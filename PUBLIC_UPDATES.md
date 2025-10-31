@@ -16,6 +16,10 @@ Structured log of outward-facing progress notes. Updates published as milestones
 - Joint encoder firmware (MT6835 magnetic sensors): SPI communication, angle readout
 - Python Flask host application: web UI, serial protocol, trajectory control, joint configuration
 
+**Electronics released:**
+- Joint controller board (Rev A): Gerber files + KiCad source (schematic + PCB layout)
+- Dual RP2040/RP2350 Pico support, MT6835 encoder interface, motor driver integration
+
 **Documentation & media:**
 - Alia logo and visual identity
 - README with hero images and 16s ankle motion demo (GIF)

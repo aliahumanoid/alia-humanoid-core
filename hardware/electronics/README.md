@@ -1,6 +1,6 @@
 # Alia Humanoid Electronics
 
-**Status:** Coming Soon (Q1 2026)  
+**Status:** Released (Rev A)  
 **License:** CC BY-NC-ND 4.0 (Phase 0) → See [hardware/LICENSE.md](../LICENSE.md)
 
 ---
@@ -25,14 +25,14 @@ Custom PCB designs for the Alia humanoid control system. Electronics release fol
 - Tendon tension sensor inputs
 - Compact form factor for human-scale integration
 
-**Status:** 🔄 PCB design finalized, Gerber files coming soon
+**Status:** ✅ Rev A released
 
-**What will be released:**
-- ✅ Schematic (PDF)
+**What's included:**
 - ✅ Gerber files (manufacturing-ready)
-- ✅ BOM with part numbers
+- ✅ KiCad source files (schematic + PCB layout)
 - ✅ Assembly documentation
-- 📅 KiCad source files (Phase 2, 2026+)
+- 🔄 BOM with part numbers (coming soon)
+- 🔄 Schematic PDF export (coming soon)
 
 ---
 
@@ -47,36 +47,6 @@ electronics/
     │   └── bom/            → Bill of materials (CSV + PDF)
     └── docs/               → Assembly guides, testing procedures
 ```
-
----
-
-## Release Timeline
-
-- **Q1 2026:** Schematic, Gerber, BOM release
-- **Q2 2026:** KiCad source files (Phase 2 transition)
-- **2026+:** Additional boards (power distribution, encoder breakout)
-
----
-
-## Design Philosophy
-
-Like the mechanical design, electronics are constrained by human-scale requirements:
-- Compact PCB footprint for tight integration
-- Efficient power routing (minimize heat in enclosed spaces)
-- Robust connectors for tendon-driven vibration
-- Modularity for iterative development
-
----
-
-## Contributing
-
-Electronics contributions follow the same DCO guidelines as software and mechanical (see root `CONTRIBUTING.md`). 
-
-**Once source files are released:**
-1. KiCad 7.0+ required
-2. Follow IPC-2221 design rules
-3. Include schematic + layout changes in same commit
-4. Run DRC before submitting PR
 
 ---
 
