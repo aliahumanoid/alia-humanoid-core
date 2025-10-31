@@ -1,0 +1,150 @@
+{
+  "version": "1.0",
+  "source": "config_presets.h",
+  "joints": {
+    "knee_left": {
+      "id": 1,
+      "config_name": "knee_left",
+      "dof_count": 1,
+      "motor_count": 2,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "flexion_extension",
+          "min_angle": 0.0,
+          "max_angle": 100.0,
+          "encoder_channel": 0,
+          "zero_angle_offset": 0.0
+        }
+      ]
+    },
+    "knee_right": {
+      "id": 2,
+      "config_name": "knee_right",
+      "dof_count": 1,
+      "motor_count": 2,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "flexion_extension",
+          "min_angle": 0.0,
+          "max_angle": 100.0,
+          "encoder_channel": 0,
+          "zero_angle_offset": 0.0
+        }
+      ]
+    },
+    "ankle_left": {
+      "id": 3,
+      "config_name": "ankle_left",
+      "dof_count": 2,
+      "motor_count": 4,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "plantar_dorsal",
+          "min_angle": -50.0,
+          "max_angle": 25.0,
+          "encoder_channel": 0,
+          "zero_angle_offset": -50.0
+        },
+        {
+          "index": 1,
+          "name": "inversion_eversion",
+          "min_angle": -25.0,
+          "max_angle": 25.0,
+          "encoder_channel": 1,
+          "zero_angle_offset": -25.0
+        }
+      ]
+    },
+    "ankle_right": {
+      "id": 4,
+      "config_name": "ankle_right",
+      "dof_count": 2,
+      "motor_count": 4,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "plantar_dorsal",
+          "min_angle": -50.0,
+          "max_angle": 25.0,
+          "encoder_channel": 0,
+          "zero_angle_offset": -50.0
+        },
+        {
+          "index": 1,
+          "name": "inversion_eversion",
+          "min_angle": -25.0,
+          "max_angle": 25.0,
+          "encoder_channel": 1,
+          "zero_angle_offset": -25.0
+        }
+      ]
+    },
+    "hip_left": {
+      "id": 5,
+      "config_name": "hip_left",
+      "dof_count": 3,
+      "motor_count": 6,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "flexion_extension",
+          "min_angle": -30.0,
+          "max_angle": 120.0,
+          "encoder_channel": 0,
+          "zero_angle_offset": 0.0
+        },
+        {
+          "index": 1,
+          "name": "abduction_adduction",
+          "min_angle": -45.0,
+          "max_angle": 45.0,
+          "encoder_channel": 1,
+          "zero_angle_offset": 0.0
+        },
+        {
+          "index": 2,
+          "name": "internal_external_rotation",
+          "min_angle": -40.0,
+          "max_angle": 40.0,
+          "encoder_channel": 2,
+          "zero_angle_offset": 0.0
+        }
+      ]
+    },
+    "hip_right": {
+      "id": 6,
+      "config_name": "hip_right",
+      "dof_count": 3,
+      "motor_count": 6,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "flexion_extension",
+          "min_angle": -30.0,
+          "max_angle": 120.0,
+          "encoder_channel": 0,
+          "zero_angle_offset": 0.0
+        },
+        {
+          "index": 1,
+          "name": "abduction_adduction",
+          "min_angle": -45.0,
+          "max_angle": 45.0,
+          "encoder_channel": 1,
+          "zero_angle_offset": 0.0
+        },
+        {
+          "index": 2,
+          "name": "int_ext_rotation",
+          "min_angle": -40.0,
+          "max_angle": 40.0,
+          "encoder_channel": 2,
+          "zero_angle_offset": 0.0
+        }
+      ]
+    }
+  }
+}

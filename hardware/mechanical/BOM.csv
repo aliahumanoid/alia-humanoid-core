@@ -1,0 +1,67 @@
+# MECHANICAL HARDWARE - BILL OF MATERIALS
+# Alia Humanoid Robot - Complete parts catalog
+# Last Updated: 2025-10-27
+# Total STL Files: 19
+# License: CC BY-NC-ND 4.0
+
+Part Name,Qty/Leg,Type,Material,Location/Sourcing,Cost EUR,Description
+
+# ========== STL FILES - LOWER LEG ==========
+lower_leg_frame_upper,1,STL,PETG/Nylon,lower_leg/right/rev_a/stl/,-,Upper frame (knee to mid-shank) + 4× eyelets
+lower_leg_frame_lower,1,STL,PETG/Nylon,lower_leg/right/rev_a/stl/,-,Lower frame (mid-shank to ankle) + 12× eyelets
+lower_leg_power_board_cover,1,STL,PETG,lower_leg/right/rev_a/stl/,-,Power board enclosure (24V + CAN hub)
+lower_leg_encoder_board_cover,1,STL,PETG,lower_leg/right/rev_a/stl/,-,Encoder board enclosure (MT6835 hub)
+
+# ========== STL FILES - ANKLE ==========
+ankle_plantar_dorsal_frame,1,STL,PETG/Nylon,ankle/right/rev_a/stl/,-,Plantar-dorsal DOF frame
+ankle_tendon_holder_left,1,STL,PETG/Nylon,ankle/right/rev_a/stl/,-,Left tendon holder (plantar-dorsal)
+ankle_tendon_holder_right,1,STL,PETG/Nylon,ankle/right/rev_a/stl/,-,Right tendon holder (plantar-dorsal)
+ankle_inversion_eversion_frame,1,STL,PETG/Nylon,ankle/right/rev_a/stl/,-,Inversion-eversion DOF + foot base plate
+ankle_tendon_holder_inversion_left,1,STL,PETG/Nylon,ankle/right/rev_a/stl/,-,Left tendon holder (inversion-eversion)
+ankle_tendon_holder_inversion_right,1,STL,PETG/Nylon,ankle/right/rev_a/stl/,-,Right tendon holder (inversion-eversion)
+
+# ========== STL FILES - COMMON: MOTOR MOUNTS ==========
+motor_mount_mg4005,3,STL,PETG/ABS,common/motor_mounts/,-,MG4005E motor mounting bracket
+motor_mount_mg5010,1,STL,PETG/ABS,common/motor_mounts/,-,MG5010 motor mounting bracket
+
+# ========== STL FILES - COMMON: CABLE MANAGEMENT ==========
+cable_clamp_10mm,8,STL,PLA/PETG,common/cable_management/,-,Semi-circular clamp Ø10mm cable bundles
+
+# ========== STL FILES - COMMON: SENSOR MOUNTS ==========
+encoder_mount_mt6835_flat,2,STL,PETG/Nylon,common/sensor_mounts/,-,MT6835 encoder mount flat profile
+encoder_mount_mt6835_with_spacer,0,STL,PETG/Nylon,common/sensor_mounts/,-,MT6835 encoder mount with spacer (hip - Phase 2)
+shaft_holder_flat,2,STL,PETG/Nylon,common/sensor_mounts/,-,Shaft/bushing holder flat profile
+shaft_holder_with_spacer,0,STL,PETG/Nylon,common/sensor_mounts/,-,Shaft holder with spacer (hip - Phase 2)
+
+# ========== STL FILES - COMMON: PULLEYS ==========
+pulley_18mm,TBD,STL,PETG/ABS/ASA,common/pulleys/,-,Tendon transmission pulley Ø18mm
+pulley_10mm,4,STL,PETG/ABS/ASA,common/pulleys/,-,Tendon transmission pulley Ø10mm (ankle motors)
+
+# ========== COMMERCIAL PARTS - FASTENERS ==========
+m3_screw_12mm,16,Fastener,Steel,Local/McMaster,0.05,ISO 4762 socket head cap screw
+m3_nut,16,Fastener,Steel,Local/McMaster,0.02,ISO 4032 hex nut
+m2_screw_8mm,8,Fastener,Steel,Local/McMaster,0.03,Sensor mount screws
+
+# ========== COMMERCIAL PARTS - EYELETS ==========
+eyelet_4mm_silver,16,Eyelet,Metal silver,Amazon,0.05,4mm double-sided eyelets UHMWPE routing (4× upper + 12× lower)
+cable_eyelet_2mm,4,Eyelet,Brass,Amazon/Local,0.02,2mm brass eyelet electrical cable routing (ankle)
+
+# ========== COMMERCIAL PARTS - BUSHINGS & PINS ==========
+bushing_04x06x06,4,Bushing,Oilless Bronze,Amazon Kozelo,0.30,Ø4mm ID × Ø6mm OD × 6mm (ankle joints)
+pin_04x18,2,Pin,SS316L,Amazon/Local,0.10,Ø4×18mm cylindrical pin (ankle DOF1)
+pin_04x14,2,Pin,SS316L,Amazon/Local,0.10,Ø4×14mm cylindrical pin (ankle DOF2)
+
+# ========== TENDONS & ACTUATORS ==========
+uhmwpe_line_8strand_250lb,1,Raw Material,UHMWPE PE braided,Amazon HERCULES,0.10/m,8-strand 250lb braided line 1000m (base material for tendons)
+uhmwpe_tendon_3strand,4,Tendon,UHMWPE flat braid,Handmade from 8-strand,TBD,3-strand flat braid ankle actuation (2 per DOF)
+motor_lkm_mg4005,4,Motor,N/A,LKMotor,TBD,Ankle actuation (2 per DOF)
+
+# ========== FOOT (Phase 2 - Q1 2026) ==========
+# foot_base,1,STL,PA12 Nylon,foot/right/rev_a/stl/,-,Foot base plate (SLS print)
+# foot_toe_01..05,5,STL,TPU 95A,foot/right/rev_a/stl/,-,5× toes (FDM flexible)
+
+# ========== NOTES ==========
+# Qty/Leg: Quantities are PER LEG (multiply ×2 for complete robot)
+# STL Location: Relative path from hardware/mechanical/
+# Cost: TBD = To Be Determined (prototyping phase)
+# Material: Recommended print material or commercial specification

@@ -1,0 +1,62 @@
+name: Format Suggest (clang-format)
+
+on:
+  pull_request:
+    paths:
+      - 'software/firmware/**'
+      - '.clang-format'
+  workflow_dispatch: {}
+
+jobs:
+  suggest-format:
+    name: Suggest formatting for firmware sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+          clang-format --version
+
+      - name: Run clang-format (in-place)
+        id: format
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=$(find software/firmware -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' \))
+          if [ -z "$FILES" ]; then
+            echo "No C/C++ sources found under software/firmware";
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Keep a copy for diff generation
+          git config user.email "actions@github"
+          git config user.name "GitHub Actions"
+          for f in $FILES; do
+            clang-format -i "$f"
+          done
+          git diff --name-only > changed-files.txt || true
+          git diff > clang-format.patch || true
+          if [ -s clang-format.patch ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload patch artifact
+        if: steps.format.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-format-suggest
+          path: |
+            clang-format.patch
+            changed-files.txt
+          if-no-files-found: ignore
+
+      - name: No changes detected
+        if: steps.format.outputs.has_changes != 'true'
+        run: echo "No formatting changes suggested."
+
