@@ -31,8 +31,6 @@ Custom PCB designs for the Alia humanoid control system. Electronics release fol
 - ✅ Gerber files (manufacturing-ready)
 - ✅ KiCad source files (schematic + PCB layout)
 - ✅ Assembly documentation
-- 🔄 BOM with part numbers (coming soon)
-- 🔄 Schematic PDF export (coming soon)
 
 ---
 
@@ -42,9 +40,8 @@ Custom PCB designs for the Alia humanoid control system. Electronics release fol
 electronics/
 └── joint_controller_board/
     ├── rev_a/              → Revision A (initial release)
-    │   ├── schematic/      → PDF schematic exports
     │   ├── gerber/         → Manufacturing files (Gerber + drill)
-    │   └── bom/            → Bill of materials (CSV + PDF)
+    │   └── *.kicad_*       → KiCad source files (schematic + PCB)
     └── docs/               → Assembly guides, testing procedures
 ```
 

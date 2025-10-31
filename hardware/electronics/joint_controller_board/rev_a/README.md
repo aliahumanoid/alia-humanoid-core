@@ -57,22 +57,13 @@ Manufacturing-ready files for PCB production:
 
 ---
 
-## BOM & Assembly
+## Assembly Notes
 
-**BOM coming soon** — Check `bom/` directory for component list and part numbers.
-
-**Assembly notes:**
 - Solder Pico headers first (through-hole)
 - MT6835 encoder connectors require careful alignment
 - Test continuity before powering up
 
----
-
-## Schematic
-
-**PDF schematic coming soon** — Check `schematic/` directory
-
-For now, open `joint_controller_board_rev_a.kicad_sch` in KiCad to view the schematic.
+**Schematic:** Open `joint_controller_board_rev_a.kicad_sch` in KiCad to view the schematic.
 
 ---
 
