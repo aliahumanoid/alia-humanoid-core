@@ -32,6 +32,46 @@ hardware/
 
 ---
 
+## Released STL Files (Phase 0)
+
+**19 files currently available for printing:**
+
+### Right Ankle Assembly (6 parts)
+- `ankle_inversion_eversion_frame.stl` — Main frame for inversion/eversion motion
+- `ankle_plantar_dorsal_frame.stl` — Frame for plantarflexion/dorsiflexion motion  
+- `ankle_tendon_holder_left.stl` — Tendon anchor point (left side)
+- `ankle_tendon_holder_right.stl` — Tendon anchor point (right side)
+- `ankle_tendon_holder_inversion_left.stl` — Inversion tendon mount
+- `ankle_tendon_holder_inversion_right.stl` — Inversion tendon mount
+
+### Right Lower Leg Assembly (4 parts)
+- `lower_leg_frame_upper.stl` — Upper leg structure
+- `lower_leg_frame_lower.stl` — Lower leg structure
+- `lower_leg_encoder_board_cover.stl` — Encoder electronics cover
+- `lower_leg_power_board_cover.stl` — Power distribution cover
+
+### Common Components (9 parts)
+**Motor mounts:**
+- `motor_mount_mg4005.stl` — Mount for LKM MG4005 motors
+- `motor_mount_mg5010.stl` — Mount for LKM MG5010 motors
+
+**Pulleys:**
+- `pulley_10mm.stl` — 10mm diameter pulley for tendon routing
+- `pulley_18mm.stl` — 18mm diameter pulley for tendon routing
+
+**Sensor mounts:**
+- `encoder_mount_mt6835_flat.stl` — MT6835 encoder mount (flat)
+- `encoder_mount_mt6835_with_spacer.stl` — MT6835 encoder mount (with spacer)
+- `shaft_holder_flat.stl` — Shaft retainer (flat version)
+- `shaft_holder_with_spacer.stl` — Shaft retainer (with spacer)
+
+**Cable management:**
+- `cable_clamp_10mm.stl` — Cable routing clamp
+
+**Material:** PA12 (nylon) recommended. Print settings and BOM available in component directories.
+
+---
+
 ## Naming Convention
 
 **Standard**: ROS/URDF snake_case for maximum compatibility with robotics ecosystem.
