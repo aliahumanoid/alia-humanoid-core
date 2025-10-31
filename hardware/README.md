@@ -24,10 +24,13 @@ hardware/
 │   ├── visual/        → High-quality STL for RViz/Gazebo rendering
 │   └── collision/     → Simplified collision meshes (performance)
 │
-└── mechanical/        → CAD sources & manufacturing files
-    ├── lower_leg/     → Shank structure (tibia/fibula analog)
-    ├── ankle/         → 2-DOF ankle joint (validated Phase 0)
-    └── foot/          → Foot base + phalanges (5 toes)
+├── mechanical/        → CAD sources & manufacturing files
+│   ├── lower_leg/     → Shank structure (tibia/fibula analog)
+│   ├── ankle/         → 2-DOF ankle joint (validated Phase 0)
+│   └── foot/          → Foot base + phalanges (5 toes)
+│
+└── electronics/       → PCB designs (Gerbers, schematics, BOM)
+    └── joint_controller_board/  → Dual RP2040/RP2350 control board (Q1 2026)
 ```
 
 ---
