@@ -1,0 +1,2 @@
+# Placeholder for future LFS activation (STL / CAD assets)
+# *.stl filter=lfs diff=lfs merge=lfs -text

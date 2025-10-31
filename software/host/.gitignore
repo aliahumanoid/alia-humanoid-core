@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# Logs and runtime artifacts
+logs/
+*.log
+serial_communication_*.log
+
+# Data caches
+*.csv
+encoder_values.json
+
+# Node/web build (if any)
+dist/
+build/

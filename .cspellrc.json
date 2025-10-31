@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "diagnosticLevel": "Hint",
+  "showStatus": false,
+  "showSuggestions": false
+}

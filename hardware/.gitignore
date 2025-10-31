@@ -1,0 +1,47 @@
+# CAD Software Temporary Files
+*.f3d~
+*.dwg
+*.dwl
+*.dwl2
+*.bak
+*.old
+*.tmp
+*~
+
+# Fusion 360 Specific
+*.iam
+*.ipt
+*.idw
+*.ipn
+.fusion360/
+
+# SolidWorks Specific
+~$*.SLDPRT
+~$*.SLDASM
+~$*.SLDDRW
+
+# FreeCAD Specific
+*.FCStd1
+*.FCStd~
+
+# OS Generated
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Build Artifacts
+*.gcode
+*.bgcode
+*.3mf
+
+# Large Files (use Git LFS for these)
+# Uncomment if not using LFS:
+# *.f3z
+# *.step
+# *.stl
+
+# IDE
+.vscode/
+.idea/
+

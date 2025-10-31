@@ -1,0 +1,23 @@
+.DS_Store
+*.log
+tmp/
+dist/
+build/
+
+# PlatformIO build directories and local VS Code files
+software/firmware/**/.pio/
+software/firmware/**/.vscode/
+
+# Generated files
+software/firmware/**/include/version.h
+
+# Firmware artifacts
+*.elf
+*.bin
+*.uf2
+*.map
+
+# Host virtual environment and runtime logs
+software/host/.venv/
+software/host/logs/
+software/host/serial_communication_*.log

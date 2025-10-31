@@ -1,0 +1,23 @@
+{
+  "python.linting.enabled": true,
+  "python.linting.flake8Enabled": true,
+  "python.linting.pylintEnabled": false,
+  "python.linting.flake8Args": [
+    "--max-line-length=120",
+    "--ignore=E501,W503,E203"
+  ],
+  "python.linting.pycodestyleArgs": [
+    "--max-line-length=120",
+    "--ignore=E501"
+  ],
+  "editor.rulers": [120],
+  "editor.wordWrap": "on",
+  "python.formatting.provider": "black",
+  "python.formatting.blackArgs": [
+    "--line-length=120"
+  ],
+  "cSpell.enabled": false,
+  "cSpell.showStatus": false,
+  "cSpell.diagnosticLevel": "Hint",
+  "cSpell.showSuggestions": false
+}
