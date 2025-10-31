@@ -76,6 +76,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 | **Software** | ✅ Public | MIT | Python host + C++ firmware (RP2040/RP2350) |
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | Assembly guides, BOM, design specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
+| **Electronics** | 🔄 Q1 2026 | CC BY-NC-ND | Dual RP2040/RP2350 controller board (Gerber, schematic, BOM) |
 | **CAD Source** | 📅 Phase 2 (2026+) | CC BY-SA | Full parametric Fusion 360 timeline |
 
 See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-source transition.
