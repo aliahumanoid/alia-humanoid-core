@@ -1,5 +1,5 @@
-<p align="center" style="margin-top: 0px; margin-bottom: 0px;">
-  <img src="docs/media/alia-logo.png" alt="Alia Logo" width="300">
+<p align="center">
+  <img src="docs/media/alia-banner.png" alt="Alia - Humanoid Design" width="100%">
 </p>
 
 # Alia Humanoid
