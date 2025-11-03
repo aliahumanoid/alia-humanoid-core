@@ -160,6 +160,29 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
+## References & Acknowledgments
+
+### Control Architecture
+
+The cascade control structure implemented for antagonistic tendon-driven actuation is inspired by the approach described in:
+
+> **Lukić B., Jovanović K., Šekara T. B. (2019).**  
+> *Cascade Control of Antagonistic VSA — An Engineering Control Approach to a Bioinspired Robot Actuator.*  
+> Facta Universitatis, Series: Automatic Control and Robotics, Vol. 18 (2), pp. 147–162.  
+> DOI: [10.22190/FUACR1902147L](https://doi.org/10.22190/FUACR1902147L)
+
+The original paper presents a double-loop cascade architecture for simultaneous position and stiffness control of an antagonistic Variable Stiffness Actuator (VSA). 
+
+In Alia's implementation, this concept has been extended and generalized to a multi-DOF humanoid control system, featuring:
+- Coordinated cascade loops for multiple joints
+- Per-DOF tuning of PID gains (inner loop: motor position, outer loop: joint position)
+- Dynamic modulation of cascade influence and stiffness reference
+- Synchronized trajectory generation for agonist–antagonist motor pairs
+
+This implementation is an independent engineering development released under the MIT License.
+
+---
+
 ## License
 
 - **Software:** [MIT License](LICENSE)
