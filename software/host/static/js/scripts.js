@@ -2685,46 +2685,138 @@ function generateIntelligentQuickButtons(ranges, container) {
     // Check automatic execution toggle state
     const isAutoExecuteEnabled = $("#autoExecuteToggle").is(":checked");
     
-    // Header informativo
+    // Determine joint type
+    const joint = $("#jointSelect").val();
+    const jointType = joint.split('_')[0]; // Extract KNEE, ANKLE or HIP
+    
+    // Informative header
     container.append(`
         <h4 class="text-sm font-medium text-gray-700 mb-2">
-            <i class="fas fa-brain mr-1"></i>Posizioni Intelligenti (basate su mappatura):
+            <i class="fas fa-brain mr-1"></i>Smart Positions (mapping-based):
             ${isAutoExecuteEnabled ? 
                 '<span class="text-orange-500 ml-2"><i class="fas fa-bolt"></i> Auto-execute active</span>' : 
                 ''}
         </h4>
     `);
     
-    const buttonContainer = $('<div class="grid grid-cols-4 gap-2"></div>');
-    
-    // Pulsante Zero sempre presente
-    buttonContainer.append(`
-        <button onclick="setMultiDofQuickAngles(0, 0)" 
-                class="bg-gray-500 hover:bg-gray-600 text-white text-xs py-2 px-1 rounded">
-            Zero<br><span class="text-xs opacity-75">0°/0°</span>
-        </button>
-    `);
-    
-    // Genera combinazioni intelligenti
+    // Generate smart combinations
     const dofs = Object.keys(ranges).map(Number).sort();
     const combinations = generateSmartCombinations(ranges, dofs);
     
-    // Limita a 15 pulsanti totali (incluso Zero)
-    const maxButtons = 15;
-    combinations.slice(0, maxButtons - 1).forEach(combo => {
-        const { angle0, angle1, label, type } = combo;
-        const colorClass = getButtonColorClass(type);
+    // Separate combinations by type
+    const dof0Only = combinations.filter(c => c.angle0 !== 0 && c.angle1 === 0);
+    const dof1Only = combinations.filter(c => c.angle0 === 0 && c.angle1 !== 0);
+    const multiDof = combinations.filter(c => c.angle0 !== 0 && c.angle1 !== 0);
+    
+    // For KNEE: simplified single-DOF layout (no grid needed)
+    if (jointType === 'KNEE' && dof0Only.length > 0) {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mt-3 mb-1">Positions:</h5>');
+        const dof0Container = $('<div class="flex flex-wrap gap-2"></div>');
         
-        buttonContainer.append(`
-            <button onclick="setMultiDofQuickAngles(${angle0}, ${angle1})" 
-                    class="${colorClass} text-white text-xs py-2 px-1 rounded transition-colors"
-                    title="${label}${isAutoExecuteEnabled ? ' (esecuzione automatica attiva)' : ''}">
-                ${label}<br><span class="text-xs opacity-75">${angle0}°/${angle1}°</span>
+        // Zero button first
+        dof0Container.append(`
+            <button onclick="setMultiDofQuickAngles(0, 0)" 
+                    class="bg-gray-500 hover:bg-gray-600 text-white text-xs py-2 rounded"
+                    style="min-width: 70px; width: 70px;"
+                    title="DOF 0: 0°">
+                Zero
             </button>
         `);
-    });
+        
+        dof0Only.forEach(combo => {
+            const { angle0, angle1, label, type } = combo;
+            const colorClass = getButtonColorClass(type);
+            
+            dof0Container.append(`
+                <button onclick="setMultiDofQuickAngles(${angle0}, ${angle1})" 
+                        class="${colorClass} text-white text-xs py-2 rounded transition-colors"
+                        style="min-width: 70px; width: 70px;"
+                        title="DOF 0: ${angle0}°">
+                    ${angle0}°
+                </button>
+            `);
+        });
+        
+        container.append(dof0Container);
+    }
     
-    container.append(buttonContainer);
+    // Multi-DOF grid - Hide for KNEE, show for ANKLE/HIP
+    if (jointType !== 'KNEE') {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mt-3 mb-1">Joint workspace - Top view:</h5>');
+        
+        // Generate 2D grid representing joint workspace
+        // Rows: DOF 0 from +max to -min (top to bottom)
+        // Cols: DOF 1 from -max to +max (left to right)
+        
+        const range0 = ranges[0];
+        const range1 = ranges[1];
+        
+        const dof0Values = [];
+        const dof1Values = [];
+        
+        // Generate DOF 0 values (rows): from max to min, step 5°
+        for (let angle = Math.ceil(range0.extended_max / 5) * 5; angle >= Math.floor(range0.extended_min / 5) * 5; angle -= 5) {
+            dof0Values.push(angle);
+        }
+        
+        // Generate DOF 1 values (cols): from min to max, step 5°
+        for (let angle = Math.floor(range1.extended_min / 5) * 5; angle <= Math.ceil(range1.extended_max / 5) * 5; angle += 5) {
+            dof1Values.push(angle);
+        }
+        
+        // Create grid container (centered)
+        const gridCols = dof1Values.length;
+        const multiDofContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 36px); justify-content: center;"></div>`);
+        
+        // Generate grid buttons
+        dof0Values.forEach(angle0 => {
+            dof1Values.forEach(angle1 => {
+                // Determine button color to create a cross pattern for single-DOF movements
+                let colorClass;
+                
+                // Zero position (center of cross)
+                if (angle0 === 0 && angle1 === 0) {
+                    colorClass = 'bg-gray-500 hover:bg-gray-600';
+                }
+                // Horizontal axis: DOF 0 movements (DOF 1 = 0) - Blue like DOF 0 buttons
+                else if (angle1 === 0) {
+                    colorClass = 'bg-indigo-400 hover:bg-indigo-500';
+                }
+                // Vertical axis: DOF 1 movements (DOF 0 = 0) - Teal like DOF 1 buttons
+                else if (angle0 === 0) {
+                    colorClass = 'bg-teal-400 hover:bg-teal-500';
+                }
+                // Edge positions (multi-DOF extremes)
+                else if (angle0 === dof0Values[0] || angle0 === dof0Values[dof0Values.length - 1] ||
+                         angle1 === dof1Values[0] || angle1 === dof1Values[dof1Values.length - 1]) {
+                    colorClass = 'bg-purple-500 hover:bg-purple-600';
+                }
+                // Internal multi-DOF positions
+                else {
+                    colorClass = 'bg-purple-400 hover:bg-purple-500';
+                }
+                
+                multiDofContainer.append(`
+                    <button onclick="setMultiDofQuickAngles(${angle0}, ${angle1})" 
+                            class="${colorClass} text-white rounded transition-colors"
+                            style="width: 36px; height: 36px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                            title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoExecuteEnabled ? ' (auto-exec)' : ''}">
+                        ${angle0}°<br>${angle1}°
+                    </button>
+                `);
+            });
+        });
+        
+        container.append(multiDofContainer);
+        
+        // Add legend
+        container.append(`
+            <div class="mt-2 text-xs text-gray-600">
+                <div><strong>Cross pattern:</strong> Blue = DOF 0 only, Teal = DOF 1 only, Purple = Multi-DOF, Gray = Zero</div>
+                <div>Grid: Rows = DOF 0 (${dof0Values[0]}° to ${dof0Values[dof0Values.length-1]}°), Columns = DOF 1 (${dof1Values[0]}° to ${dof1Values[dof1Values.length-1]}°)</div>
+            </div>
+        `);
+    }
     
     // Aggiungi info sui range
     const infoDiv = $('<div class="mt-2 text-xs text-gray-600"></div>');
@@ -2762,19 +2854,23 @@ function generateSmartCombinations(ranges, dofs) {
         const maxAngle = range.extended_max;
         const midAngle = (minAngle + maxAngle) / 2;
         
-        // Generate significant points for this DOF
+        // Generate significant points for this DOF (more granular)
         const significantAngles = [
-            minAngle,
-            minAngle + (maxAngle - minAngle) * 0.25, // 25%
-            midAngle,                                 // 50%
-            minAngle + (maxAngle - minAngle) * 0.75, // 75%
-            maxAngle
+            minAngle,                                  // 0%
+            minAngle + (maxAngle - minAngle) * 0.125, // 12.5%
+            minAngle + (maxAngle - minAngle) * 0.25,  // 25%
+            minAngle + (maxAngle - minAngle) * 0.375, // 37.5%
+            midAngle,                                  // 50%
+            minAngle + (maxAngle - minAngle) * 0.625, // 62.5%
+            minAngle + (maxAngle - minAngle) * 0.75,  // 75%
+            minAngle + (maxAngle - minAngle) * 0.875, // 87.5%
+            maxAngle                                   // 100%
         ].map(angle => Math.round(angle * 10) / 10); // Arrotonda a 1 decimale
         
         // Crea combinazioni per singolo DOF
         significantAngles.forEach((angle, index) => {
-            const labels = ['Min', '25%', 'Mid', '75%', 'Max'];
-            const types = ['min', 'quarter', 'mid', 'threequarter', 'max'];
+            const labels = ['Min', '12%', '25%', '37%', 'Mid', '62%', '75%', '87%', 'Max'];
+            const types = ['min', 'eighth', 'quarter', 'threeeighth', 'mid', 'fiveeighth', 'threequarter', 'seveneighth', 'max'];
             
             if (dof === 0) {
                 combinations.push({
@@ -2794,13 +2890,17 @@ function generateSmartCombinations(ranges, dofs) {
         });
     });
     
-    // Se abbiamo entrambi i DOF, genera alcune combinazioni coordinate
+    // If both DOFs are present, generate coordinated combinations
     if (dofs.includes(0) && dofs.includes(1)) {
         const range0 = ranges[0];
         const range1 = ranges[1];
         
-        // Combinazioni coordinate interessanti
+        // Interesting coordinated combinations
+        const mid0 = (range0.extended_min + range0.extended_max) / 2;
+        const mid1 = (range1.extended_min + range1.extended_max) / 2;
+        
         const coordCombinations = [
+            // Corner combinations (extremes)
             {
                 angle0: range0.extended_min,
                 angle1: range1.extended_min,
@@ -2814,12 +2914,6 @@ function generateSmartCombinations(ranges, dofs) {
                 type: 'coord-max'
             },
             {
-                angle0: (range0.extended_min + range0.extended_max) / 2,
-                angle1: (range1.extended_min + range1.extended_max) / 2,
-                label: 'Mid/Mid',
-                type: 'coord-mid'
-            },
-            {
                 angle0: range0.extended_max,
                 angle1: range1.extended_min,
                 label: 'Max/Min',
@@ -2830,6 +2924,54 @@ function generateSmartCombinations(ranges, dofs) {
                 angle1: range1.extended_max,
                 label: 'Min/Max',
                 type: 'coord-mixed'
+            },
+            
+            // Center combination
+            {
+                angle0: mid0,
+                angle1: mid1,
+                label: 'Mid/Mid',
+                type: 'coord-mid'
+            },
+            
+            // Mid combinations with extremes (useful for testing transitions)
+            {
+                angle0: mid0,
+                angle1: range1.extended_min,
+                label: 'Mid/Min',
+                type: 'coord-mid-edge'
+            },
+            {
+                angle0: mid0,
+                angle1: range1.extended_max,
+                label: 'Mid/Max',
+                type: 'coord-mid-edge'
+            },
+            {
+                angle0: range0.extended_min,
+                angle1: mid1,
+                label: 'Min/Mid',
+                type: 'coord-mid-edge'
+            },
+            {
+                angle0: range0.extended_max,
+                angle1: mid1,
+                label: 'Max/Mid',
+                type: 'coord-mid-edge'
+            },
+            
+            // Additional intermediate points (25% and 75%)
+            {
+                angle0: range0.extended_min + (range0.extended_max - range0.extended_min) * 0.25,
+                angle1: range1.extended_min + (range1.extended_max - range1.extended_min) * 0.75,
+                label: '25%/75%',
+                type: 'coord-intermediate'
+            },
+            {
+                angle0: range0.extended_min + (range0.extended_max - range0.extended_min) * 0.75,
+                angle1: range1.extended_min + (range1.extended_max - range1.extended_min) * 0.25,
+                label: '75%/25%',
+                type: 'coord-intermediate'
             }
         ];
         
@@ -2864,7 +3006,7 @@ function generateSmartCombinations(ranges, dofs) {
 }
 
 /**
- * Restituisce la classe CSS per il colore del pulsante basata sul tipo
+ * Returns the CSS class for the button color based on the type
  */
 function getButtonColorClass(type) {
     const colorMap = {
@@ -2872,9 +3014,15 @@ function getButtonColorClass(type) {
         'coord-min': 'bg-purple-500 hover:bg-purple-600',
         'coord-max': 'bg-purple-500 hover:bg-purple-600',
         'coord-mixed': 'bg-violet-500 hover:bg-violet-600',
+        'coord-mid-edge': 'bg-purple-400 hover:bg-purple-500',
+        'coord-intermediate': 'bg-violet-400 hover:bg-violet-500',
         'mid': 'bg-indigo-400 hover:bg-indigo-500',
         'quarter': 'bg-blue-400 hover:bg-blue-500',
         'threequarter': 'bg-blue-400 hover:bg-blue-500',
+        'eighth': 'bg-blue-300 hover:bg-blue-400',
+        'threeeighth': 'bg-blue-300 hover:bg-blue-400',
+        'fiveeighth': 'bg-blue-300 hover:bg-blue-400',
+        'seveneighth': 'bg-blue-300 hover:bg-blue-400',
         'min': 'bg-teal-400 hover:bg-teal-500',
         'max': 'bg-teal-400 hover:bg-teal-500'
     };
@@ -2893,29 +3041,123 @@ function generateDefaultQuickButtons(jointType, container) {
     
     container.append(`
         <h4 class="text-sm font-medium text-gray-700 mb-2">
-            <i class="fas fa-cog mr-1"></i>Posizioni Predefinite (${jointType}):
+            <i class="fas fa-cog mr-1"></i>Default Positions (${jointType}):
             ${isAutoExecuteEnabled ? 
                 '<span class="text-orange-500 ml-2"><i class="fas fa-bolt"></i> Auto-execute active</span>' : 
                 ''}
         </h4>
     `);
     
-    const buttonContainer = $('<div class="grid grid-cols-4 gap-2"></div>');
-    
     // Default buttons based on joint type
     const defaultButtons = getDefaultButtonsForJoint(jointType);
     
-    defaultButtons.forEach(btn => {
-        buttonContainer.append(`
-            <button onclick="setMultiDofQuickAngles(${btn.angle0}, ${btn.angle1})" 
-                    class="${btn.colorClass} text-white text-xs py-2 px-1 rounded"
-                    title="${btn.label}${isAutoExecuteEnabled ? ' (esecuzione automatica attiva)' : ''}">
-                ${btn.label}<br><span class="text-xs opacity-75">${btn.angle0}°/${btn.angle1}°</span>
-            </button>
-        `);
-    });
+    // Check if buttons have section property (for ANKLE with organized layout)
+    const hasSections = defaultButtons.some(btn => btn.section);
     
-    container.append(buttonContainer);
+    if (hasSections && jointType === 'ANKLE') {
+        // For ANKLE: generate 2D grid with cross-pattern highlighting for single-DOF
+        const multiButtons = defaultButtons.filter(btn => btn.section === 'multi');
+        
+        if (multiButtons.length > 0) {
+            container.append('<h5 class="text-xs font-medium text-gray-600 mt-3 mb-1">Joint workspace - Top view:</h5>');
+            
+            // For ANKLE: fixed grid from default positions
+            // DOF 0: +25° to -50° (rows, top to bottom)
+            // DOF 1: -25° to +25° (columns, left to right)
+            
+            const dof0Values = [];
+            const dof1Values = [];
+            
+            // Generate DOF 0 values (rows): from +25 to -50, step -5
+            for (let angle = 25; angle >= -50; angle -= 5) {
+                dof0Values.push(angle);
+            }
+            
+            // Generate DOF 1 values (cols): from -25 to +25, step +5
+            for (let angle = -25; angle <= 25; angle += 5) {
+                dof1Values.push(angle);
+            }
+            
+            // Create grid container (centered)
+            const gridCols = dof1Values.length;
+            const multiContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 36px); justify-content: center;"></div>`);
+            
+            // Generate grid buttons
+            dof0Values.forEach(angle0 => {
+                dof1Values.forEach(angle1 => {
+                    // Determine button color to create a cross pattern for single-DOF movements
+                    let colorClass;
+                    
+                    // Zero position (center of cross)
+                    if (angle0 === 0 && angle1 === 0) {
+                        colorClass = 'bg-gray-500 hover:bg-gray-600';
+                    }
+                    // Horizontal axis: DOF 0 movements (DOF 1 = 0) - Blue like DOF 0 buttons
+                    else if (angle1 === 0) {
+                        colorClass = 'bg-indigo-400 hover:bg-indigo-500';
+                    }
+                    // Vertical axis: DOF 1 movements (DOF 0 = 0) - Teal like DOF 1 buttons
+                    else if (angle0 === 0) {
+                        colorClass = 'bg-teal-400 hover:bg-teal-500';
+                    }
+                    // Edge positions (multi-DOF extremes)
+                    else if (angle0 === 25 || angle0 === -50 || angle1 === -25 || angle1 === 25) {
+                        colorClass = 'bg-purple-500 hover:bg-purple-600';
+                    }
+                    // Internal multi-DOF positions
+                    else {
+                        colorClass = 'bg-purple-400 hover:bg-purple-500';
+                    }
+                    
+                    multiContainer.append(`
+                        <button onclick="setMultiDofQuickAngles(${angle0}, ${angle1})" 
+                                class="${colorClass} text-white rounded transition-colors"
+                                style="width: 36px; height: 36px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                                title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoExecuteEnabled ? ' (auto-exec)' : ''}">
+                            ${angle0}°<br>${angle1}°
+                        </button>
+                    `);
+                });
+            });
+            
+            container.append(multiContainer);
+            
+            // Add legend
+            container.append(`
+                <div class="mt-2 text-xs text-gray-600">
+                    <div><strong>Cross pattern:</strong> Blue = DOF 0 only, Teal = DOF 1 only, Purple = Multi-DOF, Gray = Zero</div>
+                    <div>Grid: Rows = DOF 0 (+25° to -50°), Columns = DOF 1 (-25° to +25°)</div>
+                </div>
+            `);
+        }
+    } else {
+        // Original flat layout for joints without sections (KNEE, HIP)
+        const buttonContainer = $('<div class="flex flex-wrap gap-2"></div>');
+        
+        defaultButtons.forEach(btn => {
+            // For KNEE: show only DOF 0 angle (DOF 1 doesn't exist)
+            // For HIP: keep full notation until prototype is available
+            let buttonLabel;
+            if (jointType === 'KNEE') {
+                buttonLabel = btn.angle0 === 0 ? 'Zero' : btn.angle0 + '°';
+            } else {
+                // HIP: keep original format for now
+                buttonLabel = `${btn.label}<br><span class="text-xs opacity-75">${btn.angle0}°/${btn.angle1}°</span>`;
+            }
+            
+            buttonContainer.append(`
+                <button onclick="setMultiDofQuickAngles(${btn.angle0}, ${btn.angle1})" 
+                        class="${btn.colorClass} text-white text-xs py-2 rounded"
+                        style="min-width: 70px; width: 70px;"
+                        title="DOF 0: ${btn.angle0}°, DOF 1: ${btn.angle1}°${isAutoExecuteEnabled ? ' (esecuzione automatica attiva)' : ''}">
+                    ${buttonLabel}
+                </button>
+            `);
+        });
+        
+        container.append(buttonContainer);
+    }
+    
     container.append('<div class="mt-2 text-xs text-gray-600">⚠️ No mapping data available - using default values</div>');
     
     // Apply class for automatic execution if enabled
@@ -2943,12 +3185,34 @@ function getDefaultButtonsForJoint(jointType) {
             { angle0: 90, angle1: 0, label: '90°', colorClass: defaultColor }
         ],
         'ANKLE': [
-            { angle0: 0, angle1: 0, label: 'Zero', colorClass: baseColor },
-            { angle0: 15, angle1: -10, label: '15°/-10°', colorClass: defaultColor },
-            { angle0: 30, angle1: 0, label: '30°/0°', colorClass: defaultColor },
-            { angle0: -15, angle1: 15, label: '-15°/15°', colorClass: defaultColor },
-            { angle0: 20, angle1: -20, label: '20°/-20°', colorClass: defaultColor },
-            { angle0: -10, angle1: 25, label: '-10°/25°', colorClass: defaultColor }
+            // DOF 0 only (Plantarflexion/Dorsiflexion) - DOF 1 = 0
+            { angle0: -50, angle1: 0, label: '-50°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: -40, angle1: 0, label: '-40°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: -30, angle1: 0, label: '-30°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: -20, angle1: 0, label: '-20°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: -10, angle1: 0, label: '-10°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: 0, angle1: 0, label: 'Zero', colorClass: baseColor, section: 'dof0' },
+            { angle0: 5, angle1: 0, label: '5°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: 10, angle1: 0, label: '10°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: 15, angle1: 0, label: '15°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: 20, angle1: 0, label: '20°', colorClass: defaultColor, section: 'dof0' },
+            { angle0: 25, angle1: 0, label: '25°', colorClass: defaultColor, section: 'dof0' },
+            
+            // DOF 1 only (Inversion/Eversion) - DOF 0 = 0
+            { angle0: 0, angle1: -25, label: '-25°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: -20, label: '-20°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: -15, label: '-15°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: -10, label: '-10°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: -5, label: '-5°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: 0, label: 'Zero', colorClass: baseColor, section: 'dof1' },
+            { angle0: 0, angle1: 5, label: '5°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: 10, label: '10°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: 15, label: '15°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: 20, label: '20°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            { angle0: 0, angle1: 25, label: '25°', colorClass: 'bg-teal-400 hover:bg-teal-500', section: 'dof1' },
+            
+            // Multi-DOF combinations - Generated as 2D grid dynamically (see generateDefaultQuickButtons)
+            { angle0: 0, angle1: 0, label: 'Placeholder', colorClass: baseColor, section: 'multi' }
         ],
         'HIP': [
             { angle0: 0, angle1: 0, label: 'Zero', colorClass: baseColor },
