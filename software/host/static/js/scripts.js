@@ -34,6 +34,13 @@ let encoderTestData = {
     dofData: {} // Organized as dofData[dof] = {timestamps: [], values: []}
 };
 
+// Movement Sequence Builder variables
+let movementSequence = []; // Array of {dof0, dof1, delay}
+let isSequencePlaying = false;
+let sequencePlaybackHandle = null;
+let sequenceExecutionData = []; // Collected during playback: {stepIndex, targetDof0, targetDof1, startTimestamp, endTimestamp, encoderSamples[]}
+let isAddToSequenceMode = false;
+
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
     KNEE: [
@@ -97,6 +104,9 @@ const JOINT_DOF_UI_CONFIG = {
 // Physical joint limits retrieved from backend
 let jointPhysicalLimits = {};
 
+// Joint configuration from joint_config.json
+let jointConfigData = null;
+
 // Variables for intelligent status message scrolling
 let userScrolledUp = false; // Flag to track if user scrolled up
 let autoScrollEnabled = true; // Flag to enable/disable auto-scroll
@@ -121,6 +131,9 @@ $(document).ready(function() {
         renderDofControlButtons();
     });
     fetchSerialPortConfiguration();
+    
+    // Load joint configuration for auto-mapping grid visualization
+    fetchJointConfig();
     
     // Load PID values for the initially selected joint (KNEE_LEFT by default)
     setTimeout(function() {
@@ -207,6 +220,9 @@ $(document).ready(function() {
         // Store received data
         automaticMappingData = data.data;
         
+        // Update auto-mapping progress UI
+        updateAutoMappingProgress(data);
+        
         // If data contains joint name, store it
         if (data.joint_name) {
             window.lastActiveJointFromSocket = data.joint_name;
@@ -243,38 +259,55 @@ $(document).ready(function() {
 
     // Listener for real-time data from sockets
     socket.on('joint_measure', function(data) {
-        if (!isMeasuring) return;
-        
-        const timestamp = data.timestamp;
-        const joint = data.joint;
-        const dof = data.dof;
-        const measurements = data.data;
-        
-        // Add timestamp if new
-        if (!measurementData.timestamps.includes(timestamp)) {
-            measurementData.timestamps.push(timestamp);
-            // Limit number of displayed points
-            if (measurementData.timestamps.length > 100) {
-                measurementData.timestamps.shift();
+        // Handle regular measurement mode
+        if (isMeasuring) {
+            const timestamp = data.timestamp;
+            const joint = data.joint;
+            const dof = data.dof;
+            const measurements = data.data;
+            
+            // Add timestamp if new
+            if (!measurementData.timestamps.includes(timestamp)) {
+                measurementData.timestamps.push(timestamp);
+                // Limit number of displayed points
+                if (measurementData.timestamps.length > 100) {
+                    measurementData.timestamps.shift();
+                }
+            }
+            
+            // Save data for each measurement field
+            for (const [motor, value] of Object.entries(measurements)) {
+                const dataKey = `${joint}_${dof}_${motor}`;
+                if (!measurementData.jointData[dataKey]) {
+                    measurementData.jointData[dataKey] = [];
+                }
+                
+                measurementData.jointData[dataKey].push({
+                    x: timestamp,
+                    y: value
+                });
+                
+                // Limit number of points for each series
+                if (measurementData.jointData[dataKey].length > 100) {
+                    measurementData.jointData[dataKey].shift();
+                }
             }
         }
         
-        // Save data for each measurement field
-        for (const [motor, value] of Object.entries(measurements)) {
-            const dataKey = `${joint}_${dof}_${motor}`;
-            if (!measurementData.jointData[dataKey]) {
-                measurementData.jointData[dataKey] = [];
-            }
+        // NEW: Handle sequence playback data collection
+        if (isSequencePlaying && sequenceExecutionData.length > 0) {
+            const currentExecution = sequenceExecutionData[sequenceExecutionData.length - 1];
             
-            measurementData.jointData[dataKey].push({
-                x: timestamp,
-                y: value
+            // Collect encoder sample with all available data
+            currentExecution.encoderSamples.push({
+                timestamp: Date.now(),
+                serverTimestamp: data.timestamp,
+                joint: data.joint,
+                dof: data.dof,
+                measurements: data.data, // Raw measurement data
+                jointAngles: data.joint_angles || null, // DOF positions if available
+                motorPositions: data.motor_positions || null // Raw motor data if available
             });
-            
-            // Limit number of points for each series
-            if (measurementData.jointData[dataKey].length > 100) {
-                measurementData.jointData[dataKey].shift();
-            }
         }
     });
     
@@ -339,9 +372,63 @@ $(document).ready(function() {
         
         // Send command to select joint and load PIDs
         sendCommand('select-joint', { joint: joint });
+        
+        // Clear movement sequence when changing joint (sequence is joint-specific)
+        if (movementSequence.length > 0) {
+            clearSequence(true); // Silent clear
+            appendStatusMessage("🔄 Movement sequence cleared (joint changed)");
+        }
+        
+        // Update sequence builder visibility (only for ANKLE and KNEE)
+        updateSequenceBuilderVisibility(joint);
+        
+        // Show expected mapping grid for new joint
+        showExpectedMappingGrid(joint);
     });
 
     // DOF selection removed - now per-DOF controls handle specific DOF operations
+    
+    // Toggle mutual exclusion logic for auto-execute and sequence mode
+    $("#autoExecuteToggle").change(function() {
+        if ($(this).is(":checked")) {
+            // Disable sequence mode when auto-execute is enabled
+            $("#sequenceModeToggle").prop("checked", false);
+            isAddToSequenceMode = false;
+            // Hide sequence builder and update visibility
+            const currentJoint = $("#jointSelect").val();
+            updateSequenceBuilderVisibility(currentJoint);
+            // Add auto-execute visual indicator
+            $("#smartQuickButtons").addClass("auto-execute-enabled");
+            appendStatusMessage("⚡ Auto-execute mode enabled");
+        } else {
+            // Remove auto-execute visual indicator
+            $("#smartQuickButtons").removeClass("auto-execute-enabled");
+            appendStatusMessage("⏸️ Auto-execute mode disabled");
+        }
+    });
+    
+    $("#sequenceModeToggle").change(function() {
+        if ($(this).is(":checked")) {
+            // Disable auto-execute when sequence mode is enabled
+            $("#autoExecuteToggle").prop("checked", false);
+            isAddToSequenceMode = true;
+            // Remove auto-execute visual indicator
+            $("#smartQuickButtons").removeClass("auto-execute-enabled");
+            // Update sequence builder visibility
+            const currentJoint = $("#jointSelect").val();
+            updateSequenceBuilderVisibility(currentJoint);
+            appendStatusMessage("📝 Sequence mode enabled - click grid buttons to build sequence");
+        } else {
+            isAddToSequenceMode = false;
+            // Update sequence builder visibility (will hide)
+            const currentJoint = $("#jointSelect").val();
+            updateSequenceBuilderVisibility(currentJoint);
+            appendStatusMessage("Sequence mode disabled");
+        }
+    });
+    
+    // Initialize sequence builder visibility based on initial joint
+    updateSequenceBuilderVisibility($("#jointSelect").val());
 
     $("#serialPortSelect").change(function() {
         const joint = $("#jointSelect").val();
@@ -2577,36 +2664,37 @@ function refreshMappingDataForCurrentJoint() {
 /**
  * Sets quick angles for Multi-DOF command
  * If auto-execute toggle is active, immediately executes movement
+ * If sequence mode is active, adds step to sequence instead
  */
 function setMultiDofQuickAngles(angle0, angle1) {
     $("#multiDofAngle0").val(angle0);
     $("#multiDofAngle1").val(angle1);
     updateMultiDofCommandPreview();
-    appendStatusMessage(`Quick angles set: DOF0=${angle0}°, DOF1=${angle1}°`);
     
-    // Check if auto-execute toggle is active
-    if ($("#autoExecuteToggle").is(":checked")) {
-        // Execute movement immediately
+    // Check which mode is active
+    if ($("#sequenceModeToggle").is(":checked")) {
+        // Add to sequence instead of executing
+        addStepToSequence(angle0, angle1);
+        appendStatusMessage(`➕ Added to sequence: DOF0=${angle0}°, DOF1=${angle1}°`);
+    } else if ($("#autoExecuteToggle").is(":checked")) {
+        // Execute immediately (existing behavior)
         sendMultiDofMove();
         appendStatusMessage(`🚀 Auto-execute active: movement started immediately`);
+    } else {
+        // Normal mode: just set angles
+        appendStatusMessage(`Quick angles set: DOF0=${angle0}°, DOF1=${angle1}°`);
     }
 }
 
 /**
  * Updates Multi-DOF command preview while user modifies parameters
+ * Note: Preview textarea was removed from UI (was debug only)
+ * Function kept for backwards compatibility but does nothing
  */
 function updateMultiDofCommandPreview() {
-    const joint = $("#jointSelect").val();
-    const angle0 = parseFloat($("#multiDofAngle0").val()) || 0;
-    const angle1 = parseFloat($("#multiDofAngle1").val()) || 0;
-    const mask = parseInt($("#multiDofMask").val()) || 3;
-    const sync = parseInt($("#multiDofSync").val()) ?? 1;  // Use ?? to allow 0 (SYNC_NONE)
-    const speed = parseFloat($("#multiDofSpeed").val()) || 0.5;
-    const accel = parseFloat($("#multiDofAccel").val()) || 2.0;
-    const path = parseInt($("#multiDofPath").val()) ?? 1;  // Use ?? to allow 0 (PATH_LINEAR)
-    
-    const command = `${joint}:ALL:MOVE_MULTI_DOF:${angle0}:${angle1}:0:${mask}:${sync}:${speed}:${accel}:${path}`;
-    $("#multiDofCommandPreview").val(command);
+    // Preview element removed from UI - this function is now a no-op
+    // Kept to avoid breaking existing calls throughout the codebase
+    return;
 }
 
 /**
@@ -2808,14 +2896,6 @@ function generateIntelligentQuickButtons(ranges, container) {
         });
         
         container.append(multiDofContainer);
-        
-        // Add legend
-        container.append(`
-            <div class="mt-2 text-xs text-gray-600">
-                <div><strong>Cross pattern:</strong> Blue = DOF 0 only, Teal = DOF 1 only, Purple = Multi-DOF, Gray = Zero</div>
-                <div>Grid: Rows = DOF 0 (${dof0Values[0]}° to ${dof0Values[dof0Values.length-1]}°), Columns = DOF 1 (${dof1Values[0]}° to ${dof1Values[dof1Values.length-1]}°)</div>
-            </div>
-        `);
     }
     
     // Aggiungi info sui range
@@ -3121,14 +3201,6 @@ function generateDefaultQuickButtons(jointType, container) {
             });
             
             container.append(multiContainer);
-            
-            // Add legend
-            container.append(`
-                <div class="mt-2 text-xs text-gray-600">
-                    <div><strong>Cross pattern:</strong> Blue = DOF 0 only, Teal = DOF 1 only, Purple = Multi-DOF, Gray = Zero</div>
-                    <div>Grid: Rows = DOF 0 (+25° to -50°), Columns = DOF 1 (-25° to +25°)</div>
-                </div>
-            `);
         }
     } else {
         // Original flat layout for joints without sections (KNEE, HIP)
@@ -3292,24 +3364,6 @@ function sendMultiDofMove() {
 
 // === MULTI-DOF EVENT INITIALIZATION ===
 
-/**
- * Handles auto-execute toggle state change
- */
-function handleAutoExecuteToggle() {
-    const isAutoExecuteEnabled = $("#autoExecuteToggle").is(":checked");
-    const status = isAutoExecuteEnabled ? "enabled" : "disabled";
-    const icon = isAutoExecuteEnabled ? "🚀" : "⏸️";
-    
-    appendStatusMessage(`${icon} Auto-execute ${status} for smart buttons`);
-    
-    // Visually update smart buttons to indicate mode
-    if (isAutoExecuteEnabled) {
-        $("#smartQuickButtons").addClass("auto-execute-enabled");
-    } else {
-        $("#smartQuickButtons").removeClass("auto-execute-enabled");
-    }
-}
-
 // Add event handlers when document is ready
 $(document).ready(function() {
     // Add event handlers for automatic Multi-DOF command preview update
@@ -3323,10 +3377,8 @@ $(document).ready(function() {
         
     });
     
-    // Event listener per il toggle di esecuzione automatica
-    $("#autoExecuteToggle").on('change', function() {
-        handleAutoExecuteToggle();
-    });
+    // Note: autoExecuteToggle event listener is already registered earlier in the code
+    // (with mutual exclusion logic for sequence mode)
     
     // Initialize preview on load (with brief delay)
     setTimeout(updateMultiDofCommandPreview, 200);
@@ -3862,4 +3914,562 @@ function resetAllEncoderUI() {
     jointTypes.forEach(jointType => {
         updateEncoderTestUI(false, jointType);
     });
+}
+
+// ============================================================================
+// UI HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Toggles visibility of advanced movement parameters
+ */
+function toggleAdvancedParams() {
+    const container = $("#advancedParamsContainer");
+    const icon = $("#advancedParamsIcon");
+    
+    if (container.is(":visible")) {
+        container.slideUp(200);
+        icon.removeClass("fa-minus-circle").addClass("fa-plus-circle");
+    } else {
+        container.slideDown(200);
+        icon.removeClass("fa-plus-circle").addClass("fa-minus-circle");
+    }
+}
+
+// ============================================================================
+// AUTO-MAPPING PROGRESS AND VISUALIZATION
+// ============================================================================
+
+let autoMappingActive = false;
+let autoMappingGridPoints = [];
+let autoMappingCurrentIndex = 0;
+let autoMappingTotalPoints = 0;
+
+/**
+ * Updates auto-mapping progress UI and highlights current point
+ */
+function updateAutoMappingProgress(data) {
+    const progressDiv = $("#autoMappingProgress");
+    const gridInfoDiv = $("#autoMappingGridInfo");
+    const counterSpan = $("#autoMappingCounter");
+    const progressBar = $("#autoMappingProgressBar");
+    const currentPointDiv = $("#autoMappingCurrentPoint");
+    const gridDetails = $("#autoMappingGridDetails");
+    
+    // Check if mapping is complete or if data contains progress info
+    const totalPoints = data.total_points || 0;
+    const currentPoint = data.current_point || (data.data ? data.data.total_points : 0);
+    
+    // If we have mapping data, show grid info
+    if (data.data && data.data.present_dofs && data.data.present_dofs.length > 0) {
+        // Calculate grid dimensions from mapping data
+        autoMappingTotalPoints = totalPoints;
+        autoMappingGridPoints = calculateMappingGridPoints(data.data);
+        
+        // Show grid info
+        gridInfoDiv.show();
+        let gridHTML = '';
+        data.data.present_dofs.forEach((dofIdx) => {
+            const dofData = data.data[`dof_${dofIdx}`];
+            if (dofData && dofData.joint_angles) {
+                const angles = dofData.joint_angles;
+                const minAngle = Math.min(...angles);
+                const maxAngle = Math.max(...angles);
+                const numPoints = angles.length;
+                const step = numPoints > 1 ? ((maxAngle - minAngle) / (numPoints - 1)).toFixed(1) : 0;
+                gridHTML += `<div>DOF ${dofIdx}: ${minAngle.toFixed(1)}° to ${maxAngle.toFixed(1)}° (${numPoints} points, step ~${step}°)</div>`;
+            }
+        });
+        gridHTML += `<div class="font-semibold mt-1">Total: ${autoMappingTotalPoints} points</div>`;
+        gridDetails.html(gridHTML);
+        
+        // Check if mapping is still in progress
+        if (currentPoint < totalPoints && currentPoint > 0) {
+            autoMappingActive = true;
+            autoMappingCurrentIndex = currentPoint;
+            
+            // Show progress
+            progressDiv.show();
+            const percentage = (currentPoint / totalPoints * 100).toFixed(1);
+            counterSpan.text(`${currentPoint} / ${totalPoints}`);
+            progressBar.css('width', `${percentage}%`);
+            
+            // Show current point angles if available
+            if (autoMappingGridPoints[currentPoint]) {
+                const point = autoMappingGridPoints[currentPoint];
+                currentPointDiv.text(`Current: DOF0=${point.dof0.toFixed(1)}°, DOF1=${point.dof1.toFixed(1)}°`);
+                
+                // Highlight current point on grid buttons
+                highlightMappingPointOnGrid(point.dof0, point.dof1);
+            }
+        } else if (currentPoint >= totalPoints) {
+            // Mapping complete
+            autoMappingActive = false;
+            progressDiv.hide();
+            appendStatusMessage(`✅ Auto-mapping completed: ${totalPoints} points acquired`);
+            
+            // Remove highlights
+            removeAllMappingHighlights();
+        }
+    } else if (currentPoint === 0 && totalPoints > 0) {
+        // Mapping just started
+        autoMappingActive = true;
+        progressDiv.show();
+        counterSpan.text(`0 / ${totalPoints}`);
+        progressBar.css('width', '0%');
+        currentPointDiv.text('Initializing...');
+    }
+}
+
+/**
+ * Calculates grid points from mapping data for visualization
+ */
+function calculateMappingGridPoints(mappingData) {
+    const points = [];
+    
+    if (!mappingData || !mappingData.present_dofs) return points;
+    
+    const presentDofs = mappingData.present_dofs;
+    
+    // For 2-DOF joints (ANKLE), create grid of all combinations
+    if (presentDofs.length === 2) {
+        const dof0Data = mappingData[`dof_${presentDofs[0]}`];
+        const dof1Data = mappingData[`dof_${presentDofs[1]}`];
+        
+        if (dof0Data && dof1Data) {
+            dof0Data.joint_angles.forEach(angle0 => {
+                dof1Data.joint_angles.forEach(angle1 => {
+                    points.push({dof0: angle0, dof1: angle1});
+                });
+            });
+        }
+    }
+    // For 1-DOF joints (KNEE), just use DOF 0
+    else if (presentDofs.length === 1) {
+        const dof0Data = mappingData[`dof_${presentDofs[0]}`];
+        if (dof0Data) {
+            dof0Data.joint_angles.forEach(angle0 => {
+                points.push({dof0: angle0, dof1: 0});
+            });
+        }
+    }
+    
+    return points;
+}
+
+/**
+ * Highlights a specific point on the grid buttons during auto-mapping
+ */
+function highlightMappingPointOnGrid(dof0, dof1) {
+    // Remove previous highlights
+    $(".mapping-highlight").removeClass("mapping-highlight");
+    
+    // Find button matching these angles (with tolerance of ±0.5°)
+    $("#smartQuickButtons button").each(function() {
+        const btn = $(this);
+        const title = btn.attr("title");
+        
+        if (title) {
+            // Parse title like "DOF 0: 25°, DOF 1: -15°"
+            const match = title.match(/DOF 0: ([-\d.]+)°, DOF 1: ([-\d.]+)°/);
+            if (match) {
+                const btnDof0 = parseFloat(match[1]);
+                const btnDof1 = parseFloat(match[2]);
+                
+                // Check if angles match (with tolerance)
+                if (Math.abs(btnDof0 - dof0) < 0.5 && Math.abs(btnDof1 - dof1) < 0.5) {
+                    btn.addClass("mapping-highlight");
+                    
+                    // Scroll into view
+                    btn[0].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            }
+        }
+    });
+}
+
+/**
+ * Removes all mapping highlights from grid buttons
+ */
+function removeAllMappingHighlights() {
+    $(".mapping-highlight").removeClass("mapping-highlight");
+}
+
+/**
+ * Fetches joint configuration from joint_config.json
+ */
+function fetchJointConfig() {
+    $.ajax({
+        url: '/joint_config',
+        method: 'GET',
+        success: function(response) {
+            if (response.status === 'success' && response.config) {
+                jointConfigData = response.config;
+                console.log('Joint configuration loaded:', jointConfigData);
+                
+                // Show expected mapping grid for initially selected joint
+                const initialJoint = $("#jointSelect").val();
+                showExpectedMappingGrid(initialJoint);
+            } else {
+                console.error('Failed to load joint config:', response);
+            }
+        },
+        error: function(xhr, status, error) {
+            console.error('Error fetching joint config:', error);
+            appendStatusMessage('⚠️ Could not load joint configuration');
+        }
+    });
+}
+
+/**
+ * Shows expected mapping grid for a given joint BEFORE mapping starts
+ * Based on joint configuration from joint_config.json
+ */
+function showExpectedMappingGrid(jointName) {
+    if (!jointConfigData || !jointConfigData.joints) {
+        return;
+    }
+    
+    // Normalize joint name (e.g., "ANKLE_LEFT" -> "ankle_left")
+    const normalizedName = jointName.toLowerCase();
+    const jointConfig = jointConfigData.joints[normalizedName];
+    
+    if (!jointConfig) {
+        console.warn(`No config found for joint: ${jointName}`);
+        return;
+    }
+    
+    const gridInfoDiv = $("#autoMappingGridInfo");
+    const gridDetails = $("#autoMappingGridDetails");
+    
+    // Build grid info HTML
+    let gridHTML = '';
+    let totalPoints = 1;
+    
+    jointConfig.dofs.forEach((dof, idx) => {
+        // Use auto_mapping parameters from firmware config (more accurate than physical limits)
+        const minAngle = dof.auto_mapping_min_angle !== undefined ? dof.auto_mapping_min_angle : dof.min_angle;
+        const maxAngle = dof.auto_mapping_max_angle !== undefined ? dof.auto_mapping_max_angle : dof.max_angle;
+        const step = dof.auto_mapping_step !== undefined ? dof.auto_mapping_step : 5.0;
+        
+        const range = maxAngle - minAngle;
+        const numPoints = Math.floor(range / step) + 1;
+        
+        gridHTML += `<div>DOF ${idx}: ${minAngle.toFixed(1)}° to ${maxAngle.toFixed(1)}° (${numPoints} points, step ${step.toFixed(1)}°)</div>`;
+        
+        totalPoints *= numPoints;
+    });
+    
+    gridHTML += `<div class="font-semibold mt-1">Expected total: ${totalPoints} points</div>`;
+    
+    gridDetails.html(gridHTML);
+    gridInfoDiv.show();
+    
+    // Store for later use
+    autoMappingTotalPoints = totalPoints;
+}
+
+// ============================================================================
+// MOVEMENT SEQUENCE BUILDER FUNCTIONS
+// ============================================================================
+
+/**
+ * Updates visibility of sequence builder container based on joint type and toggle state
+ * Only visible for ANKLE and KNEE joints AND when sequence mode toggle is active
+ */
+function updateSequenceBuilderVisibility(joint) {
+    const container = $("#sequenceBuilderContainer");
+    const isSequenceModeActive = $("#sequenceModeToggle").is(":checked");
+    
+    // Show only if: supported joint (ANKLE/KNEE) AND sequence mode toggle is ON
+    if (joint && (joint.includes('ANKLE') || joint.includes('KNEE')) && isSequenceModeActive) {
+        container.show();
+    } else {
+        container.hide();
+        // Clear sequence when switching to non-supported joint
+        if (!joint || (!joint.includes('ANKLE') && !joint.includes('KNEE'))) {
+            if (movementSequence.length > 0) {
+                clearSequence(true); // Silent clear
+            }
+        }
+    }
+}
+
+/**
+ * Adds a step to the movement sequence
+ */
+function addStepToSequence(dof0, dof1) {
+    const delay = parseInt($("#sequenceDelay").val()) || 500;
+    
+    movementSequence.push({
+        dof0: dof0,
+        dof1: dof1,
+        delay: delay
+    });
+    
+    renderSequenceList();
+    
+    // Show sequence builder if hidden
+    $("#sequenceBuilderContainer").show();
+}
+
+/**
+ * Removes a specific step from the sequence
+ */
+function removeStep(index) {
+    if (index >= 0 && index < movementSequence.length) {
+        movementSequence.splice(index, 1);
+        renderSequenceList();
+        appendStatusMessage(`🗑️ Removed step ${index + 1}`);
+    }
+}
+
+/**
+ * Removes the last step from the sequence
+ */
+function removeLastStep() {
+    if (movementSequence.length === 0) {
+        appendStatusMessage("⚠️ Sequence is already empty");
+        return;
+    }
+    
+    movementSequence.pop();
+    renderSequenceList();
+    appendStatusMessage(`⬅️ Removed last step (${movementSequence.length} steps remaining)`);
+}
+
+/**
+ * Clears the entire sequence
+ */
+function clearSequence(silent = false) {
+    if (!silent && movementSequence.length > 3) {
+        if (!confirm(`Clear all ${movementSequence.length} steps from sequence?`)) {
+            return;
+        }
+    }
+    
+    movementSequence = [];
+    sequenceExecutionData = [];
+    renderSequenceList();
+    
+    // Hide export button
+    $("#exportSequenceBtn").hide();
+    
+    if (!silent) {
+        appendStatusMessage("🗑️ Sequence cleared");
+    }
+}
+
+/**
+ * Renders the sequence list UI with all steps
+ */
+function renderSequenceList() {
+    const container = $("#sequenceList");
+    
+    if (movementSequence.length === 0) {
+        container.html('<div class="sequence-empty-state">Click grid buttons to add steps to sequence</div>');
+        return;
+    }
+    
+    let html = '';
+    movementSequence.forEach((step, index) => {
+        html += `
+            <div class="sequence-step" data-step-index="${index}">
+                <span class="sequence-step-number">Step ${index + 1}</span>
+                <span class="sequence-step-angles">DOF0: ${step.dof0}°, DOF1: ${step.dof1}° (${step.delay}ms)</span>
+                <button class="sequence-step-remove" onclick="removeStep(${index})" title="Remove this step">×</button>
+            </div>
+        `;
+    });
+    
+    container.html(html);
+}
+
+/**
+ * Highlights a specific step during playback
+ */
+function highlightSequenceStep(index) {
+    // Remove current highlight from all steps
+    $(".sequence-step").removeClass("current");
+    
+    // Add highlight to current step
+    if (index >= 0 && index < movementSequence.length) {
+        $(`.sequence-step[data-step-index="${index}"]`).addClass("current");
+        
+        // Scroll into view if needed
+        const stepElement = $(`.sequence-step[data-step-index="${index}"]`)[0];
+        if (stepElement) {
+            stepElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+    }
+}
+
+/**
+ * Updates playback control buttons state
+ */
+function updatePlaybackControls() {
+    if (isSequencePlaying) {
+        $("#playSequenceBtn").prop("disabled", true).addClass("opacity-50");
+        $("#stopSequenceBtn").prop("disabled", false).removeClass("opacity-50");
+    } else {
+        $("#playSequenceBtn").prop("disabled", false).removeClass("opacity-50");
+        $("#stopSequenceBtn").prop("disabled", true).addClass("opacity-50");
+    }
+}
+
+/**
+ * Shows the export data button after playback
+ */
+function showExportButton() {
+    if (sequenceExecutionData.length > 0) {
+        $("#exportSequenceBtn").show();
+    }
+}
+
+/**
+ * Helper function to sleep for a specified duration (in ms)
+ */
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Async version of sendMultiDofMove that returns a Promise
+ */
+function sendMultiDofMoveAsync() {
+    return new Promise((resolve, reject) => {
+        try {
+            sendMultiDofMove();
+            // Resolve immediately after command is sent
+            // In future, could wait for movement completion feedback
+            setTimeout(resolve, 100);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+/**
+ * Main playback function - executes the movement sequence
+ */
+async function playSequence() {
+    if (movementSequence.length === 0) {
+        alert("Sequence is empty. Add steps first.");
+        return;
+    }
+    
+    const loopEnabled = $("#sequenceLoopToggle").is(":checked");
+    isSequencePlaying = true;
+    sequenceExecutionData = []; // Reset data collection
+    updatePlaybackControls();
+    
+    appendStatusMessage(`▶️ Starting sequence playback (${movementSequence.length} steps${loopEnabled ? ', loop enabled' : ''})`);
+    
+    let loopCount = 0;
+    
+    do {
+        if (loopEnabled) {
+            loopCount++;
+            appendStatusMessage(`🔄 Loop iteration ${loopCount}`);
+        }
+        
+        for (let i = 0; i < movementSequence.length; i++) {
+            if (!isSequencePlaying) {
+                appendStatusMessage("⏹️ Sequence stopped by user");
+                break;
+            }
+            
+            const step = movementSequence[i];
+            const startTime = Date.now();
+            
+            // Highlight current step
+            highlightSequenceStep(i);
+            
+            // Set angles in UI
+            $("#multiDofAngle0").val(step.dof0);
+            $("#multiDofAngle1").val(step.dof1);
+            updateMultiDofCommandPreview();
+            
+            // Collect execution data
+            const executionRecord = {
+                stepIndex: i,
+                loopIteration: loopCount,
+                targetDof0: step.dof0,
+                targetDof1: step.dof1,
+                targetDelay: step.delay,
+                startTimestamp: startTime,
+                encoderSamples: [] // Will be populated by socket listener
+            };
+            
+            sequenceExecutionData.push(executionRecord);
+            
+            appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: DOF0=${step.dof0}°, DOF1=${step.dof1}°`);
+            
+            // Execute movement
+            await sendMultiDofMoveAsync();
+            
+            // Wait for delay
+            await sleep(step.delay);
+            
+            executionRecord.endTimestamp = Date.now();
+            executionRecord.actualDuration = executionRecord.endTimestamp - executionRecord.startTimestamp;
+        }
+    } while (loopEnabled && isSequencePlaying);
+    
+    isSequencePlaying = false;
+    highlightSequenceStep(-1); // Remove all highlights
+    updatePlaybackControls();
+    showExportButton();
+    
+    appendStatusMessage(`✅ Sequence playback completed (${sequenceExecutionData.length} executions recorded)`);
+}
+
+/**
+ * Stops the sequence playback
+ */
+function stopSequence() {
+    if (isSequencePlaying) {
+        isSequencePlaying = false;
+        appendStatusMessage("⏹️ Stopping sequence playback...");
+        // The playback loop will stop at next iteration check
+    }
+}
+
+/**
+ * Exports sequence execution data as JSON file
+ */
+function exportSequenceData() {
+    if (sequenceExecutionData.length === 0) {
+        alert("No execution data available. Run the sequence first.");
+        return;
+    }
+    
+    const exportData = {
+        metadata: {
+            joint: $("#jointSelect").val(),
+            timestamp: new Date().toISOString(),
+            totalSteps: movementSequence.length,
+            loopEnabled: $("#sequenceLoopToggle").is(":checked"),
+            executionCount: sequenceExecutionData.length,
+            totalDuration: sequenceExecutionData.reduce((sum, exec) => sum + (exec.actualDuration || 0), 0)
+        },
+        sequence: movementSequence, // Planned sequence
+        executionData: sequenceExecutionData // Actual execution with feedback
+    };
+    
+    const blob = new Blob(
+        [JSON.stringify(exportData, null, 2)], 
+        {type: 'application/json'}
+    );
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    link.download = `sequence_${exportData.metadata.joint}_${timestamp}.json`;
+    
+    link.click();
+    URL.revokeObjectURL(url);
+    
+    appendStatusMessage(`💾 Exported sequence data: ${sequenceExecutionData.length} executions, ${exportData.metadata.totalDuration}ms total`);
 }

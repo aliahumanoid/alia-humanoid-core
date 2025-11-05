@@ -14,6 +14,7 @@ from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
 import json
 import os
 import utils
+from pathlib import Path
 
 def register_routes(app, serial_manager: SerialManager):
     """
@@ -158,6 +159,34 @@ def register_routes(app, serial_manager: SerialManager):
                 limits[joint_key]["dofs"] = joint_info['dofs']  # Include full DOF data (with zero_angle_offset)
 
         return jsonify({"limits": limits})
+    
+    @app.route('/joint_config', methods=['GET'])
+    def get_joint_config():
+        """
+        Endpoint to get joint configuration from joint_config.json
+        Includes DOF limits, motor count, encoder channels, etc.
+        """
+        try:
+            config_path = Path(__file__).parent.parent / "joint_config.json"
+            
+            if not config_path.exists():
+                return jsonify({
+                    "status": "error",
+                    "message": "joint_config.json not found"
+                }), 404
+            
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+            
+            return jsonify({
+                "status": "success",
+                "config": config_data
+            })
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"Error loading joint config: {str(e)}"
+            }), 500
 
     @app.route('/get_encoder_data', methods=['GET'])
     def get_encoder_data():
