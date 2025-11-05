@@ -28,12 +28,159 @@
             box-shadow: 0 0 8px rgba(249, 115, 22, 0.4) !important;
             /* Light orange glow on hover only */
         }
+
+        /* Sequence Builder Styles */
+        .sequence-builder-container {
+            background: #f9fafb;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+
+        .sequence-list {
+            max-height: 300px;
+            overflow-y: auto;
+            margin-bottom: 1rem;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 0.5rem;
+        }
+
+        .sequence-step {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            margin-bottom: 0.25rem;
+            transition: all 0.2s;
+        }
+
+        .sequence-step:hover {
+            background: #f9fafb;
+        }
+
+        .sequence-step.current {
+            background: #dbeafe;
+            border: 2px solid #3b82f6;
+            font-weight: 600;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+        }
+
+        .sequence-step-number {
+            font-weight: 600;
+            color: #6b7280;
+            min-width: 60px;
+        }
+
+        .sequence-step-angles {
+            flex: 1;
+            color: #374151;
+            font-family: monospace;
+        }
+
+        .sequence-step-remove {
+            color: #ef4444;
+            background: none;
+            border: none;
+            font-size: 1.25rem;
+            cursor: pointer;
+            padding: 0 0.5rem;
+            transition: transform 0.2s;
+        }
+
+        .sequence-step-remove:hover {
+            transform: scale(1.2);
+            color: #dc2626;
+        }
+
+        .sequence-controls {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .sequence-empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: #9ca3af;
+            font-style: italic;
+        }
+
+        /* Auto-mapping highlight for grid buttons */
+        .mapping-highlight {
+            animation: pulse-mapping 1s ease-in-out infinite;
+            box-shadow: 0 0 15px rgba(34, 197, 94, 0.6) !important;
+            border: 2px solid #22c55e !important;
+        }
+
+        @keyframes pulse-mapping {
+            0%, 100% {
+                box-shadow: 0 0 15px rgba(34, 197, 94, 0.6);
+            }
+            50% {
+                box-shadow: 0 0 25px rgba(34, 197, 94, 0.9);
+            }
+        }
+
+        /* Collapsible sections styles */
+        .section-header {
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .section-header:hover {
+            opacity: 0.8;
+        }
+
+        .section-content {
+            max-height: 5000px;
+            overflow: hidden;
+            transition: max-height 0.3s ease-in-out, opacity 0.3s ease-in-out;
+                opacity: 1;
+            }
+
+        .section-content.collapsed {
+            max-height: 0 !important;
+            opacity: 0;
+        }
+
+        .chevron-icon {
+            transition: transform 0.3s ease-in-out;
+        }
+
+        .chevron-icon.rotated {
+            transform: rotate(180deg);
+        }
     </style>
 </head>
 
 <body class="bg-gray-100">
 
     <script src="{{ url_for('static', filename='js/scripts.js') }}"></script>
+
+    <script>
+        // Toggle collapsible sections
+        function toggleSection(sectionId) {
+            const content = document.getElementById(sectionId);
+            const chevron = document.querySelector(`[onclick="toggleSection('${sectionId}')"] .chevron-icon`);
+            
+            if (content) {
+                content.classList.toggle('collapsed');
+            }
+            if (chevron) {
+                chevron.classList.toggle('rotated');
+            }
+        }
+    </script>
 
     <nav class="bg-blue-600 p-4 text-white">
         <div class="flex items-center px-4">
@@ -45,7 +192,14 @@
     <div class="flex h-screen overflow-hidden">
         <!-- Left fixed column for Status Messages -->
         <div class="w-1/4 p-4 bg-white shadow-md overflow-y-auto relative" style="height: calc(100vh - 4rem);">
-            <h2 class="text-xl font-semibold mb-4">Status Messages</h2>
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-semibold">Status Messages</h2>
+                <button onclick="sendCommand('reset-errors')"
+                    class="bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
+                    title="Reset Errors">
+                    <i class="fas fa-exclamation-triangle"></i>
+                </button>
+            </div>
             <div class="relative">
                 <ul id="statusMessages" class="list-disc pl-5 text-xs status-container"></ul>
                 <!-- Scroll button will be added dynamically here -->
@@ -54,193 +208,258 @@
 
         <!-- Right scrollable column for controls and charts -->
         <div class="w-3/4 overflow-y-auto p-4" style="height: calc(100vh - 4rem);">
-            <!-- Joint and DOF Selection -->
-            <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                <h2 class="text-xl font-semibold mb-4">Joint Selection</h2>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label for="jointSelect" class="block text-sm font-medium text-gray-700">Select
-                            Joint:</label>
-                        <select id="jointSelect"
-                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                            <option value="KNEE_LEFT" selected>Left Knee</option>
-                            <option value="KNEE_RIGHT">Right Knee</option>
-                            <option value="ANKLE_LEFT">Left Ankle</option>
-                            <option value="ANKLE_RIGHT">Right Ankle</option>
-                            <option value="HIP_LEFT">Left Hip</option>
-                            <option value="HIP_RIGHT">Right Hip</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label for="serialPortSelect" class="block text-sm font-medium text-gray-700">Serial Port:</label>
-                        <div class="mt-1 flex items-center space-x-2">
-                            <select id="serialPortSelect"
-                                class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                <option value="">Select port</option>
+
+            <!-- Main content in two columns -->
+            <div class="flex flex-wrap -mx-4">
+                <!-- Left column: Joint Selection, Setup, PID, Mapping -->
+                <div class="w-full lg:w-1/3 px-4 mb-8">
+
+                <!-- Joint Selection -->
+                <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointSelectionContent')">
+                        <span>Joint Selection</span>
+                        <i class="fas fa-chevron-up chevron-icon"></i>
+                    </h2>
+
+                    <div id="jointSelectionContent" class="section-content">
+                    <div class="grid grid-cols-1 gap-4">
+                        <div>
+                            <label for="jointSelect" class="block text-sm font-medium text-gray-700">Select
+                                Joint:</label>
+                            <select id="jointSelect"
+                                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                <option value="KNEE_LEFT" selected>Left Knee</option>
+                                <option value="KNEE_RIGHT">Right Knee</option>
+                                <option value="ANKLE_LEFT">Left Ankle</option>
+                                <option value="ANKLE_RIGHT">Right Ankle</option>
+                                <option value="HIP_LEFT">Left Hip</option>
+                                <option value="HIP_RIGHT">Right Hip</option>
                             </select>
-                            <button id="refreshSerialPorts" type="button"
-                                class="p-2 rounded-md border border-gray-300 text-gray-600 hover:bg-gray-100"
-                                title="Refresh port list">
-                                <i class="fas fa-sync"></i>
-                            </button>
                         </div>
-                        <p id="serialPortHint" class="text-xs text-gray-500 mt-1"></p>
+                        <div>
+                            <label for="serialPortSelect" class="block text-sm font-medium text-gray-700">Serial Port:</label>
+                            <div class="mt-1 flex items-center space-x-2">
+                                <select id="serialPortSelect"
+                                    class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                    <option value="">Select port</option>
+                                </select>
+                                <button id="refreshSerialPorts" type="button"
+                                    class="p-2 rounded-md border border-gray-300 text-gray-600 hover:bg-gray-100"
+                                    title="Refresh port list">
+                                    <i class="fas fa-sync"></i>
+                                </button>
+                            </div>
+                            <p id="serialPortHint" class="text-xs text-gray-500 mt-1"></p>
+                        </div>
+                    </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="flex flex-wrap -mx-4">
-                <!-- Control buttons column -->
-                <div class="w-full lg:w-1/3 px-4 mb-8">
-                    <!-- Auto Mapping -->
-                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">Auto Mapping</h2>
-                        <p class="text-sm text-gray-600 mb-4">This function activates advanced automatic mapping
-                            for the selected joint.</p>
-                        <div class="grid grid-cols-2 gap-4">
-                            <button onclick="sendCommand('start-auto-mapping')"
-                                class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-robot mr-2"></i>START_AUTO_MAPPING
-                            </button>
-                            <button onclick="sendCommand('stop-auto-mapping')"
-                                class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-stop mr-2"></i>STOP_AUTO_MAPPING
-                            </button>
-                        </div>
-                        <div class="mt-4 text-sm text-gray-600">
-                            <p>Offset recalculation is now available in specific controls for each DOF.</p>
-                        </div>
-                    </div>
-
-                    <!-- Simultaneous Multi-DOF Command -->
-                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4 text-indigo-700">
-                            <i class="fas fa-arrows-alt mr-2"></i>Simultaneous Multi-DOF Command
+                <!-- Specific visualization for each joint type -->
+                    <div id="kneePanel" class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('kneeSetupContent')">
+                            <span>Knee Setup</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
                         </h2>
-                        <p class="text-sm text-gray-600 mb-4">
-                            Control multiple degrees of freedom simultaneously with optional synchronization
-                        </p>
 
-                        <!-- Angle inputs for each DOF -->
-                        <div class="grid grid-cols-2 gap-4 mb-4">
-                            <div>
-                                <label for="multiDofAngle0" class="block text-sm font-medium text-gray-700">Angle DOF 0
-                                    (degrees):</label>
-                                <input id="multiDofAngle0" type="number" value="0" step="0.1"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                            </div>
-                            <div>
-                                <label for="multiDofAngle1" class="block text-sm font-medium text-gray-700">Angle DOF 1
-                                    (degrees):</label>
-                                <input id="multiDofAngle1" type="number" value="0" step="0.1"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                            </div>
-                        </div>
-
-                        <!-- Smart quick buttons based on mapping -->
-                        <div class="mb-4" id="smartQuickButtons">
-                            <!-- Buttons will be generated dynamically by JavaScript -->
-                        </div>
-
-                        <!-- Toggle for automatic execution -->
-                        <div class="mb-4 flex items-center justify-between">
-                            <label for="autoExecuteToggle" class="text-sm font-medium text-gray-700 flex items-center">
-                                <i class="fas fa-bolt mr-2 text-yellow-500"></i>Automatic execution:
-                            </label>
-                            <label class="inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="autoExecuteToggle" class="sr-only peer">
-                                <div
-                                    class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600">
+                        <div id="kneeSetupContent" class="section-content">
+                        <!-- Encoder Test Controls -->
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-3">Real-Time Encoder Test</h3>
+                            <div class="grid grid-cols-3 gap-4 items-end mb-3">
+                                <div>
+                                    <label for="kneeEncoderInterval"
+                                        class="block text-sm font-medium text-gray-700">Interval (ms):</label>
+                                    <select id="kneeEncoderInterval"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                        <option value="200">200ms</option>
+                                        <option value="500" selected>500ms</option>
+                                        <option value="1000">1000ms</option>
+                                        <option value="2000">2000ms</option>
+                                        <option value="5000">5000ms</option>
+                                    </select>
                                 </div>
-                                <span class="ml-2 text-sm font-medium text-gray-700">Off/On</span>
-                            </label>
-                        </div>
-
-                        <!-- Button to regenerate smart buttons -->
-                        <div class="mb-4 text-center">
-                            <button onclick="generateSmartQuickButtons()"
-                                class="bg-indigo-500 hover:bg-indigo-600 text-white text-xs py-1 px-3 rounded transition-colors">
-                                <i class="fas fa-sync-alt mr-1"></i>Update Smart Buttons
+                                <button onclick="startEncoderTest('KNEE')"
+                                class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-play mr-2"></i>Start Test
+                            </button>
+                                <button onclick="stopEncoderTest('KNEE')"
+                                class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-stop mr-2"></i>Stop Test
                             </button>
                         </div>
-
-                        <!-- Advanced parameters -->
-                        <div class="grid grid-cols-2 gap-4 mb-4">
-                            <div>
-                                <label for="multiDofMask" class="block text-sm font-medium text-gray-700">DOF Mask:</label>
-                                <select id="multiDofMask"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                                    <option value="1">Only DOF 0 (1)</option>
-                                    <option value="2">Only DOF 1 (2)</option>
-                                    <option value="3" selected>DOF 0 + 1 (3)</option>
-                                    <option value="4">Only DOF 2 (4)</option>
-                                    <option value="5">DOF 0 + 2 (5)</option>
-                                    <option value="6">DOF 1 + 2 (6)</option>
-                                    <option value="7">All DOFs (7)</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label for="multiDofSync"
-                                    class="block text-sm font-medium text-gray-700">Synchronization:</label>
-                                <select id="multiDofSync"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                                    <option value="0">No synchronization</option>
-                                    <option value="1" selected>Synchronize by duration</option>
-                                    <option value="2">Synchronize by speed</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <!-- Movement parameters -->
-                        <div class="grid grid-cols-2 gap-4 mb-4">
-                            <div>
-                                <label for="multiDofSpeed" class="block text-sm font-medium text-gray-700">Speed
-                                    (rad/s):</label>
-                                <input id="multiDofSpeed" type="number" value="0.5" step="0.1" min="0.1" max="2.0"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                            </div>
-                            <div>
-                                <label for="multiDofAccel" class="block text-sm font-medium text-gray-700">Accel. Time
-                                    (s):</label>
-                                <input id="multiDofAccel" type="number" value="0.2" step="0.1" min="0.1" max="5.0"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                            </div>
-                        </div>
-
-                        <div class="mb-4">
-                            <label for="multiDofPath" class="block text-sm font-medium text-gray-700">Path Type
-:</label>
-                            <select id="multiDofPath"
-                                class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                                <option value="0">PATH_LINEAR</option>
-                                <option value="1" selected>PATH_TRIG</option>
-                                <option value="2">PATH_QUAD</option>
-                            </select>
-                        </div>
-
-                        <!-- Control buttons -->
-                        <div class="grid grid-cols-2 gap-4">
-                            <button onclick="sendMultiDofMove()"
-                                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition-colors">
-                                <i class="fas fa-play mr-2"></i>Execute Multi-DOF Movement
-                            </button>
-                            <button onclick="sendCommand('stop-move')"
-                                class="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-4 rounded-lg transition-colors">
-                                <i class="fas fa-stop mr-2"></i>Stop Movement
-                            </button>
-                        </div>
-
-                        <!-- Generated command (debug) -->
-                        <div class="mt-4">
-                            <label for="multiDofCommandPreview" class="block text-sm font-medium text-gray-700">Command Generated:</label>
-                            <textarea id="multiDofCommandPreview" rows="2" readonly
-                                class="mt-1 block w-full rounded-md border-gray-300 bg-gray-50 text-xs font-mono shadow-sm"></textarea>
+                            <!-- Encoder values display -->
+                            <div id="kneeEncoderValues" class="text-sm text-gray-600 font-mono">
+                                <div class="grid grid-cols-1 gap-1">
+                                    <div>DOF 0 (Flexion-Extension): <span id="kneeEncoderDof0"
+                                            class="font-bold text-blue-600">-- °</span></div>
+                                </div>
                         </div>
                     </div>
 
-                    <!-- PID Control -->
+                        <div style="height: 400px;">
+                            <canvas id="kneeChart"></canvas>
+                        </div>
+                        <button onclick="resetTemporalChart(kneeChart, 'knee')"
+                            class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
+                            <i class="fas fa-redo mr-1"></i>Reset Chart
+                        </button>
+                        <div id="kneeDof0Buttons" class="mt-2 space-y-2"></div>
+                        </div>
+                    </div>
+
+                    <div id="anklePanel" class="bg-white rounded-lg shadow-md p-6 mb-8" style="display: none;">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('ankleSetupContent')">
+                            <span>Ankle Setup</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="ankleSetupContent" class="section-content">
+
+                        <!-- Encoder Test Controls -->
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-3">Real-Time Encoder Test</h3>
+                            <div class="grid grid-cols-3 gap-4 items-end mb-3">
+                            <div>
+                                    <label for="ankleEncoderInterval"
+                                        class="block text-sm font-medium text-gray-700">Interval (ms):</label>
+                                    <select id="ankleEncoderInterval"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                        <option value="200">200ms</option>
+                                        <option value="500" selected>500ms</option>
+                                        <option value="1000">1000ms</option>
+                                        <option value="2000">2000ms</option>
+                                        <option value="5000">5000ms</option>
+                                    </select>
+                            </div>
+                                <button onclick="startEncoderTest('ANKLE')"
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-play mr-2"></i>Start Test
+                                </button>
+                                <button onclick="stopEncoderTest('ANKLE')"
+                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-stop mr-2"></i>Stop Test
+                                </button>
+                            </div>
+                            <!-- Encoder values display -->
+                            <div id="ankleEncoderValues" class="text-sm text-gray-600 font-mono">
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>DOF 0 (Plantar-Dorsal): <span id="ankleEncoderDof0"
+                                            class="font-bold text-blue-600">-- °</span></div>
+                                    <div>DOF 1 (Inversion-Eversion): <span id="ankleEncoderDof1"
+                                            class="font-bold text-green-600">-- °</span></div>
+                        </div>
+                            </div>
+                        </div>
+
+                        <!-- Separate temporal charts for each DOF -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 0 - Plantar-Dorsal</h4>
+                                <div style="height: 300px;">
+                                    <canvas id="ankleDof0Chart"></canvas>
+                                </div>
+                                <button onclick="resetTemporalChart(ankleDof0Chart, 'ankle_dof0')"
+                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
+                                    <i class="fas fa-redo mr-1"></i>Reset Chart
+                                </button>
+                                <div id="ankleDof0Buttons" class="mt-2 space-y-2"></div>
+                        </div>
+                            <div>
+                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 1 - Inversion-Eversion</h4>
+                                <div style="height: 300px;">
+                                    <canvas id="ankleDof1Chart"></canvas>
+                                </div>
+                                <button onclick="resetTemporalChart(ankleDof1Chart, 'ankle_dof1')"
+                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
+                                    <i class="fas fa-redo mr-1"></i>Reset Chart
+                            </button>
+                                <div id="ankleDof1Buttons" class="mt-2 space-y-2"></div>
+                            </div>
+                        </div>
+                        </div>
+                        </div>
+
+                    <div id="hipPanel" class="bg-white rounded-lg shadow-md p-6 mb-8" style="display: none;">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('hipSetupContent')">
+                            <span>Hip Setup</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="hipSetupContent" class="section-content">
+
+                        <!-- Encoder Test Controls -->
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-3">Real-Time Encoder Test</h3>
+                            <div class="grid grid-cols-3 gap-4 items-end mb-3">
+                            <div>
+                                    <label for="hipEncoderInterval"
+                                        class="block text-sm font-medium text-gray-700">Interval (ms):</label>
+                                    <select id="hipEncoderInterval"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                        <option value="200">200ms</option>
+                                        <option value="500" selected>500ms</option>
+                                        <option value="1000">1000ms</option>
+                                        <option value="2000">2000ms</option>
+                                        <option value="5000">5000ms</option>
+                                </select>
+                            </div>
+                                <button onclick="startEncoderTest('HIP')"
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-play mr-2"></i>Start Test
+                                </button>
+                                <button onclick="stopEncoderTest('HIP')"
+                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-stop mr-2"></i>Stop Test
+                                </button>
+                            </div>
+                            <!-- Encoder values display -->
+                            <div id="hipEncoderValues" class="text-sm text-gray-600 font-mono">
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>DOF 0 (Flexion-Extension): <span id="hipEncoderDof0"
+                                            class="font-bold text-blue-600">-- °</span></div>
+                                    <div>DOF 1 (Abduction-Adduction): <span id="hipEncoderDof1"
+                                            class="font-bold text-green-600">-- °</span></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Separate temporal charts for each DOF -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 0 - Flexion-Extension</h4>
+                                <div style="height: 300px;">
+                                    <canvas id="hipDof0Chart"></canvas>
+                                </div>
+                                <button onclick="resetTemporalChart(hipDof0Chart, 'hip_dof0')"
+                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
+                                    <i class="fas fa-redo mr-1"></i>Reset Chart
+                                </button>
+                                <div id="hipDof0Buttons" class="mt-2 space-y-2"></div>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 1 - Abduction-Adduction</h4>
+                                <div style="height: 300px;">
+                                    <canvas id="hipDof1Chart"></canvas>
+                            </div>
+                                <button onclick="resetTemporalChart(hipDof1Chart, 'hip_dof1')"
+                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
+                                    <i class="fas fa-redo mr-1"></i>Reset Chart
+                            </button>
+                                <div id="hipDof1Buttons" class="mt-2 space-y-2"></div>
+                        </div>
+                        </div>
+                        </div>
+                    </div>
+
+                    <!-- PID Parameters -->
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">PID Control</h2>
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('pidParamsContent')">
+                            <span>PID Parameters</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="pidParamsContent" class="section-content">
 
                         <!-- DOF tab selectors -->
                         <div class="flex mb-4 space-x-2 pid-tab-selectors">
@@ -613,204 +832,52 @@
                             class="mt-2 w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded">
                             <i class="fas fa-save mr-2"></i>Save PID & Cascade to Flash
                         </button>
-                    </div>
-
-                    <!-- Utility Controls -->
-                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">Utility Controls</h2>
-                        <div class="grid grid-cols-2 gap-4">
-                            <button onclick="sendCommand('reset-errors')"
-                                class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-exclamation-triangle mr-2"></i>Reset Errors
-                            </button>
                         </div>
                     </div>
+
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointMappingContent')">
+                            <span>Joint Mapping</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="jointMappingContent" class="section-content">
+                        
+                        <!-- Auto Mapping Controls -->
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                            <h3 class="text-sm font-semibold mb-2 text-gray-700">Automatic Mapping</h3>
+                            <p class="text-xs text-gray-600 mb-3">Automatic grid exploration for joint calibration</p>
+                            
+                            <!-- Progress indicator -->
+                            <div id="autoMappingProgress" class="mb-3 p-2 bg-blue-50 border border-blue-200 rounded text-xs" style="display: none;">
+                                <div class="flex items-center justify-between mb-1">
+                                    <span class="font-semibold text-blue-700">Mapping in progress...</span>
+                                    <span id="autoMappingCounter" class="text-blue-600">0 / 0</span>
+                        </div>
+                                <div class="w-full bg-blue-200 rounded-full h-2">
+                                    <div id="autoMappingProgressBar" class="bg-blue-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+                    </div>
+                                <div id="autoMappingCurrentPoint" class="mt-1 text-blue-600 font-mono text-xs"></div>
                 </div>
 
-                <!-- Charts column -->
-                <div class="w-full lg:w-2/3 px-4">
-                    <!-- Specific visualization for each joint type -->
-                    <div id="kneePanel" class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">Knee Visualization</h2>
-
-                        <!-- Encoder Test Controls -->
-                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
-                            <h3 class="text-lg font-semibold mb-3">Real-Time Encoder Test</h3>
-                            <div class="grid grid-cols-3 gap-4 items-end mb-3">
-                                <div>
-                                    <label for="kneeEncoderInterval"
-                                        class="block text-sm font-medium text-gray-700">Interval (ms):</label>
-                                    <select id="kneeEncoderInterval"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                        <option value="200">200ms</option>
-                                        <option value="500" selected>500ms</option>
-                                        <option value="1000">1000ms</option>
-                                        <option value="2000">2000ms</option>
-                                        <option value="5000">5000ms</option>
-                                    </select>
-                                </div>
-                                <button onclick="startEncoderTest('KNEE')"
-                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-play mr-2"></i>Start Test
-                                </button>
-                                <button onclick="stopEncoderTest('KNEE')"
-                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-stop mr-2"></i>Stop Test
-                                </button>
+                            <!-- Grid info -->
+                            <div id="autoMappingGridInfo" class="mb-3 p-2 bg-white border border-gray-200 rounded text-xs" style="display: none;">
+                                <div class="font-semibold text-gray-700 mb-1">Grid to explore:</div>
+                                <div id="autoMappingGridDetails" class="text-gray-600 space-y-0.5"></div>
                             </div>
-                            <!-- Encoder values display -->
-                            <div id="kneeEncoderValues" class="text-sm text-gray-600 font-mono">
-                                <div class="grid grid-cols-1 gap-1">
-                                    <div>DOF 0 (Flexion-Extension): <span id="kneeEncoderDof0"
-                                            class="font-bold text-blue-600">-- °</span></div>
+                            
+                            <div class="grid grid-cols-2 gap-2">
+                                <button onclick="sendCommand('start-auto-mapping')"
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-robot mr-1"></i>Start
+                                </button>
+                                <button onclick="sendCommand('stop-auto-mapping')"
+                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-stop mr-1"></i>Stop
+                                </button>
                                 </div>
-                            </div>
                         </div>
-
-                        <div style="height: 400px;">
-                            <canvas id="kneeChart"></canvas>
-                        </div>
-                        <button onclick="resetTemporalChart(kneeChart, 'knee')"
-                            class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
-                            <i class="fas fa-redo mr-1"></i>Reset Chart
-                        </button>
-                        <div id="kneeDof0Buttons" class="mt-2 space-y-2"></div>
-                    </div>
-
-                    <div id="anklePanel" class="bg-white rounded-lg shadow-md p-6 mb-8" style="display: none;">
-                        <h2 class="text-xl font-semibold mb-4">Ankle Visualization</h2>
-
-                        <!-- Encoder Test Controls -->
-                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
-                            <h3 class="text-lg font-semibold mb-3">Real-Time Encoder Test</h3>
-                            <div class="grid grid-cols-3 gap-4 items-end mb-3">
-                                <div>
-                                    <label for="ankleEncoderInterval"
-                                        class="block text-sm font-medium text-gray-700">Interval (ms):</label>
-                                    <select id="ankleEncoderInterval"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                        <option value="200">200ms</option>
-                                        <option value="500" selected>500ms</option>
-                                        <option value="1000">1000ms</option>
-                                        <option value="2000">2000ms</option>
-                                        <option value="5000">5000ms</option>
-                                    </select>
-                                </div>
-                                <button onclick="startEncoderTest('ANKLE')"
-                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-play mr-2"></i>Start Test
-                                </button>
-                                <button onclick="stopEncoderTest('ANKLE')"
-                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-stop mr-2"></i>Stop Test
-                                </button>
-                            </div>
-                            <!-- Encoder values display -->
-                            <div id="ankleEncoderValues" class="text-sm text-gray-600 font-mono">
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div>DOF 0 (Plantar-Dorsal): <span id="ankleEncoderDof0"
-                                            class="font-bold text-blue-600">-- °</span></div>
-                                    <div>DOF 1 (Inversion-Eversion): <span id="ankleEncoderDof1"
-                                            class="font-bold text-green-600">-- °</span></div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Separate temporal charts for each DOF -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 0 - Plantar-Dorsal</h4>
-                                <div style="height: 300px;">
-                                    <canvas id="ankleDof0Chart"></canvas>
-                                </div>
-                                <button onclick="resetTemporalChart(ankleDof0Chart, 'ankle_dof0')"
-                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
-                                    <i class="fas fa-redo mr-1"></i>Reset Chart
-                                </button>
-                                <div id="ankleDof0Buttons" class="mt-2 space-y-2"></div>
-                            </div>
-                            <div>
-                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 1 - Inversion-Eversion</h4>
-                                <div style="height: 300px;">
-                                    <canvas id="ankleDof1Chart"></canvas>
-                                </div>
-                                <button onclick="resetTemporalChart(ankleDof1Chart, 'ankle_dof1')"
-                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
-                                    <i class="fas fa-redo mr-1"></i>Reset Chart
-                                </button>
-                                <div id="ankleDof1Buttons" class="mt-2 space-y-2"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div id="hipPanel" class="bg-white rounded-lg shadow-md p-6 mb-8" style="display: none;">
-                        <h2 class="text-xl font-semibold mb-4">Hip Visualization</h2>
-
-                        <!-- Encoder Test Controls -->
-                        <div class="mb-4 p-4 bg-gray-50 rounded-lg">
-                            <h3 class="text-lg font-semibold mb-3">Real-Time Encoder Test</h3>
-                            <div class="grid grid-cols-3 gap-4 items-end mb-3">
-                                <div>
-                                    <label for="hipEncoderInterval"
-                                        class="block text-sm font-medium text-gray-700">Interval (ms):</label>
-                                    <select id="hipEncoderInterval"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                        <option value="200">200ms</option>
-                                        <option value="500" selected>500ms</option>
-                                        <option value="1000">1000ms</option>
-                                        <option value="2000">2000ms</option>
-                                        <option value="5000">5000ms</option>
-                                    </select>
-                                </div>
-                                <button onclick="startEncoderTest('HIP')"
-                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-play mr-2"></i>Start Test
-                                </button>
-                                <button onclick="stopEncoderTest('HIP')"
-                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-stop mr-2"></i>Stop Test
-                                </button>
-                            </div>
-                            <!-- Encoder values display -->
-                            <div id="hipEncoderValues" class="text-sm text-gray-600 font-mono">
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div>DOF 0 (Flexion-Extension): <span id="hipEncoderDof0"
-                                            class="font-bold text-blue-600">-- °</span></div>
-                                    <div>DOF 1 (Abduction-Adduction): <span id="hipEncoderDof1"
-                                            class="font-bold text-green-600">-- °</span></div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Separate temporal charts for each DOF -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 0 - Flexion-Extension</h4>
-                                <div style="height: 300px;">
-                                    <canvas id="hipDof0Chart"></canvas>
-                                </div>
-                                <button onclick="resetTemporalChart(hipDof0Chart, 'hip_dof0')"
-                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
-                                    <i class="fas fa-redo mr-1"></i>Reset Chart
-                                </button>
-                                <div id="hipDof0Buttons" class="mt-2 space-y-2"></div>
-                            </div>
-                            <div>
-                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 1 - Abduction-Adduction</h4>
-                                <div style="height: 300px;">
-                                    <canvas id="hipDof1Chart"></canvas>
-                                </div>
-                                <button onclick="resetTemporalChart(hipDof1Chart, 'hip_dof1')"
-                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
-                                    <i class="fas fa-redo mr-1"></i>Reset Chart
-                                </button>
-                                <div id="hipDof1Buttons" class="mt-2 space-y-2"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">DOF Mapping Charts</h2>
+                        
                         <div class="mb-4 flex flex-wrap gap-2">
                             <button onclick="refreshMappingDataForCurrentJoint()"
                                 class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded">
@@ -821,18 +888,18 @@
                                 <i class="fas fa-eraser mr-2"></i>Clear All Charts
                             </button>
                             <button onclick="listSavedMappingFiles()"
-                                class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
                                 <i class="fas fa-list mr-2"></i>List Files
-                            </button>
+                                </button>
                             <button onclick="deleteSavedMappingData()"
-                                class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
                                 <i class="fas fa-trash mr-2"></i>Delete Current
                             </button>
                             <button onclick="exportInterpolationEquations($('#jointSelect').val())"
                                 class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded">
                                 <i class="fas fa-download mr-2"></i>Export Equations
-                            </button>
-                        </div>
+                                </button>
+                            </div>
                         <div class="mb-4">
                             <span id="mappingDataInfo" class="text-sm text-gray-600">
                                 No data loaded
@@ -844,32 +911,232 @@
                             <!-- Charts will be created dynamically here -->
                             <!-- Each DOF will have two charts: one for measured data and one for interpolated data -->
                         </div>
-                    </div>
-
-                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">Real-Time Measurements</h2>
-                        <div style="height: 400px;">
-                            <canvas id="realTimeChart"></canvas>
-                        </div>
-                        <div class="mt-4 flex space-x-4">
-                            <button onclick="startMeasureOutput()"
-                                class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-play mr-2"></i>Start Measure
-                            </button>
-                            <button onclick="stopMeasureOutput()"
-                                class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-stop mr-2"></i>Stop Measure
-                            </button>
-                            <button onclick="saveMeasurementData()"
-                                class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-save mr-2"></i>Save Data
-                            </button>
                         </div>
                     </div>
 
-                    <!-- Movement Charts Multi-DOF -->
+                </div>
+
+                <!-- Right column: Movement, Charts, Measurements -->
+                <div class="w-full lg:w-2/3 px-4">
+
+                <!-- Joint Movement -->
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">Movement Charts Multi-DOF</h2>
+                        <h2 class="text-xl font-semibold mb-4 text-indigo-700 section-header" onclick="toggleSection('jointMovementContent')">
+                            <span><i class="fas fa-arrows-alt mr-2"></i>Joint Movement</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="jointMovementContent" class="section-content">
+                        <p class="text-sm text-gray-600 mb-4">
+                            Control multiple degrees of freedom simultaneously with optional synchronization
+                        </p>
+
+                        <!-- Angle inputs for each DOF -->
+                        <div class="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label for="multiDofAngle0" class="block text-sm font-medium text-gray-700">Angle DOF 0
+                                    (degrees):</label>
+                                <input id="multiDofAngle0" type="number" value="0" step="0.1"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                        </div>
+                            <div>
+                                <label for="multiDofAngle1" class="block text-sm font-medium text-gray-700">Angle DOF 1
+                                    (degrees):</label>
+                                <input id="multiDofAngle1" type="number" value="0" step="0.1"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                            </div>
+                        </div>
+
+                        <!-- Control buttons -->
+                        <div class="grid grid-cols-2 gap-4 mb-4">
+                            <button onclick="sendMultiDofMove()"
+                                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition-colors">
+                                <i class="fas fa-play mr-2"></i>Execute Multi-DOF Movement
+                        </button>
+                            <button onclick="sendCommand('stop-move')"
+                                class="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-4 rounded-lg transition-colors">
+                                <i class="fas fa-stop mr-2"></i>Stop Movement
+                            </button>
+                    </div>
+
+                        <!-- Advanced parameters (collapsible) -->
+                        <div class="mb-4">
+                            <button onclick="toggleAdvancedParams()" class="flex items-center text-sm font-medium text-gray-700 hover:text-indigo-600 transition-colors">
+                                <i id="advancedParamsIcon" class="fas fa-plus-circle mr-2"></i>
+                                <span>Advanced Movement Parameters</span>
+                            </button>
+                        </div>
+                        
+                        <div id="advancedParamsContainer" style="display: none;" class="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                            <!-- DOF Mask and Sync -->
+                            <div class="grid grid-cols-2 gap-4 mb-4">
+                                <div>
+                                    <label for="multiDofMask" class="block text-sm font-medium text-gray-700">DOF Mask:</label>
+                                    <select id="multiDofMask"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                        <option value="1">Only DOF 0 (1)</option>
+                                        <option value="2">Only DOF 1 (2)</option>
+                                        <option value="3" selected>DOF 0 + 1 (3)</option>
+                                        <option value="4">Only DOF 2 (4)</option>
+                                        <option value="5">DOF 0 + 2 (5)</option>
+                                        <option value="6">DOF 1 + 2 (6)</option>
+                                        <option value="7">All DOFs (7)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="multiDofSync"
+                                        class="block text-sm font-medium text-gray-700">Synchronization:</label>
+                                    <select id="multiDofSync"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                        <option value="0">No synchronization</option>
+                                        <option value="1" selected>Synchronize by duration</option>
+                                        <option value="2">Synchronize by speed</option>
+                                    </select>
+                            </div>
+                                </div>
+
+                            <!-- Movement parameters -->
+                            <div class="grid grid-cols-2 gap-4 mb-4">
+                                <div>
+                                    <label for="multiDofSpeed" class="block text-sm font-medium text-gray-700">Speed
+                                        (rad/s):</label>
+                                    <input id="multiDofSpeed" type="number" value="0.5" step="0.1" min="0.1" max="2.0"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                </div>
+                                <div>
+                                    <label for="multiDofAccel" class="block text-sm font-medium text-gray-700">Accel. Time
+                                        (s):</label>
+                                    <input id="multiDofAccel" type="number" value="0.2" step="0.1" min="0.1" max="5.0"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                            </div>
+                        </div>
+
+                            <div>
+                                <label for="multiDofPath" class="block text-sm font-medium text-gray-700">Path Type:</label>
+                                <select id="multiDofPath"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                    <option value="0">PATH_LINEAR</option>
+                                    <option value="1" selected>PATH_TRIG</option>
+                                    <option value="2">PATH_QUAD</option>
+                                </select>
+                                </div>
+                            </div>
+
+                        <!-- Smart quick buttons based on mapping -->
+                        <div class="mb-4" id="smartQuickButtons">
+                            <!-- Buttons will be generated dynamically by JavaScript -->
+                                </div>
+
+                        <!-- Toggle for automatic execution -->
+                        <div class="mb-4 flex items-center gap-3">
+                            <label for="autoExecuteToggle" class="text-sm font-medium text-gray-700 flex items-center">
+                                <i class="fas fa-bolt mr-2 text-yellow-500"></i>Automatic execution:
+                            </label>
+                            <label class="inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="autoExecuteToggle" class="sr-only peer">
+                                <div
+                                    class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600">
+                                </div>
+                                <span class="ml-2 text-sm font-medium text-gray-700">Off/On</span>
+                            </label>
+                        </div>
+
+                        <!-- Toggle for sequence mode -->
+                        <div class="mb-4 flex items-center gap-3">
+                            <label for="sequenceModeToggle" class="text-sm font-medium text-gray-700 flex items-center">
+                                <i class="fas fa-list-ol mr-2 text-purple-500"></i>Sequence Mode:
+                            </label>
+                            <label class="inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="sequenceModeToggle" class="sr-only peer">
+                                <div
+                                    class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600">
+                                </div>
+                                <span class="ml-2 text-sm font-medium text-gray-700">Off/On</span>
+                            </label>
+                        </div>
+
+                        <!-- Movement Sequence Builder (visible only for ANKLE and KNEE) -->
+                        <div id="sequenceBuilderContainer" class="sequence-builder-container mb-4" style="display: none;">
+                            <h3 class="text-lg font-semibold mb-3 text-purple-700">
+                                <i class="fas fa-film mr-2"></i>Movement Sequence Builder
+                            </h3>
+                            
+                            <!-- Sequence list -->
+                            <div id="sequenceList" class="sequence-list">
+                                <div class="sequence-empty-state">
+                                    Click grid buttons to add steps to sequence
+                                </div>
+                            </div>
+                            
+                            <!-- Sequence controls -->
+                            <div class="sequence-controls">
+                                <!-- Delay dropdown -->
+                                <div class="flex items-center gap-2">
+                                    <label for="sequenceDelay" class="text-sm font-medium text-gray-700 whitespace-nowrap">
+                                        <i class="fas fa-clock mr-1"></i>Delay:
+                                    </label>
+                                    <select id="sequenceDelay" class="text-sm rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
+                                        <option value="500">500ms</option>
+                                        <option value="1000">1000ms</option>
+                                        <option value="1500" selected>1500ms</option>
+                                        <option value="2000">2000ms</option>
+                                        <option value="3000">3000ms</option>
+                                        <option value="4000">4000ms</option>
+                                        <option value="5000">5000ms</option>
+                                    </select>
+                                </div>
+                                
+                                <!-- Loop toggle -->
+                                <div class="flex items-center gap-2">
+                                    <label for="sequenceLoopToggle" class="text-sm font-medium text-gray-700 flex items-center whitespace-nowrap">
+                                        <i class="fas fa-redo mr-1"></i>Loop:
+                                    </label>
+                                    <label class="inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" id="sequenceLoopToggle" class="sr-only peer">
+                                        <div class="relative w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
+                                        <span class="ml-1 text-xs font-medium text-gray-700">Off/On</span>
+                                    </label>
+                                </div>
+                                
+                                <!-- Action buttons -->
+                                <button onclick="playSequence()" id="playSequenceBtn"
+                                    class="bg-green-500 hover:bg-green-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
+                                    <i class="fas fa-play mr-1"></i>Play
+                                </button>
+                                
+                                <button onclick="stopSequence()" id="stopSequenceBtn" disabled
+                                    class="bg-red-500 hover:bg-red-600 text-white text-sm py-1.5 px-3 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <i class="fas fa-stop mr-1"></i>Stop
+                                </button>
+                                
+                                <button onclick="removeLastStep()"
+                                    class="bg-orange-500 hover:bg-orange-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
+                                    <i class="fas fa-arrow-left mr-1"></i>Remove Last
+                                </button>
+                                
+                                <button onclick="clearSequence()"
+                                    class="bg-gray-500 hover:bg-gray-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
+                                    <i class="fas fa-trash mr-1"></i>Clear All
+                                </button>
+                                
+                                <button onclick="exportSequenceData()" id="exportSequenceBtn" style="display: none;"
+                                    class="bg-blue-500 hover:bg-blue-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
+                                    <i class="fas fa-download mr-1"></i>Export Data
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    </div>
+
+                    <!-- Movement Charts -->
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('movementChartsContent')">
+                            <span>Movement Charts</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="movementChartsContent" class="section-content">
                         <div class="mb-4 flex flex-wrap gap-2">
                             <button id="getMovementDataBtn" onclick="requestMovementDataFromPico()"
                                 class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
@@ -889,12 +1156,43 @@
                                 <p class="text-sm">Charts will appear here when data is received from PICO</p>
                             </div>
                         </div>
+                        </div>
                     </div>
 
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('realTimeMeasurementsContent')">
+                            <span>Real-Time Measurements</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
 
+                        <div id="realTimeMeasurementsContent" class="section-content">
+                        <div style="height: 400px;">
+                            <canvas id="realTimeChart"></canvas>
+                        </div>
+                        <div class="mt-4 flex space-x-4">
+                            <button onclick="startMeasureOutput()"
+                                class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                <i class="fas fa-play mr-2"></i>Start Measure
+                            </button>
+                            <button onclick="stopMeasureOutput()"
+                                class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                                <i class="fas fa-stop mr-2"></i>Stop Measure
+                            </button>
+                            <button onclick="saveMeasurementData()"
+                                class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded">
+                                <i class="fas fa-save mr-2"></i>Save Data
+                            </button>
+                        </div>
+                    </div>
+                        </div>
 
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4">Output Chart</h2>
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('outputChartContent')">
+                            <span>Output Chart</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="outputChartContent" class="section-content">
                         <div style="height: 400px;">
                             <canvas id="outputChart"></canvas>
                         </div>
@@ -907,6 +1205,7 @@
                                 class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
                                 <i class="fas fa-stop mr-2"></i>Stop Measure Output
                             </button>
+                        </div>
                         </div>
                     </div>
 

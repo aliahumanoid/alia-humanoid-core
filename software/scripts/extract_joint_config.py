@@ -123,13 +123,26 @@ def parse_config_presets(file_path):
                 zero_offset_match = re.search(r'\.zero_angle_offset\s*=\s*([-\d.]+)f?', dof_block)
                 zero_angle_offset = float(zero_offset_match.group(1)) if zero_offset_match else 0.0
                 
+                # Extract auto-mapping parameters
+                auto_mapping_min_match = re.search(r'\.auto_mapping_min_angle\s*=\s*([-\d.]+)f?', dof_block)
+                auto_mapping_min_angle = float(auto_mapping_min_match.group(1)) if auto_mapping_min_match else min_angle
+                
+                auto_mapping_max_match = re.search(r'\.auto_mapping_max_angle\s*=\s*([-\d.]+)f?', dof_block)
+                auto_mapping_max_angle = float(auto_mapping_max_match.group(1)) if auto_mapping_max_match else max_angle
+                
+                auto_mapping_step_match = re.search(r'\.auto_mapping_step\s*=\s*([-\d.]+)f?', dof_block)
+                auto_mapping_step = float(auto_mapping_step_match.group(1)) if auto_mapping_step_match else 5.0
+                
                 dofs.append({
                     'index': dof_idx,
                     'name': dof_name,
                     'min_angle': min_angle,
                     'max_angle': max_angle,
                     'encoder_channel': encoder_channel,
-                    'zero_angle_offset': zero_angle_offset
+                    'zero_angle_offset': zero_angle_offset,
+                    'auto_mapping_min_angle': auto_mapping_min_angle,
+                    'auto_mapping_max_angle': auto_mapping_max_angle,
+                    'auto_mapping_step': auto_mapping_step
                 })
         
         # Create joint entry
@@ -185,7 +198,8 @@ def main():
     for joint_name, joint_data in sorted(config['joints'].items(), key=lambda x: x[1]['id']):
         print(f"  [{joint_data['id']}] {joint_name}: {joint_data['dof_count']} DOF, {joint_data['motor_count']} motors")
         for dof in joint_data['dofs']:
-            print(f"      DOF {dof['index']}: {dof['name']} ({dof['min_angle']:.1f}° to {dof['max_angle']:.1f}°, zero_ref={dof['zero_angle_offset']:.1f}°)")
+            print(f"      DOF {dof['index']}: {dof['name']} (limits: {dof['min_angle']:.1f}° to {dof['max_angle']:.1f}°)")
+            print(f"         Auto-mapping: {dof['auto_mapping_min_angle']:.1f}° to {dof['auto_mapping_max_angle']:.1f}° (step {dof['auto_mapping_step']:.1f}°)")
 
 
 if __name__ == '__main__':
