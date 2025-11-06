@@ -58,6 +58,10 @@ class SerialHandler:
             {}
         )  # Stores time offsets for each PICO
 
+        # Time synchronization helpers
+        self.time_sync_reference_clock: Optional[float] = None
+        self.time_sync_baseline_offset: Optional[float] = None
+
         # Structure to store PID values for each joint/DOF/motor
         self.pid_values = {}
         self.pid_outer_values = {}
@@ -2311,86 +2315,130 @@ class SerialHandler:
         result = {
             "success": False,
             "offset": 0.0,
+            "offset_ms": 0.0,
+            "offset_drift_ms": None,
             "rtt": 0.0,
+            "rtt_ms": 0.0,
             "T1": 0.0,
             "T2": 0.0,
             "T3": 0.0,
             "T4": 0.0,
+            "host_epoch_send": 0.0,
+            "host_epoch_receive": 0.0,
+            "host_midpoint_epoch": 0.0,
+            "host_midpoint_seconds": 0.0,
+            "host_midpoint_iso": None,
+            "firmware_boot_epoch": 0.0,
+            "firmware_boot_iso": None,
+            "firmware_uptime_seconds": 0.0,
+            "is_baseline": False,
             "error": None
         }
         
-        if not self.serial_connection or not self.serial_connection.is_open:
-            result["error"] = "Serial connection not open"
-            logger.error(result["error"])
-            return result
-        
         try:
-            # Pause listening thread
+            # Pause listening thread and wait for it to release the serial port
             self.pause_listening()
-            time.sleep(0.1)  # Give listener time to pause
+            time.sleep(0.2)  # Give listener time to exit the 'with' block
             
-            # Clear any pending data
-            self.serial_connection.reset_input_buffer()
-            self.serial_connection.reset_output_buffer()
+            if self.time_sync_reference_clock is None:
+                self.time_sync_reference_clock = time.perf_counter()
             
-            # T1: Send SYNC command with host timestamp
-            T1 = time.time()
-            result["T1"] = T1
-            command = f"CMD:SYNC({T1:.6f})\n"
-            self.serial_connection.write(command.encode())
-            self.serial_connection.flush()  # Ensure data is sent immediately
-            logger.info(f"Sent SYNC command at T1={T1:.6f}")
-            
-            # Wait for response
-            response_received = False
-            timeout_start = time.time()
-            
-            while time.time() - timeout_start < 1.0:
-                if self.serial_connection.in_waiting > 0:
-                    line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
-                    logger.debug(f"Sync received: {line}")
-                    
-                    # T4: Record receive time immediately
-                    T4 = time.time()
-                    
-                    # Parse EVT:SYNC_RESPONSE(T1_echo,T2)
-                    if line.startswith("EVT:SYNC_RESPONSE("):
-                        result["T4"] = T4
-                        try:
-                            # Extract T1_echo and T2 from response
-                            values_str = line[18:-1]  # Remove "EVT:SYNC_RESPONSE(" and ")"
-                            T1_echo, T2 = map(float, values_str.split(','))
-                            result["T2"] = T2
-                            result["T3"] = T2  # T3 = T2 for immediate response
-                            
-                            # Calculate offset using NTP algorithm
-                            # offset = ((T2 - T1) + (T3 - T4)) / 2
-                            # Since T3 = T2, this simplifies to:
-                            # offset = ((T2 - T1) + (T2 - T4)) / 2 = T2 - (T1 + T4) / 2
-                            result["offset"] = T2 - (T1 + T4) / 2.0
-                            
-                            # Round-trip time
-                            result["rtt"] = T4 - T1
-                            
-                            result["success"] = True
-                            response_received = True
-                            
-                            logger.info(
-                                f"Time sync successful: offset={result['offset']:.6f}s, "
-                                f"RTT={result['rtt']:.6f}s"
-                            )
-                            break
-                            
-                        except (ValueError, IndexError) as e:
-                            result["error"] = f"Failed to parse response: {e}"
-                            logger.error(result["error"])
-                            break
+            # Open a temporary dedicated connection for sync
+            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1.0) as ser:
+                # Clear any pending data
+                ser.reset_input_buffer()
+                ser.reset_output_buffer()
                 
-                time.sleep(0.01)  # Small delay to avoid busy-waiting
-            
-            if not response_received:
-                result["error"] = "Timeout waiting for SYNC_RESPONSE"
-                logger.error(result["error"])
+                # T1: Send SYNC command with host timestamp
+                host_epoch_send = time.time()
+                host_clock_send = time.perf_counter()
+                T1 = host_clock_send - self.time_sync_reference_clock
+                result["T1"] = T1
+                result["host_epoch_send"] = host_epoch_send
+                command = f"CMD:SYNC({T1:.6f})\n"
+                ser.write(command.encode())
+                ser.flush()  # Ensure data is sent immediately
+                logger.info(f"Sent SYNC command at T1={T1:.6f}s (relative)")
+                
+                # Wait for response
+                response_received = False
+                timeout_start = time.perf_counter()
+                
+                while time.perf_counter() - timeout_start < 1.0:
+                    if ser.in_waiting > 0:
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+                        logger.debug(f"Sync received: {line}")
+                        
+                        # T4: Record receive time immediately
+                        host_clock_receive = time.perf_counter()
+                        T4 = host_clock_receive - self.time_sync_reference_clock
+                        
+                        # Parse EVT:SYNC_RESPONSE(T1_echo,T2)
+                        if line.startswith("EVT:SYNC_RESPONSE("):
+                            result["T4"] = T4
+                            try:
+                                # Extract T1_echo and T2 from response
+                                values_str = line[18:-1]  # Remove "EVT:SYNC_RESPONSE(" and ")"
+                                T1_echo, T2 = map(float, values_str.split(','))
+                                result["T2"] = T2
+                                result["T3"] = T2  # T3 = T2 for immediate response
+                                
+                                # Calculate offset using NTP algorithm
+                                # offset = ((T2 - T1) + (T3 - T4)) / 2
+                                # Since T3 = T2, this simplifies to T2 - (T1 + T4) / 2
+                                host_round_trip = T4 - T1
+                                host_midpoint = T1 + host_round_trip / 2.0
+                                offset_seconds = T2 - host_midpoint
+
+                                result["offset"] = offset_seconds
+                                result["offset_ms"] = offset_seconds * 1000.0
+                                result["rtt"] = host_round_trip
+                                result["rtt_ms"] = host_round_trip * 1000.0
+                                result["firmware_uptime_seconds"] = T2
+                                result["host_midpoint_seconds"] = host_midpoint
+
+                                host_epoch_receive = host_epoch_send + (host_round_trip)
+                                result["host_epoch_receive"] = host_epoch_receive
+                                host_midpoint_epoch = host_epoch_send + (host_round_trip / 2.0)
+                                result["host_midpoint_epoch"] = host_midpoint_epoch
+
+                                firmware_boot_epoch = host_midpoint_epoch - T2
+                                result["firmware_boot_epoch"] = firmware_boot_epoch
+                                try:
+                                    result["firmware_boot_iso"] = datetime.fromtimestamp(firmware_boot_epoch).isoformat()
+                                    result["host_midpoint_iso"] = datetime.fromtimestamp(host_midpoint_epoch).isoformat()
+                                except (OverflowError, OSError, ValueError):
+                                    result["firmware_boot_iso"] = None
+                                    result["host_midpoint_iso"] = None
+
+                                if self.time_sync_baseline_offset is None:
+                                    self.time_sync_baseline_offset = offset_seconds
+                                    result["offset_drift_ms"] = 0.0
+                                    result["is_baseline"] = True
+                                else:
+                                    drift_ms = (offset_seconds - self.time_sync_baseline_offset) * 1000.0
+                                    result["offset_drift_ms"] = drift_ms
+                                    result["is_baseline"] = False
+
+                                result["success"] = True
+                                response_received = True
+                                
+                                logger.info(
+                                    f"Time sync successful: offset={offset_seconds:.6f}s (drift={result['offset_drift_ms'] or 0:.3f}ms), "
+                                    f"RTT={host_round_trip:.6f}s"
+                                )
+                                break
+                                
+                            except (ValueError, IndexError) as e:
+                                result["error"] = f"Failed to parse response: {e}"
+                                logger.error(result["error"])
+                                break
+                    
+                    time.sleep(0.01)  # Small delay to avoid busy-waiting
+                
+                if not response_received:
+                    result["error"] = "Timeout waiting for SYNC_RESPONSE"
+                    logger.error(result["error"])
 
         except serial.SerialException as e:
             result["error"] = f"Serial communication error: {e}"
