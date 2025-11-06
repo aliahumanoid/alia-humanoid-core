@@ -4473,3 +4473,92 @@ function exportSequenceData() {
     
     appendStatusMessage(`💾 Exported sequence data: ${sequenceExecutionData.length} executions, ${exportData.metadata.totalDuration}ms total`);
 }
+
+// =============================================================================
+// TIME SYNCHRONIZATION
+// =============================================================================
+
+/**
+ * Perform NTP-like time synchronization with firmware
+ */
+function syncTime() {
+    const joint = $("#jointSelect").val();
+    
+    if (!joint) {
+        appendStatusMessage("⚠️ Please select a joint first");
+        return;
+    }
+    
+    appendStatusMessage("🔄 Synchronizing time with firmware...");
+    
+    $.ajax({
+        url: '/sync_time',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ joint: joint }),
+        success: function(response) {
+            if (response.status === 'success') {
+                displaySyncResults(response.sync_data);
+                appendStatusMessage(`✅ Time sync successful: offset=${response.sync_data.offset_ms.toFixed(3)}ms, RTT=${response.sync_data.rtt_ms.toFixed(3)}ms`);
+            } else {
+                appendStatusMessage(`❌ Time sync failed: ${response.message}`);
+            }
+        },
+        error: function(xhr) {
+            const errorMsg = xhr.responseJSON?.message || 'Unknown error';
+            appendStatusMessage(`❌ Time sync error: ${errorMsg}`);
+        }
+    });
+}
+
+/**
+ * Display time synchronization results in the UI
+ */
+function displaySyncResults(syncData) {
+    const panel = $("#syncResultsPanel");
+    const results = $("#syncResults");
+    
+    // Determine quality color
+    const qualityColors = {
+        'good': 'text-green-600',
+        'fair': 'text-yellow-600',
+        'poor': 'text-red-600'
+    };
+    const qualityColor = qualityColors[syncData.quality] || 'text-gray-600';
+    
+    // Build results HTML
+    const html = `
+        <div class="grid grid-cols-2 gap-2">
+            <div class="font-semibold">Time Offset:</div>
+            <div class="text-right">${syncData.offset_ms.toFixed(3)} ms</div>
+            
+            <div class="font-semibold">Round-Trip Time:</div>
+            <div class="text-right">${syncData.rtt_ms.toFixed(3)} ms</div>
+            
+            <div class="font-semibold">Quality:</div>
+            <div class="text-right ${qualityColor} font-semibold">${syncData.quality.toUpperCase()}</div>
+        </div>
+        
+        <div class="mt-3 pt-3 border-t border-gray-300">
+            <div class="text-xs text-gray-600 space-y-1">
+                <div class="font-semibold mb-1">Timing Details:</div>
+                <div>T1 (Host Send): ${syncData.T1_host_send.toFixed(6)}s</div>
+                <div>T2 (Firmware Recv): ${syncData.T2_firmware_receive.toFixed(6)}s</div>
+                <div>T3 (Firmware Send): ${syncData.T3_firmware_send.toFixed(6)}s</div>
+                <div>T4 (Host Recv): ${syncData.T4_host_receive.toFixed(6)}s</div>
+            </div>
+        </div>
+        
+        <div class="mt-3 text-xs text-gray-500 italic">
+            Offset calculated using NTP algorithm: ((T2-T1)+(T3-T4))/2
+        </div>
+    `;
+    
+    results.html(html);
+    panel.removeClass('hidden');
+    
+    // Auto-hide after 30 seconds
+    setTimeout(() => {
+        panel.addClass('hidden');
+    }, 30000);
+}

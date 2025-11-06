@@ -749,6 +749,58 @@ def register_routes(app, serial_manager: SerialManager):
                 "message": f"Error saving enriched data: {str(e)}"
             })
 
+    @app.route('/sync_time', methods=['POST'])
+    def sync_time():
+        """
+        Endpoint to synchronize time between host and firmware using NTP-like protocol
+        
+        Returns detailed timing information and calculated offset
+        """
+        try:
+            data = request.get_json()
+            joint_name = data.get('joint')
+            
+            if not joint_name:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint_name)
+            if error:
+                return error, code
+            
+            # Perform time synchronization
+            sync_result = handler.synchronize_time()
+            
+            if sync_result["success"]:
+                return jsonify({
+                    "status": "success",
+                    "message": "Time synchronization completed",
+                    "sync_data": {
+                        "offset_seconds": sync_result["offset"],
+                        "offset_ms": sync_result["offset"] * 1000,
+                        "rtt_seconds": sync_result["rtt"],
+                        "rtt_ms": sync_result["rtt"] * 1000,
+                        "T1_host_send": sync_result["T1"],
+                        "T2_firmware_receive": sync_result["T2"],
+                        "T3_firmware_send": sync_result["T3"],
+                        "T4_host_receive": sync_result["T4"],
+                        "quality": "good" if sync_result["rtt"] < 0.01 else "fair" if sync_result["rtt"] < 0.05 else "poor"
+                    }
+                })
+            else:
+                return jsonify({
+                    "status": "error",
+                    "message": sync_result.get("error", "Time synchronization failed")
+                }), 500
+                
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"Error during time synchronization: {str(e)}"
+            }), 500
+
     @app.route('/')
     def index():
         return render_template('index.html')

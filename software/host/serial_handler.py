@@ -2294,19 +2294,100 @@ class SerialHandler:
             "flexor_output": self.flexor,
         }
 
-    def synchronize_time(self) -> None:
+    def synchronize_time(self) -> Dict[str, float]:
+        """
+        Perform NTP-like time synchronization with firmware.
+        
+        Returns:
+            Dict containing:
+                - offset: calculated time offset (seconds)
+                - rtt: round-trip time (seconds)
+                - T1: host send time
+                - T2: firmware receive time
+                - T3: firmware send time (same as T2)
+                - T4: host receive time
+                - success: True if sync successful
+        """
         self.pause_listening()
+        result = {
+            "success": False,
+            "offset": 0.0,
+            "rtt": 0.0,
+            "T1": 0.0,
+            "T2": 0.0,
+            "T3": 0.0,
+            "T4": 0.0,
+            "error": None
+        }
+        
         try:
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
-                # Send SYNC command with T1 using new protocol
+            with serial.Serial(self.serial_port, BAUD_RATE, timeout=2) as ser:
+                # Clear any pending data
+                ser.reset_input_buffer()
+                
+                # T1: Send SYNC command with host timestamp
                 T1 = time.time()
-                command = f"SYNC({T1})"
-                self.send_command_with_prefix(command, ser)
+                result["T1"] = T1
+                command = f"CMD:SYNC({T1:.6f})\n"
+                ser.write(command.encode())
+                logger.info(f"Sent SYNC command at T1={T1:.6f}")
+                
+                # Wait for response
+                response_received = False
+                timeout_start = time.time()
+                
+                while time.time() - timeout_start < 2.0:
+                    if ser.in_waiting > 0:
+                        line = ser.readline().decode('utf-8', errors='ignore').strip()
+                        logger.debug(f"Received: {line}")
+                        
+                        # T4: Record receive time
+                        T4 = time.time()
+                        result["T4"] = T4
+                        
+                        # Parse EVT:SYNC_RESPONSE(T1_echo,T2)
+                        if line.startswith("EVT:SYNC_RESPONSE("):
+                            try:
+                                # Extract T1_echo and T2 from response
+                                values_str = line[18:-1]  # Remove "EVT:SYNC_RESPONSE(" and ")"
+                                T1_echo, T2 = map(float, values_str.split(','))
+                                result["T2"] = T2
+                                result["T3"] = T2  # T3 = T2 for immediate response
+                                
+                                # Calculate offset using NTP algorithm
+                                # offset = ((T2 - T1) + (T3 - T4)) / 2
+                                # Since T3 = T2, this simplifies to:
+                                # offset = ((T2 - T1) + (T2 - T4)) / 2 = T2 - (T1 + T4) / 2
+                                result["offset"] = T2 - (T1 + T4) / 2.0
+                                
+                                # Round-trip time
+                                result["rtt"] = T4 - T1
+                                
+                                result["success"] = True
+                                response_received = True
+                                
+                                logger.info(
+                                    f"Time sync successful: offset={result['offset']:.6f}s, "
+                                    f"RTT={result['rtt']:.6f}s"
+                                )
+                                break
+                                
+                            except (ValueError, IndexError) as e:
+                                result["error"] = f"Failed to parse response: {e}"
+                                logger.error(result["error"])
+                                break
+                
+                if not response_received:
+                    result["error"] = "Timeout waiting for SYNC_RESPONSE"
+                    logger.error(result["error"])
 
         except serial.SerialException as e:
-            logger.error(f"Serial communication error during synchronization: {e}")
+            result["error"] = f"Serial communication error: {e}"
+            logger.error(result["error"])
         finally:
             self.resume_listening()
+            
+        return result
 
     def generate_command(self, joint, dof, command, params=None):
         """
