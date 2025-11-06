@@ -298,194 +298,195 @@ void core0_main_loop() {
 
                   // Check if the command can be handled directly on core0
                   switch (parsed_cmd.command) {
-                      case CMD_STOP_MEASURING: {
-                        measuring_data_ext.flag = 0;
-                        handled_on_core0        = true;
-                        LOG_INFO("Measurement stopped");
-                        break;
-                      }
+                    case CMD_STOP_MEASURING: {
+                      measuring_data_ext.flag = 0;
+                      handled_on_core0        = true;
+                      LOG_INFO("Measurement stopped");
+                      break;
+                    }
 
-                      case CMD_START_MEASURING: {
-                        measuring_data_ext.flag      = 1;
-                        measuring_data_ext.joint_id  = ACTIVE_JOINT;
-                        measuring_data_ext.dof_index = parsed_cmd.dof_index;
-                        handled_on_core0             = true;
-                        LOG_INFO("Measurement started for DOF " + String(parsed_cmd.dof_index));
-                        break;
-                      }
+                    case CMD_START_MEASURING: {
+                      measuring_data_ext.flag      = 1;
+                      measuring_data_ext.joint_id  = ACTIVE_JOINT;
+                      measuring_data_ext.dof_index = parsed_cmd.dof_index;
+                      handled_on_core0             = true;
+                      LOG_INFO("Measurement started for DOF " + String(parsed_cmd.dof_index));
+                      break;
+                    }
 
-                // Note: CMD_GET_VERSION and CMD_GET_ANGLES commands do not exist in commands.h
-                // Version information is sent automatically during setup() as EVT:FW:VERSION
+                    // Note: CMD_GET_VERSION and CMD_GET_ANGLES commands do not exist in commands.h
+                    // Version information is sent automatically during setup() as EVT:FW:VERSION
 
-                case CMD_GET_PID: {
-                  // Get PID parameters for specified DOF and motor
-                  if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
-                    uint8_t motor_index = parsed_cmd.params[0]; // 1=agonist, 2=antagonist
-                    if (motor_index == 1 || motor_index == 2) {
-                      float kp, ki, kd, tau;
-                      if (active_joint_controller->getPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
-                        // Format: EVT:PID:<DOF>:<MOTOR_TYPE>:<KP>:<KI>:<KD>:<TAU>
-                        Serial.println("EVT:PID:" + String(parsed_cmd.dof_index) + ":" + String(motor_index) + ":" +
-                                       String(kp, 6) + ":" + String(ki, 6) + ":" +
-                                       String(kd, 6) + ":" + String(tau, 6));
+                    case CMD_GET_PID: {
+                      // Get PID parameters for specified DOF and motor
+                      if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
+                        uint8_t motor_index = parsed_cmd.params[0]; // 1=agonist, 2=antagonist
+                        Serial.println("DBG: GET_PID motor_index=" + String(motor_index) + " DOF=" + String(parsed_cmd.dof_index));
+                        if (motor_index == 1 || motor_index == 2) {
+                          float kp, ki, kd, tau;
+                          if (active_joint_controller->getPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
+                            // Format: EVT:PID:<DOF>:<MOTOR_TYPE>:<KP>:<KI>:<KD>:<TAU>
+                            Serial.println("EVT:PID:" + String(parsed_cmd.dof_index) + ":" + String(motor_index) + ":" +
+                                           String(kp, 6) + ":" + String(ki, 6) + ":" +
+                                           String(kd, 6) + ":" + String(tau, 6));
+                          } else {
+                            Serial.println("RSP:ERROR: Failed to get PID parameters");
+                          }
+                        } else {
+                          Serial.println("RSP:ERROR: Invalid motor index (expected 1 or 2)");
+                        }
                       } else {
-                        Serial.println("RSP:ERROR: Failed to get PID parameters");
+                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
-                    } else {
-                      Serial.println("RSP:ERROR: Invalid motor index (expected 1 or 2)");
+                      handled_on_core0 = true;
+                      break;
                     }
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
-                  }
-                  handled_on_core0 = true;
-                  break;
-                }
 
-                case CMD_SET_PID: {
-                  // Set PID parameters for specified DOF and motor
-                  if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
-                    uint8_t motor_index = parsed_cmd.params[0]; // 1=agonist, 2=antagonist
-                    if ((motor_index == 1 || motor_index == 2) && parsed_cmd.param_count >= 5) {
-                      float kp  = parsed_cmd.params[1];
-                      float ki  = parsed_cmd.params[2];
-                      float kd  = parsed_cmd.params[3];
-                      float tau = parsed_cmd.params[4];
-                      if (active_joint_controller->setPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
-                        Serial.println("RSP:PID_SET_OK(" + String(ACTIVE_JOINT) + "," +
-                                       String(parsed_cmd.dof_index) + "," + String(motor_index) + ")");
+                    case CMD_SET_PID: {
+                      // Set PID parameters for specified DOF and motor
+                      if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
+                        uint8_t motor_index = parsed_cmd.params[0]; // 1=agonist, 2=antagonist
+                        if ((motor_index == 1 || motor_index == 2) && parsed_cmd.param_count >= 5) {
+                          float kp  = parsed_cmd.params[1];
+                          float ki  = parsed_cmd.params[2];
+                          float kd  = parsed_cmd.params[3];
+                          float tau = parsed_cmd.params[4];
+                          if (active_joint_controller->setPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
+                            Serial.println("RSP:PID_SET_OK(" + String(ACTIVE_JOINT) + "," +
+                                           String(parsed_cmd.dof_index) + "," + String(motor_index) + ")");
+                          } else {
+                            Serial.println("RSP:ERROR: Failed to set PID parameters");
+                          }
+                        } else {
+                          Serial.println("RSP:ERROR: Invalid parameters (expected motor_index,kp,ki,kd,tau)");
+                        }
                       } else {
-                        Serial.println("RSP:ERROR: Failed to set PID parameters");
+                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
-                    } else {
-                      Serial.println("RSP:ERROR: Invalid parameters (expected motor_index,kp,ki,kd,tau)");
+                      handled_on_core0 = true;
+                      break;
                     }
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
-                  }
-                  handled_on_core0 = true;
-                  break;
-                }
 
-                case CMD_GET_PID_OUTER: {
-                  // Get outer loop (cascade) PID parameters for specified DOF
-                  if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
-                    float kp, ki, kd, stiffness_deg, cascade_influence;
-                    if (active_joint_controller->getOuterLoopParameters(parsed_cmd.dof_index, kp, ki, kd,
-                                                                         stiffness_deg, cascade_influence)) {
-                      // Format: EVT:PID_OUTER:<DOF>:<KP>:<KI>:<KD>:<STIFFNESS>:<CASCADE>
-                      Serial.println("EVT:PID_OUTER:" + String(parsed_cmd.dof_index) + ":" +
-                                     String(kp, 6) + ":" + String(ki, 6) + ":" + String(kd, 6) + ":" +
-                                     String(stiffness_deg, 6) + ":" + String(cascade_influence, 6));
-                    } else {
-                      Serial.println("RSP:ERROR: Failed to get outer loop PID parameters");
-                    }
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
-                  }
-                  handled_on_core0 = true;
-                  break;
-                }
-
-                case CMD_SET_PID_OUTER: {
-                  // Set outer loop (cascade) PID parameters for specified DOF
-                  if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
-                    if (parsed_cmd.param_count >= 5) {
-                      float kp                = parsed_cmd.params[0];
-                      float ki                = parsed_cmd.params[1];
-                      float kd                = parsed_cmd.params[2];
-                      float stiffness_deg     = parsed_cmd.params[3];
-                      float cascade_influence = parsed_cmd.params[4];
-                      if (active_joint_controller->setOuterLoopParameters(parsed_cmd.dof_index, kp, ki, kd,
-                                                                           stiffness_deg, cascade_influence)) {
-                        Serial.println("RSP:PID_OUTER_SET_OK(" + String(ACTIVE_JOINT) + "," +
-                                       String(parsed_cmd.dof_index) + ")");
+                    case CMD_GET_PID_OUTER: {
+                      // Get outer loop (cascade) PID parameters for specified DOF
+                      if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
+                        float kp, ki, kd, stiffness_deg, cascade_influence;
+                        if (active_joint_controller->getOuterLoopParameters(parsed_cmd.dof_index, kp, ki, kd,
+                                                                             stiffness_deg, cascade_influence)) {
+                          // Format: EVT:PID_OUTER:<DOF>:<KP>:<KI>:<KD>:<STIFFNESS>:<CASCADE>
+                          Serial.println("EVT:PID_OUTER:" + String(parsed_cmd.dof_index) + ":" +
+                                         String(kp, 6) + ":" + String(ki, 6) + ":" + String(kd, 6) + ":" +
+                                         String(stiffness_deg, 6) + ":" + String(cascade_influence, 6));
+                        } else {
+                          Serial.println("RSP:ERROR: Failed to get outer loop PID parameters");
+                        }
                       } else {
-                        Serial.println("RSP:ERROR: Failed to set outer loop PID parameters");
+                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
-                    } else {
-                      Serial.println("RSP:ERROR: Invalid parameters (expected kp,ki,kd,stiffness,influence)");
+                      handled_on_core0 = true;
+                      break;
                     }
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
-                  }
-                  handled_on_core0 = true;
-                  break;
-                }
 
-                case CMD_SAVE_PID: {
-                  // Save PID parameters to flash memory
-                  if (active_joint_controller != nullptr) {
-                    if (active_joint_controller->savePIDDataToFlash()) {
-                      Serial.println("RSP:PID_SAVED(" + String(ACTIVE_JOINT) + ")");
-                      LOG_INFO("PID parameters saved to flash for joint " + String(ACTIVE_JOINT));
-                    } else {
-                      Serial.println("RSP:ERROR: Failed to save PID parameters to flash");
-                      LOG_ERROR("Failed to save PID parameters for joint " + String(ACTIVE_JOINT));
+                    case CMD_SET_PID_OUTER: {
+                      // Set outer loop (cascade) PID parameters for specified DOF
+                      if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
+                        if (parsed_cmd.param_count >= 5) {
+                          float kp                = parsed_cmd.params[0];
+                          float ki                = parsed_cmd.params[1];
+                          float kd                = parsed_cmd.params[2];
+                          float stiffness_deg     = parsed_cmd.params[3];
+                          float cascade_influence = parsed_cmd.params[4];
+                          if (active_joint_controller->setOuterLoopParameters(parsed_cmd.dof_index, kp, ki, kd,
+                                                                               stiffness_deg, cascade_influence)) {
+                            Serial.println("RSP:PID_OUTER_SET_OK(" + String(ACTIVE_JOINT) + "," +
+                                           String(parsed_cmd.dof_index) + ")");
+                          } else {
+                            Serial.println("RSP:ERROR: Failed to set outer loop PID parameters");
+                          }
+                        } else {
+                          Serial.println("RSP:ERROR: Invalid parameters (expected kp,ki,kd,stiffness,influence)");
+                        }
+                      } else {
+                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
+                      }
+                      handled_on_core0 = true;
+                      break;
                     }
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized");
-                  }
-                  handled_on_core0 = true;
-                  break;
-                }
 
-                case CMD_LOAD_PID: {
-                  // Load PID parameters from flash memory
-                  if (active_joint_controller != nullptr) {
-                    if (active_joint_controller->loadPIDDataFromFlash()) {
-                      Serial.println("RSP:PID_LOADED(" + String(ACTIVE_JOINT) + ")");
-                      LOG_INFO("PID parameters loaded from flash for joint " + String(ACTIVE_JOINT));
-                    } else {
-                      Serial.println("RSP:ERROR: Failed to load PID parameters from flash");
-                      LOG_ERROR("Failed to load PID parameters for joint " + String(ACTIVE_JOINT));
+                    case CMD_SAVE_PID: {
+                      // Save PID parameters to flash memory
+                      if (active_joint_controller != nullptr) {
+                        if (active_joint_controller->savePIDDataToFlash()) {
+                          Serial.println("RSP:PID_SAVED(" + String(ACTIVE_JOINT) + ")");
+                          LOG_INFO("PID parameters saved to flash for joint " + String(ACTIVE_JOINT));
+                        } else {
+                          Serial.println("RSP:ERROR: Failed to save PID parameters to flash");
+                          LOG_ERROR("Failed to save PID parameters for joint " + String(ACTIVE_JOINT));
+                        }
+                      } else {
+                        Serial.println("RSP:ERROR: Controller not initialized");
+                      }
+                      handled_on_core0 = true;
+                      break;
                     }
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized");
+
+                    case CMD_LOAD_PID: {
+                      // Load PID parameters from flash memory
+                      if (active_joint_controller != nullptr) {
+                        if (active_joint_controller->loadPIDDataFromFlash()) {
+                          Serial.println("RSP:PID_LOADED(" + String(ACTIVE_JOINT) + ")");
+                          LOG_INFO("PID parameters loaded from flash for joint " + String(ACTIVE_JOINT));
+                        } else {
+                          Serial.println("RSP:ERROR: Failed to load PID parameters from flash");
+                          LOG_ERROR("Failed to load PID parameters for joint " + String(ACTIVE_JOINT));
+                        }
+                      } else {
+                        Serial.println("RSP:ERROR: Controller not initialized");
+                      }
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    case CMD_START_TEST_ENCODER: {
+                      // Activate encoder test
+                      encoder_test_active    = true;
+                      encoder_test_joint_id  = parsed_cmd.joint_id;
+                      encoder_test_dof_index = parsed_cmd.dof_index;
+                      encoder_test_all_dofs  = parsed_cmd.all_dofs;
+                      last_encoder_test_time = millis();
+                      handled_on_core0       = true;
+
+                      if (encoder_test_all_dofs) {
+                        LOG_INFO("Encoder test enabled for ALL joint DOFs");
+                      } else {
+                        LOG_INFO("Encoder test enabled for DOF " + String(parsed_cmd.dof_index));
+                      }
+                      break;
+                    }
+
+                    case CMD_STOP_TEST_ENCODER: {
+                      // Deactivate encoder test
+                      encoder_test_active   = false;
+                      encoder_test_all_dofs = false;
+                      handled_on_core0      = true;
+                      LOG_INFO("Encoder test disabled");
+                      break;
+                    }
+
+                    case CMD_GET_MOVEMENT_DATA: {
+                      // Flush movement samples to serial on-demand
+                      LOG_INFO("Sending movement data to host (on-demand request)");
+                      // Enable stream done flag to allow flush (required by flushMovementSamples)
+                      movement_sample_stream_done = true;
+                      flushMovementSamples();
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    default:
+                      // Command requires hardware access - will be dispatched to core1
+                      break;
                   }
-                  handled_on_core0 = true;
-                  break;
-                }
-
-                case CMD_START_TEST_ENCODER: {
-                  // Activate encoder test
-                  encoder_test_active    = true;
-                  encoder_test_joint_id  = parsed_cmd.joint_id;
-                  encoder_test_dof_index = parsed_cmd.dof_index;
-                  encoder_test_all_dofs  = parsed_cmd.all_dofs;
-                  last_encoder_test_time = millis();
-                  handled_on_core0       = true;
-
-                  if (encoder_test_all_dofs) {
-                    LOG_INFO("Encoder test enabled for ALL joint DOFs");
-                  } else {
-                    LOG_INFO("Encoder test enabled for DOF " + String(parsed_cmd.dof_index));
-                  }
-                  break;
-                }
-
-                case CMD_STOP_TEST_ENCODER: {
-                  // Deactivate encoder test
-                  encoder_test_active   = false;
-                  encoder_test_all_dofs = false;
-                  handled_on_core0      = true;
-                  LOG_INFO("Encoder test disabled");
-                  break;
-                }
-
-                case CMD_GET_MOVEMENT_DATA: {
-                  // Flush movement samples to serial on-demand
-                  LOG_INFO("Sending movement data to host (on-demand request)");
-                  // Enable stream done flag to allow flush (required by flushMovementSamples)
-                  movement_sample_stream_done = true;
-                  flushMovementSamples();
-                  handled_on_core0 = true;
-                  break;
-                }
-
-                default:
-                  // Command requires hardware access - will be dispatched to core1
-                  break;
-                }
 
                 // If command was not handled on core0, send it to core1
                 if (!handled_on_core0) {
