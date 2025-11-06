@@ -774,19 +774,37 @@ def register_routes(app, serial_manager: SerialManager):
             sync_result = handler.synchronize_time()
             
             if sync_result["success"]:
+                quality = (
+                    "good"
+                    if sync_result["rtt_ms"] < 10
+                    else "fair"
+                    if sync_result["rtt_ms"] < 50
+                    else "poor"
+                )
+
                 return jsonify({
                     "status": "success",
                     "message": "Time synchronization completed",
                     "sync_data": {
                         "offset_seconds": sync_result["offset"],
-                        "offset_ms": sync_result["offset"] * 1000,
+                        "offset_ms": sync_result["offset_ms"],
+                        "offset_drift_ms": sync_result.get("offset_drift_ms"),
                         "rtt_seconds": sync_result["rtt"],
-                        "rtt_ms": sync_result["rtt"] * 1000,
+                        "rtt_ms": sync_result["rtt_ms"],
                         "T1_host_send": sync_result["T1"],
                         "T2_firmware_receive": sync_result["T2"],
                         "T3_firmware_send": sync_result["T3"],
                         "T4_host_receive": sync_result["T4"],
-                        "quality": "good" if sync_result["rtt"] < 0.01 else "fair" if sync_result["rtt"] < 0.05 else "poor"
+                        "firmware_uptime_seconds": sync_result["firmware_uptime_seconds"],
+                        "firmware_boot_epoch": sync_result["firmware_boot_epoch"],
+                        "firmware_boot_iso": sync_result.get("firmware_boot_iso"),
+                        "host_midpoint_seconds": sync_result["host_midpoint_seconds"],
+                        "host_midpoint_epoch": sync_result["host_midpoint_epoch"],
+                        "host_midpoint_iso": sync_result.get("host_midpoint_iso"),
+                        "host_epoch_send": sync_result["host_epoch_send"],
+                        "host_epoch_receive": sync_result["host_epoch_receive"],
+                        "is_baseline": sync_result.get("is_baseline", False),
+                        "quality": quality
                     }
                 })
             else:

@@ -4499,7 +4499,19 @@ function syncTime() {
         success: function(response) {
             if (response.status === 'success') {
                 displaySyncResults(response.sync_data);
-                appendStatusMessage(`✅ Time sync successful: offset=${response.sync_data.offset_ms.toFixed(3)}ms, RTT=${response.sync_data.rtt_ms.toFixed(3)}ms`);
+                const driftMs = response.sync_data.offset_drift_ms;
+                const isBaseline = response.sync_data.is_baseline;
+                const rttText = `${response.sync_data.rtt_ms.toFixed(3)}ms`;
+                let message;
+                if (isBaseline) {
+                    const offsetHuman = formatDurationHuman(response.sync_data.offset_seconds);
+                    message = `✅ Time sync baseline established: offset ≈ ${offsetHuman}, RTT=${rttText}`;
+                } else if (driftMs !== null && driftMs !== undefined) {
+                    message = `✅ Time sync successful: drift=${driftMs.toFixed(3)}ms, RTT=${rttText}`;
+                } else {
+                    message = `✅ Time sync successful: RTT=${rttText}`;
+                }
+                appendStatusMessage(message);
             } else {
                 appendStatusMessage(`❌ Time sync failed: ${response.message}`);
             }
@@ -4525,15 +4537,34 @@ function displaySyncResults(syncData) {
         'poor': 'text-red-600'
     };
     const qualityColor = qualityColors[syncData.quality] || 'text-gray-600';
+    const offsetSeconds = syncData.offset_seconds;
+    const offsetMs = syncData.offset_ms;
+    const driftMs = syncData.offset_drift_ms;
+    const rttMs = syncData.rtt_ms;
+    const firmwareUptime = syncData.firmware_uptime_seconds;
+    const firmwareBootIso = syncData.firmware_boot_iso;
+    const hostMidpointIso = syncData.host_midpoint_iso;
+    const isBaseline = syncData.is_baseline;
+
+    const offsetHuman = formatDurationHuman(offsetSeconds);
+    const firmwareUptimeHuman = formatDurationHuman(firmwareUptime);
+    const driftText = (isBaseline || driftMs === null || driftMs === undefined)
+        ? '— (baseline)'
+        : `${driftMs.toFixed(3)} ms`;
+    const bootTimeText = formatIsoTimestamp(firmwareBootIso);
+    const hostMidpointText = formatIsoTimestamp(hostMidpointIso);
     
     // Build results HTML
     const html = `
         <div class="grid grid-cols-2 gap-2">
-            <div class="font-semibold">Time Offset:</div>
-            <div class="text-right">${syncData.offset_ms.toFixed(3)} ms</div>
+            <div class="font-semibold">Clock Offset (abs.):</div>
+            <div class="text-right">${offsetHuman} (${offsetMs.toFixed(3)} ms)</div>
+
+            <div class="font-semibold">Offset drift vs baseline:</div>
+            <div class="text-right">${driftText}</div>
             
             <div class="font-semibold">Round-Trip Time:</div>
-            <div class="text-right">${syncData.rtt_ms.toFixed(3)} ms</div>
+            <div class="text-right">${rttMs.toFixed(3)} ms</div>
             
             <div class="font-semibold">Quality:</div>
             <div class="text-right ${qualityColor} font-semibold">${syncData.quality.toUpperCase()}</div>
@@ -4542,10 +4573,10 @@ function displaySyncResults(syncData) {
         <div class="mt-3 pt-3 border-t border-gray-300">
             <div class="text-xs text-gray-600 space-y-1">
                 <div class="font-semibold mb-1">Timing Details:</div>
-                <div>T1 (Host Send): ${syncData.T1_host_send.toFixed(6)}s</div>
-                <div>T2 (Firmware Recv): ${syncData.T2_firmware_receive.toFixed(6)}s</div>
-                <div>T3 (Firmware Send): ${syncData.T3_firmware_send.toFixed(6)}s</div>
-                <div>T4 (Host Recv): ${syncData.T4_host_receive.toFixed(6)}s</div>
+                <div>Firmware uptime: ${firmwareUptimeHuman} (${firmwareUptime.toFixed(6)} s)</div>
+                <div>Estimated firmware boot time: ${bootTimeText}</div>
+                <div>Host midpoint (epoch): ${hostMidpointText}</div>
+                <div>Host RTT midpoint (relative): ${syncData.host_midpoint_seconds.toFixed(6)} s</div>
             </div>
         </div>
         
@@ -4561,4 +4592,38 @@ function displaySyncResults(syncData) {
     setTimeout(() => {
         panel.addClass('hidden');
     }, 30000);
+}
+
+function formatDurationHuman(seconds) {
+    if (seconds === null || seconds === undefined || isNaN(seconds)) {
+        return '—';
+    }
+    const sign = seconds < 0 ? '-' : '';
+    const absSeconds = Math.abs(seconds);
+    const hours = Math.floor(absSeconds / 3600);
+    const minutes = Math.floor((absSeconds % 3600) / 60);
+    const secs = absSeconds % 60;
+
+    if (hours > 0) {
+        return `${sign}${hours}h ${minutes}m ${secs.toFixed(3)}s`;
+    }
+    if (minutes > 0) {
+        return `${sign}${minutes}m ${secs.toFixed(3)}s`;
+    }
+    return `${sign}${secs.toFixed(3)}s`;
+}
+
+function formatIsoTimestamp(iso) {
+    if (!iso) {
+        return '—';
+    }
+    try {
+        const date = new Date(iso);
+        if (isNaN(date.getTime())) {
+            return iso;
+        }
+        return date.toLocaleString();
+    } catch (e) {
+        return iso;
+    }
 }
