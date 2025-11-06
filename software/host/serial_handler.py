@@ -2308,7 +2308,6 @@ class SerialHandler:
                 - T4: host receive time
                 - success: True if sync successful
         """
-        self.pause_listening()
         result = {
             "success": False,
             "offset": 0.0,
@@ -2320,71 +2319,87 @@ class SerialHandler:
             "error": None
         }
         
+        if not self.serial_connection or not self.serial_connection.is_open:
+            result["error"] = "Serial connection not open"
+            logger.error(result["error"])
+            return result
+        
         try:
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=2) as ser:
-                # Clear any pending data
-                ser.reset_input_buffer()
-                
-                # T1: Send SYNC command with host timestamp
-                T1 = time.time()
-                result["T1"] = T1
-                command = f"CMD:SYNC({T1:.6f})\n"
-                ser.write(command.encode())
-                logger.info(f"Sent SYNC command at T1={T1:.6f}")
-                
-                # Wait for response
-                response_received = False
-                timeout_start = time.time()
-                
-                while time.time() - timeout_start < 2.0:
-                    if ser.in_waiting > 0:
-                        line = ser.readline().decode('utf-8', errors='ignore').strip()
-                        logger.debug(f"Received: {line}")
-                        
-                        # T4: Record receive time
-                        T4 = time.time()
+            # Pause listening thread
+            self.pause_listening()
+            time.sleep(0.1)  # Give listener time to pause
+            
+            # Clear any pending data
+            self.serial_connection.reset_input_buffer()
+            self.serial_connection.reset_output_buffer()
+            
+            # T1: Send SYNC command with host timestamp
+            T1 = time.time()
+            result["T1"] = T1
+            command = f"CMD:SYNC({T1:.6f})\n"
+            self.serial_connection.write(command.encode())
+            self.serial_connection.flush()  # Ensure data is sent immediately
+            logger.info(f"Sent SYNC command at T1={T1:.6f}")
+            
+            # Wait for response
+            response_received = False
+            timeout_start = time.time()
+            
+            while time.time() - timeout_start < 1.0:
+                if self.serial_connection.in_waiting > 0:
+                    line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
+                    logger.debug(f"Sync received: {line}")
+                    
+                    # T4: Record receive time immediately
+                    T4 = time.time()
+                    
+                    # Parse EVT:SYNC_RESPONSE(T1_echo,T2)
+                    if line.startswith("EVT:SYNC_RESPONSE("):
                         result["T4"] = T4
-                        
-                        # Parse EVT:SYNC_RESPONSE(T1_echo,T2)
-                        if line.startswith("EVT:SYNC_RESPONSE("):
-                            try:
-                                # Extract T1_echo and T2 from response
-                                values_str = line[18:-1]  # Remove "EVT:SYNC_RESPONSE(" and ")"
-                                T1_echo, T2 = map(float, values_str.split(','))
-                                result["T2"] = T2
-                                result["T3"] = T2  # T3 = T2 for immediate response
-                                
-                                # Calculate offset using NTP algorithm
-                                # offset = ((T2 - T1) + (T3 - T4)) / 2
-                                # Since T3 = T2, this simplifies to:
-                                # offset = ((T2 - T1) + (T2 - T4)) / 2 = T2 - (T1 + T4) / 2
-                                result["offset"] = T2 - (T1 + T4) / 2.0
-                                
-                                # Round-trip time
-                                result["rtt"] = T4 - T1
-                                
-                                result["success"] = True
-                                response_received = True
-                                
-                                logger.info(
-                                    f"Time sync successful: offset={result['offset']:.6f}s, "
-                                    f"RTT={result['rtt']:.6f}s"
-                                )
-                                break
-                                
-                            except (ValueError, IndexError) as e:
-                                result["error"] = f"Failed to parse response: {e}"
-                                logger.error(result["error"])
-                                break
+                        try:
+                            # Extract T1_echo and T2 from response
+                            values_str = line[18:-1]  # Remove "EVT:SYNC_RESPONSE(" and ")"
+                            T1_echo, T2 = map(float, values_str.split(','))
+                            result["T2"] = T2
+                            result["T3"] = T2  # T3 = T2 for immediate response
+                            
+                            # Calculate offset using NTP algorithm
+                            # offset = ((T2 - T1) + (T3 - T4)) / 2
+                            # Since T3 = T2, this simplifies to:
+                            # offset = ((T2 - T1) + (T2 - T4)) / 2 = T2 - (T1 + T4) / 2
+                            result["offset"] = T2 - (T1 + T4) / 2.0
+                            
+                            # Round-trip time
+                            result["rtt"] = T4 - T1
+                            
+                            result["success"] = True
+                            response_received = True
+                            
+                            logger.info(
+                                f"Time sync successful: offset={result['offset']:.6f}s, "
+                                f"RTT={result['rtt']:.6f}s"
+                            )
+                            break
+                            
+                        except (ValueError, IndexError) as e:
+                            result["error"] = f"Failed to parse response: {e}"
+                            logger.error(result["error"])
+                            break
                 
-                if not response_received:
-                    result["error"] = "Timeout waiting for SYNC_RESPONSE"
-                    logger.error(result["error"])
+                time.sleep(0.01)  # Small delay to avoid busy-waiting
+            
+            if not response_received:
+                result["error"] = "Timeout waiting for SYNC_RESPONSE"
+                logger.error(result["error"])
 
         except serial.SerialException as e:
             result["error"] = f"Serial communication error: {e}"
             logger.error(result["error"])
+        except Exception as e:
+            result["error"] = f"Unexpected error: {e}"
+            logger.error(result["error"])
         finally:
+            # Resume listening thread
             self.resume_listening()
             
         return result
