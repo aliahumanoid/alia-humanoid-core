@@ -302,12 +302,28 @@
         <div class="resizable-column p-4 bg-white shadow-md relative" style="width: 25%; flex-basis: 25%;">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-xl font-semibold">Status Messages</h2>
-                <button onclick="sendCommand('reset-errors')"
-                    class="bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
-                    title="Reset Errors">
-                    <i class="fas fa-exclamation-triangle"></i>
-                </button>
+                <div class="flex gap-2">
+                    <button onclick="syncTime()"
+                        class="bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
+                        title="Synchronize Time">
+                        <i class="fas fa-clock"></i>
+                    </button>
+                    <button onclick="sendCommand('reset-errors')"
+                        class="bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold py-1 px-2 rounded transition-colors"
+                        title="Reset Errors">
+                        <i class="fas fa-exclamation-triangle"></i>
+                    </button>
+                </div>
             </div>
+            
+            <!-- Time Sync Results Panel -->
+            <div id="syncResultsPanel" class="bg-gray-50 border border-gray-300 rounded p-3 mb-4 hidden">
+                <h3 class="text-sm font-semibold mb-2 flex items-center">
+                    <i class="fas fa-clock mr-2 text-blue-500"></i>Time Synchronization
+                </h3>
+                <div id="syncResults" class="text-xs space-y-1"></div>
+            </div>
+            
             <div class="relative">
                 <ul id="statusMessages" class="list-disc pl-5 text-xs status-container"></ul>
                 <!-- Scroll button will be added dynamically here -->
