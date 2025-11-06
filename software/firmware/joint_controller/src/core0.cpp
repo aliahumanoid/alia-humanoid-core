@@ -200,106 +200,104 @@ void core0_main_loop() {
         char actual_command[96];
         strcpy(actual_command, command + 4); // Skip "CMD:"
 
-        // Check if it's a simple command (no multi-joint format)
-        {
-          // Special handling for SYNC command with parameters
-          if (strncmp(actual_command, "SYNC(", 5) == 0) {
-            // NTP-like time synchronization
-            // Expected format: CMD:SYNC(T1)
-            // where T1 is the host timestamp in seconds (double precision)
+        // Special handling for SYNC command with parameters
+        if (strncmp(actual_command, "SYNC(", 5) == 0) {
+          // NTP-like time synchronization
+          // Expected format: CMD:SYNC(T1)
+          // where T1 is the host timestamp in seconds (double precision)
+          
+          double T1 = 0.0;
+          double T2 = 0.0;
+          
+          // Extract T1 from command (format: SYNC(T1))
+          char* paren_start = strchr(actual_command, '(');
+          if (paren_start != nullptr) {
+            T1 = atof(paren_start + 1);
             
-            double T1 = 0.0;
-            double T2 = 0.0;
+            // Get T2 - current firmware time (microseconds since boot)
+            T2 = micros() / 1000000.0; // Convert to seconds
             
-            // Extract T1 from command (format: SYNC(T1))
-            char* paren_start = strchr(actual_command, '(');
-            if (paren_start != nullptr) {
-              T1 = atof(paren_start + 1);
-              
-              // Get T2 - current firmware time (microseconds since boot)
-              T2 = micros() / 1000000.0; // Convert to seconds
-              
-              // Send response with T1 and T2
-              // Host will receive this at T4 and can calculate offset
-              // Format: EVT:SYNC_RESPONSE(T1,T2)
-              Serial.print("EVT:SYNC_RESPONSE(");
-              Serial.print(T1, 6); // 6 decimal places for microsecond precision
-              Serial.print(",");
-              Serial.print(T2, 6);
-              Serial.println(")");
-            } else {
-              Serial.println("ERROR: Invalid SYNC format, expected SYNC(T1)");
-            }
+            // Send response with T1 and T2
+            // Host will receive this at T4 and can calculate offset
+            // Format: EVT:SYNC_RESPONSE(T1,T2)
+            Serial.print("EVT:SYNC_RESPONSE(");
+            Serial.print(T1, 6); // 6 decimal places for microsecond precision
+            Serial.print(",");
+            Serial.print(T2, 6);
+            Serial.println(")");
+          } else {
+            Serial.println("ERROR: Invalid SYNC format, expected SYNC(T1)");
           }
-          // First, try to recognize it as a simple command (e.g., STATUS, STOP)
-          else {
-            int simple_cmd_id = getCommandId(actual_command);
-            
-            if (simple_cmd_id != CMD_UNKNOWN && 
-                (simple_cmd_id == CMD_STATUS || simple_cmd_id == CMD_STOP)) {
-              // Handle simple commands that don't use multi-joint format
-              switch (simple_cmd_id) {
-                case CMD_STATUS: {
-                  // Get joint status
-                  if (active_joint_controller != nullptr) {
-                    bool ready = active_joint_controller->isSystemReadyForMovement();
-                    Serial.println("RSP:STATUS(" + String(ACTIVE_JOINT) + "," +
-                                   (ready ? "READY" : "NOT_READY") + ")");
-                  } else {
-                    Serial.println("RSP:ERROR: Controller not initialized");
-                  }
-                  break;
+        }
+        // First, try to recognize it as a simple command (e.g., STATUS, STOP)
+        else {
+          int simple_cmd_id = getCommandId(actual_command);
+          
+          if (simple_cmd_id != CMD_UNKNOWN && 
+              (simple_cmd_id == CMD_STATUS || simple_cmd_id == CMD_STOP)) {
+            // Handle simple commands that don't use multi-joint format
+            switch (simple_cmd_id) {
+              case CMD_STATUS: {
+                // Get joint status
+                if (active_joint_controller != nullptr) {
+                  bool ready = active_joint_controller->isSystemReadyForMovement();
+                  Serial.println("RSP:STATUS(" + String(ACTIVE_JOINT) + "," +
+                                 (ready ? "READY" : "NOT_READY") + ")");
+                } else {
+                  Serial.println("RSP:ERROR: Controller not initialized");
                 }
-                
-                case CMD_STOP: {
-                  // Emergency stop - forward to Core1
-                  emergency_stop_requested = true;
-                  Serial.println("RSP:STOP");
-                  break;
-                }
+                break;
+              }
+              
+              case CMD_STOP: {
+                // Emergency stop - forward to Core1
+                emergency_stop_requested = true;
+                Serial.println("RSP:STOP");
+                break;
               }
             }
-            // Try to parse as multi-joint format command
-            else {
-              // Make a copy for parsing (parseCommand uses strtok which modifies the string)
-              char cmd_copy[96];
-              strncpy(cmd_copy, actual_command, sizeof(cmd_copy) - 1);
-              cmd_copy[sizeof(cmd_copy) - 1] = '\0';
-              
-              ParsedCommand parsed_cmd;
-              bool is_new_format = command_parser.parseCommand(cmd_copy, parsed_cmd);
+          }
+          // Try to parse as multi-joint format command
+          else {
+            // Make a copy for parsing (parseCommand uses strtok which modifies the string)
+            char cmd_copy[96];
+            strncpy(cmd_copy, actual_command, sizeof(cmd_copy) - 1);
+            cmd_copy[sizeof(cmd_copy) - 1] = '\0';
+            
+            ParsedCommand parsed_cmd;
+            bool is_new_format = command_parser.parseCommand(cmd_copy, parsed_cmd);
 
-              if (!is_new_format) {
-                // Unrecognized command format
-                LOG_ERROR("Unrecognized command format: " + String(actual_command));
+            if (!is_new_format) {
+              // Unrecognized command format
+              LOG_ERROR("Unrecognized command format: " + String(actual_command));
+            } else {
+              // Command is in the new (multi-joint) format
+
+              // If the command targets a specific joint, verify it is the active joint
+              if (parsed_cmd.joint_id != 0 && parsed_cmd.joint_id != ACTIVE_JOINT) {
+                Serial.println("RSP:ERROR: Command targeted to joint " + String(parsed_cmd.joint_id) +
+                               ", but this device controls joint " + String(ACTIVE_JOINT));
               } else {
-                // Command is in the new (multi-joint) format
+                // Set the joint ID to the active one (if it was 0 or already correct)
+                parsed_cmd.joint_id = ACTIVE_JOINT;
 
-                // If the command targets a specific joint, verify it is the active joint
-                if (parsed_cmd.joint_id != 0 && parsed_cmd.joint_id != ACTIVE_JOINT) {
-                  Serial.println("RSP:ERROR: Command targeted to joint " + String(parsed_cmd.joint_id) +
-                                 ", but this device controls joint " + String(ACTIVE_JOINT));
+                if (parsed_cmd.command == CMD_UNKNOWN) {
+                  Serial.println("RSP:ERROR: Unsupported command: " +
+                                 String(parsed_cmd.original_command));
                 } else {
-                  // Set the joint ID to the active one (if it was 0 or already correct)
-                  parsed_cmd.joint_id = ACTIVE_JOINT;
+                  // Debug command execution
+                  LOG_DEBUG("CMD: " + String(parsed_cmd.original_command) + " → ID:" + String(parsed_cmd.command));
+                  LOG_DEBUG("    Joint:" + String(parsed_cmd.joint_id) + " DOF:" + String(parsed_cmd.dof_index) + 
+                            " AllDOF:" + String(parsed_cmd.all_dofs) + " Params:" + String(parsed_cmd.param_count));
 
-                  if (parsed_cmd.command == CMD_UNKNOWN) {
-                    Serial.println("RSP:ERROR: Unsupported command: " +
-                                   String(parsed_cmd.original_command));
-                  } else {
-                    // Debug command execution
-                    LOG_DEBUG("CMD: " + String(parsed_cmd.original_command) + " → ID:" + String(parsed_cmd.command));
-                    LOG_DEBUG("    Joint:" + String(parsed_cmd.joint_id) + " DOF:" + String(parsed_cmd.dof_index) + 
-                              " AllDOF:" + String(parsed_cmd.all_dofs) + " Params:" + String(parsed_cmd.param_count));
+                  // Populate command data
+                  command_parser.populateCommandData(parsed_cmd, command_data_ext);
 
-                    // Populate command data
-                    command_parser.populateCommandData(parsed_cmd, command_data_ext);
+                  // Handle commands that don't require hardware access
+                  bool handled_on_core0 = false;
 
-                    // Handle commands that don't require hardware access
-                    bool handled_on_core0 = false;
-
-                    // Check if the command can be handled directly on core0
-                    switch (parsed_cmd.command) {
+                  // Check if the command can be handled directly on core0
+                  switch (parsed_cmd.command) {
                       case CMD_STOP_MEASURING: {
                         measuring_data_ext.flag = 0;
                         handled_on_core0        = true;
@@ -509,12 +507,12 @@ void core0_main_loop() {
 
                   LOG_DEBUG("Command dispatched to core1: " + String(parsed_cmd.command));
                 }
-              }
-            }
-            }  // Close the "else" block for multi-joint format parsing
-          }    // Close the "else" block for simple command check
-        }
-      } else {
+              }  // Close the 'else' block for parsed_cmd.command == CMD_UNKNOWN
+            }    // Close the 'else' block for parsed_cmd.joint_id compatibility
+          }      // Close the 'else' block for is_new_format parsing
+          }      // Close the 'else' block for multi-joint format parsing (line 261)
+        }        // Close the "else" block for SYNC command check (line 233)
+      } else {  // Close the "if (CMD:)" block (line 198)
         // Command without correct prefix
         Serial.println("RSP:ERROR: Commands must start with CMD: prefix");
       }
