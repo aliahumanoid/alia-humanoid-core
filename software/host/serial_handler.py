@@ -125,12 +125,20 @@ class SerialHandler:
     def listen_for_messages(self) -> None:
         while True:
             try:
+                # Wait here if listening is paused before attempting to open the port
+                self.listening.wait()
+
                 with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
-                    while True:
-                        if not self.listening.is_set():
-                            self.listening.wait()
-                        # with self.serial_lock:
-                        line = ser.readline().decode().strip()
+                    while self.listening.is_set():
+                        raw_line = ser.readline()
+
+                        if not raw_line:
+                            continue
+
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+
+                        if not line:
+                            continue
 
                         self.handle_serial_message(line, ser)
 
@@ -138,12 +146,16 @@ class SerialHandler:
                 error_msg = f"Serial communication error: {e}"
                 logger.error(error_msg)
                 self.serial_logger.log_error(error_msg)
-                continue
             except Exception as e:
                 error_msg = f"Error in listen_for_messages: {e}"
                 logger.error(error_msg)
                 self.serial_logger.log_error(error_msg)
-                continue
+            finally:
+                # If listening has been paused, wait until it is resumed before reopening the port
+                if not self.listening.is_set():
+                    self.listening.wait()
+
+                time.sleep(0.01)
 
     def handle_serial_message(self, line: str, ser: serial.Serial) -> None:
         # Log received message (if not empty)
@@ -2672,20 +2684,20 @@ class SerialHandler:
         self.last_pid_request_joint = joint
 
         # Check if DOF is 'ALL' and in that case use 0 for request
-        dof_to_use = 0 if dof == "ALL" else dof
+        dof_to_use = 0 if dof == "ALL" else int(dof)
 
         cmd = self.generate_command(
             joint, dof_to_use, COMMANDS["GET_PID"], [motor_type]
         )
-        try:
-            self.pause_listening()
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
-                self.send_command_with_prefix(cmd, ser)
-                logger.info(f"PID request sent: CMD:{cmd}")
-        except Exception as e:
-            logger.error(f"Error requesting PID {cmd}: {e}")
-        finally:
-            self.resume_listening()
+
+        success = self._send_command_and_wait_for_response(
+            cmd, [f"PID:{dof_to_use}:{motor_type}"], read_timeout=0.8
+        )
+
+        if not success:
+            logger.warning(
+                f"PID response timeout for {joint} DOF {dof_to_use} motor {motor_type}"
+            )
 
     def get_outer_pid_for_joint_dof(self, joint, dof):
         """Requests outer loop PID parameters for a specific DOF."""
@@ -2697,15 +2709,14 @@ class SerialHandler:
             joint, dof_to_use, COMMANDS["GET_PID_OUTER"], []
         )
 
-        try:
-            self.pause_listening()
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
-                self.send_command_with_prefix(cmd, ser)
-                logger.info(f"Outer PID request sent: CMD:{cmd}")
-        except Exception as e:
-            logger.error(f"Error requesting outer PID {cmd}: {e}")
-        finally:
-            self.resume_listening()
+        success = self._send_command_and_wait_for_response(
+            cmd, [f"PID_OUTER:{dof_to_use}"], read_timeout=0.8
+        )
+
+        if not success:
+            logger.warning(
+                f"Outer PID response timeout for {joint} DOF {dof_to_use}"
+            )
 
     def set_pid_for_joint_dof(self, joint, dof, motor_type, kp, ki, kd, tau):
         """
@@ -2818,3 +2829,97 @@ class SerialHandler:
             error_msg = f"Error sending command {command}: {e}"
             logger.error(error_msg)
             self.serial_logger.log_error(error_msg)
+
+    def _send_command_and_wait_for_response(
+        self,
+        command: str,
+        expected_prefixes: List[str],
+        read_timeout: float = 0.6,
+        post_success_drain: float = 0.1,
+    ) -> bool:
+        """
+        Sends a command using a dedicated serial connection and blocks until one of the
+        expected responses is observed or the timeout expires. This prevents responses
+        from being lost when commands complete very quickly (e.g., PID queries).
+
+        Args:
+            command: Command string (without CMD: prefix) to send.
+            expected_prefixes: List of response prefixes (without EVT:) that should
+                terminate the wait loop once detected.
+            read_timeout: Maximum time to wait for an expected response (seconds).
+            post_success_drain: Additional time to continue draining the serial buffer
+                after the expected response has been found (seconds).
+
+        Returns:
+            bool: True if one of the expected prefixes was received, False otherwise.
+        """
+
+        expected_received = False
+
+        try:
+            self.pause_listening()
+            time.sleep(0.05)  # Ensure listener loop releases the serial port
+            with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
+                try:
+                    ser.reset_input_buffer()
+                except Exception:
+                    pass
+
+                try:
+                    ser.reset_output_buffer()
+                except Exception:
+                    pass
+
+                self.send_command_with_prefix(command, ser)
+
+                deadline = time.time() + read_timeout
+                post_deadline: Optional[float] = None
+
+                while True:
+                    now = time.time()
+                    if expected_received:
+                        if post_deadline is None:
+                            post_deadline = now + post_success_drain
+                        elif now >= post_deadline:
+                            break
+                    elif now >= deadline:
+                        break
+
+                    raw_line = ser.readline()
+                    if not raw_line:
+                        continue
+
+                    try:
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                    except Exception:
+                        continue
+
+                    if not line:
+                        continue
+
+                    try:
+                        self.handle_serial_message(line, ser)
+                    except Exception as exc:
+                        logger.error(
+                            f"Error handling temporary serial message '{line}': {exc}"
+                        )
+
+                    normalized = (
+                        self.remove_evt_prefix(line)
+                        if line.startswith("EVT:")
+                        else line
+                    )
+
+                    if not expected_received and any(
+                        normalized.startswith(prefix) for prefix in expected_prefixes
+                    ):
+                        expected_received = True
+
+                return expected_received
+        except Exception as exc:
+            logger.error(
+                f"Error sending command {command} with direct response handling: {exc}"
+            )
+            return False
+        finally:
+            self.resume_listening()
