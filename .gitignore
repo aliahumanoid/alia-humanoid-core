@@ -21,3 +21,6 @@ software/firmware/**/include/version.h
 software/host/.venv/
 software/host/logs/
 software/host/serial_communication_*.log
+
+# GitHub social preview (uploaded manually, not committed)
+social-preview.png
