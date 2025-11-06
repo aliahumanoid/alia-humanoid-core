@@ -168,8 +168,8 @@ The cascade control structure implemented for antagonistic tendon-driven actuati
 
 > **Lukić B., Jovanović K., Šekara T. B. (2019).**  
 > *Cascade Control of Antagonistic VSA — An Engineering Control Approach to a Bioinspired Robot Actuator.*  
-> Facta Universitatis, Series: Automatic Control and Robotics, Vol. 18 (2), pp. 147–162.  
-> DOI: [10.22190/FUACR1902147L](https://doi.org/10.22190/FUACR1902147L)
+> Frontiers in Neurorobotics, Vol. 13, Article 69.  
+> DOI: [10.3389/fnbot.2019.00069](https://doi.org/10.3389/fnbot.2019.00069)
 
 The original paper presents a double-loop cascade architecture for simultaneous position and stiffness control of an antagonistic Variable Stiffness Actuator (VSA). 
 
