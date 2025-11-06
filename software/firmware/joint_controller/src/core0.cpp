@@ -320,12 +320,25 @@ void core0_main_loop() {
                     case CMD_GET_PID: {
                       // Get PID parameters for specified DOF and motor
                       if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
-                        uint8_t motor_index = parsed_cmd.params[0]; // 1=agonist, 2=antagonist
-                        Serial.println("DBG: GET_PID motor_index=" + String(motor_index) + " DOF=" + String(parsed_cmd.dof_index));
+                        uint8_t motor_index = 0;
+
+                        if (parsed_cmd.param_count > 0) {
+                          motor_index = static_cast<uint8_t>(parsed_cmd.params[0]);
+                        } else {
+                          // Fallback: parse motor_index directly from command string
+                          const char *cmd_segment = strstr(parsed_cmd.original_command,
+                                                            SERIAL_CMD_GET_PID ":");
+                          if (cmd_segment != nullptr) {
+                            cmd_segment += strlen(SERIAL_CMD_GET_PID) + 1;
+                            motor_index = static_cast<uint8_t>(atoi(cmd_segment));
+                          } else {
+                            LOG_WARN("GET_PID: failed to parse motor index");
+                          }
+                        }
+
                         if (motor_index == 1 || motor_index == 2) {
                           float kp, ki, kd, tau;
                           if (active_joint_controller->getPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
-                            // Format: EVT:PID:<DOF>:<MOTOR_TYPE>:<KP>:<KI>:<KD>:<TAU>
                             Serial.println("EVT:PID:" + String(parsed_cmd.dof_index) + ":" + String(motor_index) + ":" +
                                            String(kp, 6) + ":" + String(ki, 6) + ":" +
                                            String(kd, 6) + ":" + String(tau, 6));
@@ -333,7 +346,7 @@ void core0_main_loop() {
                             Serial.println("RSP:ERROR: Failed to get PID parameters");
                           }
                         } else {
-                          Serial.println("RSP:ERROR: Invalid motor index (expected 1 or 2)");
+                          Serial.println("RSP:ERROR: Invalid or missing motor index (expected 1 or 2)");
                         }
                       } else {
                         Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
