@@ -4362,18 +4362,66 @@ function sleep(ms) {
 }
 
 /**
- * Async version of sendMultiDofMove that returns a Promise
+ * Async version of sendMultiDofMove that waits for movement completion
+ * This uses the backend acknowledgment system that waits for RSP:MOVE_COMPLETE
  */
 function sendMultiDofMoveAsync() {
     return new Promise((resolve, reject) => {
-        try {
-            sendMultiDofMove();
-            // Resolve immediately after command is sent
-            // In future, could wait for movement completion feedback
-            setTimeout(resolve, 100);
-        } catch (error) {
-            reject(error);
+        const joint = $("#jointSelect").val();
+        const angle0 = parseFloat($("#multiDofAngle0").val()) || 0;
+        const angle1 = parseFloat($("#multiDofAngle1").val()) || 0;
+        const mask = parseInt($("#multiDofMask").val()) || 3;
+        const sync = parseInt($("#multiDofSync").val()) ?? 1;
+        const speed = parseFloat($("#multiDofSpeed").val()) || 0.5;
+        const accel = parseFloat($("#multiDofAccel").val()) || 2.0;
+        const path = parseInt($("#multiDofPath").val()) ?? 1;
+        
+        // Validation
+        if (!joint) {
+            reject(new Error("No joint selected"));
+            return;
         }
+        
+        const assignedPort = jointPortMapping[joint];
+        if (!assignedPort) {
+            appendStatusMessage(`⚠️ Associate a serial port to ${joint} before sending command.`);
+            reject(new Error("No serial port assigned"));
+            return;
+        }
+        
+        // Build command data
+        const multiDofData = {
+            joint: joint,
+            angle0: angle0,
+            angle1: angle1,
+            angle2: 0,
+            mask: mask,
+            sync: sync,
+            speed: speed,
+            accel: accel,
+            path: path
+        };
+        
+        const data = { cmd: 'move-multi-dof', joint: joint, dof: 'ALL', ...multiDofData };
+        
+        // Send command and WAIT for completion (backend waits for RSP:MOVE_COMPLETE)
+        $.ajax({
+            url: "/command",
+            method: "POST",
+            data: JSON.stringify(data),
+            contentType: "application/json; charset=utf-8",
+            dataType: "json",
+            timeout: 30000, // 30 second timeout
+            success: function(response) {
+                appendStatusMessage(response.message);
+                resolve(response);
+            },
+            error: function(xhr, status, error) {
+                const errorMsg = `Error sending move command: ${error}`;
+                appendStatusMessage(`❌ ${errorMsg}`);
+                reject(new Error(errorMsg));
+            }
+        });
     });
 }
 
@@ -4410,12 +4458,13 @@ async function playSequence() {
             const step = movementSequence[i];
             const startTime = Date.now();
             
-            // Highlight current step
-            highlightSequenceStep(i);
-            
             if (step.type === "pause") {
                 // Handle pause step
                 appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: ⏸️ Pause ${step.duration}s`);
+                
+                // Highlight current step AFTER logging, BEFORE execution
+                highlightSequenceStep(i);
+                
                 await sleep(step.duration * 1000); // Convert seconds to milliseconds
                 
                 // Record execution (optional, for tracking)
@@ -4449,6 +4498,9 @@ async function playSequence() {
                 sequenceExecutionData.push(executionRecord);
                 
                 appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: DOF0=${step.dof0}°, DOF1=${step.dof1}°`);
+                
+                // Highlight current step AFTER logging, BEFORE sending command
+                highlightSequenceStep(i);
                 
                 // Execute movement - now waits for acknowledgment from firmware
                 await sendMultiDofMoveAsync();
