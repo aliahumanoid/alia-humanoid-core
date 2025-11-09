@@ -445,8 +445,13 @@ def register_routes(app, serial_manager: SerialManager):
                 if valid_angles:
                     # Build parameters for Multi-DOF command
                     params = [angle0, angle1, angle2, mask, sync, speed, accel, path]
-                    handler.send_new_command(joint, 'ALL', COMMANDS['MOVE_MULTI_DOF'], params)
-                    message = f"Multi-DOF command sent for {joint}: DOF0={angle0}°, DOF1={angle1}°, mask={mask}, sync={sync}"
+                    # Use acknowledgment-based sending to wait for movement completion
+                    success = handler.send_movement_command_with_ack(joint, 'ALL', COMMANDS['MOVE_MULTI_DOF'], params, timeout=30.0)
+                    if success:
+                        message = f"✅ Multi-DOF movement completed for {joint}: DOF0={angle0}°, DOF1={angle1}°, mask={mask}, sync={sync}"
+                    else:
+                        status = "error"
+                        message = f"❌ Multi-DOF movement timeout or error for {joint}"
                 else:
                     status = "error"
                     message = "Angle validation errors: " + "; ".join(error_msgs)
