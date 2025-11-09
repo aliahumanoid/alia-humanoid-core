@@ -99,6 +99,20 @@
             color: #dc2626;
         }
 
+        .sequence-step.pause {
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+        }
+
+        .sequence-step.pause:hover {
+            background: #fde68a;
+        }
+
+        .sequence-step.pause .sequence-step-angles {
+            color: #92400e;
+            font-weight: 500;
+        }
+
         .sequence-controls {
             display: flex;
             gap: 0.5rem;
@@ -1200,19 +1214,24 @@
                             
                             <!-- Sequence controls -->
                             <div class="sequence-controls">
-                                <!-- Delay dropdown -->
+                                <!-- Add Pause Button -->
+                                <button onclick="addPauseToSequence()"
+                                    class="bg-yellow-500 hover:bg-yellow-600 text-white text-sm py-1.5 px-3 rounded transition-colors"
+                                    title="Add a pause step to the sequence">
+                                    <i class="fas fa-pause mr-1"></i>Add Pause
+                                </button>
+                                
+                                <!-- Pause Duration Input -->
                                 <div class="flex items-center gap-2">
-                                    <label for="sequenceDelay" class="text-sm font-medium text-gray-700 whitespace-nowrap">
-                                        <i class="fas fa-clock mr-1"></i>Delay:
+                                    <label for="pauseDuration" class="text-sm font-medium text-gray-700 whitespace-nowrap">
+                                        <i class="fas fa-clock mr-1"></i>Pause:
                                     </label>
-                                    <select id="sequenceDelay" class="text-sm rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
-                                        <option value="500">500ms</option>
-                                        <option value="1000">1000ms</option>
-                                        <option value="1500" selected>1500ms</option>
-                                        <option value="2000">2000ms</option>
-                                        <option value="3000">3000ms</option>
-                                        <option value="4000">4000ms</option>
-                                        <option value="5000">5000ms</option>
+                                    <select id="pauseDuration" class="text-sm rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
+                                        <option value="0.5">0.5s</option>
+                                        <option value="1" selected>1s</option>
+                                        <option value="2">2s</option>
+                                        <option value="3">3s</option>
+                                        <option value="5">5s</option>
                                     </select>
                                 </div>
                                 
