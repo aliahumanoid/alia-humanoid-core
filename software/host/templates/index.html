@@ -13,11 +13,6 @@
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" rel="stylesheet">
     <style>
-        .status-container {
-            max-height: calc(100vh - 10rem);
-            overflow-y: auto;
-        }
-
         /* Style for smart buttons with automatic execution active */
         .auto-execute-enabled button {
             border: 1.5px solid #f97316 !important;
@@ -222,20 +217,31 @@
 
         .resizable-container {
             display: flex;
-            height: calc(100vh - 4rem);
+            height: calc(100vh - 6.5rem);
+            overflow: hidden;
         }
 
         .resizable-column {
-            overflow-y: auto;
+            overflow-y: scroll;
+            overflow-x: hidden;
             min-width: 200px;
             flex-shrink: 0;
-            /* Hide scrollbar for Chrome, Safari and Opera */
-            scrollbar-width: none; /* Firefox */
-            -ms-overflow-style: none;  /* Internet Explorer 10+ */
+            /* Hide scrollbar */
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+            position: relative;
         }
 
         .resizable-column::-webkit-scrollbar {
-            display: none;  /* Safari and Chrome */
+            display: none;
+        }
+
+        /* Negative margin to absorb trailing mb-8 (2rem = 32px) */
+        .resizable-column::after {
+            content: '';
+            display: block;
+            height: 1px;
+            margin-top: -2rem;
         }
     </style>
 </head>
@@ -243,6 +249,25 @@
 <body class="bg-gray-100">
 
     <script src="{{ url_for('static', filename='js/scripts.js') }}"></script>
+
+    <script>
+        // Remove trailing margins to prevent scroll overflow
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.resizable-column').forEach(column => {
+                const children = Array.from(column.children);
+                if (children.length > 0) {
+                    const lastChild = children[children.length - 1];
+                    lastChild.style.marginBottom = '0';
+                    
+                    // Also check for mb-8 elements inside
+                    const mb8Elements = column.querySelectorAll('.mb-8');
+                    if (mb8Elements.length > 0) {
+                        mb8Elements[mb8Elements.length - 1].style.marginBottom = '0';
+                    }
+                }
+            });
+        });
+    </script>
 
     <script>
         // Toggle collapsible sections
@@ -313,7 +338,7 @@
 
     <div class="resizable-container">
         <!-- Left resizable column for Status Messages -->
-        <div class="resizable-column p-4 bg-white shadow-md relative" style="width: 25%; flex-basis: 25%;">
+        <div class="resizable-column pt-4 px-4 pb-0 bg-white shadow-md relative" style="width: 25%; flex-basis: 25%;">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-xl font-semibold">Status Messages</h2>
                 <div class="flex gap-2">
@@ -348,12 +373,12 @@
         <div class="resize-handle"></div>
 
         <!-- Right resizable column for controls and charts -->
-        <div class="resizable-column p-4" style="width: 75%; flex-basis: 75%;">
+        <div class="resizable-column" style="width: 75%; flex-basis: 75%;">
 
             <!-- Main content in two resizable columns -->
             <div class="resizable-container" style="height: 100%;">
                 <!-- Left column: Joint Selection, Setup, PID, Mapping -->
-                <div class="resizable-column px-4 mb-8" style="width: 60%; flex-basis: 60%;">
+                <div class="resizable-column pt-4 px-4 pb-0" style="width: 60%; flex-basis: 60%;">
 
                 <!-- Joint Selection -->
                 <div class="bg-white rounded-lg shadow-md p-6 mb-8">
@@ -1061,7 +1086,7 @@
                 <div class="resize-handle"></div>
 
                 <!-- Right column: Movement, Charts, Measurements -->
-                <div class="resizable-column px-4" style="width: 40%; flex-basis: 40%;">
+                <div class="resizable-column pt-4 px-4 pb-0" style="width: 40%; flex-basis: 40%;">
 
                 <!-- Joint Movement -->
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
