@@ -221,6 +221,21 @@ void core1_loop() {
         break;
       }
 
+      // CRITICAL FIX: Wait for Core0 to reset flag before starting new movement
+      // This prevents race condition where flag is still set from previous movement
+      uint32_t wait_counter = 0;
+      const uint32_t MAX_WAIT_CYCLES = 10000; // ~1s timeout
+      while (shared_data_ext.flag != 0 && wait_counter < MAX_WAIT_CYCLES) {
+        sleep_us(100);
+        wait_counter++;
+      }
+
+      if (shared_data_ext.flag != 0) {
+        // Timeout: Core0 didn't reset flag in time
+        LOG_ERROR("Core0 flag reset timeout - forcing reset to prevent deadlock");
+        shared_data_ext.flag = 0;
+      }
+
       // Determine whether this is a smooth transition move
       bool is_smooth_transition =
           (last_movement_result.exit_code == MOVEMENT_TRANSITION) || smooth_transition_active;
