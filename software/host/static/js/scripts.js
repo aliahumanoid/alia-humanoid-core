@@ -35,7 +35,7 @@ let encoderTestData = {
 };
 
 // Movement Sequence Builder variables
-let movementSequence = []; // Array of {dof0, dof1, delay}
+let movementSequence = []; // Array of {type: "move", dof0, dof1} or {type: "pause", duration}
 let isSequencePlaying = false;
 let sequencePlaybackHandle = null;
 let sequenceExecutionData = []; // Collected during playback: {stepIndex, targetDof0, targetDof1, startTimestamp, endTimestamp, encoderSamples[]}
@@ -4199,15 +4199,31 @@ function updateSequenceBuilderVisibility(joint) {
  * Adds a step to the movement sequence
  */
 function addStepToSequence(dof0, dof1) {
-    const delay = parseInt($("#sequenceDelay").val()) || 500;
-    
     movementSequence.push({
+        type: "move",
         dof0: dof0,
-        dof1: dof1,
-        delay: delay
+        dof1: dof1
     });
     
     renderSequenceList();
+    
+    // Show sequence builder if hidden
+    $("#sequenceBuilderContainer").show();
+}
+
+/**
+ * Adds a pause step to the movement sequence
+ */
+function addPauseToSequence() {
+    const duration = parseFloat($("#pauseDuration").val()) || 1.0;
+    
+    movementSequence.push({
+        type: "pause",
+        duration: duration
+    });
+    
+    renderSequenceList();
+    appendStatusMessage(`⏸️ Added pause: ${duration}s`);
     
     // Show sequence builder if hidden
     $("#sequenceBuilderContainer").show();
@@ -4273,13 +4289,25 @@ function renderSequenceList() {
     
     let html = '';
     movementSequence.forEach((step, index) => {
-        html += `
-            <div class="sequence-step" data-step-index="${index}">
-                <span class="sequence-step-number">Step ${index + 1}</span>
-                <span class="sequence-step-angles">DOF0: ${step.dof0}°, DOF1: ${step.dof1}° (${step.delay}ms)</span>
-                <button class="sequence-step-remove" onclick="removeStep(${index})" title="Remove this step">×</button>
-            </div>
-        `;
+        if (step.type === "pause") {
+            // Render pause step
+            html += `
+                <div class="sequence-step pause" data-step-index="${index}">
+                    <span class="sequence-step-number">Step ${index + 1}</span>
+                    <span class="sequence-step-angles"><i class="fas fa-pause-circle mr-1"></i>Pause: ${step.duration}s</span>
+                    <button class="sequence-step-remove" onclick="removeStep(${index})" title="Remove this step">×</button>
+                </div>
+            `;
+        } else {
+            // Render movement step
+            html += `
+                <div class="sequence-step" data-step-index="${index}">
+                    <span class="sequence-step-number">Step ${index + 1}</span>
+                    <span class="sequence-step-angles"><i class="fas fa-arrows-alt mr-1"></i>DOF0: ${step.dof0}°, DOF1: ${step.dof1}°</span>
+                    <button class="sequence-step-remove" onclick="removeStep(${index})" title="Remove this step">×</button>
+                </div>
+            `;
+        }
     });
     
     container.html(html);
@@ -4385,34 +4413,49 @@ async function playSequence() {
             // Highlight current step
             highlightSequenceStep(i);
             
-            // Set angles in UI
-            $("#multiDofAngle0").val(step.dof0);
-            $("#multiDofAngle1").val(step.dof1);
-            updateMultiDofCommandPreview();
-            
-            // Collect execution data
-            const executionRecord = {
-                stepIndex: i,
-                loopIteration: loopCount,
-                targetDof0: step.dof0,
-                targetDof1: step.dof1,
-                targetDelay: step.delay,
-                startTimestamp: startTime,
-                encoderSamples: [] // Will be populated by socket listener
-            };
-            
-            sequenceExecutionData.push(executionRecord);
-            
-            appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: DOF0=${step.dof0}°, DOF1=${step.dof1}°`);
-            
-            // Execute movement
-            await sendMultiDofMoveAsync();
-            
-            // Wait for delay
-            await sleep(step.delay);
-            
-            executionRecord.endTimestamp = Date.now();
-            executionRecord.actualDuration = executionRecord.endTimestamp - executionRecord.startTimestamp;
+            if (step.type === "pause") {
+                // Handle pause step
+                appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: ⏸️ Pause ${step.duration}s`);
+                await sleep(step.duration * 1000); // Convert seconds to milliseconds
+                
+                // Record execution (optional, for tracking)
+                const executionRecord = {
+                    stepIndex: i,
+                    loopIteration: loopCount,
+                    type: "pause",
+                    duration: step.duration,
+                    startTimestamp: startTime,
+                    endTimestamp: Date.now()
+                };
+                sequenceExecutionData.push(executionRecord);
+            } else {
+                // Handle movement step
+                // Set angles in UI
+                $("#multiDofAngle0").val(step.dof0);
+                $("#multiDofAngle1").val(step.dof1);
+                updateMultiDofCommandPreview();
+                
+                // Collect execution data
+                const executionRecord = {
+                    stepIndex: i,
+                    loopIteration: loopCount,
+                    type: "move",
+                    targetDof0: step.dof0,
+                    targetDof1: step.dof1,
+                    startTimestamp: startTime,
+                    encoderSamples: [] // Will be populated by socket listener
+                };
+                
+                sequenceExecutionData.push(executionRecord);
+                
+                appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: DOF0=${step.dof0}°, DOF1=${step.dof1}°`);
+                
+                // Execute movement - now waits for acknowledgment from firmware
+                await sendMultiDofMoveAsync();
+                
+                executionRecord.endTimestamp = Date.now();
+                executionRecord.actualDuration = executionRecord.endTimestamp - executionRecord.startTimestamp;
+            }
         }
     } while (loopEnabled && isSequencePlaying);
     

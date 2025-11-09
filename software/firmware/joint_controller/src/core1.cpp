@@ -223,15 +223,16 @@ void core1_loop() {
 
       // CRITICAL FIX: Wait for Core0 to reset flag before starting new movement
       // This prevents race condition where flag is still set from previous movement
+      // Normal case: flag reset happens in < 1ms, timeout is just safety net
       uint32_t wait_counter = 0;
-      const uint32_t MAX_WAIT_CYCLES = 10000; // ~1s timeout
+      const uint32_t MAX_WAIT_CYCLES = 500; // 50ms timeout (500 * 100µs)
       while (shared_data_ext.flag != 0 && wait_counter < MAX_WAIT_CYCLES) {
         sleep_us(100);
         wait_counter++;
       }
 
       if (shared_data_ext.flag != 0) {
-        // Timeout: Core0 didn't reset flag in time
+        // Timeout: Core0 didn't reset flag in time - indicates serious issue
         LOG_ERROR("Core0 flag reset timeout - forcing reset to prevent deadlock");
         shared_data_ext.flag = 0;
       }
