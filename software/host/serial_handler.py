@@ -91,6 +91,11 @@ class SerialHandler:
         self.expected_raw_data_points: int = 0
         self.received_raw_data_points: int = 0
 
+        # Movement acknowledgment system
+        self.movement_complete_event = threading.Event()
+        self.movement_pending = False
+        self.movement_queue_lock = threading.Lock()
+
         # Initialize logger for serial communication
         self.serial_logger = SerialLogger("logs/serial_communication.log")
         self.serial_logger.log_info(f"Initializing SerialHandler for port: {port}")
@@ -239,6 +244,19 @@ class SerialHandler:
             elif actual_message:
                 self.status_message.append(actual_message)
                 logger.info(f"Received EVT message: {actual_message}")
+        elif line.startswith("RSP:"):
+            # Handle response messages from firmware
+            if line.startswith("RSP:MOVE_COMPLETE"):
+                # Movement completed - signal waiting thread
+                logger.info(f"✅ Movement completed: {line}")
+                self.status_message.append(f"✅ {line}")
+                with self.movement_queue_lock:
+                    self.movement_pending = False
+                    self.movement_complete_event.set()
+            elif line.strip():
+                # Other RSP messages
+                logger.info(f"Received RSP message: {line}")
+                self.status_message.append(f"{line}")
         elif line.strip():  # Messages without EVT: prefix are only logged
             logger.info(f"Received non-EVT message (logged only): {line}")
             # Add to status messages for UI anyway, but with distinctive prefix
@@ -2564,6 +2582,62 @@ class SerialHandler:
             self.resume_listening()
 
         return True
+
+    def send_movement_command_with_ack(
+        self, joint, dof, command, params=None, timeout=30.0
+    ):
+        """
+        Sends a movement command and waits for RSP:MOVE_COMPLETE acknowledgment.
+        This ensures movements are executed sequentially without overwhelming the firmware.
+
+        Args:
+            joint (str): Joint name (KNEE, ANKLE, HIP)
+            dof (str/int): DOF index (0, 1) or 'ALL' for all
+            command (str): Command name (should be MOVE_MULTI_DOF)
+            params (list, optional): Optional list of parameters
+            timeout (float): Maximum time to wait for completion (seconds)
+
+        Returns:
+            bool: True if movement completed successfully, False if timeout or error
+        """
+        with self.movement_queue_lock:
+            if self.movement_pending:
+                logger.warning("Movement already pending, waiting for completion...")
+                # If another movement is pending, wait for it to complete first
+                self.movement_complete_event.wait(timeout=timeout)
+            
+            # Reset event and set pending flag
+            self.movement_complete_event.clear()
+            self.movement_pending = True
+
+        # Send the movement command
+        cmd = self.generate_command(joint, dof, command, params)
+        logger.info(f"🚀 Sending movement command: {cmd}")
+        
+        try:
+            self.pause_listening()
+            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
+                self.send_command_with_prefix(cmd, ser)
+        except Exception as e:
+            logger.error(f"Error sending movement command {cmd}: {e}")
+            with self.movement_queue_lock:
+                self.movement_pending = False
+                self.movement_complete_event.set()
+            return False
+        finally:
+            self.resume_listening()
+
+        # Wait for movement completion acknowledgment
+        logger.info(f"⏳ Waiting for movement completion (timeout: {timeout}s)...")
+        if self.movement_complete_event.wait(timeout=timeout):
+            logger.info("✅ Movement completed successfully")
+            return True
+        else:
+            logger.error(f"❌ Movement timeout after {timeout}s")
+            with self.movement_queue_lock:
+                self.movement_pending = False
+                self.movement_complete_event.clear()
+            return False
 
     def handle_joint_message(self, line: str) -> None:
         """
