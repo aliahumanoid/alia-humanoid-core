@@ -704,8 +704,14 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         Serial.println("\nStarting position holding phase with cascade control");
       }
 
+      // IMPORTANT: Signal movement completion BEFORE entering holding loop
+      // This allows the host to proceed with next command while motors maintain position
+      Serial.println("RSP:MOVE_COMPLETE_HOLDING");
+      Serial.flush(); // Ensure message is sent immediately
+
       // Maintain position using cascade control
       int safety_check_counter = 0; // Counter for periodic safety checks
+      
       while (true) {
         next_time += sampling_period;
         cycle_count++;

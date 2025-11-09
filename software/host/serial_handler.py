@@ -246,8 +246,9 @@ class SerialHandler:
                 logger.info(f"Received EVT message: {actual_message}")
         elif line.startswith("RSP:"):
             # Handle response messages from firmware
-            if line.startswith("RSP:MOVE_COMPLETE"):
+            if line.startswith("RSP:MOVE_COMPLETE") or line.startswith("RSP:MOVE_COMPLETE_HOLDING"):
                 # Movement completed - signal waiting thread
+                # MOVE_COMPLETE_HOLDING means movement is done and motors are in holding loop
                 logger.info(f"✅ Movement completed: {line}")
                 self.status_message.append(f"✅ {line}")
                 with self.movement_queue_lock:
