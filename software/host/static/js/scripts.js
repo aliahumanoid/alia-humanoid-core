@@ -4439,6 +4439,18 @@ async function playSequence() {
     sequenceExecutionData = []; // Reset data collection
     updatePlaybackControls();
     
+    // Start sequence data collection on backend
+    try {
+        await $.ajax({
+            url: "/sequence/start",
+            method: "POST",
+            contentType: "application/json"
+        });
+        appendStatusMessage(`📊 Backend data collection started`);
+    } catch (error) {
+        console.error("Error starting sequence data collection:", error);
+    }
+    
     appendStatusMessage(`▶️ Starting sequence playback (${movementSequence.length} steps${loopEnabled ? ', loop enabled' : ''})`);
     
     let loopCount = 0;
@@ -4514,6 +4526,19 @@ async function playSequence() {
     isSequencePlaying = false;
     highlightSequenceStep(-1); // Remove all highlights
     updatePlaybackControls();
+    
+    // Stop sequence data collection on backend
+    try {
+        const response = await $.ajax({
+            url: "/sequence/stop",
+            method: "POST",
+            contentType: "application/json"
+        });
+        appendStatusMessage(`📊 Backend data collection stopped - ${response.steps_collected} steps collected`);
+    } catch (error) {
+        console.error("Error stopping sequence data collection:", error);
+    }
+    
     showExportButton();
     
     appendStatusMessage(`✅ Sequence playback completed (${sequenceExecutionData.length} executions recorded)`);
@@ -4531,42 +4556,97 @@ function stopSequence() {
 }
 
 /**
- * Exports sequence execution data as JSON file
+ * Exports sequence movement data as CSV file
  */
-function exportSequenceData() {
-    if (sequenceExecutionData.length === 0) {
-        alert("No execution data available. Run the sequence first.");
-        return;
+async function exportSequenceData() {
+    try {
+        appendStatusMessage(`📥 Fetching sequence movement data from backend...`);
+        
+        // Get accumulated movement data from backend
+        const response = await $.ajax({
+            url: "/sequence/data",
+            method: "GET"
+        });
+        
+        if (response.status !== "success" || !response.data || response.data.length === 0) {
+            alert("No movement data available. The sequence may not have been executed or data collection failed.");
+            return;
+        }
+        
+        appendStatusMessage(`📊 Processing ${response.steps} steps of movement data...`);
+        
+        // Build CSV
+        const csvLines = [];
+        
+        // CSV Header
+        csvLines.push([
+            "Step",
+            "Joint",
+            "DOF",
+            "Sample_Index",
+            "Joint_Target_deg",
+            "Joint_Actual_deg",
+            "Motor_Agonist_Current_deg",
+            "Motor_Antagonist_Current_deg",
+            "Motor_Agonist_Ref_deg",
+            "Motor_Antagonist_Ref_deg",
+            "Torque_Agonist",
+            "Torque_Antagonist"
+        ].join(","));
+        
+        // Process each step
+        for (const stepData of response.data) {
+            const stepIndex = stepData.step_index;
+            const jointName = stepData.joint_name;
+            const dofData = stepData.dof_data;
+            
+            // Process each DOF
+            for (const [dofIndex, dofArrays] of Object.entries(dofData)) {
+                const sampleCount = dofArrays.joint_targets.length;
+                
+                // Process each sample
+                for (let i = 0; i < sampleCount; i++) {
+                    const row = [
+                        stepIndex,
+                        jointName,
+                        dofIndex,
+                        i,
+                        dofArrays.joint_targets[i].toFixed(4),
+                        dofArrays.joint_angles[i].toFixed(4),
+                        dofArrays.motor_angles.agonist_current[i].toFixed(4),
+                        dofArrays.motor_angles.antagonist_current[i].toFixed(4),
+                        dofArrays.motor_angles.agonist_next[i].toFixed(4),
+                        dofArrays.motor_angles.antagonist_next[i].toFixed(4),
+                        dofArrays.motor_torques.agonist[i].toFixed(2),
+                        dofArrays.motor_torques.antagonist[i].toFixed(2)
+                    ];
+                    csvLines.push(row.join(","));
+                }
+            }
+        }
+        
+        // Create CSV file
+        const csvContent = csvLines.join("\n");
+        const blob = new Blob([csvContent], {type: 'text/csv;charset=utf-8;'});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const joint = $("#jointSelect").val();
+        link.download = `sequence_movement_${joint}_${timestamp}.csv`;
+        
+        link.click();
+        URL.revokeObjectURL(url);
+        
+        const totalSamples = csvLines.length - 1; // Exclude header
+        appendStatusMessage(`💾 Exported ${totalSamples} movement samples from ${response.steps} steps to CSV`);
+        
+    } catch (error) {
+        console.error("Error exporting sequence data:", error);
+        appendStatusMessage(`❌ Error exporting sequence data: ${error.message || error}`);
+        alert("Failed to export sequence data. Check console for details.");
     }
-    
-    const exportData = {
-        metadata: {
-            joint: $("#jointSelect").val(),
-            timestamp: new Date().toISOString(),
-            totalSteps: movementSequence.length,
-            loopEnabled: $("#sequenceLoopToggle").is(":checked"),
-            executionCount: sequenceExecutionData.length,
-            totalDuration: sequenceExecutionData.reduce((sum, exec) => sum + (exec.actualDuration || 0), 0)
-        },
-        sequence: movementSequence, // Planned sequence
-        executionData: sequenceExecutionData // Actual execution with feedback
-    };
-    
-    const blob = new Blob(
-        [JSON.stringify(exportData, null, 2)], 
-        {type: 'application/json'}
-    );
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    link.download = `sequence_${exportData.metadata.joint}_${timestamp}.json`;
-    
-    link.click();
-    URL.revokeObjectURL(url);
-    
-    appendStatusMessage(`💾 Exported sequence data: ${sequenceExecutionData.length} executions, ${exportData.metadata.totalDuration}ms total`);
 }
 
 // =============================================================================
