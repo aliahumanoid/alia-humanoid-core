@@ -824,6 +824,59 @@ def register_routes(app, serial_manager: SerialManager):
                 "message": f"Error during time synchronization: {str(e)}"
             }), 500
 
+    @app.route('/sequence/start', methods=['POST'])
+    def start_sequence():
+        """
+        Starts sequence data collection
+        """
+        try:
+            handler.start_sequence_data_collection()
+            return jsonify({
+                "status": "success",
+                "message": "Sequence data collection started"
+            })
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"Error starting sequence: {str(e)}"
+            }), 500
+
+    @app.route('/sequence/stop', methods=['POST'])
+    def stop_sequence():
+        """
+        Stops sequence data collection
+        """
+        try:
+            handler.stop_sequence_data_collection()
+            return jsonify({
+                "status": "success",
+                "message": "Sequence data collection stopped",
+                "steps_collected": len(handler.get_sequence_movement_data())
+            })
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"Error stopping sequence: {str(e)}"
+            }), 500
+
+    @app.route('/sequence/data', methods=['GET'])
+    def get_sequence_data():
+        """
+        Returns accumulated sequence movement data
+        """
+        try:
+            data = handler.get_sequence_movement_data()
+            return jsonify({
+                "status": "success",
+                "steps": len(data),
+                "data": data
+            })
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"Error getting sequence data: {str(e)}"
+            }), 500
+
     @app.route('/')
     def index():
         return render_template('index.html')

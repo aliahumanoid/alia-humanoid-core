@@ -95,6 +95,11 @@ class SerialHandler:
         self.movement_complete_event = threading.Event()
         self.movement_pending = False
         self.movement_queue_lock = threading.Lock()
+        
+        # Sequence data accumulation
+        self.sequence_active = False
+        self.sequence_movement_data = []  # Accumulates movement data for all steps
+        self.sequence_current_step = 0
 
         # Initialize logger for serial communication
         self.serial_logger = SerialLogger("logs/serial_communication.log")
@@ -251,6 +256,18 @@ class SerialHandler:
                 # MOVE_COMPLETE_HOLDING means movement is done and motors are in holding loop
                 logger.info(f"✅ Movement completed: {line}")
                 self.status_message.append(f"✅ {line}")
+                
+                # If sequence is active, automatically request movement data
+                if self.sequence_active and line.startswith("RSP:MOVE_COMPLETE_HOLDING"):
+                    logger.info(f"📊 Sequence active - requesting movement data for step {self.sequence_current_step}")
+                    try:
+                        # Send GET_MOVEMENT_DATA command (will be handled by firmware)
+                        ser.write(b"CMD:GET_MOVEMENT_DATA\n")
+                        ser.flush()
+                        self.sequence_current_step += 1
+                    except Exception as e:
+                        logger.error(f"Error requesting movement data during sequence: {e}")
+                
                 with self.movement_queue_lock:
                     self.movement_pending = False
                     self.movement_complete_event.set()
@@ -914,8 +931,20 @@ class SerialHandler:
                 }
             }
             
-            logger.info(f"📤 Sending {total_samples} samples for {joint_name} ({len(transformed_dof_data)} DOFs) to frontend")
-            self.socketio.emit("movement_data_multi_dof", payload, namespace="/movement")
+            # If sequence is active, accumulate data instead of sending to frontend
+            if self.sequence_active:
+                logger.info(f"📦 Accumulating {total_samples} samples for {joint_name} (step {self.sequence_current_step - 1})")
+                self.sequence_movement_data.append({
+                    "step_index": self.sequence_current_step - 1,
+                    "joint_name": joint_name,
+                    "dof_count": len(transformed_dof_data),
+                    "total_samples": total_samples,
+                    "dof_data": transformed_dof_data
+                })
+            else:
+                # Normal operation: send to frontend immediately
+                logger.info(f"📤 Sending {total_samples} samples for {joint_name} ({len(transformed_dof_data)} DOFs) to frontend")
+                self.socketio.emit("movement_data_multi_dof", payload, namespace="/movement")
 
         except Exception as e:
             logger.error(f"❌ EXCEPTION in handle_movement_sample_header: {e}")
@@ -2639,6 +2668,33 @@ class SerialHandler:
                 self.movement_pending = False
                 self.movement_complete_event.clear()
             return False
+
+    def start_sequence_data_collection(self):
+        """
+        Starts accumulating movement data for sequence playback.
+        Call this when a sequence starts playing.
+        """
+        self.sequence_active = True
+        self.sequence_movement_data = []
+        self.sequence_current_step = 0
+        logger.info("🎬 Started sequence data collection")
+
+    def stop_sequence_data_collection(self):
+        """
+        Stops accumulating movement data for sequence playback.
+        Call this when a sequence stops playing.
+        """
+        self.sequence_active = False
+        logger.info(f"🛑 Stopped sequence data collection - accumulated {len(self.sequence_movement_data)} steps")
+
+    def get_sequence_movement_data(self):
+        """
+        Returns the accumulated movement data from sequence playback.
+        
+        Returns:
+            list: Array of movement data for each step
+        """
+        return self.sequence_movement_data
 
     def handle_joint_message(self, line: str) -> None:
         """
