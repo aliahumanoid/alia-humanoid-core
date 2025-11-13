@@ -4,6 +4,23 @@ Structured log of outward-facing progress notes. Updates published as milestones
 
 ---
 
+## 2025-11-13 — Joint Design Log #001 published
+
+**Video documentation:** First technical deep-dive published on YouTube — Joint Design Log #001 documenting the lower leg assembly with focus on ankle joint mechanics.
+
+**Content covered:**
+- Tendon-driven 2-DOF ankle joint (plantarflexion/dorsiflexion -50° to +25°, inversion/eversion ±25°)
+- 4 motors in antagonistic configuration, 50:1 to 67:1 mechanical advantage (planetary gearbox + pulley differential)
+- Variable impedance control through co-contraction
+- Human-scale proportions: 60mm ankle diameter, 110-120mm calf diameter
+- CAD visualization + physical prototype footage (31 video clips + 8 CAD animations)
+
+**Watch:** [Joint Design Log #001 on YouTube](https://youtu.be/1Z9GlTnYEFs)
+
+This is the first of 8 planned joint design logs documenting the full humanoid robot assembly. Phase 0 — validate mechanics, document honestly. Phase 1 (targeted ~6 months) will open full CAD files under CC BY-SA for community contributions.
+
+---
+
 ## 2025-10-31 — Initial public release: Phase 0 ankle prototype
 
 **Hardware released (19 STL files):**
