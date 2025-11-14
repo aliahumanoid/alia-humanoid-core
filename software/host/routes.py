@@ -8,13 +8,23 @@ This module defines all HTTP endpoints for:
 - System configuration (joint limits, available commands)
 """
 from flask import jsonify, request, current_app, render_template
-from typing import Dict, Any
+from typing import Dict, Any, List
 from serial_manager import SerialManager
 from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
 import json
 import os
 import utils
 from pathlib import Path
+import logging
+
+# CAN interface detection
+try:
+    import can
+    CAN_AVAILABLE = True
+except ImportError:
+    CAN_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 def register_routes(app, serial_manager: SerialManager):
     """
@@ -97,6 +107,164 @@ def register_routes(app, serial_manager: SerialManager):
             "result": result,
             "mappings": serial_manager.get_joint_to_port_mapping(),
         })
+
+    @app.route('/can_interfaces', methods=['GET'])
+    def list_can_interfaces():
+        """
+        List available CAN interfaces detected on the system.
+        
+        Returns:
+            JSON with available CAN interfaces or error if python-can not available
+        """
+        if not CAN_AVAILABLE:
+            return jsonify({
+                "status": "error",
+                "message": "python-can library not installed",
+                "interfaces": []
+            }), 503
+        
+        try:
+            # Detect available CAN configurations
+            configs = can.detect_available_configs()
+            
+            # Format interfaces for UI
+            interfaces = []
+            for config in configs:
+                interface_type = config.get('interface', 'unknown')
+                channel = config.get('channel', 'N/A')
+                
+                # Create a display name
+                if interface_type == 'slcan':
+                    # Extract port name from channel for SLCAN
+                    display_name = f"SLCAN ({channel.split('/')[-1] if channel != 'N/A' else 'N/A'})"
+                else:
+                    display_name = f"{interface_type.upper()} ({channel})"
+                
+                interfaces.append({
+                    "interface": interface_type,
+                    "channel": channel,
+                    "display_name": display_name,
+                    "value": json.dumps(config)  # Serialize config for later use
+                })
+            
+            return jsonify({
+                "status": "success",
+                "interfaces": interfaces,
+                "count": len(interfaces)
+            })
+        
+        except Exception as e:
+            logger.exception("Error detecting CAN interfaces")
+            return jsonify({
+                "status": "error",
+                "message": f"Error detecting CAN interfaces: {str(e)}",
+                "interfaces": []
+            }), 500
+
+    @app.route('/can_test_init', methods=['POST'])
+    def test_can_init():
+        """
+        Test CAN bus initialization with selected interface.
+        
+        Expected JSON:
+            {
+                "config": "{\"interface\":\"slcan\",\"channel\":\"/dev/cu.usbmodem...\"}"
+            }
+        
+        Returns:
+            JSON with initialization result and bus information
+        """
+        if not CAN_AVAILABLE:
+            return jsonify({
+                "status": "error",
+                "message": "python-can library not installed"
+            }), 503
+        
+        try:
+            data = request.get_json()
+            config_str = data.get('config')
+            
+            if not config_str:
+                return jsonify({
+                    "status": "error",
+                    "message": "No CAN interface config provided"
+                }), 400
+            
+            # Parse config
+            config = json.loads(config_str)
+            interface = config.get('interface')
+            channel = config.get('channel')
+            
+            if not interface or not channel:
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid config: missing interface or channel"
+                }), 400
+            
+            # Try to initialize CAN bus
+            logger.info(f"Initializing CAN bus: {interface} on {channel} @ 1 Mbps")
+            
+            bus = can.Bus(
+                interface=interface,
+                channel=channel,
+                bitrate=1000000  # 1 Mbps
+            )
+            
+            # Get bus info
+            bus_info = {
+                "interface": interface,
+                "channel": channel,
+                "bitrate": "1 Mbps",
+                "channel_info": str(bus.channel_info) if hasattr(bus, 'channel_info') else "N/A"
+            }
+            
+            # Try to receive (non-blocking, 0.5s timeout)
+            logger.info("Testing message reception (0.5s timeout)...")
+            msg = bus.recv(timeout=0.5)
+            
+            if msg:
+                bus_info["test_message"] = {
+                    "arbitration_id": f"0x{msg.arbitration_id:03X}",
+                    "data": msg.data.hex(),
+                    "timestamp": msg.timestamp
+                }
+                logger.info(f"Received CAN message: {msg}")
+            else:
+                bus_info["test_message"] = None
+                logger.info("No CAN messages received (normal if no devices transmitting)")
+            
+            # Shutdown bus
+            bus.shutdown()
+            logger.info("CAN bus closed cleanly")
+            
+            return jsonify({
+                "status": "success",
+                "message": "CAN bus initialized successfully",
+                "bus_info": bus_info
+            })
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid config JSON: {e}")
+            return jsonify({
+                "status": "error",
+                "message": f"Invalid config format: {str(e)}"
+            }), 400
+        
+        except can.CanError as e:
+            logger.exception("CAN initialization error")
+            return jsonify({
+                "status": "error",
+                "message": f"CAN error: {str(e)}",
+                "error_type": "can_error"
+            }), 500
+        
+        except Exception as e:
+            logger.exception("Unexpected error during CAN test")
+            return jsonify({
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+                "error_type": "unknown"
+            }), 500
 
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
