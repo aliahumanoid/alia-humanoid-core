@@ -131,6 +131,7 @@ $(document).ready(function() {
         renderDofControlButtons();
     });
     fetchSerialPortConfiguration();
+    fetchCanInterfaces();
     
     // Load joint configuration for auto-mapping grid visualization
     fetchJointConfig();
@@ -438,6 +439,29 @@ $(document).ready(function() {
 
     $("#refreshSerialPorts").on('click', function() {
         fetchSerialPortConfiguration({ showStatus: true });
+    });
+
+    $("#canInterfaceSelect").change(function() {
+        selectedCanInterface = $(this).val() || null;
+        updateCanInterfaceHint();
+        if (selectedCanInterface) {
+            try {
+                const config = JSON.parse(selectedCanInterface);
+                appendStatusMessage(`🔌 CAN interface selected: ${config.interface} on ${config.channel}`);
+            } catch (e) {
+                appendStatusMessage(`⚠️ Invalid CAN interface configuration`);
+            }
+        } else {
+            appendStatusMessage(`🔌 CAN interface deselected`);
+        }
+    });
+
+    $("#refreshCanInterfaces").on('click', function() {
+        fetchCanInterfaces({ showStatus: true });
+    });
+
+    $("#testCanInit").on('click', function() {
+        testCanInitialization();
     });
 
     // Start status polling
@@ -1637,6 +1661,143 @@ function assignSerialPortToJoint(joint, port) {
         },
         complete: function() {
             serialPortAssignmentPending = false;
+        }
+    });
+}
+
+// =============================================================================
+// CAN INTERFACE MANAGEMENT
+// =============================================================================
+
+let availableCanInterfaces = [];
+let selectedCanInterface = null;
+
+function fetchCanInterfaces(options = {}) {
+    const { showStatus = false } = options;
+    return $.ajax({
+        url: '/can_interfaces',
+        method: 'GET',
+        dataType: 'json'
+    }).done(response => {
+        if (response.status === 'success') {
+            availableCanInterfaces = response.interfaces || [];
+            updateCanInterfaceSelectUI();
+            if (showStatus) {
+                appendStatusMessage(`🔌 CAN interfaces detected: ${availableCanInterfaces.length}`);
+            }
+        } else {
+            availableCanInterfaces = [];
+            updateCanInterfaceSelectUI();
+            if (showStatus) {
+                appendStatusMessage(`⚠️ ${response.message || 'No CAN interfaces found'}`);
+            }
+        }
+    }).fail((xhr, status, error) => {
+        appendStatusMessage(`⚠️ Error fetching CAN interfaces: ${error}`);
+        availableCanInterfaces = [];
+        updateCanInterfaceSelectUI();
+    });
+}
+
+function updateCanInterfaceSelectUI() {
+    const select = $("#canInterfaceSelect");
+    if (!select.length) {
+        return;
+    }
+
+    const currentSelection = select.val();
+    select.empty();
+    select.append('<option value="">Select CAN interface</option>');
+
+    availableCanInterfaces.forEach(iface => {
+        const option = $('<option></option>')
+            .val(iface.value)
+            .text(iface.display_name);
+        select.append(option);
+    });
+
+    // Restore previous selection if still available
+    if (currentSelection) {
+        select.val(currentSelection);
+    }
+
+    updateCanInterfaceHint();
+}
+
+function updateCanInterfaceHint() {
+    const hint = $("#canInterfaceHint");
+    if (!hint.length) {
+        return;
+    }
+
+    const selectedValue = $("#canInterfaceSelect").val();
+    
+    if (!selectedValue) {
+        hint.text('No CAN interface selected');
+        hint.removeClass('text-green-600').addClass('text-gray-500');
+        return;
+    }
+
+    try {
+        const config = JSON.parse(selectedValue);
+        hint.text(`Selected: ${config.interface} on ${config.channel}`);
+        hint.removeClass('text-gray-500').addClass('text-green-600');
+    } catch (e) {
+        hint.text('Invalid interface configuration');
+        hint.removeClass('text-green-600').addClass('text-red-600');
+    }
+}
+
+function testCanInitialization() {
+    const selectedValue = $("#canInterfaceSelect").val();
+    
+    if (!selectedValue) {
+        appendStatusMessage("⚠️ Please select a CAN interface first");
+        return;
+    }
+
+    const testBtn = $("#testCanInit");
+    testBtn.prop('disabled', true);
+    testBtn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Testing...');
+    
+    appendStatusMessage("🔄 Testing CAN bus initialization...");
+
+    $.ajax({
+        url: '/can_test_init',
+        method: 'POST',
+        contentType: 'application/json',
+        dataType: 'json',
+        data: JSON.stringify({ config: selectedValue }),
+        success: function(response) {
+            if (response.status === 'success') {
+                const info = response.bus_info;
+                appendStatusMessage(`✅ CAN bus initialized successfully!`);
+                appendStatusMessage(`   Interface: ${info.interface} on ${info.channel}`);
+                appendStatusMessage(`   Bitrate: ${info.bitrate}`);
+                
+                if (info.test_message) {
+                    appendStatusMessage(`   📨 Received message: ID=0x${info.test_message.arbitration_id}`);
+                } else {
+                    appendStatusMessage(`   ℹ️  No messages received (normal with no devices)`);
+                }
+            } else {
+                appendStatusMessage(`❌ CAN test failed: ${response.message}`);
+            }
+        },
+        error: function(xhr) {
+            const errorMsg = xhr.responseJSON?.message || 'Unknown error';
+            const errorType = xhr.responseJSON?.error_type || 'unknown';
+            
+            if (errorType === 'can_error') {
+                appendStatusMessage(`❌ CAN error: ${errorMsg}`);
+                appendStatusMessage(`   💡 Check: cable, termination, bitrate`);
+            } else {
+                appendStatusMessage(`❌ Test error: ${errorMsg}`);
+            }
+        },
+        complete: function() {
+            testBtn.prop('disabled', false);
+            testBtn.html('<i class="fas fa-vial mr-1"></i>Test');
         }
     });
 }
