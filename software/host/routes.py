@@ -928,6 +928,19 @@ def register_routes(app, serial_manager: SerialManager):
         Starts sequence data collection
         """
         try:
+            data = request.get_json()
+            joint = data.get('joint')
+            
+            if not joint:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint)
+            if error:
+                return error, code
+            
             handler.start_sequence_data_collection()
             return jsonify({
                 "status": "success",
@@ -945,6 +958,19 @@ def register_routes(app, serial_manager: SerialManager):
         Stops sequence data collection
         """
         try:
+            data = request.get_json()
+            joint = data.get('joint')
+            
+            if not joint:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint)
+            if error:
+                return error, code
+            
             handler.stop_sequence_data_collection()
             return jsonify({
                 "status": "success",
@@ -963,6 +989,18 @@ def register_routes(app, serial_manager: SerialManager):
         Returns accumulated sequence movement data
         """
         try:
+            joint = request.args.get('joint')
+            
+            if not joint:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint)
+            if error:
+                return error, code
+            
             data = handler.get_sequence_movement_data()
             return jsonify({
                 "status": "success",
