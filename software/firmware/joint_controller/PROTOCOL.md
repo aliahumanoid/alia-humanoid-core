@@ -28,7 +28,6 @@ Examples
 - `ANKLE_RIGHT:0:RECALC_OFFSET:RECALC_TORQUE=10:RECALC_DURATION=500`
 - `ANKLE_RIGHT:0:START_MEASURE` / `ANKLE_RIGHT:0:STOP_MEASURE`
 - `ANKLE_RIGHT:0:START_TEST_ENCODER` / `ANKLE_RIGHT:0:STOP_TEST_ENCODER`
-- `SYNC(1728500000.123456)` (NTP-like time synchronization)
 
 Supported command tokens are defined in `src/commands.h` and parsed by `CommandParser`.
 
@@ -45,7 +44,6 @@ Only `EVT:` lines are intended for host parsing. Common events include:
 - `EVT:ENCODER_DATA:DOF=<d>:ANGLE=<deg>:COUNT=<ticks>` (or `EVT:ENCODER_DATA:ERROR=...`)
 - `EVT:ANGLE(<JOINT_NAME>,<DOF>,<angle_deg>)` (during measurements)
 - `EVT:MAPPING_DATA(<size>,<dof_count>)` (followed by data points)
-- `EVT:SYNC_RESPONSE(<T1_echo>,<T2_firmware>)` (NTP-like sync: T1=host send time, T2=firmware receive time)
 - `EVT:FW:VERSION <version>`, `EVT:PROTO <version>`, `EVT:BUILD <sha> <date>`, `EVT:READY` (on startup)
 
 Notes

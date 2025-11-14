@@ -200,37 +200,8 @@ void core0_main_loop() {
         char actual_command[96];
         strcpy(actual_command, command + 4); // Skip "CMD:"
 
-        // Special handling for SYNC command with parameters
-        if (strncmp(actual_command, "SYNC(", 5) == 0) {
-          // NTP-like time synchronization
-          // Expected format: CMD:SYNC(T1)
-          // where T1 is the host timestamp in seconds (double precision)
-          
-          double T1 = 0.0;
-          double T2 = 0.0;
-          
-          // Extract T1 from command (format: SYNC(T1))
-          char* paren_start = strchr(actual_command, '(');
-          if (paren_start != nullptr) {
-            T1 = atof(paren_start + 1);
-            
-            // Get T2 - current firmware time (microseconds since boot)
-            T2 = micros() / 1000000.0; // Convert to seconds
-            
-            // Send response with T1 and T2
-            // Host will receive this at T4 and can calculate offset
-            // Format: EVT:SYNC_RESPONSE(T1,T2)
-            Serial.print("EVT:SYNC_RESPONSE(");
-            Serial.print(T1, 6); // 6 decimal places for microsecond precision
-            Serial.print(",");
-            Serial.print(T2, 6);
-            Serial.println(")");
-          } else {
-            Serial.println("ERROR: Invalid SYNC format, expected SYNC(T1)");
-          }
-        }
         // First, try to recognize it as a simple command (e.g., STATUS, STOP)
-        else {
+        {
           int simple_cmd_id = getCommandId(actual_command);
           
           if (simple_cmd_id != CMD_UNKNOWN && 

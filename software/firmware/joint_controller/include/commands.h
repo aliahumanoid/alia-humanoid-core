@@ -29,10 +29,6 @@
 #define CMD_STOP 0
 #endif
 
-#ifndef CMD_SYNC
-#define CMD_SYNC 1
-#endif
-
 #ifndef CMD_STATUS
 #define CMD_STATUS 2
 #endif
@@ -204,7 +200,6 @@
 
 // --- Command Strings (System Control) ---
 #define SERIAL_CMD_STOP "STOP"
-#define SERIAL_CMD_SYNC "SYNC"
 #define SERIAL_CMD_STATUS "STATUS"
 #define SERIAL_CMD_CONFIG "CONFIG"
 
@@ -304,8 +299,6 @@ inline uint8_t getCommandId(const char *cmd_name) {
   // System Control
   if (strcmp(cmd_name, SERIAL_CMD_STOP) == 0) {
     return CMD_STOP;
-  } else if (strcmp(cmd_name, SERIAL_CMD_SYNC) == 0) {
-    return CMD_SYNC;
   } else if (strcmp(cmd_name, SERIAL_CMD_STATUS) == 0) {
     return CMD_STATUS;
   }

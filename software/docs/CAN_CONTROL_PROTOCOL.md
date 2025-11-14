@@ -69,9 +69,11 @@ struct CanCmd_Waypoint {
 enum TrajectoryMode {
     MODE_DIRECT     = 0x00,  // Instant position change (no interpolation)
     MODE_LINEAR     = 0x01,  // Linear interpolation v = Δs/Δt
-    MODE_SMOOTH     = 0x02,  // Trigonometric/smooth (existing path_trig)
+    MODE_SMOOTH     = 0x02,  // Reserved for future (currently same as LINEAR)
 };
 ```
+
+**Note**: In current implementation (Phase 0), all modes use simple linear interpolation. `MODE_SMOOTH` is reserved for future trajectory generation enhancements (e.g., S-curve, quintic splines).
 
 ---
 
@@ -183,7 +185,6 @@ struct CanCmd_EmergencyStop {
 
 ```cpp
 #define WAYPOINT_BUFFER_DEPTH 2
-#define SEGMENT_STEPS 30  // Trajectory array size per segment (vs 100 in moveMultiDOF_cascade)
 
 enum WaypointState {
     IDLE,      // No waypoints, no motion
@@ -198,16 +199,8 @@ struct WaypointBuffer {
     uint8_t count;                    // Number of waypoints in buffer
     
     // Current segment tracking
-    float prev_angle;                 // Angle at start of current segment
+    float prev_angle;                 // Angle at start of current segment (degrees)
     uint32_t prev_time;               // Time at start of current segment (ms)
-    uint32_t segment_start_time;      // When current segment started (ms)
-    
-    // Trajectory arrays (generated per segment, analogous to moveMultiDOF_cascade)
-    std::array<float, SEGMENT_STEPS> time_array;
-    std::array<float, SEGMENT_STEPS> angle_array;
-    std::array<float, SEGMENT_STEPS> velocity_array;
-    std::array<float, SEGMENT_STEPS> accel_array;
-    bool array_valid;                 // True if arrays contain valid trajectory
     
     // State
     WaypointState state;
@@ -219,22 +212,25 @@ WaypointBuffer waypoint_buffers[MAX_DOFS];
 
 **Memory footprint per DOF**:
 - Waypoint buffer: 2 × 8 bytes = 16 bytes
-- Trajectory arrays: 4 × 30 floats × 4 bytes = 480 bytes
-- Metadata: ~16 bytes
-- **Total: ~512 bytes per DOF** (vs ~800 bytes in moveMultiDOF_cascade with 100 steps)
+- Tracking state: ~12 bytes (prev_angle, prev_time, state)
+- **Total: ~32 bytes per DOF**
 
-For 3 DOFs (ankle): **~1.5 KB** (acceptable for RP2040's 264 KB RAM)
+For 3 DOFs (ankle): **~96 bytes** (minimal RAM usage!)
+
+**Note**: Unlike `moveMultiDOF_cascade` which pre-generates 100-point trajectory arrays, this implementation uses **simple linear interpolation** between waypoints. Smoothness comes from the **density of waypoints** (50-100 Hz from host), not from complex trajectory generation.
 
 ---
 
 ### 5.2 Execution Logic
 
-**Design Philosophy**: The CAN control implementation **reuses the existing cascade control architecture** from `moveMultiDOF_cascade()` (outer PID @ 100 Hz, inner motor control @ 500 Hz). The key difference is that trajectory arrays are **populated dynamically** from incoming CAN waypoints instead of being pre-generated.
+**Design Philosophy**: The CAN control implementation **reuses the existing cascade control architecture** from `moveMultiDOF_cascade()` (outer PID @ 100 Hz, inner motor control @ 500 Hz, same 2ms sampling period). The key difference is that trajectory generation is **simplified**: instead of pre-computing smooth velocity profiles, the controller uses **simple linear interpolation** between consecutive waypoints.
+
+**Smoothness comes from waypoint density** (50-100 Hz from host), not from complex on-controller trajectory generation.
 
 **Key behaviors**:
-- **Waypoints arrive** → trajectory continues smoothly
-- **Waypoints stop** → hold current position
-- **Waypoints resume** → motion resumes from held position
+- **Waypoints arrive @ 50-100 Hz** → smooth motion via dense linear interpolation
+- **Waypoints stop** → hold current position (HOLDING mode)
+- **Waypoints resume** → motion resumes seamlessly from held position
 
 ---
 
@@ -262,57 +258,31 @@ void onWaypointReceived(uint8_t dof, CanCmd_Waypoint wp) {
     insert_waypoint_sorted(buf, wp);
     buf->count++;
     
-    // If first waypoint after being idle, initialize trajectory segment
-    if (buf->count == 1 && buf->state == HOLDING) {
-        buf->prev_angle = getCurrentAngle(dof);
+    // If first waypoint after being idle/holding, initialize segment
+    if (buf->count == 1 && (buf->state == IDLE || buf->state == HOLDING)) {
+        buf->prev_angle = getCurrentAngle(dof);  // Start from current position
         buf->prev_time = t_now;
         buf->state = MOVING;
-        
-        // Generate trajectory arrays for this segment
-        generateTrajectorySegment(dof, buf);
     }
 }
 ```
 
 ---
 
-#### 5.2.2 Dynamic Trajectory Array Generation
+#### 5.2.2 Linear Interpolation Between Waypoints
 
-Instead of pre-computing the entire trajectory at the start (as in `moveMultiDOF_cascade`), arrays are generated **per segment** (between consecutive waypoints):
+**No trajectory array generation needed!** The controller simply computes:
 
 ```cpp
-void generateTrajectorySegment(uint8_t dof, WaypointBuffer *buf) {
-    CanCmd_Waypoint *wp = &buf->buffer[0];
-    
-    float start_angle = buf->prev_angle;
-    float target_angle = wp->target_angle / 100.0f;  // Convert from 0.01° units
-    float duration = (wp->t_arrival_ms - buf->prev_time) / 1000.0f;  // seconds
-    
-    // Estimate velocity and accel_time based on duration
-    float angle_diff = fabs(target_angle - start_angle);
-    float vmax = angle_diff / duration * 1.5f;  // Heuristic: 1.5x average speed
-    float ta = duration / 4.0f;  // Accel time = 25% of total
-    
-    // Generate trajectory using EXISTING path generation functions
-    if (wp->mode == MODE_LINEAR) {
-        path_linear(radians(start_angle), radians(target_angle), 
-                    vmax, ta, SEGMENT_STEPS,
-                    buf->time_array, buf->angle_array, 
-                    buf->velocity_array, buf->accel_array);
-    } 
-    else if (wp->mode == MODE_SMOOTH) {
-        path_trig(radians(start_angle), radians(target_angle),
-                  vmax, ta, SEGMENT_STEPS,
-                  buf->time_array, buf->angle_array,
-                  buf->velocity_array, buf->accel_array);
-    }
-    
-    buf->segment_start_time = buf->prev_time;
-    buf->array_valid = true;
-}
+q_des(t) = prev_angle + (target_angle - prev_angle) × progress
+
+where progress = (t_now - prev_time) / (t_arrival - prev_time)
 ```
 
-**Note**: `SEGMENT_STEPS` can be smaller than `moveMultiDOF_cascade` default (e.g. 20-30 instead of 100) since segments are shorter (50-200ms vs entire trajectory).
+**Example with 50 Hz waypoints** (20 ms spacing):
+- Inner loop @ 500 Hz → **10 interpolation points** per segment
+- 10 points over 20 ms → smooth enough for human-scale motion
+- No jerk discontinuity if host sends pre-smoothed trajectory
 
 ---
 
@@ -322,6 +292,7 @@ The main control loop executes continuously, using the **same dual-loop cascade 
 
 ```cpp
 // Core1 main loop (runs forever, NOT blocking like moveMultiDOF_cascade)
+// SAMPLING_PERIOD = 2000 µs (same as moveMultiDOF_cascade default)
 void core1_loop() {
     while (true) {
         uint64_t next_time = time_us_64() + SAMPLING_PERIOD;
@@ -331,7 +302,7 @@ void core1_loop() {
         
         // Update trajectories for all active DOFs
         for (uint8_t dof = 0; dof < MAX_DOFS; dof++) {
-            updateTrajectory_Cascade(dof);
+            updateTrajectory_Linear(dof);
         }
         
         // Wait for next cycle
@@ -339,7 +310,7 @@ void core1_loop() {
     }
 }
 
-void updateTrajectory_Cascade(uint8_t dof) {
+void updateTrajectory_Linear(uint8_t dof) {
     static int cycle_count = 0;
     cycle_count++;
     
@@ -349,34 +320,42 @@ void updateTrajectory_Cascade(uint8_t dof) {
     // === CHECK WAYPOINT TRANSITION ===
     if (buf->count > 0 && t_now >= buf->buffer[0].t_arrival_ms) {
         // Reached target - transition to next waypoint
-        buf->prev_angle = getCurrentAngle(dof);
-        buf->prev_time = t_now;
+        float reached_angle = buf->buffer[0].target_angle / 100.0f;  // 0.01° → degrees
+        buf->prev_angle = reached_angle;
+        buf->prev_time = buf->buffer[0].t_arrival_ms;
+        
+        // Shift buffer
         shift_buffer(buf);
         buf->count--;
         
-        if (buf->count > 0) {
-            // Generate trajectory for next segment
-            generateTrajectorySegment(dof, buf);
-        } else {
+        if (buf->count == 0) {
             // No more waypoints - enter HOLDING mode
             buf->state = HOLDING;
-            buf->array_valid = false;
             set_status_flag(dof, STATUS_HOLDING);
         }
+        // else: continue MOVING to next waypoint
     }
     
     // === OUTER LOOP @ 100 Hz (Joint PID) ===
+    // OUTER_LOOP_DIV = 5 (500 Hz / 100 Hz)
     if ((cycle_count - 1) % OUTER_LOOP_DIV == 0) {
         
         float q_des;
         
-        if (buf->state == MOVING && buf->array_valid) {
-            // Interpolate from trajectory array (EXISTING logic)
-            float t_segment = (t_now - buf->segment_start_time) / 1000.0f;
-            q_des = degrees(interpolate_data(t_segment, 
-                                             buf->time_array, 
-                                             buf->angle_array, 
-                                             SEGMENT_STEPS));
+        if (buf->state == MOVING && buf->count > 0) {
+            // LINEAR INTERPOLATION between prev_angle and next waypoint
+            CanCmd_Waypoint *next_wp = &buf->buffer[0];
+            float target_angle = next_wp->target_angle / 100.0f;  // 0.01° → degrees
+            float time_total = next_wp->t_arrival_ms - buf->prev_time;
+            float time_elapsed = t_now - buf->prev_time;
+            float progress = time_elapsed / time_total;
+            
+            // Clamp progress to [0, 1]
+            if (progress < 0.0f) progress = 0.0f;
+            if (progress > 1.0f) progress = 1.0f;
+            
+            // Simple linear: q_des = start + (end - start) × progress
+            q_des = buf->prev_angle + (target_angle - buf->prev_angle) * progress;
         } 
         else {
             // HOLDING mode - maintain current position
@@ -410,15 +389,15 @@ void updateTrajectory_Cascade(uint8_t dof) {
 
 **Key Differences from `moveMultiDOF_cascade`**:
 1. **Non-blocking**: Loop runs forever, not just for one movement
-2. **Dynamic arrays**: Trajectory arrays regenerated for each segment
+2. **Linear interpolation**: No trajectory arrays, just `start + (end - start) × progress`
 3. **Holding mode**: Automatically holds position when waypoints stop
 4. **Resumable**: New waypoints can arrive anytime, motion resumes seamlessly
 
 **Preserved from `moveMultiDOF_cascade`**:
-1. ✅ Outer PID @ 100 Hz (joint-level control)
-2. ✅ Inner motor control @ 500 Hz
-3. ✅ Cascade control architecture (delta_theta → motor references)
-4. ✅ Smooth trajectory profiles (path_linear, path_trig, path_quad)
+1. ✅ **SAMPLING_PERIOD = 2000 µs** (2 ms, exactly the same!)
+2. ✅ Outer PID @ 100 Hz (joint-level control)
+3. ✅ Inner motor control @ 500 Hz
+4. ✅ Cascade control architecture (delta_theta → motor references)
 5. ✅ Movement logging/sampling (if enabled)
 
 ---
@@ -574,105 +553,125 @@ Knee_Right buffer (dof=0):
 
 ### 6.5 Trajectory Execution Timeline
 
-**Note**: Unlike simple linear interpolation, the controller uses **trajectory arrays** (analogous to `moveMultiDOF_cascade`) with smooth velocity profiles (MODE_LINEAR = trapezoidal, MODE_SMOOTH = trigonometric).
+**Note**: The controller uses **simple linear interpolation** between consecutive waypoints. Smoothness comes from **waypoint density** (50-100 Hz from host), not from complex trajectory generation.
+
+**Scenario**: Host sends waypoints @ 50 Hz (20 ms spacing) for 2 joints
 
 ```
 t=1700000.016s CONTROLLERS after receiving waypoints:
   Ankle_Right:
-    ├─→ Waypoint received: angle=10°, t_arrival=1700000.100, mode=LINEAR
-    ├─→ generateTrajectorySegment():
-    │   - start_angle = 0° (current position)
-    │   - target_angle = 10°
-    │   - duration = 85ms (100 - 15)
-    │   - Call path_linear(0°, 10°, vmax, ta, 30 steps)
-    │   - Generate arrays: time[30], angle[30], velocity[30], accel[30]
-    ├─→ array_valid = true
+    ├─→ Waypoint 1 received: angle=2°, t_arrival=1700000.036
+    ├─→ Waypoint 2 received: angle=4°, t_arrival=1700000.056
+    ├─→ buffer[0] = {2°, 1700000.036}, buffer[1] = {4°, 1700000.056}
+    ├─→ count = 2
+    ├─→ prev_angle = 0° (current position)
+    ├─→ prev_time = 1700000.016 (now)
     └─→ state = MOVING
 
-t=1700000.020s CONTROLLERS @ 100Hz outer PID loop:
+  Knee_Right:
+    ├─→ Waypoint 1: angle=1°, t_arrival=1700000.036
+    ├─→ Waypoint 2: angle=2°, t_arrival=1700000.056
+    └─→ Similar buffer state
+
+t=1700000.020s CONTROLLERS @ 100Hz outer PID loop (4ms into segment):
   Ankle_Right:
     ├─→ t_now = 1700000.020
-    ├─→ t_segment = (20 - 16) / 1000 = 0.004s (4ms into trajectory)
-    ├─→ q_des = interpolate_data(0.004, time_array, angle_array, 30)
-    │   → Interpolates from trajectory array (smooth trapezoidal profile)
-    │   → q_des ≈ 0.35° (acceleration phase, not linear!)
-    └─→ PID_outer.setTarget(0.35°)
+    ├─→ target_angle = 2° (buffer[0])
+    ├─→ time_total = 1700000.036 - 1700000.016 = 20ms
+    ├─→ time_elapsed = 1700000.020 - 1700000.016 = 4ms
+    ├─→ progress = 4 / 20 = 0.2
+    ├─→ q_des = 0° + (2° - 0°) × 0.2 = 0.4°
+    └─→ PID_outer.setTarget(0.4°)
   
   Knee_Right:
-    └─→ q_des ≈ 0.18° (proportional to ankle)
+    └─→ q_des = 0° + (1° - 0°) × 0.2 = 0.2°
 
-t=1700000.050s (34ms into segment):
+t=1700000.030s (14ms into segment):
   Ankle_Right:
-    ├─→ t_segment = 0.034s
-    ├─→ q_des = interpolate_data(0.034, time_array, angle_array, 30)
-    │   → Now in constant velocity phase
-    └─→ q_des ≈ 4.2°
+    ├─→ time_elapsed = 14ms
+    ├─→ progress = 14 / 20 = 0.7
+    ├─→ q_des = 0° + (2° - 0°) × 0.7 = 1.4°
+    └─→ PID_outer.setTarget(1.4°)
   
   Knee_Right:
-    └─→ q_des ≈ 2.1°
+    └─→ q_des = 0° + (1° - 0°) × 0.7 = 0.7°
 
-t=1700000.100s (ARRIVAL at waypoint 1):
+t=1700000.036s (ARRIVAL at waypoint 1):
   Ankle_Right:
     ├─→ t_now >= buffer[0].t_arrival → TRANSITION!
-    ├─→ prev_angle = current_angle = 10.0° ± 0.1° (PID error)
-    ├─→ prev_time = 1700000.100
-    ├─→ shift_buffer() → buffer[0] now = old buffer[1]
+    ├─→ prev_angle = 2.0° (from buffer[0].target_angle)
+    ├─→ prev_time = 1700000.036 (from buffer[0].t_arrival)
+    ├─→ shift_buffer() → buffer[0] = old buffer[1]
     ├─→ count = 1
-    ├─→ generateTrajectorySegment() for next segment:
-    │   - start_angle = 10° (current position)
-    │   - target_angle = 20°
-    │   - duration = 100ms
-    │   - Regenerate arrays for 10° → 20° trajectory
-    └─→ array_valid = true, seamless continuation
+    └─→ Continue MOVING (seamless to next waypoint)
 
   Knee_Right:
-    └─→ Similar transition: regenerate arrays for 5° → 10°
+    └─→ Similar transition: prev_angle = 1.0°, continue MOVING
 
-t=1700000.150s (mid-trajectory, segment 2):
+t=1700000.040s (4ms into segment 2):
   Ankle_Right:
-    ├─→ t_segment = (150 - 100) / 1000 = 0.050s
-    ├─→ q_des = interpolate_data(0.050, time_array, angle_array, 30)
-    │   → Smooth interpolation from regenerated array
-    └─→ q_des ≈ 15.1° (deceleration phase starting)
+    ├─→ NOW: prev_angle = 2°, target = 4° (buffer[0])
+    ├─→ time_total = 1700000.056 - 1700000.036 = 20ms
+    ├─→ time_elapsed = 1700000.040 - 1700000.036 = 4ms
+    ├─→ progress = 4 / 20 = 0.2
+    ├─→ q_des = 2° + (4° - 2°) × 0.2 = 2.4°
+    └─→ Seamless continuation, no discontinuity!
   
   Knee_Right:
-    └─→ q_des ≈ 7.6°
+    └─→ q_des = 1° + (2° - 1°) × 0.2 = 1.2°
 
-t=1700000.200s (ARRIVAL at waypoint 2 - FINAL):
+t=1700000.050s (mid-segment 2):
   Ankle_Right:
-    ├─→ Reached target: 20.0°
+    ├─→ time_elapsed = 14ms
+    ├─→ progress = 14 / 20 = 0.7
+    ├─→ q_des = 2° + (4° - 2°) × 0.7 = 3.4°
+  
+  Knee_Right:
+    └─→ q_des = 1° + (2° - 1°) × 0.7 = 1.7°
+
+t=1700000.056s (ARRIVAL at waypoint 2 - FINAL):
+  Ankle_Right:
+    ├─→ Reached target: 4.0°
     ├─→ count = 0 (buffer empty)
     ├─→ state = HOLDING
-    ├─→ array_valid = false
-    └─→ q_des = getCurrentAngle() → Hold position until new waypoint
+    └─→ q_des = getCurrentAngle() = 4.0° (hold position)
   
   Knee_Right:
-    └─→ Reached target: 10.0°, state = HOLDING
+    └─→ Reached target: 2.0°, state = HOLDING
 
-t=1700000.300s (100ms later, still HOLDING):
+t=1700000.100s (44ms later, still HOLDING):
   Ankle_Right:
     ├─→ No new waypoints received
-    ├─→ q_des = getCurrentAngle() = 20.0°
+    ├─→ q_des = getCurrentAngle() = 4.0°
     ├─→ PID maintains position (zero error if stable)
     └─→ Status feedback: FLAGS = HOLDING | SYNCED
 
-t=1700000.400s (NEW waypoint arrives):
+t=1700000.150s (NEW waypoint arrives):
   Ankle_Right:
-    ├─→ Waypoint received: angle=15°, t_arrival=1700000.500
-    ├─→ state = HOLDING → MOVING
-    ├─→ generateTrajectorySegment():
-    │   - start_angle = 20° (current held position)
-    │   - target_angle = 15°
-    │   - duration = 100ms
-    │   - Generate new trajectory arrays
+    ├─→ Waypoint received: angle=6°, t_arrival=1700000.170
+    ├─→ state = HOLDING → MOVING (transition!)
+    ├─→ prev_angle = 4.0° (current held position)
+    ├─→ prev_time = 1700000.150 (now)
+    ├─→ count = 1
     └─→ Motion RESUMES smoothly from held position!
+
+t=1700000.160s (10ms into resumed segment):
+  Ankle_Right:
+    ├─→ target_angle = 6° (buffer[0])
+    ├─→ time_total = 1700000.170 - 1700000.150 = 20ms
+    ├─→ time_elapsed = 10ms
+    ├─→ progress = 10 / 20 = 0.5
+    ├─→ q_des = 4° + (6° - 4°) × 0.5 = 5.0°
+    └─→ Smooth resume from HOLDING!
 ```
 
 **Key Observations**:
-1. **Smooth profiles**: Trajectory arrays ensure zero jerk (acceleration continuous)
-2. **Seamless transitions**: Regenerating arrays at each waypoint eliminates discontinuities
-3. **Holding mode**: When buffer empties, holds position indefinitely
-4. **Resumable**: New waypoints can arrive anytime, motion resumes from held position
+1. **Linear interpolation**: Simple formula `q_des = start + (end - start) × progress`
+2. **Smooth via density**: 20ms spacing → 10 points @ 500 Hz inner loop → smooth enough
+3. **Seamless transitions**: Each waypoint arrival updates `prev_angle`/`prev_time`, no discontinuity
+4. **Holding mode**: When buffer empties, holds position indefinitely
+5. **Resumable**: New waypoints can arrive anytime, motion resumes from held position
+6. **Low memory**: No trajectory arrays, just 32 bytes per DOF (vs 512 with arrays)
 
 ---
 
