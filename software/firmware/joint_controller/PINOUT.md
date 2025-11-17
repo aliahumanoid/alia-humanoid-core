@@ -2,28 +2,29 @@
 
 Authoritative mapping is in code; this document mirrors those defaults for wiring and bring‑up.
 
-## SPI1 — CAN Interface
+## SPI1 — Unified CAN Interface (Single Bus Architecture)
 
 - `GP10` → `SPI1 SCK`
 - `GP11` → `SPI1 MOSI`
 - `GP12` → `SPI1 MISO`
-- `GP09` → `CAN_CS_PIN` (chip select)
-- `GP13` → `CAN_INT_PIN` (interrupt from CAN controller/transceiver)
+- `GP09` → `CAN_CS_PIN` (chip select for MCP2515)
+- `GP13` → `CAN_INT_PIN` (interrupt from MCP2515)
 
-Notes
-- Library: `mcp_can` (MCP2515‑compatible CAN controller expected)
-- See: `software/firmware/joint_controller/src/main.cpp` and `src/global.h:20`
+**Architecture:**
+- **Single CAN Bus** handles both Host commands and Motor commands
+- **Core1 exclusive access** to CAN bus (no SPI conflicts)
+- **Priority-optimized CAN IDs**:
+  - Emergency Stop: 0x000 (highest priority)
+  - Time Sync: 0x002
+  - Motor Commands: 0x140-0x280 (CRITICAL for PID @ 500 Hz)
+  - Waypoint Commands: 0x300-0x31F (trajectory updates)
+  - Status Feedback: 0x400-0x4FF (lowest priority)
 
-## SPI1 — Host CAN Interface (MCP2515 #2)
-
-- Shares `SPI1 SCK/MOSI/MISO` (GP10/GP11/GP12)
-- `GP08` → `HOST_CAN_CS_PIN` (chip select, dedicated to host-facing MCP2515)
-- `GP14` → `HOST_CAN_INT_PIN` (interrupt line from host CAN transceiver)
-
-Notes
-- Second MCP2515 reserved for host ↔ controller protocol (time sync, waypoints)
-- Uses same `mcp_can` library instance (`HostCanInterface` wrapper)
-- Keep both MCP2515 boards terminated appropriately on their respective buses
+**Notes:**
+- Library: `mcp_can` (MCP2515 CAN controller)
+- Requires 120Ω termination at both ends of CAN bus
+- See: `software/firmware/joint_controller/src/core1.cpp` for CAN polling
+- See: `software/docs/CAN_CONTROL_PROTOCOL.md` for protocol details
 
 ## SPI0 — Joint Encoder Link (Master → Encoder Board Slave)
 
