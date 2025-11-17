@@ -13,6 +13,7 @@ from flask import Flask
 from flask_socketio import SocketIO
 from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
 from serial_manager import SerialManager
+from can_manager import CanManager
 from routes import register_routes
 
 # Configure logging
@@ -25,8 +26,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, static_url_path='', static_folder='static')
 socketio = SocketIO(app)
 
-# Global serial manager instance
+# Global manager instances
 serial_manager_instance: Optional[SerialManager] = None
+can_manager_instance: Optional[CanManager] = None
 
 
 @socketio.on('connect', namespace='/movement')
@@ -37,9 +39,16 @@ def handle_connect():
 
 def init_app():
     """Initialize the application by setting up SerialManager and routes"""
-    global serial_manager_instance
+    global serial_manager_instance, can_manager_instance
     serial_manager_instance = SerialManager(socketio)
-    register_routes(app, serial_manager_instance)
+    try:
+        shared_logger = serial_manager_instance.get_session_logger() if serial_manager_instance else None
+        can_manager_instance = CanManager(socketio, comm_logger=shared_logger)
+    except RuntimeError as exc:
+        logger.warning("CAN features unavailable: %s", exc)
+        can_manager_instance = None
+
+    register_routes(app, serial_manager_instance, can_manager_instance)
 
 
 def signal_handler(signum, frame):
@@ -48,6 +57,9 @@ def signal_handler(signum, frame):
     if serial_manager_instance:
         serial_manager_instance.shutdown()
         logger.info("Serial session logs saved")
+    if can_manager_instance:
+        can_manager_instance.disconnect()
+        logger.info("CAN interface closed")
     sys.exit(0)
 
 

@@ -8,11 +8,12 @@ This module defines all HTTP endpoints for:
 - System configuration (joint limits, available commands)
 """
 from flask import jsonify, request, current_app, render_template
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from serial_manager import SerialManager
 from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
 import json
 import os
+import time
 import utils
 from pathlib import Path
 import logging
@@ -26,7 +27,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-def register_routes(app, serial_manager: SerialManager):
+def register_routes(app, serial_manager: SerialManager, can_manager=None):
     """
     Register all Flask routes for the joint controller application.
     
@@ -47,6 +48,14 @@ def register_routes(app, serial_manager: SerialManager):
                 400,
             )
         return handler, None, None
+
+    def can_unavailable_response():
+        if not CAN_AVAILABLE or can_manager is None:
+            return jsonify({
+                "status": "error",
+                "message": "CAN features not available on this host (python-can missing or disabled)."
+            }), 503
+        return None
 
     def load_mapping_from_file(joint_name: str):
         filename = f"mapping_data/{joint_name.lower()}_mapping.json"
@@ -264,6 +273,226 @@ def register_routes(app, serial_manager: SerialManager):
                 "status": "error",
                 "message": f"Unexpected error: {str(e)}",
                 "error_type": "unknown"
+            }), 500
+
+    @app.route('/can/connect', methods=['POST'])
+    def connect_can_interface():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        config_payload = data.get('config')
+        bitrate_override = data.get('bitrate')
+
+        if isinstance(config_payload, str):
+            try:
+                config = json.loads(config_payload)
+            except json.JSONDecodeError as exc:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Invalid config JSON: {exc}"
+                }), 400
+        elif isinstance(config_payload, dict):
+            config = dict(config_payload)
+        else:
+            config = {}
+
+        if bitrate_override:
+            try:
+                config['bitrate'] = int(bitrate_override)
+            except ValueError:
+                return jsonify({
+                    "status": "error",
+                    "message": "bitrate must be an integer value"
+                }), 400
+
+        if 'bitrate' not in config:
+            config['bitrate'] = getattr(can_manager, "DEFAULT_BITRATE", 1_000_000)
+
+        try:
+            info = can_manager.connect(config)
+            return jsonify({
+                "status": "success",
+                "message": "CAN interface connected",
+                "info": info
+            })
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": str(exc)
+            }), 400
+        except Exception as exc:
+            logger.exception("Failed to connect CAN interface")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to connect: {exc}"
+            }), 500
+
+    @app.route('/can/disconnect', methods=['POST'])
+    def disconnect_can_interface():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            can_manager.disconnect()
+            return jsonify({
+                "status": "success",
+                "message": "CAN interface disconnected"
+            })
+        except Exception as exc:
+            logger.exception("Error while disconnecting CAN interface")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to disconnect: {exc}"
+            }), 500
+
+    @app.route('/can/status', methods=['GET'])
+    def get_can_status():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            state = can_manager.get_connection_state()
+            return jsonify({
+                "status": "success",
+                "state": state
+            })
+        except Exception as exc:
+            logger.exception("Unable to fetch CAN status")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to fetch status: {exc}"
+            }), 500
+
+    @app.route('/can/time_sync', methods=['POST'])
+    def send_can_time_sync():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        timestamp_ms = data.get('timestamp_ms')
+        if timestamp_ms is None:
+            timestamp_ms = int(time.time() * 1000)
+        else:
+            try:
+                timestamp_ms = int(timestamp_ms)
+            except ValueError:
+                return jsonify({
+                    "status": "error",
+                    "message": "timestamp_ms must be an integer"
+                }), 400
+
+        try:
+            result = can_manager.send_time_sync(timestamp_ms)
+            return jsonify({
+                "status": "success",
+                "message": f"Time sync broadcast at {result['timestamp_ms']} ms",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to send CAN time sync")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send time sync: {exc}"
+            }), 500
+
+    @app.route('/can/waypoint', methods=['POST'])
+    def send_can_waypoint():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        joint = data.get('joint')
+        dof_index = data.get('dof_index')
+        angle_deg = data.get('angle_deg')
+        t_arrival_ms = data.get('t_arrival_ms')
+        arrival_offset_ms = data.get('arrival_offset_ms', 50)
+        mode = data.get('mode', 0x01)
+
+        if not joint:
+            return jsonify({
+                "status": "error",
+                "message": "Joint is required"
+            }), 400
+        if dof_index is None:
+            return jsonify({
+                "status": "error",
+                "message": "dof_index is required"
+            }), 400
+        if angle_deg is None:
+            return jsonify({
+                "status": "error",
+                "message": "angle_deg is required"
+            }), 400
+
+        try:
+            dof_index = int(dof_index)
+            angle_deg = float(angle_deg)
+            if t_arrival_ms is None:
+                arrival_offset_ms = max(int(arrival_offset_ms), 1)
+                t_arrival_ms = int(time.time() * 1000) + arrival_offset_ms
+            else:
+                t_arrival_ms = int(t_arrival_ms)
+            mode = int(mode) & 0xFF
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": f"Invalid parameter: {exc}"
+            }), 400
+
+        try:
+            details = can_manager.send_waypoint(joint, dof_index, angle_deg, t_arrival_ms, mode)
+            return jsonify({
+                "status": "success",
+                "message": f"Waypoint queued for {joint} DOF {dof_index}",
+                "details": details
+            })
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": str(exc)
+            }), 400
+        except Exception as exc:
+            logger.exception("Failed to send waypoint")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send waypoint: {exc}"
+            }), 500
+
+    @app.route('/can/emergency_stop', methods=['POST'])
+    def send_can_emergency_stop():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        reason_code = data.get('reason_code', 0)
+
+        try:
+            reason_code = int(reason_code) & 0xFF
+        except ValueError:
+            return jsonify({
+                "status": "error",
+                "message": "reason_code must be integer"
+            }), 400
+
+        try:
+            result = can_manager.send_emergency_stop(reason_code)
+            return jsonify({
+                "status": "success",
+                "message": "Emergency stop broadcast",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to send emergency stop")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send emergency stop: {exc}"
             }), 500
 
     @app.route('/status_message', methods=['GET'])

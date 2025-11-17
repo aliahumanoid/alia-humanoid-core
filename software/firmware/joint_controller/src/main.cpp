@@ -148,6 +148,7 @@ void setup() {
   SPI1.setTX(11);
   SPI1.setSCK(10);
   SPI1.begin();
+  spi1_lock_init();
 
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
@@ -166,6 +167,13 @@ void setup() {
   } else {
     LOG_INFO("Normal mode set successfully.");
   }
+
+  // Initialize waypoint buffers for CAN-based control
+  waypoint_buffers_init(ACTIVE_JOINT_CONFIG.dof_count);
+  LOG_INFO("Waypoint buffers initialized for " + String(ACTIVE_JOINT_CONFIG.dof_count) + " DOFs");
+
+  // Verify CS pin is HIGH (inactive) after initialization
+  LOG_INFO("CS pin state: Motor CAN (GP" + String(CAN_CS_PIN) + ")=" + String(digitalRead(CAN_CS_PIN)));
 
   LOG_INFO("Joint firmware starting!");
 

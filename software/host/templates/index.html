@@ -404,6 +404,16 @@
                             </div>
                             <p id="serialPortHint" class="text-xs text-gray-500 mt-1"></p>
                         </div>
+                    </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('hostCanControlContent')">
+                        <span>Host CAN Control</span>
+                        <i class="fas fa-chevron-up chevron-icon"></i>
+                    </h2>
+                    <div id="hostCanControlContent" class="section-content space-y-4">
                         <div>
                             <label for="canInterfaceSelect" class="block text-sm font-medium text-gray-700">CAN Interface:</label>
                             <div class="mt-1 flex items-center space-x-2">
@@ -424,7 +434,85 @@
                             </div>
                             <p id="canInterfaceHint" class="text-xs text-gray-500 mt-1"></p>
                         </div>
-                    </div>
+                        <div id="canControlPanel" class="bg-gray-50 rounded-lg p-4 space-y-4">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm font-semibold text-gray-700">Connection</p>
+                                    <p id="canConnectionDetails" class="text-xs text-gray-500">Select interface and press Connect</p>
+                                </div>
+                                <span id="canConnectionBadge"
+                                    class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700">Disconnected</span>
+                            </div>
+                            <div class="flex flex-wrap gap-2">
+                                <button id="connectCanBtn" type="button"
+                                    class="px-3 py-2 rounded-md bg-green-500 text-white hover:bg-green-600">
+                                    <i class="fas fa-plug mr-1"></i>Connect
+                                </button>
+                                <button id="disconnectCanBtn" type="button"
+                                    class="px-3 py-2 rounded-md bg-gray-500 text-white hover:bg-gray-600">
+                                    <i class="fas fa-unlink mr-1"></i>Disconnect
+                                </button>
+                                <button id="sendCanTimeSync" type="button"
+                                    class="px-3 py-2 rounded-md bg-blue-500 text-white hover:bg-blue-600">
+                                    <i class="fas fa-clock mr-1"></i>Time Sync
+                                </button>
+                                <button id="sendCanEmergency" type="button"
+                                    class="px-3 py-2 rounded-md bg-red-500 text-white hover:bg-red-600">
+                                    <i class="fas fa-exclamation-triangle mr-1"></i>E-Stop
+                                </button>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+                                <div>
+                                    <label for="canWaypointJoint" class="block text-xs font-medium text-gray-600">Joint</label>
+                                    <select id="canWaypointJoint"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                        <option value="">Loading joints...</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="canWaypointDof" class="block text-xs font-medium text-gray-600">DOF</label>
+                                    <select id="canWaypointDof"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                        <option value="0">DOF 0</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="canWaypointAngle" class="block text-xs font-medium text-gray-600">Angle (°)</label>
+                                    <input type="number" id="canWaypointAngle" value="5"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50" />
+                                </div>
+                                <div>
+                                    <label for="canWaypointArrival" class="block text-xs font-medium text-gray-600">Arrival Offset (ms)</label>
+                                    <input type="number" id="canWaypointArrival" value="50"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50" />
+                                </div>
+                                <div>
+                                    <label for="canWaypointMode" class="block text-xs font-medium text-gray-600">Mode</label>
+                                    <select id="canWaypointMode"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                        <option value="1" selected>LINEAR (default)</option>
+                                        <option value="0">DIRECT</option>
+                                        <option value="2">SMOOTH (future)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="flex justify-end">
+                                <button id="sendCanWaypointBtn" type="button"
+                                    class="px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600">
+                                    <i class="fas fa-paper-plane mr-1"></i>Send Waypoint
+                                </button>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <p class="text-xs font-semibold text-gray-600 uppercase mb-1">Latest Status</p>
+                                    <div id="canStatusList" class="space-y-1 min-h-[40px]"></div>
+                                </div>
+                                <div>
+                                    <p class="text-xs font-semibold text-gray-600 uppercase mb-1">Recent Frames</p>
+                                    <div id="canRawMessages" class="space-y-1 min-h-[40px]"></div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 

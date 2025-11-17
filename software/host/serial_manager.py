@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import serial.tools.list_ports
 
 from serial_handler import SerialHandler
+from serial_logger import SerialLogger
 
 
 class SerialManager:
@@ -32,6 +33,7 @@ class SerialManager:
         self._listener_threads: Dict[str, threading.Thread] = {}
         self._joint_to_port: Dict[str, str] = {}
         self._lock = threading.Lock()
+        self.session_logger = SerialLogger("logs/serial_communication.log")
 
     def list_available_ports(self) -> List[str]:
         """
@@ -116,7 +118,7 @@ class SerialManager:
 
             handler = self._handlers_by_port.get(port)
             if handler is None:
-                handler = SerialHandler(self.socketio, port=port)
+                handler = SerialHandler(self.socketio, port=port, serial_logger=self.session_logger)
                 listener = threading.Thread(
                     target=handler.listen_for_messages,
                     daemon=True,
@@ -185,8 +187,11 @@ class SerialManager:
         Gracefully closes all SerialHandler instances and their associated
         serial loggers to ensure proper cleanup.
         """
-        with self._lock:
-            handlers = list(self._handlers_by_port.values())
-        for handler in handlers:
-            if hasattr(handler, "serial_logger"):
-                handler.serial_logger.close_session()
+        if self.session_logger:
+            self.session_logger.close_session()
+
+    def get_session_logger(self) -> SerialLogger:
+        """
+        Return the shared session logger instance.
+        """
+        return self.session_logger

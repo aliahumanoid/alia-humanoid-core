@@ -130,18 +130,21 @@ $(document).ready(function() {
         // Render DOF-specific buttons after limits are loaded (so zero_angle_offset is available)
         renderDofControlButtons();
     });
-    fetchSerialPortConfiguration();
-    fetchCanInterfaces();
     
     // Load joint configuration for auto-mapping grid visualization
     fetchJointConfig();
     
-    // Load PID values for the initially selected joint (KNEE_LEFT by default)
-    setTimeout(function() {
+    // Fetch serial port configuration first, then initialize joint selection
+    fetchSerialPortConfiguration().done(function() {
+        // Now that jointPortMapping is populated, we can safely select the joint
         const initialJoint = $("#jointSelect").val();
         sendCommand('select-joint', { joint: initialJoint });
         console.log('Initial PID values requested for joint:', initialJoint);
-    }, 500); // Small delay to ensure backend is ready
+    });
+    
+    // Fetch CAN interfaces after serial port configuration
+    fetchCanInterfaces({ showStatus: false });
+    startCanStatusPolling();
 
     socket.on('connect', function() {
         console.log('Websocket connected!');
@@ -335,6 +338,14 @@ $(document).ready(function() {
             }
         }
     });
+
+    // CAN control handlers
+    $("#connectCanBtn").on('click', connectCanInterface);
+    $("#disconnectCanBtn").on('click', disconnectCanInterface);
+    $("#sendCanTimeSync").on('click', sendCanTimeSyncCommand);
+    $("#sendCanWaypointBtn").on('click', sendCanWaypointCommand);
+    $("#sendCanEmergency").on('click', sendCanEmergencyStop);
+    $("#canWaypointJoint").on('change', updateCanWaypointDofOptions);
 
     // Initialize charts
     initializeCharts();
@@ -1671,6 +1682,12 @@ function assignSerialPortToJoint(joint, port) {
 
 let availableCanInterfaces = [];
 let selectedCanInterface = null;
+let canConnectionState = {
+    connected: false,
+    last_status: {},
+    stats: {}
+};
+let canStatusPollHandle = null;
 
 function fetchCanInterfaces(options = {}) {
     const { showStatus = false } = options;
@@ -1800,6 +1817,269 @@ function testCanInitialization() {
             testBtn.html('<i class="fas fa-vial mr-1"></i>Test');
         }
     });
+}
+
+function connectCanInterface() {
+    const selectedValue = $("#canInterfaceSelect").val();
+    
+    if (!selectedValue) {
+        appendStatusMessage("⚠️ Select a CAN interface before connecting.");
+        return;
+    }
+
+    const connectBtn = $("#connectCanBtn");
+    connectBtn.prop("disabled", true).html('<i class="fas fa-spinner fa-spin mr-1"></i>Connecting...');
+
+    $.ajax({
+        url: '/can/connect',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ config: selectedValue })
+    }).done(response => {
+        if (response.status === 'success') {
+            selectedCanInterface = selectedValue;
+            appendStatusMessage(`✅ ${response.message || 'CAN interface connected'}`);
+            fetchCanStatus({ showStatus: true });
+        } else {
+            appendStatusMessage(`❌ ${response.message || 'Failed to connect CAN interface'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ CAN connect error: ${message}`);
+    }).always(() => {
+        connectBtn.prop("disabled", false).html('<i class="fas fa-plug mr-1"></i>Connect');
+    });
+}
+
+function disconnectCanInterface() {
+    const disconnectBtn = $("#disconnectCanBtn");
+    disconnectBtn.prop("disabled", true).html('<i class="fas fa-spinner fa-spin mr-1"></i>Disconnecting...');
+
+    $.ajax({
+        url: '/can/disconnect',
+        method: 'POST'
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage("🔌 CAN interface disconnected");
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Failed to disconnect CAN interface'}`);
+        }
+        fetchCanStatus();
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ CAN disconnect error: ${message}`);
+    }).always(() => {
+        disconnectBtn.prop("disabled", false).html('<i class="fas fa-unlink mr-1"></i>Disconnect');
+    });
+}
+
+function fetchCanStatus(options = {}) {
+    const { showStatus = false } = options;
+    return $.ajax({
+        url: '/can/status',
+        method: 'GET',
+        dataType: 'json'
+    }).done(response => {
+        if (response.status === 'success') {
+            canConnectionState = response.state || {};
+            updateCanStatusUI(canConnectionState);
+            if (showStatus) {
+                appendStatusMessage(`ℹ️ CAN status: ${canConnectionState.connected ? 'connected' : 'disconnected'}`);
+            }
+        } else if (showStatus) {
+            appendStatusMessage(`⚠️ ${response.message || 'CAN status unavailable'}`);
+        }
+    }).fail(xhr => {
+        if (xhr.status === 503) {
+            updateCanStatusUI({ connected: false, error: 'CAN not available on this system' });
+            if (showStatus) {
+                appendStatusMessage('⚠️ CAN subsystem not available');
+            }
+        } else if (showStatus) {
+            appendStatusMessage(`⚠️ Error fetching CAN status: ${xhr.statusText}`);
+        }
+    });
+}
+
+function updateCanStatusUI(state = {}) {
+    const badge = $("#canConnectionBadge");
+    const details = $("#canConnectionDetails");
+    const statusList = $("#canStatusList");
+    const rawMessages = $("#canRawMessages");
+
+    const connected = !!state.connected;
+    if (badge.length) {
+        const baseClasses = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold";
+        if (connected) {
+            badge.attr("class", `${baseClasses} bg-green-100 text-green-800`);
+            badge.text("Connected");
+        } else {
+            badge.attr("class", `${baseClasses} bg-gray-200 text-gray-700`);
+            badge.text("Disconnected");
+        }
+    }
+
+    if (details.length) {
+        if (connected && state.config) {
+            const cfg = state.config;
+            const bitrate = cfg.bitrate ? `${(cfg.bitrate / 1000).toFixed(0)} kbps` : 'unknown bitrate';
+            details.text(`${cfg.interface || '??'} @ ${cfg.channel || 'N/A'} (${bitrate})`);
+        } else if (state.error) {
+            details.text(state.error);
+        } else {
+            details.text('Select interface and press Connect');
+        }
+    }
+
+    if (statusList.length) {
+        statusList.empty();
+        if (state.last_status) {
+            Object.values(state.last_status).forEach(entry => {
+                const item = $('<div class="flex justify-between text-xs font-mono"></div>');
+                const joint = $('<span></span>').text(`${entry.joint} · DOF${entry.dof_index}`);
+                const value = $('<span></span>').text(`${entry.current_angle_deg.toFixed(2)}° → ${entry.target_angle_deg.toFixed(2)}° (${entry.progress_pct}% )`);
+                item.append(joint).append(value);
+                statusList.append(item);
+            });
+        } else {
+            statusList.append('<div class="text-xs text-gray-500">No status frames received yet</div>');
+        }
+    }
+
+    if (rawMessages.length) {
+        rawMessages.empty();
+        if (state.status_messages && state.status_messages.length > 0) {
+            state.status_messages.slice(0, 6).forEach(msg => {
+                const text = msg.type === "status"
+                    ? `${msg.data.arbitration_id} joint=${msg.data.joint} flags=0x${msg.data.flags.toString(16)}`
+                    : `${msg.frame.id} data=${msg.frame.data}`;
+                rawMessages.append(`<div class="text-xs font-mono">${text}</div>`);
+            });
+        } else {
+            rawMessages.append('<div class="text-xs text-gray-500">No frames logged</div>');
+        }
+    }
+}
+
+function sendCanTimeSyncCommand() {
+    $.ajax({
+        url: '/can/time_sync',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({})
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage(`🕒 Time sync @ ${response.result?.timestamp_ms || 'unknown'} ms`);
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Time sync failed'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Time sync error: ${message}`);
+    });
+}
+
+function sendCanEmergencyStop() {
+    $.ajax({
+        url: '/can/emergency_stop',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ reason_code: 1 })
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage('🛑 Emergency stop broadcast via CAN');
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Emergency stop failed'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Emergency stop error: ${message}`);
+    });
+}
+
+function populateCanWaypointJointOptions() {
+    const select = $("#canWaypointJoint");
+    if (!select.length || !jointConfigData || !jointConfigData.joints) {
+        return;
+    }
+
+    select.empty();
+    Object.keys(jointConfigData.joints).forEach(key => {
+        const hostKey = key.toUpperCase();
+        const niceName = jointConfigData.joints[key].name || hostKey.replace('_', ' ');
+        select.append(`<option value="${hostKey}">${niceName}</option>`);
+    });
+
+    updateCanWaypointDofOptions();
+}
+
+function updateCanWaypointDofOptions() {
+    const joint = $("#canWaypointJoint").val();
+    const dofSelect = $("#canWaypointDof");
+    if (!joint || !dofSelect.length || !jointConfigData || !jointConfigData.joints) {
+        return;
+    }
+
+    const configKey = joint.toLowerCase();
+    const jointEntry = jointConfigData.joints[configKey];
+    if (!jointEntry) {
+        dofSelect.empty().append('<option value="0">DOF 0</option>');
+        return;
+    }
+
+    dofSelect.empty();
+    jointEntry.dofs.forEach((dof, idx) => {
+        const label = dof.name ? dof.name.replace('_', ' ') : `DOF ${idx}`;
+        dofSelect.append(`<option value="${idx}">${idx} · ${label}</option>`);
+    });
+}
+
+function sendCanWaypointCommand() {
+    const joint = $("#canWaypointJoint").val();
+    const dofIndex = $("#canWaypointDof").val();
+    const angle = parseFloat($("#canWaypointAngle").val());
+    const arrivalOffset = parseInt($("#canWaypointArrival").val(), 10) || 50;
+    const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint for the waypoint test.");
+        return;
+    }
+    if (Number.isNaN(angle)) {
+        appendStatusMessage("⚠️ Enter a valid angle in degrees.");
+        return;
+    }
+
+    $.ajax({
+        url: '/can/waypoint',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            joint: joint,
+            dof_index: dofIndex,
+            angle_deg: angle,
+            arrival_offset_ms: arrivalOffset,
+            mode: mode
+        })
+    }).done(response => {
+        if (response.status === 'success') {
+            const details = response.details || {};
+            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${details.dof_index ?? dofIndex} @ ${details.angle_deg ?? angle}°`);
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Failed to send waypoint'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Waypoint error: ${message}`);
+    });
+}
+
+function startCanStatusPolling() {
+    if (canStatusPollHandle) {
+        clearInterval(canStatusPollHandle);
+    }
+    fetchCanStatus();
+    canStatusPollHandle = setInterval(fetchCanStatus, 3000);
 }
 
 // --- Legacy chart functions (Mapping, Movement, Output) ---
@@ -4267,6 +4547,7 @@ function fetchJointConfig() {
             if (response.status === 'success' && response.config) {
                 jointConfigData = response.config;
                 console.log('Joint configuration loaded:', jointConfigData);
+                populateCanWaypointJointOptions();
                 
                 // Show expected mapping grid for initially selected joint
                 const initialJoint = $("#jointSelect").val();
