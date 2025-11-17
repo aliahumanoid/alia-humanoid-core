@@ -19,6 +19,163 @@
 
 #include "main_common.h"
 
+// ============================================================================
+// UNIFIED CAN BUS POLLING - Host Commands & Motor Responses (Core1 only)
+// ============================================================================
+
+// CAN ID ranges (from CAN_CONTROL_PROTOCOL.md - Priority-Optimized)
+// Priority Level 0 (Highest): Emergency
+#define CAN_ID_EMERGENCY_STOP 0x000
+
+// Priority Level 1: System Control
+#define CAN_ID_TIME_SYNC 0x002
+
+// Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
+
+// Priority Level 3: Trajectory Commands
+#define CAN_ID_WAYPOINT_BASE 0x300  // 0x300-0x31F for waypoints (NEW: was 0x010)
+
+// Priority Level 4: Status Feedback
+#define CAN_ID_STATUS_BASE 0x400    // 0x400-0x4FF for status (NEW: was 0x200)
+
+// Time synchronization state
+static volatile int32_t clock_offset_ms = 0;
+static volatile bool clock_synced = false;
+static volatile uint32_t last_sync_host_ms = 0;
+static volatile uint32_t last_sync_local_ms = 0;
+
+/**
+ * @brief Get absolute time in milliseconds (synchronized with host)
+ * @return Absolute time in ms, or local time if not synchronized
+ */
+uint32_t getAbsoluteTimeMs() {
+  const uint32_t local = millis();
+  if (!clock_synced) {
+    return local;
+  }
+  const int32_t adjusted = static_cast<int32_t>(local) + clock_offset_ms;
+  return adjusted < 0 ? 0 : static_cast<uint32_t>(adjusted);
+}
+
+/**
+ * @brief Handle Time Sync frame from host
+ * @param data CAN frame data (8 bytes)
+ * @param len Frame length
+ */
+void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
+  if (len < 8) {
+    LOG_WARN("[CAN] Time Sync frame too short (" + String(len) + " bytes)");
+    return;
+  }
+
+  // Parse timestamp (uint32_t, little-endian)
+  uint32_t t_host_ms = 0;
+  memcpy(&t_host_ms, data, sizeof(uint32_t));
+
+  const uint32_t t_local = millis();
+  clock_offset_ms = static_cast<int32_t>(t_host_ms) - static_cast<int32_t>(t_local);
+  last_sync_host_ms = t_host_ms;
+  last_sync_local_ms = t_local;
+  clock_synced = true;
+
+  LOG_INFO("[CAN] Time sync applied: host=" + String(t_host_ms) + " ms offset=" + String(clock_offset_ms) + " ms");
+}
+
+/**
+ * @brief Handle Waypoint frame from host
+ * @param id CAN ID (encodes joint and DOF)
+ * @param data CAN frame data (8 bytes)
+ * @param len Frame length
+ */
+void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
+  if (len < 8) {
+    LOG_WARN("[CAN] Waypoint frame too short (" + String(len) + " bytes)");
+    return;
+  }
+
+  if (!clock_synced) {
+    LOG_WARN("[CAN] Waypoint dropped: clock not synchronized");
+    return;
+  }
+
+  // Parse waypoint (from CAN_CONTROL_PROTOCOL.md)
+  struct {
+    uint8_t dof_index;
+    int16_t target_angle;    // 0.01° resolution
+    uint32_t t_arrival_ms;   // Absolute arrival time
+    uint8_t mode;            // LINEAR/SMOOTH
+  } __attribute__((packed)) waypoint;
+
+  memcpy(&waypoint, data, sizeof(waypoint));
+
+  // Verify DOF index
+  if (waypoint.dof_index >= waypoint_buffers_get_dof_count()) {
+    LOG_WARN("[CAN] Waypoint DOF " + String(waypoint.dof_index) + " exceeds configured DOFs");
+    return;
+  }
+
+  // Convert to WaypointEntry
+  WaypointEntry entry{};
+  entry.dof_index = waypoint.dof_index;
+  entry.target_angle_deg = static_cast<float>(waypoint.target_angle) / 100.0f;
+  entry.t_arrival_ms = waypoint.t_arrival_ms;
+  entry.mode = waypoint.mode;
+
+  // Push to buffer
+  if (!waypoint_buffer_push(waypoint.dof_index, entry)) {
+    LOG_WARN("[CAN] Waypoint buffer full for DOF " + String(waypoint.dof_index));
+    return;
+  }
+
+  LOG_INFO("[CAN] Waypoint queued DOF=" + String(waypoint.dof_index) + " angle=" + String(entry.target_angle_deg, 3) +
+           " deg t_arrival=" + String(entry.t_arrival_ms) + " ms mode=" + String(entry.mode));
+}
+
+/**
+ * @brief Poll unified CAN bus for host commands and motor responses
+ * 
+ * This function polls the single CAN bus that now handles both:
+ * - Host commands (Time Sync, Waypoints, Emergency Stop)
+ * - Motor commands and responses (existing LKM protocol)
+ * 
+ * Called from core1_loop() every iteration.
+ * NOTE: Moved to Core1 to avoid SPI1 conflicts with motor commands.
+ */
+void pollUnifiedCan() {
+  extern MCP_CAN CAN;  // Motor CAN bus (now also handles host commands)
+
+  // Check if messages are available
+  if (CAN.checkReceive() != CAN_MSGAVAIL) {
+    return;
+  }
+
+  // Process up to 10 messages per poll to avoid blocking
+  uint8_t msg_count = 0;
+  while (CAN.checkReceive() == CAN_MSGAVAIL && msg_count < 10) {
+    unsigned long rx_id = 0;
+    unsigned char len = 0;
+    unsigned char buf[8] = {0};
+
+    if (CAN.readMsgBuf(&rx_id, &len, buf) != CAN_OK) {
+      // Read error - skip this message
+      break;
+    }
+
+    // Dispatch based on CAN ID
+    if (rx_id == CAN_ID_TIME_SYNC) {
+      handleTimeSyncFrame(buf, len);
+    } else if (rx_id == CAN_ID_EMERGENCY_STOP) {
+      LOG_WARN("[CAN] RX EMERGENCY_STOP frame");
+      emergency_stop_requested = true;
+    } else if (rx_id >= CAN_ID_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
+      handleWaypointFrame(rx_id, buf, len);
+    }
+    // Motor responses (0x140+) are handled by LKM_Motor internally
+
+    msg_count++;
+  }
+}
+
 /**
  * @brief Core1 main execution loop
  *
@@ -46,16 +203,26 @@ void core1_loop() {
   MovementResult last_movement_result; // To track last movement result
 
   while (true) {
+    // === POLL CAN BUS (Host + Motor) ===
+    // Core1 now handles ALL CAN communication to avoid SPI1 conflicts
+    pollUnifiedCan();
+
     // === EMERGENCY STOP CHECK ===
     if (emergency_stop_requested) {
-      // Immediate stop of all motors
+      LOG_INFO("Core1: Emergency stop requested");
+
+      // Stop all motors immediately
+      // No SPI1 conflicts possible - Core1 has exclusive CAN access
       if (active_joint_controller != nullptr) {
         active_joint_controller->stopAllMotors();
+        LOG_INFO("Core1: All motors stopped");
       }
 
       // Reset flag
       emergency_stop_requested = false;
       smooth_transition_active = false;
+
+      LOG_INFO("Core1: Emergency stop flag cleared");
 
       // Notify core0
       if (shared_data_ext.flag == 0) {
