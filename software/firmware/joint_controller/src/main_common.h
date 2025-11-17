@@ -30,7 +30,6 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <mcp_can.h>
-#include "mcp_can_guard.h"
 
 // Multi-joint support includes (before legacy system)
 #include <CommandParser.h>
@@ -40,7 +39,6 @@
 #include <config_presets.h>
 #include <shared_data.h>
 #include <waypoint_buffer.h>
-#include <spi1_lock.h>
 
 // Legacy support includes
 #include <PID.h>
