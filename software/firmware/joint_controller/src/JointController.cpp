@@ -456,9 +456,12 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
 }
 
 // Stop all motors
+// Can be safely called from both Core0 and Core1 (noInterrupts() protects SPI1 access)
 void JointController::stopAllMotors() {
   for (int i = 0; i < config.motor_count; i++) {
-    motors[i]->motorStop();
+    if (motors[i] != nullptr) {
+      motors[i]->motorStop();
+    }
   }
   LOG_INFO("Stopping all motors in JointController");
 }

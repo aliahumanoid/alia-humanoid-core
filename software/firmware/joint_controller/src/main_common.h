@@ -30,6 +30,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <mcp_can.h>
+#include "mcp_can_guard.h"
 
 // Multi-joint support includes (before legacy system)
 #include <CommandParser.h>
@@ -38,6 +39,8 @@
 #include <commands.h> // Before global.h to avoid conflicts
 #include <config_presets.h>
 #include <shared_data.h>
+#include <waypoint_buffer.h>
+#include <spi1_lock.h>
 
 // Legacy support includes
 #include <PID.h>
@@ -85,7 +88,7 @@ extern bool init_prg;
 // Command buffer
 extern char command[100];
 
-// CAN bus controller
+// CAN bus controller (unified for both host commands and motor control)
 extern MCP_CAN CAN;
 
 // Joint encoder board with 3 encoders

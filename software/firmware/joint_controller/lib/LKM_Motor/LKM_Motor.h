@@ -42,6 +42,7 @@
 #include <Arduino.h>
 #include <initializer_list>
 #include <mcp_can.h>
+#include "mcp_can_guard.h"
 
 // Use common type definition to avoid circular dependencies
 #include <common_types.h>

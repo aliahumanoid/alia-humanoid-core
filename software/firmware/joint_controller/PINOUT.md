@@ -14,6 +14,17 @@ Notes
 - Library: `mcp_can` (MCP2515‑compatible CAN controller expected)
 - See: `software/firmware/joint_controller/src/main.cpp` and `src/global.h:20`
 
+## SPI1 — Host CAN Interface (MCP2515 #2)
+
+- Shares `SPI1 SCK/MOSI/MISO` (GP10/GP11/GP12)
+- `GP08` → `HOST_CAN_CS_PIN` (chip select, dedicated to host-facing MCP2515)
+- `GP14` → `HOST_CAN_INT_PIN` (interrupt line from host CAN transceiver)
+
+Notes
+- Second MCP2515 reserved for host ↔ controller protocol (time sync, waypoints)
+- Uses same `mcp_can` library instance (`HostCanInterface` wrapper)
+- Keep both MCP2515 boards terminated appropriately on their respective buses
+
 ## SPI0 — Joint Encoder Link (Master → Encoder Board Slave)
 
 Master (controller Pico) pins:
