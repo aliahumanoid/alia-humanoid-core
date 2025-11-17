@@ -148,7 +148,7 @@ void setup() {
   SPI1.setTX(11);
   SPI1.setSCK(10);
   SPI1.begin();
-  spi1_lock_init();
+  // Note: SPI1 lock not needed - Core1 has exclusive CAN access
 
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
