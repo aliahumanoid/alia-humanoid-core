@@ -743,6 +743,85 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
   return true; // All motors are within limits
 }
 
+bool JointController::checkWaypointSafety(uint8_t dof_index, float current_angle, float target_angle,
+                                          uint32_t t_arrival_ms, uint32_t t_now, String &violation_message) {
+  violation_message = "";
+
+  // === CHECK 1: DOF index validity ===
+  if (dof_index >= config.dof_count) {
+    violation_message = "WAYPOINT REJECTED: DOF index " + String(dof_index) + " out of range";
+    return false;
+  }
+
+  // === CHECK 2: Time validity (arrival must be in the future) ===
+  if (t_arrival_ms <= t_now) {
+    violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
+                        " arrival time in the past (t_arrival=" + String(t_arrival_ms) + 
+                        " ms, t_now=" + String(t_now) + " ms)";
+    return false;
+  }
+
+  // === CHECK 3: Target angle within joint limits ===
+  if (!isAngleInLimits(dof_index, target_angle)) {
+    const DofConfig &dof_config = config.dofs[dof_index];
+    violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
+                        " target angle " + String(target_angle, 2) + "° outside joint limits " +
+                        "[" + String(dof_config.limits.min_angle, 1) + " / " + 
+                        String(dof_config.limits.max_angle, 1) + "]";
+    return false;
+  }
+
+  // === CHECK 4: Target angle within mapping limits (more conservative) ===
+  if (!isAngleInMappingLimits(dof_index, target_angle)) {
+    float min_safe, max_safe;
+    if (hasValidEquations(dof_index)) {
+      min_safe = linear_equations[dof_index].joint_safe_min;
+      max_safe = linear_equations[dof_index].joint_safe_max;
+    } else {
+      const float CONSERVATIVE_MARGIN = 2.0f;
+      min_safe = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN;
+      max_safe = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN;
+    }
+    violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
+                        " target angle " + String(target_angle, 2) + "° outside safe mapping limits " +
+                        "[" + String(min_safe, 1) + " / " + String(max_safe, 1) + "]";
+    return false;
+  }
+
+  // === CHECK 5: Velocity safety (with emergency margin) ===
+  float angle_delta = abs(target_angle - current_angle);
+  float time_delta_s = (t_arrival_ms - t_now) / 1000.0f;
+
+  if (time_delta_s > 0.001f) { // Avoid division by zero (1ms minimum)
+    float requested_velocity_deg_s = angle_delta / time_delta_s;
+    float requested_velocity_rad_s = requested_velocity_deg_s * DEG_TO_RAD;
+    
+    float max_speed_rad_s = config.dofs[dof_index].motion.max_speed;
+    float max_speed_deg_s = max_speed_rad_s * RAD_TO_DEG;
+    
+    // Emergency margin: 2x max_speed is considered critically dangerous
+    const float EMERGENCY_MARGIN = 2.0f;
+    
+    if (requested_velocity_rad_s > max_speed_rad_s * EMERGENCY_MARGIN) {
+      // CRITICAL: Velocity exceeds safe limits by 2x
+      violation_message = "WAYPOINT REJECTED (EMERGENCY): DOF " + String(dof_index) + 
+                          " requested velocity " + String(requested_velocity_deg_s, 1) + " °/s (" +
+                          String(requested_velocity_rad_s, 2) + " rad/s) exceeds " +
+                          String(EMERGENCY_MARGIN, 1) + "x max_speed " + String(max_speed_deg_s, 1) + " °/s";
+      return false;
+    } else if (requested_velocity_rad_s > max_speed_rad_s) {
+      // WARNING: Velocity exceeds configured max but within safety margin
+      // Log warning but allow movement (PID will limit actual speed)
+      LOG_WARN("[WAYPOINT SAFETY] DOF " + String(dof_index) + 
+               " requested velocity " + String(requested_velocity_deg_s, 1) + " °/s exceeds max_speed " + 
+               String(max_speed_deg_s, 1) + " °/s. Movement allowed but may lag behind.");
+    }
+  }
+
+  // All checks passed
+  return true;
+}
+
 bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
                                         String &violation_message, bool check_motors) {
   violation_message = "";

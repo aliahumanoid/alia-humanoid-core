@@ -347,6 +347,35 @@ public:
   float getCurrentAngle(uint8_t dof_index, bool &is_valid);
 
   /**
+   * @brief Get maximum speed for a DOF
+   * @param dof_index DOF index
+   * @return Maximum speed in rad/s, or 0.0 if DOF invalid
+   */
+  float getMaxSpeed(uint8_t dof_index) const {
+    if (dof_index >= config.dof_count) return 0.0f;
+    return config.dofs[dof_index].motion.max_speed;
+  }
+
+  /**
+   * @brief Check if a waypoint is safe for execution
+   * 
+   * Performs comprehensive safety checks before accepting a waypoint:
+   * 1. Velocity check: requested velocity must be within safe limits
+   * 2. Angle check: target angle must be within joint limits
+   * 3. Time check: arrival time must be in the future
+   * 
+   * @param dof_index DOF index
+   * @param current_angle Current joint angle (degrees)
+   * @param target_angle Target joint angle (degrees)
+   * @param t_arrival_ms Absolute arrival time (ms)
+   * @param t_now Current absolute time (ms)
+   * @param violation_message Output: detailed error message if check fails
+   * @return true if waypoint is safe, false otherwise
+   */
+  bool checkWaypointSafety(uint8_t dof_index, float current_angle, float target_angle,
+                           uint32_t t_arrival_ms, uint32_t t_now, String &violation_message);
+
+  /**
    * @brief Check if an angle is within safe limits derived from auto‑mapping
    * @param dof_index DOF index
    * @param angle Angle to verify
@@ -552,6 +581,27 @@ public:
       return 0;
     return spike_counters[dof_index];
   }
+
+  // ==========================================================================
+  // WAYPOINT-BASED TRAJECTORY CONTROL
+  // ==========================================================================
+
+  /**
+   * @brief Execute waypoint-based movement for all DOFs
+   * 
+   * Main entry point for waypoint control. Call this from core1_loop() at 500 Hz.
+   * Implements the same cascade control as moveMultiDOF_cascade but with continuous
+   * waypoint consumption instead of pre-generated trajectory arrays.
+   * 
+   * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
+   * - Outer loop @ 100 Hz (every 5 cycles)
+   * - Inner loop @ 500 Hz (every cycle)
+   * - Linear interpolation between waypoints
+   * - Hold position when buffer empty
+   * 
+   * @return true if any DOF is actively moving
+   */
+  bool executeWaypointMovement();
 };
 
 #endif // JOINT_CONTROLLER_H

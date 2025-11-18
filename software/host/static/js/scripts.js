@@ -344,6 +344,7 @@ $(document).ready(function() {
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
     $("#sendCanTimeSync").on('click', sendCanTimeSyncCommand);
     $("#sendCanWaypointBtn").on('click', sendCanWaypointCommand);
+    $("#sendCanWaypointSequenceBtn").on('click', sendCanWaypointSequence);
     $("#sendCanEmergency").on('click', sendCanEmergencyStop);
     $("#canWaypointJoint").on('change', updateCanWaypointDofOptions);
 
@@ -2071,6 +2072,83 @@ function sendCanWaypointCommand() {
     }).fail(xhr => {
         const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
         appendStatusMessage(`❌ Waypoint error: ${message}`);
+    });
+}
+
+function sendCanWaypointSequence() {
+    const joint = $("#canWaypointJoint").val();
+    const dofIndex = parseInt($("#canWaypointDof").val(), 10);
+    const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint for the waypoint sequence test.");
+        return;
+    }
+
+    // Define a test sequence: 0° → 5° → -5° → 10° → 0°
+    const testSequence = [
+        { angle: 0, delay: 1000 },   // Start at 0° after 1s
+        { angle: 5, delay: 1000 },   // Move to 5° after 1s
+        { angle: -5, delay: 1000 },  // Move to -5° after 1s
+        { angle: 10, delay: 1000 },  // Move to 10° after 1s
+        { angle: 0, delay: 1000 }    // Return to 0° after 1s
+    ];
+
+    appendStatusMessage(`🚀 Sending test sequence for ${joint} DOF${dofIndex} (${testSequence.length} waypoints)...`);
+
+    // Disable button during sequence
+    const btn = $("#sendCanWaypointSequenceBtn");
+    btn.prop('disabled', true);
+    btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
+
+    // Send waypoints sequentially with proper timing
+    let cumulativeDelay = 0;
+    let successCount = 0;
+
+    testSequence.forEach((waypoint, index) => {
+        cumulativeDelay += waypoint.delay;
+        
+        setTimeout(() => {
+            $.ajax({
+                url: '/can/waypoint',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    joint: joint,
+                    dof_index: dofIndex,
+                    angle_deg: waypoint.angle,
+                    arrival_offset_ms: waypoint.delay,
+                    mode: mode
+                })
+            }).done(response => {
+                if (response.status === 'success') {
+                    successCount++;
+                    appendStatusMessage(`  ✓ Waypoint ${index + 1}/${testSequence.length}: ${waypoint.angle}° (arrival in ${waypoint.delay}ms)`);
+                } else {
+                    appendStatusMessage(`  ✗ Waypoint ${index + 1} failed: ${response.message}`);
+                }
+                
+                // Re-enable button after last waypoint
+                if (index === testSequence.length - 1) {
+                    setTimeout(() => {
+                        btn.prop('disabled', false);
+                        btn.html('<i class="fas fa-list mr-1"></i>Send Test Sequence');
+                        appendStatusMessage(`✅ Sequence complete: ${successCount}/${testSequence.length} waypoints sent successfully`);
+                    }, 500);
+                }
+            }).fail(xhr => {
+                const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+                appendStatusMessage(`  ✗ Waypoint ${index + 1} error: ${message}`);
+                
+                // Re-enable button on error
+                if (index === testSequence.length - 1) {
+                    setTimeout(() => {
+                        btn.prop('disabled', false);
+                        btn.html('<i class="fas fa-list mr-1"></i>Send Test Sequence');
+                    }, 500);
+                }
+            });
+        }, index * 100); // Stagger requests by 100ms to avoid overwhelming the system
     });
 }
 
