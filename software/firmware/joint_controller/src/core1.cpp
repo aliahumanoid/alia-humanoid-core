@@ -121,10 +121,45 @@ void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
   entry.t_arrival_ms = waypoint.t_arrival_ms;
   entry.mode = waypoint.mode;
 
+  // Check if this is the first waypoint for this DOF (transition from IDLE to MOVING)
+  WaypointState current_state = waypoint_buffer_state(waypoint.dof_index);
+  bool is_first_waypoint = (current_state == WaypointState::IDLE);
+
   // Push to buffer
   if (!waypoint_buffer_push(waypoint.dof_index, entry)) {
     LOG_WARN("[CAN] Waypoint buffer full for DOF " + String(waypoint.dof_index));
     return;
+  }
+
+  // If this is the first waypoint, transition to MOVING state and initialize prev_angle
+  if (is_first_waypoint && active_joint_controller != nullptr) {
+    // Get current joint angle as starting point
+    bool is_valid = false;
+    float current_angle = active_joint_controller->getCurrentAngle(waypoint.dof_index, is_valid);
+    
+    if (is_valid) {
+      uint32_t t_now = getAbsoluteTimeMs();
+      
+      // === COMPREHENSIVE SAFETY CHECK ===
+      // Checks: velocity limits, angle limits, time validity, mapping limits
+      String safety_violation;
+      if (!active_joint_controller->checkWaypointSafety(waypoint.dof_index, current_angle, 
+                                                        entry.target_angle_deg, entry.t_arrival_ms, 
+                                                        t_now, safety_violation)) {
+        // Safety check failed - log error and trigger emergency stop
+        LOG_ERROR("[CAN SAFETY] " + safety_violation);
+        emergency_stop_requested = true;
+        return; // Drop waypoint
+      }
+      
+      // Safety check passed - initialize movement
+      waypoint_buffer_set_prev(waypoint.dof_index, current_angle, t_now);
+      waypoint_buffer_set_state(waypoint.dof_index, WaypointState::MOVING);
+      LOG_INFO("[CAN] DOF " + String(waypoint.dof_index) + " transitioned IDLE → MOVING (start=" + 
+               String(current_angle, 3) + "° at t=" + String(t_now) + " ms)");
+    } else {
+      LOG_WARN("[CAN] Cannot read current angle for DOF " + String(waypoint.dof_index) + ", waypoint queued but state unchanged");
+    }
   }
 
   LOG_INFO("[CAN] Waypoint queued DOF=" + String(waypoint.dof_index) + " angle=" + String(entry.target_angle_deg, 3) +
@@ -202,10 +237,40 @@ void pollUnifiedCan() {
 void core1_loop() {
   MovementResult last_movement_result; // To track last movement result
 
+  // Timing for waypoint control @ 500 Hz (same as moveMultiDOF_cascade)
+  const uint64_t SAMPLING_PERIOD_US = 2000; // 2 ms = 500 Hz
+  uint64_t next_time = 0; // Will be initialized on first waypoint
+  bool timing_initialized = false;
+
   while (true) {
     // === POLL CAN BUS (Host + Motor) ===
     // Core1 now handles ALL CAN communication to avoid SPI1 conflicts
     pollUnifiedCan();
+
+    // === WAYPOINT-BASED MOVEMENT ===
+    // Execute waypoint trajectory for all DOFs (if waypoints available)
+    // This runs @ 500 Hz with precise timing (outer loop @ 100 Hz, inner loop @ 500 Hz)
+    bool waypoint_active = false;
+    if (active_joint_controller != nullptr) {
+      waypoint_active = active_joint_controller->executeWaypointMovement();
+    }
+
+    // === TIMING: Wait for next cycle @ 500 Hz ===
+    // Only wait if waypoint control is active (to maintain precise timing)
+    // If no waypoints, loop runs as fast as possible for responsive command handling
+    if (waypoint_active) {
+      // Initialize timing on first active waypoint
+      if (!timing_initialized) {
+        next_time = time_us_64() + SAMPLING_PERIOD_US;
+        timing_initialized = true;
+      }
+      
+      busy_wait_until(next_time);
+      next_time += SAMPLING_PERIOD_US;
+    } else {
+      // Reset timing when waypoints stop (for next activation)
+      timing_initialized = false;
+    }
 
     // === EMERGENCY STOP CHECK ===
     if (emergency_stop_requested) {
