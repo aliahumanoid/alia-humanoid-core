@@ -258,6 +258,55 @@ Recommendation: Option A (separate legs)
   - CANL: Green
   - GND: Black
 
+### 3.4 Operational Guide: Hardware Development
+
+This section outlines the practical steps to move from concept to physical implementation.
+
+#### Step 1: Rapid Prototyping (Breadboard Phase)
+**Objective**: Validate the multi-bus software stack before manufacturing custom PCBs.
+
+**Hardware Checklist:**
+1.  **Nvidia Jetson** (Nano / Orin Nano / Orin NX)
+2.  **2x MCP2515 Modules** (Generic blue boards, ~€3 each)
+3.  **Jumper Wires** (Female-Female)
+4.  **1x Breadboard** (for sharing power/GND)
+
+**Wiring (Jetson 40-pin Header J30):**
+
+| Jetson Pin | Signal | Connect to MCP2515 (1) | Connect to MCP2515 (2) |
+|------------|--------|------------------------|------------------------|
+| **1** | 3.3V | VCC | VCC |
+| **6** | GND | GND | GND |
+| **19** | MOSI | SI | SI |
+| **21** | MISO | SO | SO |
+| **23** | SCK | SCK | SCK |
+| **24** | CS0 | **CS** | - |
+| **26** | CS1 | - | **CS** |
+| **2** | 5V | *VCC_5V (if TJA1050)* | *VCC_5V (if TJA1050)* |
+
+*Note: If using generic modules with TJA1050, they need 5V for the transceiver but 3.3V for SPI logic. Check if your module has a jumper or separate pins. Safer alternative: Use modules with **SN65HVD230** (3.3V native).*
+
+#### Step 2: Component Selection for Custom PCB
+For the final **CAN Expansion Board**, we recommend specific components to simplify integration with Jetson (3.3V logic).
+
+**Recommended BOM:**
+
+1.  **CAN Controller**: `Microchip MCP2515-I/SO` (SOIC-18)
+    *   *Status*: Industry standard, robust Linux driver.
+2.  **CAN Transceiver**: `Texas Instruments SN65HVD230` (SOIC-8)
+    *   *Why*: **Crucial Change**. Unlike TJA1050 (5V), this runs on **3.3V**.
+    *   *Benefit*: Eliminates need for 5V level shifting or dual power rails on the interface board. Directly compatible with Jetson logic.
+3.  **SPI Multiplexer**: `Texas Instruments SN74HC4051D` (SOIC-16)
+    *   *Function*: Expands 1 Chip Select line into 8.
+4.  **Crystal**: `8.000 MHz` (SMD 5032 or HC-49)
+    *   *Note*: One per MCP2515 (or a single oscillator buffered to all).
+
+#### Step 3: Power Strategy
+*   **Logic Power (3.3V)**: Can be drawn from Jetson header (Pins 1, 17) if total current < 500mA.
+    *   *Calculation*: 20x MCP2515 + 20x Transceivers ≈ 20 * 15mA = 300mA. **Safe.**
+*   **Bus Isolation**: Ideally, use an isolated DC/DC converter for the transceiver side if operating in electrically noisy environment (near high-power motors).
+    *   *Pro Tip*: For the first version, shared GND with Jetson is acceptable if star-grounding is used.
+
 ---
 
 ## 4. Communication Protocol
@@ -1236,13 +1285,15 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | 0x001 | 1 | Reserved | - | - |
 | 0x002 | 2 | Time Sync | Host → All | High |
 | 0x003-0x00F | 3-15 | Reserved | - | - |
-| 0x010-0x012 | 16-18 | Waypoint Joint 1 (DOF 0-2) | Host → Ctrl | Medium |
-| 0x013-0x015 | 19-21 | Waypoint Joint 2 (DOF 0-2) | Host → Ctrl | Medium |
+| 0x010-0x13F | 16-319 | Reserved (Future High Priority) | - | - |
+| 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
+| 0x200-0x2FF | 512-767 | Reserved | - | - |
+| 0x300-0x302 | 768-770 | Waypoint Joint 1 (DOF 0-2) | Host → Ctrl | **Level 3** (Medium) |
+| 0x303-0x305 | 771-773 | Waypoint Joint 2 (DOF 0-2) | Host → Ctrl | **Level 3** (Medium) |
 | ... | ... | ... | ... | ... |
-| 0x064-0x066 | 100-102 | Waypoint Joint 20 (DOF 0-2) | Host → Ctrl | Medium |
-| 0x067-0x13F | 103-319 | Reserved | - | - |
-| 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | Medium |
-| 0x200-0x3FF | 512-1023 | Status/Feedback | Ctrl → Host | Low |
+| 0x3C8-0x3CA | 968-970 | Waypoint Joint 20 (DOF 0-2) | Host → Ctrl | **Level 3** (Medium) |
+| 0x3CB-0x3FF | 971-1023 | Reserved Waypoints | - | - |
+| 0x400-0x4FF | 1024-1279 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
 
 ### Appendix B: Pinout Diagrams
 

@@ -91,14 +91,14 @@ bool JointController::executeWaypointMovement() {
         waypoint_buffer_pop(dof);
         waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms);
         
-        LOG_DEBUG("[Waypoint] DOF " + String(dof) + " reached: " + 
+        LOG_INFO("[Waypoint] DOF " + String(dof) + " REACHED: " + 
                   String(next_waypoint.target_angle_deg, 2) + "° at t=" + String(t_now));
         
         // Check if more waypoints available
         WaypointEntry peek_next;
         if (!waypoint_buffer_peek(dof, peek_next)) {
           // No more waypoints - will enter HOLDING mode in outer loop
-          LOG_DEBUG("[Waypoint] DOF " + String(dof) + " buffer empty, entering HOLDING");
+          LOG_INFO("[Waypoint] DOF " + String(dof) + " buffer empty, entering HOLDING");
         }
       }
     }
@@ -329,14 +329,16 @@ bool JointController::executeWaypointMovement() {
     float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_curr);
     
-    // Apply torque limits
-    const int MAX_TORQUE = 1000; // TODO: Make this configurable
-    command_A = constrain(command_A, -MAX_TORQUE, MAX_TORQUE);
-    command_B = constrain(command_B, -MAX_TORQUE, MAX_TORQUE);
+    // Apply torque limits from motor configuration
+    float max_torque_A = config.motors[agonist_idx].max_torque;
+    float max_torque_B = config.motors[antagonist_idx].max_torque;
+    command_A = constrain(command_A, -max_torque_A, max_torque_A);
+    command_B = constrain(command_B, -max_torque_B, max_torque_B);
     
     // Send torque commands to motors
     agonist->setTorque((int)command_A);
     antagonist->setTorque((int)command_B);
+    
   }
   
   // Reset safety check counter after processing all DOFs

@@ -525,8 +525,16 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
         auto_mapping_state.initial_error[i] = angle_error;
 
         // Decide which motor must move and which must resist based on error direction
-        if (current_direction > 0) {
-          // We need to increase DOF angle (target > current)
+        // NEW: Check if inversion logic is requested
+        bool invert_logic = config.dofs[i].zero_mapping.auto_mapping_invert_direction;
+        
+        // Effective direction is flipped if invert_logic is true
+        // current_direction > 0 means "increase angle"
+        // If inverted: treat "increase angle" as "decrease angle" logic
+        bool increase_angle_logic = (current_direction > 0) ^ invert_logic;
+
+        if (increase_angle_logic) {
+          // We need to increase DOF angle (target > current) [OR inverted logic]
           // Stop motors first to avoid conflicting commands
           motors[agonist_index]->motorStop();
           motors[antagonist_index]->motorStop();
@@ -545,9 +553,10 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
           auto_mapping_state.applied_torques[antagonist_index] = 0; // Speed, not torque
           auto_mapping_state.applied_torques[agonist_index]    = resistance_torque;
 
-          Serial.println("DOF " + String(i) + ": Changed direction, now increasing angle");
+          Serial.println("DOF " + String(i) + ": Changed direction, now " + 
+                         (invert_logic ? "decreasing (inverted logic)" : "increasing") + " angle");
         } else {
-          // We need to decrease DOF angle (target < current)
+          // We need to decrease DOF angle (target < current) [OR inverted logic]
           // Stop motors first to avoid conflicting commands
           motors[agonist_index]->motorStop();
           motors[antagonist_index]->motorStop();
@@ -566,7 +575,8 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
           auto_mapping_state.applied_torques[agonist_index]    = 0; // Speed, not torque
           auto_mapping_state.applied_torques[antagonist_index] = -resistance_torque;
 
-          Serial.println("DOF " + String(i) + ": Changed direction, now decreasing angle");
+          Serial.println("DOF " + String(i) + ": Changed direction, now " + 
+                         (invert_logic ? "increasing (inverted logic)" : "decreasing") + " angle");
         }
       }
 

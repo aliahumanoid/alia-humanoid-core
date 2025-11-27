@@ -36,7 +36,7 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": 5.0,
           "auto_mapping_max_angle": 95.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 10.0
         }
       ]
     },

@@ -23,7 +23,7 @@
 // Set the joint type for this PICO board
 // Possible values: JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT, JOINT_ANKLE_LEFT,
 // JOINT_ANKLE_RIGHT, JOINT_HIP_LEFT, JOINT_HIP_RIGHT
-#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
+// #define ACTIVE_JOINT JOINT_KNEE_RIGHT // Configured in main_common.h
 
 // CAN ID assignment scheme for motors:
 // - IDs always start from 1
@@ -50,8 +50,10 @@ const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
 bool init_prg = true;
 // command array
 char command[100];
-// SERVO CANBUS
+// SERVO CANBUS (J4 CAN_Servo - Motor communication)
 MCP_CAN CAN(&SPI1, CAN_CS_PIN);
+// HOST CANBUS (J5 CAN_Controller - Host/Jetson communication)
+MCP_CAN CAN_HOST(&SPI1, CAN_HOST_CS_PIN);
 // JOINT ENCODER board with 3 encoders
 Encoders encoder1(PIN_RX, PIN_CS, PIN_SCK, PIN_TX);
 
@@ -153,27 +155,54 @@ void setup() {
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // Initialize CAN module
+  // Initialize Motor CAN module (J4 CAN_Servo)
   if (CAN.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
-    LOG_INFO("CAN module initialized successfully on SPI1.");
+    LOG_INFO("Motor CAN (J4) initialized successfully on SPI1, CS=GP" + String(CAN_CS_PIN));
   } else {
-    LOG_ERROR("Failed to initialize CAN module on SPI1!");
-    LOG_INFO("Continuing without CAN (normal for serial-only testing)");
-    // NOTE: Removed while(1) to allow serial-only testing without CAN hardware
+    LOG_ERROR("Failed to initialize Motor CAN on SPI1!");
+    LOG_INFO("Continuing without Motor CAN (normal for serial-only testing)");
   }
-  // set the CAN mode to normal
   if (CAN.setMode(MCP_NORMAL) != CAN_OK) {
-    LOG_ERROR("Failed to set normal mode.");
+    LOG_ERROR("Failed to set Motor CAN to normal mode.");
   } else {
-    LOG_INFO("Normal mode set successfully.");
+    LOG_INFO("Motor CAN normal mode set successfully.");
+  }
+
+  // Initialize Host CAN module (J5 CAN_Controller)
+  if (CAN_HOST.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
+    LOG_INFO("Host CAN (J5) initialized successfully on SPI1, CS=GP" + String(CAN_HOST_CS_PIN));
+    
+    // SAFETY: Flush any stale messages from MCP2515 RX buffers
+    // This prevents old waypoints from executing after a reset
+    int flushed = 0;
+    unsigned long flush_start = millis();
+    while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && (millis() - flush_start) < 100) {
+      unsigned long rx_id;
+      unsigned char len;
+      unsigned char buf[8];
+      CAN_HOST.readMsgBuf(&rx_id, &len, buf);
+      flushed++;
+    }
+    if (flushed > 0) {
+      LOG_WARN("Host CAN: Flushed " + String(flushed) + " stale messages from RX buffer");
+    }
+  } else {
+    LOG_ERROR("Failed to initialize Host CAN on SPI1!");
+    LOG_INFO("Continuing without Host CAN (waypoints via serial only)");
+  }
+  if (CAN_HOST.setMode(MCP_NORMAL) != CAN_OK) {
+    LOG_ERROR("Failed to set Host CAN to normal mode.");
+  } else {
+    LOG_INFO("Host CAN normal mode set successfully.");
   }
 
   // Initialize waypoint buffers for CAN-based control
   waypoint_buffers_init(ACTIVE_JOINT_CONFIG.dof_count);
   LOG_INFO("Waypoint buffers initialized for " + String(ACTIVE_JOINT_CONFIG.dof_count) + " DOFs");
 
-  // Verify CS pin is HIGH (inactive) after initialization
-  LOG_INFO("CS pin state: Motor CAN (GP" + String(CAN_CS_PIN) + ")=" + String(digitalRead(CAN_CS_PIN)));
+  // Verify CS pins are HIGH (inactive) after initialization
+  LOG_INFO("CS pin state: Motor CAN (GP" + String(CAN_CS_PIN) + ")=" + String(digitalRead(CAN_CS_PIN)) +
+           ", Host CAN (GP" + String(CAN_HOST_CS_PIN) + ")=" + String(digitalRead(CAN_HOST_CS_PIN)));
 
   LOG_INFO("Joint firmware starting!");
 
