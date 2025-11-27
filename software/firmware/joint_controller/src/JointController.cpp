@@ -973,8 +973,17 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   float initial_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
 
   // Apply opposite torque to tension the system
-  agonist_motor->setTorque(-pretension_torque);
-  antagonist_motor->setTorque(pretension_torque);
+  // NEW: Check if inversion logic is requested
+  bool invert_logic = config.dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
+  float effective_agonist_torque = invert_logic ? pretension_torque : -pretension_torque;
+  float effective_antagonist_torque = invert_logic ? -pretension_torque : pretension_torque;
+  
+  agonist_motor->setTorque(effective_agonist_torque);
+  antagonist_motor->setTorque(effective_antagonist_torque);
+
+  if (invert_logic) {
+      LOG_INFO("Using INVERTED pretension logic for DOF " + String(dof_index));
+  }
 
   // Brief wait to allow system to react
   sleep_ms(100);
@@ -1017,11 +1026,13 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Continue with full pretension
   sleep_ms(pretension_duration_ms - 100); // Subtract the 100 ms already elapsed
 
-  // Apply a lighter torque while maintaining tension during calibration
-  float holding_torque = pretension_torque / 2;
-  agonist_motor->setTorque(-holding_torque);
-  antagonist_motor->setTorque(holding_torque);
-  sleep_ms(150); // Brief pause to stabilize
+  // FIX: Maintain FULL pretension torque during measurement.
+  // Previously we reduced to (pretension_torque / 2), but this caused heavy joints 
+  // to sag due to gravity, failing the stability check.
+  agonist_motor->setTorque(effective_agonist_torque);
+  antagonist_motor->setTorque(effective_antagonist_torque);
+  
+  sleep_ms(300); // Increased pause to ensure absolute stability before reading
 
   // Verify that position is stable (no continuous movement)
   float stability_check_agonist    = agonist_motor->getMultiAngleSync(false).angle;
@@ -1090,11 +1101,21 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   LOG_DEBUG(String("Current antagonist motor angle (raw): ") + String(current_antagonist_angle));
 
   // Calculate new offsets
-  // CORRECT: The offset is the difference between expected and current angle, with inverted sign
-  // because the motor SUBTRACTS the offset instead of adding it
-  float new_agonist_offset = current_agonist_angle - expected_agonist_angle; // Inverted sign
-  float new_antagonist_offset =
-      current_antagonist_angle - expected_antagonist_angle; // Inverted sign
+  float new_agonist_offset;
+  float new_antagonist_offset;
+
+  if (invert_logic) {
+      // For INVERTED logic (e.g., Knee Right), the motor seems to ADD the offset
+      // or the sign relationship is reversed.
+      // Logic: If Raw + Offset = Target, then Offset = Target - Raw
+      new_agonist_offset = expected_agonist_angle - current_agonist_angle;
+      new_antagonist_offset = expected_antagonist_angle - current_antagonist_angle;
+  } else {
+      // For STANDARD logic (e.g., Ankle), the motor SUBTRACTS the offset
+      // Logic: If Raw - Offset = Target, then Offset = Raw - Target
+      new_agonist_offset = current_agonist_angle - expected_agonist_angle;
+      new_antagonist_offset = current_antagonist_angle - expected_antagonist_angle;
+  }
 
   LOG_DEBUG(String("New agonist offset: ") + String(new_agonist_offset));
   LOG_DEBUG(String("New antagonist offset: ") + String(new_antagonist_offset));

@@ -20,7 +20,11 @@
 #include "main_common.h"
 
 // ============================================================================
-// UNIFIED CAN BUS POLLING - Host Commands & Motor Responses (Core1 only)
+// DUAL CAN BUS ARCHITECTURE
+// ============================================================================
+// J4 CAN_Servo (Motor CAN): GP9=CS, GP13=INT - Motor commands via LKM_Motor
+// J5 CAN_Controller (Host CAN): GP8=CS, GP14=INT - Host commands (TimeSync, Waypoints)
+// Both share SPI1 (GP10=SCK, GP11=MOSI, GP12=MISO) with different CS pins
 // ============================================================================
 
 // CAN ID ranges (from CAN_CONTROL_PROTOCOL.md - Priority-Optimized)
@@ -39,22 +43,48 @@
 #define CAN_ID_STATUS_BASE 0x400    // 0x400-0x4FF for status (NEW: was 0x200)
 
 // Time synchronization state
-static volatile int32_t clock_offset_ms = 0;
+// We store the host timestamp and local timestamp at sync time.
+// To convert host time to local time: local = host - host_at_sync + local_at_sync
 static volatile bool clock_synced = false;
-static volatile uint32_t last_sync_host_ms = 0;
-static volatile uint32_t last_sync_local_ms = 0;
+static volatile uint32_t sync_host_ms = 0;   // Host timestamp at sync
+static volatile uint32_t sync_local_ms = 0;  // Local millis() at sync
+
+// Startup safety: require minimum uptime before accepting waypoints
+// This prevents stale messages from executing after reset
+static const uint32_t MIN_UPTIME_FOR_WAYPOINTS_MS = 2000;  // 2 seconds
 
 /**
- * @brief Get absolute time in milliseconds (synchronized with host)
- * @return Absolute time in ms, or local time if not synchronized
+ * @brief Convert host timestamp to local time
+ * @param host_time_ms Timestamp in host time reference
+ * @return Equivalent timestamp in local millis() reference
+ * 
+ * Formula: local = (host_time - sync_host) + sync_local
+ * This avoids overflow issues with large offsets.
+ */
+uint32_t hostTimeToLocal(uint32_t host_time_ms) {
+  if (!clock_synced) {
+    // Not synchronized - assume host time IS local time (for testing)
+    return host_time_ms;
+  }
+  // Calculate relative offset from sync point
+  // Using signed arithmetic to handle both directions
+  int32_t delta_from_sync = (int32_t)(host_time_ms - sync_host_ms);
+  return sync_local_ms + delta_from_sync;
+}
+
+/**
+ * @brief Get current time in local milliseconds
+ * @return Current local time (millis())
  */
 uint32_t getAbsoluteTimeMs() {
-  const uint32_t local = millis();
-  if (!clock_synced) {
-    return local;
-  }
-  const int32_t adjusted = static_cast<int32_t>(local) + clock_offset_ms;
-  return adjusted < 0 ? 0 : static_cast<uint32_t>(adjusted);
+  return millis();
+}
+
+/**
+ * @brief Check if clock is synchronized with host
+ */
+bool isClockSynced() {
+  return clock_synced;
 }
 
 /**
@@ -73,12 +103,11 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
   memcpy(&t_host_ms, data, sizeof(uint32_t));
 
   const uint32_t t_local = millis();
-  clock_offset_ms = static_cast<int32_t>(t_host_ms) - static_cast<int32_t>(t_local);
-  last_sync_host_ms = t_host_ms;
-  last_sync_local_ms = t_local;
+  sync_host_ms = t_host_ms;
+  sync_local_ms = t_local;
   clock_synced = true;
 
-  LOG_INFO("[CAN] Time sync applied: host=" + String(t_host_ms) + " ms offset=" + String(clock_offset_ms) + " ms");
+  LOG_INFO("[CAN] Time sync: host=" + String(t_host_ms) + " local=" + String(t_local) + " (synced)");
 }
 
 /**
@@ -97,6 +126,14 @@ void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
     LOG_WARN("[CAN] Waypoint dropped: clock not synchronized");
     return;
   }
+  
+  // SAFETY: Require minimum uptime before accepting waypoints
+  // This prevents stale messages from MCP2515 buffer from executing after reset
+  if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
+    LOG_WARN("[CAN] Waypoint dropped: system startup (uptime=" + String(millis()) + "ms < " + 
+             String(MIN_UPTIME_FOR_WAYPOINTS_MS) + "ms)");
+    return;
+  }
 
   // Parse waypoint (from CAN_CONTROL_PROTOCOL.md)
   struct {
@@ -113,12 +150,21 @@ void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
     LOG_WARN("[CAN] Waypoint DOF " + String(waypoint.dof_index) + " exceeds configured DOFs");
     return;
   }
+  
+  // SAFETY: Verify system is ready for movement (linear equations + calibrated offsets)
+  if (active_joint_controller != nullptr && !active_joint_controller->isSystemReadyForMovement()) {
+    LOG_ERROR("[CAN] Waypoint REJECTED: System not ready - run recalcOffset first!");
+    return;
+  }
 
+  // Convert host timestamp to local time
+  uint32_t t_arrival_local = hostTimeToLocal(waypoint.t_arrival_ms);
+  
   // Convert to WaypointEntry
   WaypointEntry entry{};
   entry.dof_index = waypoint.dof_index;
   entry.target_angle_deg = static_cast<float>(waypoint.target_angle) / 100.0f;
-  entry.t_arrival_ms = waypoint.t_arrival_ms;
+  entry.t_arrival_ms = t_arrival_local;  // Store in local time reference
   entry.mode = waypoint.mode;
 
   // Check if this is the first waypoint for this DOF (transition from IDLE to MOVING)
@@ -131,8 +177,11 @@ void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
     return;
   }
 
-  // If this is the first waypoint, transition to MOVING state and initialize prev_angle
-  if (is_first_waypoint && active_joint_controller != nullptr) {
+  // Initialize movement if first waypoint OR resuming from HOLDING
+  // In both cases, we need to set prev_angle/prev_time to current values
+  bool needs_init = is_first_waypoint || (current_state == WaypointState::HOLDING);
+  
+  if (needs_init && active_joint_controller != nullptr) {
     // Get current joint angle as starting point
     bool is_valid = false;
     float current_angle = active_joint_controller->getCurrentAngle(waypoint.dof_index, is_valid);
@@ -152,46 +201,57 @@ void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
         return; // Drop waypoint
       }
       
-      // Safety check passed - initialize movement
+      // Safety check passed - initialize/update movement start point
       waypoint_buffer_set_prev(waypoint.dof_index, current_angle, t_now);
       waypoint_buffer_set_state(waypoint.dof_index, WaypointState::MOVING);
-      LOG_INFO("[CAN] DOF " + String(waypoint.dof_index) + " transitioned IDLE → MOVING (start=" + 
-               String(current_angle, 3) + "° at t=" + String(t_now) + " ms)");
+      
+      if (is_first_waypoint) {
+        LOG_INFO("[CAN] DOF " + String(waypoint.dof_index) + " transitioned IDLE → MOVING (start=" + 
+                 String(current_angle, 3) + "° at t=" + String(t_now) + " ms)");
+      } else {
+        LOG_INFO("[CAN] DOF " + String(waypoint.dof_index) + " resumed HOLDING → MOVING (start=" + 
+                 String(current_angle, 3) + "° at t=" + String(t_now) + " ms)");
+      }
     } else {
       LOG_WARN("[CAN] Cannot read current angle for DOF " + String(waypoint.dof_index) + ", waypoint queued but state unchanged");
     }
   }
 
+  uint32_t t_now = millis();
+  int32_t time_until_arrival = (int32_t)entry.t_arrival_ms - (int32_t)t_now;
   LOG_INFO("[CAN] Waypoint queued DOF=" + String(waypoint.dof_index) + " angle=" + String(entry.target_angle_deg, 3) +
-           " deg t_arrival=" + String(entry.t_arrival_ms) + " ms mode=" + String(entry.mode));
+           " deg t_arrival=" + String(entry.t_arrival_ms) + " (in " + String(time_until_arrival) + " ms)");
 }
 
 /**
- * @brief Poll unified CAN bus for host commands and motor responses
+ * @brief Poll Host CAN bus for commands from Jetson/Host
  * 
- * This function polls the single CAN bus that now handles both:
- * - Host commands (Time Sync, Waypoints, Emergency Stop)
- * - Motor commands and responses (existing LKM protocol)
+ * This function polls the dedicated Host CAN bus (J5 CAN_Controller) for:
+ * - Time Sync commands
+ * - Waypoint commands
+ * - Emergency Stop commands
+ * 
+ * The Motor CAN bus (J4 CAN_Servo) is handled separately by LKM_Motor.
+ * Both share SPI1 but have different CS pins (GP8 for Host, GP9 for Motor).
  * 
  * Called from core1_loop() every iteration.
- * NOTE: Moved to Core1 to avoid SPI1 conflicts with motor commands.
  */
-void pollUnifiedCan() {
-  extern MCP_CAN CAN;  // Motor CAN bus (now also handles host commands)
+void pollHostCan() {
+  extern MCP_CAN CAN_HOST;  // Host CAN bus (separate from motor CAN)
 
-  // Check if messages are available
-  if (CAN.checkReceive() != CAN_MSGAVAIL) {
+  // Check if messages are available on Host CAN
+  if (CAN_HOST.checkReceive() != CAN_MSGAVAIL) {
     return;
   }
 
   // Process up to 10 messages per poll to avoid blocking
   uint8_t msg_count = 0;
-  while (CAN.checkReceive() == CAN_MSGAVAIL && msg_count < 10) {
+  while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && msg_count < 10) {
     unsigned long rx_id = 0;
     unsigned char len = 0;
     unsigned char buf[8] = {0};
 
-    if (CAN.readMsgBuf(&rx_id, &len, buf) != CAN_OK) {
+    if (CAN_HOST.readMsgBuf(&rx_id, &len, buf) != CAN_OK) {
       // Read error - skip this message
       break;
     }
@@ -200,12 +260,12 @@ void pollUnifiedCan() {
     if (rx_id == CAN_ID_TIME_SYNC) {
       handleTimeSyncFrame(buf, len);
     } else if (rx_id == CAN_ID_EMERGENCY_STOP) {
-      LOG_WARN("[CAN] RX EMERGENCY_STOP frame");
+      LOG_WARN("[CAN_HOST] RX EMERGENCY_STOP frame");
       emergency_stop_requested = true;
     } else if (rx_id >= CAN_ID_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       handleWaypointFrame(rx_id, buf, len);
     }
-    // Motor responses (0x140+) are handled by LKM_Motor internally
+    // Note: Motor responses (0x140+) are on the Motor CAN bus, not here
 
     msg_count++;
   }
@@ -243,9 +303,10 @@ void core1_loop() {
   bool timing_initialized = false;
 
   while (true) {
-    // === POLL CAN BUS (Host + Motor) ===
-    // Core1 now handles ALL CAN communication to avoid SPI1 conflicts
-    pollUnifiedCan();
+    // === POLL HOST CAN BUS ===
+    // Poll dedicated Host CAN (J5) for TimeSync, Waypoints, Emergency Stop
+    // Motor CAN (J4) is handled by LKM_Motor during motor operations
+    pollHostCan();
 
     // === WAYPOINT-BASED MOVEMENT ===
     // Execute waypoint trajectory for all DOFs (if waypoints available)
@@ -281,6 +342,13 @@ void core1_loop() {
       if (active_joint_controller != nullptr) {
         active_joint_controller->stopAllMotors();
         LOG_INFO("Core1: All motors stopped");
+        
+        // Clear all waypoint buffers to exit waypoint control loop
+        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+          waypoint_buffer_clear(dof);
+          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+        }
+        LOG_INFO("Core1: Waypoint buffers cleared");
       }
 
       // Reset flag
@@ -404,20 +472,41 @@ void core1_loop() {
       controller->stopAllMotors();
       break;
 
-    case CMD_PRETENSION:
+    case CMD_PRETENSION: {
       // Pretension the motors of the specific DOF
-      controller->pretension(dof_index, command_data_ext.torque, command_data_ext.duration);
+      // Check for inverted logic (e.g. Knee joint)
+      bool invert = controller->getConfig().dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
+      if (invert) {
+        // Inverted logic: use RELEASE instead of PRETENSION
+        controller->release(dof_index, command_data_ext.torque, command_data_ext.duration);
+      } else {
+        // Standard logic
+        controller->pretension(dof_index, command_data_ext.torque, command_data_ext.duration);
+      }
       break;
+    }
 
     case CMD_PRETENSION_ALL:
-      // Pretension all DOFs of the joint with the configured parameters
+      // Pretension all DOFs of the joint
+      // Note: This assumes all DOFs share the same logic or controller handles it.
+      // Ideally iterate through DOFs, but for now relying on standard implementation.
+      // TODO: If mixed DOFs exist (inverted/standard), this needs per-DOF loop here.
       controller->pretensionAll();
       break;
 
-    case CMD_RELEASE:
-      // Release the motors of the specific DOF (opposite torque compared to pretensioning)
-      controller->release(dof_index, command_data_ext.torque, command_data_ext.duration);
+    case CMD_RELEASE: {
+      // Release the motors of the specific DOF
+      // Check for inverted logic
+      bool invert = controller->getConfig().dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
+      if (invert) {
+        // Inverted logic: use PRETENSION instead of RELEASE
+        controller->pretension(dof_index, command_data_ext.torque, command_data_ext.duration);
+      } else {
+        // Standard logic
+        controller->release(dof_index, command_data_ext.torque, command_data_ext.duration);
+      }
       break;
+    }
 
     case CMD_RELEASE_ALL:
       // Release all DOFs of the joint with the configured parameters

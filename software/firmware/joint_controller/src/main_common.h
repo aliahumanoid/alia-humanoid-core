@@ -56,7 +56,7 @@
 // Set the joint type for this PICO board
 // Possible values: JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT, JOINT_ANKLE_LEFT,
 // JOINT_ANKLE_RIGHT, JOINT_HIP_LEFT, JOINT_HIP_RIGHT
-#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
+#define ACTIVE_JOINT JOINT_KNEE_RIGHT
 
 // CAN ID assignment scheme for motors:
 // - IDs always start from 1
@@ -86,8 +86,11 @@ extern bool init_prg;
 // Command buffer
 extern char command[100];
 
-// CAN bus controller (unified for both host commands and motor control)
+// CAN bus controller for motor control (J4 CAN_Servo - SPI1)
 extern MCP_CAN CAN;
+
+// CAN bus controller for host commands (J5 CAN_Controller - SPI1 shared, different CS)
+extern MCP_CAN CAN_HOST;
 
 // Joint encoder board with 3 encoders
 extern Encoders encoder1;
