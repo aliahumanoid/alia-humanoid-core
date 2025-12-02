@@ -464,6 +464,87 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": f"Unable to send waypoint: {exc}"
             }), 500
 
+    @app.route('/can/multi_dof_waypoint', methods=['POST'])
+    def send_can_multi_dof_waypoint():
+        """
+        Send Multi-DOF waypoint command (optimized format).
+        
+        This is the recommended format for production use, as it sends all DOFs
+        of a joint in a single CAN frame, reducing bus traffic by 66%.
+        
+        Request JSON:
+            {
+                "joint": "ANKLE_RIGHT",
+                "angles_deg": [45.0, 10.0, -5.0],  // DOF0, DOF1, DOF2 (use null for unused)
+                "t_offset_ms": 1000                // Offset from last time sync
+            }
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        joint = data.get('joint')
+        angles_deg = data.get('angles_deg')
+        t_offset_ms = data.get('t_offset_ms')
+
+        if not joint:
+            return jsonify({
+                "status": "error",
+                "message": "Joint is required"
+            }), 400
+        if angles_deg is None or not isinstance(angles_deg, list):
+            return jsonify({
+                "status": "error",
+                "message": "angles_deg must be a list of up to 3 angles (use null for unused DOFs)"
+            }), 400
+        if t_offset_ms is None:
+            return jsonify({
+                "status": "error",
+                "message": "t_offset_ms is required (offset from last time sync)"
+            }), 400
+
+        try:
+            # Convert angles, keeping None for unused DOFs
+            processed_angles = []
+            for i, angle in enumerate(angles_deg[:3]):  # Max 3 DOFs
+                if angle is not None:
+                    processed_angles.append(float(angle))
+                else:
+                    processed_angles.append(None)
+            
+            t_offset_ms = int(t_offset_ms)
+            if t_offset_ms < 0 or t_offset_ms > 65535:
+                return jsonify({
+                    "status": "error",
+                    "message": "t_offset_ms must be 0-65535"
+                }), 400
+                
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": f"Invalid parameter: {exc}"
+            }), 400
+
+        try:
+            details = can_manager.send_multi_dof_waypoint(joint, processed_angles, t_offset_ms)
+            return jsonify({
+                "status": "success",
+                "message": f"Multi-DOF waypoint queued for {joint}",
+                "details": details
+            })
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": str(exc)
+            }), 400
+        except Exception as exc:
+            logger.exception("Failed to send multi-DOF waypoint")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send multi-DOF waypoint: {exc}"
+            }), 500
+
     @app.route('/can/emergency_stop', methods=['POST'])
     def send_can_emergency_stop():
         unavailable = can_unavailable_response()
@@ -791,6 +872,9 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 handler.send_new_command(joint, dof, COMMANDS['START_TEST_ENCODER'])
             elif cmd == "stop-test-encoder":
                 handler.send_new_command(joint, dof, COMMANDS['STOP_TEST_ENCODER'])
+            elif cmd == "can-diag":
+                handler.send_new_command(joint, dof, COMMANDS['CAN_DIAG'])
+                message = f"CAN diagnostic started for {joint}"
             elif cmd == "reset-errors":
                 # Reset error counter and clear message queue
                 handler.status_message = []

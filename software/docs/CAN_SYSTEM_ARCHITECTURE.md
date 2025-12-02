@@ -1,9 +1,20 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 1.0  
-**Date:** 2024-11-17  
+**Document Version:** 1.2  
+**Date:** 2024-12-02  
 **Status:** Design Specification (Indicative)  
 **Authors:** Alia Robotics Team
+
+**Changelog v1.2:**
+- **Multi-DOF Waypoint timing fix**: Changed `t_offset_ms` from "offset from time sync" to "offset from current time" (same semantics as Single-DOF `arrival_offset_ms`)
+- Added sentinel value `0x7FFF` for unused DOFs in Multi-DOF format
+- Updated Python/C++ examples with improved clarity
+
+**Changelog v1.1:**
+- Added CAN Gateway architecture (Section 2.4)
+- Added Multi-DOF Waypoint Frame specification (Section 4.2.4)
+- Updated bandwidth analysis for optimized protocol
+- Added comparison with commercial humanoid robots
 
 ---
 
@@ -144,6 +155,239 @@ Recommendation: Option A (separate legs)
 - ⚠️ **Current plan is indicative** and will be refined based on mechanical design
 - ✅ **Scalable**: Easy to add/remove channels as needed
 - ✅ **Modular**: Each body region can be developed independently
+
+### 2.4 CAN Gateway Architecture (Recommended)
+
+#### 2.4.1 Why Not Direct Jetson SPI?
+
+**Technical Feasibility:** The Jetson Nano *can* technically manage multiple MCP2515 on a single SPI bus using multiple Chip Select (CS) pins, exactly like the Pico does. However, there's a critical reason to prefer an external Gateway: **timing determinism**.
+
+**The Real Problem: Linux Jitter**
+
+| Aspect | Jetson Direct (Linux) | Gateway (Bare-metal MCU) |
+|--------|----------------------|--------------------------|
+| **Latency per frame** | 0.5-1.5 ms | 0.2-0.4 ms |
+| **Jitter** | ±1-5 ms ❌ | ±50 µs ✅ |
+| **Determinism** | Low (kernel scheduling) | High (no OS) |
+| **RT kernel required?** | Yes (complex setup) | No |
+
+**Why Jitter Matters for Walking:**
+
+```
+IDEAL TIMING (waypoints every 10 ms):
+  |----●----●----●----●----|
+       ↑    ↑    ↑    ↑
+     Hip  Knee Ankle Foot   → Synchronized movement ✅
+
+WITH ±5ms JITTER (Linux without RT kernel):
+  |--●------●--●--------●--|
+       ↑      ↑  ↑        ↑
+     Hip    Knee Ankle   Foot
+     
+     ⚠️ Foot arrives BEFORE ankle command!
+     → Robot loses balance, potential fall
+```
+
+**Linux Timing Stack (causes jitter):**
+
+```
+Python send_waypoint()
+    │ ~0.1 ms (Python overhead)
+    ▼
+python-can library
+    │ ~0.05 ms
+    ▼
+SocketCAN (kernel) ← VARIABLE: kernel can preempt here!
+    │ ~0.1-1 ms (scheduling jitter)
+    ▼
+mcp251x driver
+    │ ~0.05 ms
+    ▼
+SPI transaction → CAN frame
+
+TOTAL: 0.4-1.5 ms per frame (VARIABLE, jitter ±1-5 ms)
+```
+
+**Gateway Timing Stack (deterministic):**
+
+```
+Python send_batch() via USB
+    │ ~0.15 ms (160 bytes @ 12 Mbps)
+    ▼
+USB CDC receive (Pico bare-metal)
+    │ ~0.02 ms
+    ▼
+Direct SPI write (no kernel!)
+    │ ~0.06 ms per MCP2515
+    ▼
+CAN frame TX
+
+TOTAL: 0.2-0.4 ms per frame (DETERMINISTIC, jitter ±50 µs)
+```
+
+**When to Use Each Approach:**
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Rapid prototype, 1-2 joints | Jetson direct OK |
+| Low frequency testing (10-20 Hz) | Jetson direct OK |
+| **Production, 20 joints, 100 Hz** | **Gateway MCU** ✅ |
+| **Synchronized walking/running** | **Gateway MCU** ✅ |
+| **Balance corrections (50-100 Hz)** | **Gateway MCU** ✅ |
+
+**Cost of Determinism:** ~€40 (Pico 2 + 3× MCP2515) — negligible vs robot total cost.
+
+#### 2.4.2 Solution: RP2350 CAN Gateway
+
+A dedicated **Raspberry Pi Pico 2 (RP2350)** acts as a CAN Gateway between Jetson and joint controllers:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  NVIDIA JETSON NANO                                                 │
+│  - Trajectory planning (Python, 50-100 Hz)                          │
+│  - Sends batch waypoints via USB CDC                                │
+│  - Time sync broadcast                                              │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ USB CDC (12 Mbps Full Speed)
+                            │ Latency: < 0.2 ms for 160 bytes
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  CAN GATEWAY (RP2350 Pico 2)                                        │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Core0: USB CDC Reception                                    │   │
+│  │  - Receives batch waypoint frames from Jetson                │   │
+│  │  - Parses and queues to inter-core buffer                    │   │
+│  │  - Handles time sync distribution                            │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Core1: CAN Distribution                                     │   │
+│  │  - Reads from inter-core buffer                              │   │
+│  │  - Distributes to 3 CAN buses (round-robin)                  │   │
+│  │  - Manages timing and synchronization                        │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  SPI1 (shared bus, multiple CS):                             │   │
+│  │  GP10 = SCK  ─────┬──────────┬──────────┐                   │   │
+│  │  GP11 = MOSI ─────┼──────────┼──────────┤                   │   │
+│  │  GP12 = MISO ─────┼──────────┼──────────┤                   │   │
+│  │                   │          │          │                   │   │
+│  │  GP8  = CS0 ──►┌──┴──┐  ┌────┴────┐ ┌───┴───┐              │   │
+│  │  GP9  = CS1 ──►│MCP  │  │  MCP    │ │  MCP  │              │   │
+│  │  GP13 = CS2 ──►│2515 │  │  2515   │ │  2515 │              │   │
+│  │                │ #0  │  │  #1     │ │  #2   │              │   │
+│  │                └──┬──┘  └────┬────┘ └───┬───┘              │   │
+│  └───────────────────┼──────────┼──────────┼───────────────────┘   │
+│                      │          │          │                       │
+└──────────────────────┼──────────┼──────────┼───────────────────────┘
+                       │          │          │
+                  CAN Bus 0   CAN Bus 1  CAN Bus 2
+                  (Legs L)    (Legs R)   (Arms+Head)
+                       │          │          │
+              ┌────────┴────┐ ┌───┴────┐ ┌───┴────┐
+              │ 6× Pico     │ │ 6× Pico│ │ 8× Pico│
+              │ (6 joints)  │ │(6 jnts)│ │(8 jnts)│
+              └─────────────┘ └────────┘ └────────┘
+```
+
+#### 2.4.3 Why CAN Gateway Works
+
+**Timing Analysis:**
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| USB receive 160 bytes (20 joints × 8 bytes) | ~0.15 ms | USB Full Speed 12 Mbps |
+| Parse and queue to buffer | ~0.02 ms | Simple memcpy |
+| SPI write to MCP2515 (8 bytes) | ~6.4 µs | SPI @ 10 MHz |
+| MCP2515 load + send | ~50 µs | Internal processing |
+| CAN frame transmission | ~111 µs | 111 bits @ 1 Mbps |
+| **Total per joint** | **~60 µs** | Sequential per bus |
+| **Total 20 joints (3 buses)** | **~1.2 ms** | 7 joints/bus max |
+
+**Frequency Capability:**
+
+| Waypoint Frequency | Cycle Time | Distribution Time | Margin |
+|--------------------|------------|-------------------|--------|
+| 50 Hz | 20 ms | 1.2 ms | 94% ✅ |
+| 100 Hz | 10 ms | 1.2 ms | 88% ✅ |
+| 200 Hz | 5 ms | 1.2 ms | 76% ✅ |
+| 500 Hz | 2 ms | 1.2 ms | 40% ⚠️ |
+
+**Conclusion:** 100 Hz waypoint streaming is easily achievable with significant margin.
+
+#### 2.4.4 Gateway Bill of Materials
+
+| Component | Quantity | Unit Cost (€) | Total (€) |
+|-----------|----------|---------------|-----------|
+| RP2350 Pico 2 | 1 | 5 | 5 |
+| MCP2515 module | 3 | 6 | 18 |
+| TJA1050 transceiver | 3 | 2.50 | 7.50 |
+| USB cable | 1 | 3 | 3 |
+| Connectors | 5 | 1 | 5 |
+| **TOTAL** | | | **€38.50** |
+
+#### 2.4.5 Comparison: Gateway vs Direct Jetson SPI
+
+| Aspect | Direct Jetson (SPI + CS) | CAN Gateway |
+|--------|--------------------------|-------------|
+| **Technically feasible?** | ✅ Yes | ✅ Yes |
+| **Complexity** | High (device tree, RT kernel) | Low (USB CDC) |
+| **Real-time determinism** | ❌ Linux jitter ±1-5 ms | ✅ Bare-metal ±50 µs |
+| **Development effort** | High (kernel drivers, DT overlay) | Low (Arduino/C++) |
+| **Debugging** | Difficult (kernel logs) | Easy (USB serial) |
+| **Cost** | €0 (uses existing Jetson) | €38.50 |
+| **Walking/balance safe?** | ⚠️ Only with RT kernel | ✅ Yes |
+| **Scalability** | Limited by GPIO count | Easy (add more MCP2515) |
+
+**Key Insight:** The Gateway is not required because Jetson "can't" do it, but because **Linux timing jitter is unacceptable for synchronized multi-joint movement**. A bare-metal MCU provides the determinism needed for safe walking.
+
+**Recommendation:** ✅ **Use CAN Gateway** for production robots. Direct Jetson SPI is acceptable only for low-frequency prototyping.
+
+#### 2.4.6 Gateway Firmware Architecture
+
+```cpp
+// CAN Gateway - Core0: USB Reception
+void core0_loop() {
+    if (Serial.available() >= sizeof(BatchWaypointFrame)) {
+        BatchWaypointFrame batch;
+        Serial.readBytes((char*)&batch, sizeof(batch));
+        
+        // Push to inter-core queue
+        multicore_fifo_push_blocking((uint32_t)&batch);
+    }
+}
+
+// CAN Gateway - Core1: CAN Distribution  
+void core1_loop() {
+    if (multicore_fifo_rvalid()) {
+        BatchWaypointFrame* batch = (BatchWaypointFrame*)multicore_fifo_pop_blocking();
+        
+        // Distribute to 3 CAN buses
+        for (int i = 0; i < batch->joint_count; i++) {
+            uint8_t bus_id = batch->joints[i].joint_id / 7;  // 0, 1, or 2
+            MCP_CAN* can = can_buses[bus_id];
+            
+            can->sendMsgBuf(
+                0x380 + (batch->joints[i].joint_id % 7),  // Multi-DOF waypoint ID
+                0, 8,
+                batch->joints[i].data
+            );
+        }
+    }
+}
+```
+
+#### 2.4.7 Future Expansion
+
+If more than 20 joints are needed:
+
+| Option | Additional Joints | Cost | Notes |
+|--------|-------------------|------|-------|
+| Add MCP2515 to Gateway | +7 per MCP2515 | +€8.50 | Up to 6 MCP2515 on one Pico |
+| Second Gateway | +20 | +€38.50 | Separate USB connection |
+| Upgrade to CAN FD | Same | +€50 | 5x bandwidth (MCP2518FD) |
 
 ---
 
@@ -411,8 +655,8 @@ if (emergency_stop_requested) {
 }
 ```
 
-#### 4.2.3 Waypoint (ID: 0x300-0x31F)
-**Purpose**: Stream target positions for trajectory execution
+#### 4.2.3 Single-DOF Waypoint (ID: 0x300-0x31F) - Legacy
+**Purpose**: Stream target positions for single DOF (legacy format)
 
 **Format (8 bytes, packed):**
 ```
@@ -425,6 +669,122 @@ Byte 7:    uint8_t  mode (0=LINEAR, 1=SMOOTH, future use)
 **Frequency**: 50-100 Hz per DOF  
 **Latency**: < 200 µs  
 **Buffer Depth**: 20 waypoints per DOF (200 ms @ 100 Hz)
+
+**Note:** This format requires 3 CAN frames for a 3-DOF joint. See **Multi-DOF Waypoint (4.2.6)** for optimized format.
+
+#### 4.2.4 Multi-DOF Waypoint (ID: 0x380-0x39F) - Recommended
+**Purpose**: Stream target positions for all DOFs of a joint in a single frame
+
+**Format (8 bytes, packed):**
+```
+Byte 0-1:  int16_t  dof0_angle (0.01° resolution, ±327.67°, 0x7FFF = unused)
+Byte 2-3:  int16_t  dof1_angle (0.01° resolution, ±327.67°, 0x7FFF = unused)
+Byte 4-5:  int16_t  dof2_angle (0.01° resolution, ±327.67°, 0x7FFF = unused)
+Byte 6-7:  uint16_t t_offset_ms (offset from CURRENT time, 0-65535 ms)
+```
+
+**CAN ID**: `0x380 + joint_id` (0x380 = Ankle Right, 0x381 = Ankle Left, etc.)
+
+**Advantages over Single-DOF format:**
+| Aspect | Single-DOF (0x300) | Multi-DOF (0x380) |
+|--------|-------------------|-------------------|
+| Frames per 3-DOF joint | 3 | **1** |
+| Bandwidth usage | 333 bits | **111 bits** |
+| Synchronization | Implicit (same t_arrival) | **Explicit (single frame)** |
+| Latency | 3× frame time | **1× frame time** |
+
+**Time Reference:**
+- Uses **relative offset** from **current time** (same semantics as Single-DOF `arrival_offset_ms`)
+- Firmware calculates: `t_arrival = t_now + t_offset_ms`
+- Reduces payload from 4 bytes to 2 bytes
+- Maximum offset: 65.535 seconds (sufficient for 50+ waypoints @ 100 Hz)
+- **Note:** This approach is simpler and more robust than using time sync offsets, as it doesn't require precise time synchronization between host and controller
+
+**Example (Python):**
+```python
+UNUSED_DOF = 0x7FFF  # Sentinel value for unused DOF
+
+def send_multi_dof_waypoint(bus, joint_id, angles_deg, t_offset_ms):
+    """
+    Send a multi-DOF waypoint to a joint.
+    
+    Args:
+        bus: python-can Bus instance
+        joint_id: 0-31 (joint index)
+        angles_deg: [dof0, dof1, dof2] angles in degrees (use None for unused DOFs)
+        t_offset_ms: offset from current time in ms (same as Single-DOF arrival_offset_ms)
+    
+    Example:
+        # 3-DOF joint (ankle): all DOFs used, arrive in 1 second
+        send_multi_dof_waypoint(bus, 0, [45.0, 10.0, -5.0], 1000)
+        
+        # 1-DOF joint (knee): only DOF0 used, arrive in 500ms
+        send_multi_dof_waypoint(bus, 2, [90.0, None, None], 500)
+    """
+    # Convert angles to 0.01° resolution, use sentinel for unused DOFs
+    def to_counts(angle):
+        if angle is None:
+            return UNUSED_DOF
+        return max(-32768, min(32767, int(angle * 100)))
+    
+    dof0 = to_counts(angles_deg[0]) if len(angles_deg) > 0 else UNUSED_DOF
+    dof1 = to_counts(angles_deg[1]) if len(angles_deg) > 1 else UNUSED_DOF
+    dof2 = to_counts(angles_deg[2]) if len(angles_deg) > 2 else UNUSED_DOF
+    
+    data = struct.pack('<hhhH', dof0, dof1, dof2, t_offset_ms)
+    
+    msg = can.Message(
+        arbitration_id=0x380 + joint_id,
+        data=data,
+        is_extended_id=False
+    )
+    bus.send(msg)
+```
+
+**Example (C++ Controller):**
+```cpp
+#define MULTI_DOF_UNUSED 0x7FFF  // Sentinel value for unused DOF
+
+void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
+    uint8_t joint_id = id - 0x380;
+    
+    struct {
+        int16_t dof0_angle;
+        int16_t dof1_angle;
+        int16_t dof2_angle;
+        uint16_t t_offset_ms;  // Offset from CURRENT time (same as Single-DOF)
+    } __attribute__((packed)) waypoint;
+    
+    memcpy(&waypoint, data, sizeof(waypoint));
+    
+    // Calculate absolute arrival time from current time + offset
+    // This matches Single-DOF behavior: t_arrival = t_now + offset
+    uint32_t t_now = millis();  // Or getAbsoluteTimeMs()
+    uint32_t t_arrival = t_now + waypoint.t_offset_ms;
+    
+    // Push to all DOF buffers with same arrival time (synchronized)
+    for (uint8_t dof = 0; dof < 3; dof++) {
+        int16_t angle_raw = (dof == 0) ? waypoint.dof0_angle :
+                            (dof == 1) ? waypoint.dof1_angle :
+                                         waypoint.dof2_angle;
+        
+        if (angle_raw == MULTI_DOF_UNUSED) continue;  // Skip unused DOF (sentinel value)
+        
+        WaypointEntry entry{};
+        entry.dof_index = dof;
+        entry.target_angle_deg = static_cast<float>(angle_raw) / 100.0f;
+        entry.t_arrival_ms = t_arrival;
+        entry.mode = 0;  // LINEAR
+        
+        waypoint_buffer_push(dof, entry);
+    }
+}
+```
+
+**Unused DOF Handling:**
+- For joints with fewer than 3 DOFs (e.g., knee = 1 DOF), set unused angles to `0x7FFF` (sentinel)
+- Controller skips DOFs with sentinel value
+- Example: Knee joint sends `[angle, 0x7FFF, 0x7FFF, t_offset]`
 
 **Example:**
 ```python
@@ -498,7 +858,7 @@ Byte 6-7:  uint16_t error_code
 
 ### 4.3 Bandwidth Analysis
 
-**Per Joint (1 CAN bus @ 1 Mbps):**
+#### 4.3.1 Per Joint (Single-DOF Waypoint - Legacy)
 
 | Message Type | Freq (Hz) | Frame/s | Bandwidth | Notes |
 |--------------|-----------|---------|-----------|-------|
@@ -516,10 +876,43 @@ Byte 6-7:  uint16_t error_code
 | Motor 3 Status | 100 | 100 | 1.4% | Optional feedback |
 | **TOTAL** | | **2710** | **38.7%** | **61.3% margin** ✅ |
 
+#### 4.3.2 Per Joint (Multi-DOF Waypoint - Optimized)
+
+| Message Type | Freq (Hz) | Frame/s | Bandwidth | Notes |
+|--------------|-----------|---------|-----------|-------|
+| Time Sync | 10 | 10 | 0.14% | Broadcast to all |
+| **Multi-DOF Waypoint** | 100 | **100** | **1.4%** | **All 3 DOFs in 1 frame** |
+| Motor 0 Cmd | 500 | 500 | 7.1% | Inner PID loop |
+| Motor 1 Cmd | 500 | 500 | 7.1% | Inner PID loop |
+| Motor 2 Cmd | 500 | 500 | 7.1% | Inner PID loop |
+| Motor 3 Cmd | 500 | 500 | 7.1% | Inner PID loop |
+| Motor 0 Status | 100 | 100 | 1.4% | Optional feedback |
+| Motor 1 Status | 100 | 100 | 1.4% | Optional feedback |
+| Motor 2 Status | 100 | 100 | 1.4% | Optional feedback |
+| Motor 3 Status | 100 | 100 | 1.4% | Optional feedback |
+| **TOTAL** | | **2510** | **35.9%** | **64.1% margin** ✅ |
+
+**Savings with Multi-DOF format:**
+- **Waypoint frames reduced**: 300 → 100 (66% reduction)
+- **Total bandwidth reduced**: 38.7% → 35.9%
+- **Additional headroom**: +2.8% for future features
+
+#### 4.3.3 Host CAN Bus Analysis (Gateway → 20 Joints)
+
+**Scenario: Full Robot with CAN Gateway (3 physical buses)**
+
+| Bus | Joints | DOFs | Waypoint Frames @ 100 Hz | Bandwidth |
+|-----|--------|------|--------------------------|-----------|
+| Bus 0 (Leg L) | 6 | ~12 | 600 (legacy) / **200 (multi-DOF)** | 8.6% / **2.9%** |
+| Bus 1 (Leg R) | 6 | ~12 | 600 (legacy) / **200 (multi-DOF)** | 8.6% / **2.9%** |
+| Bus 2 (Arms+) | 8 | ~18 | 800 (legacy) / **267 (multi-DOF)** | 11.4% / **3.8%** |
+
+**Conclusion:** Multi-DOF format reduces host bus traffic by **66%**, leaving ample bandwidth for status feedback and diagnostics.
+
 **Notes:**
 - **Theoretical max**: ~7000 frame/s @ 1 Mbps (8-byte frames)
 - **Practical max**: ~5000 frame/s (accounting for overhead)
-- **Current usage**: 2710 frame/s (54% of practical max)
+- **Current usage (Multi-DOF)**: 2510 frame/s (50% of practical max)
 - **Margin**: Sufficient for future features (status feedback, diagnostics)
 
 ---
@@ -1288,12 +1681,24 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | 0x010-0x13F | 16-319 | Reserved (Future High Priority) | - | - |
 | 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
 | 0x200-0x2FF | 512-767 | Reserved | - | - |
-| 0x300-0x302 | 768-770 | Waypoint Joint 1 (DOF 0-2) | Host → Ctrl | **Level 3** (Medium) |
-| 0x303-0x305 | 771-773 | Waypoint Joint 2 (DOF 0-2) | Host → Ctrl | **Level 3** (Medium) |
+| 0x300-0x31F | 768-799 | Single-DOF Waypoint (Legacy) | Host → Ctrl | **Level 3** (Medium) |
+| 0x320-0x37F | 800-895 | Reserved | - | - |
+| **0x380** | 896 | **Multi-DOF Waypoint Joint 0** (Ankle R) | Host → Ctrl | **Level 3** (Medium) |
+| **0x381** | 897 | **Multi-DOF Waypoint Joint 1** (Ankle L) | Host → Ctrl | **Level 3** (Medium) |
+| **0x382** | 898 | **Multi-DOF Waypoint Joint 2** (Knee R) | Host → Ctrl | **Level 3** (Medium) |
+| **0x383** | 899 | **Multi-DOF Waypoint Joint 3** (Knee L) | Host → Ctrl | **Level 3** (Medium) |
 | ... | ... | ... | ... | ... |
-| 0x3C8-0x3CA | 968-970 | Waypoint Joint 20 (DOF 0-2) | Host → Ctrl | **Level 3** (Medium) |
-| 0x3CB-0x3FF | 971-1023 | Reserved Waypoints | - | - |
+| **0x393** | 915 | **Multi-DOF Waypoint Joint 19** | Host → Ctrl | **Level 3** (Medium) |
+| 0x394-0x3FF | 916-1023 | Reserved Waypoints | - | - |
 | 0x400-0x4FF | 1024-1279 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
+
+**Multi-DOF Waypoint Format (0x380-0x39F):**
+```
+Byte 0-1:  int16_t  dof0_angle (0.01° resolution)
+Byte 2-3:  int16_t  dof1_angle (0.01° resolution, 0x7FFF = unused)
+Byte 4-5:  int16_t  dof2_angle (0.01° resolution, 0x7FFF = unused)
+Byte 6-7:  uint16_t t_offset_ms (offset from last time sync)
+```
 
 ### Appendix B: Pinout Diagrams
 
