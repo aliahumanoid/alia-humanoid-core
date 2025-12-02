@@ -1508,12 +1508,13 @@ function appendStatusMessage(message) {
 }
 
 /**
- * Checks if element is scrolled to bottom (with 30px tolerance)
+ * Checks if element is scrolled to bottom (with tolerance for padding)
  * @param {HTMLElement} element - Element to check
  * @returns {boolean} True if element is scrolled to bottom
  */
 function isScrolledToBottom(element) {
-    const threshold = 30; // Tolerance in pixels
+    // Increased threshold to account for padding-bottom and ::after pseudo-element
+    const threshold = 100; // Tolerance in pixels (covers 3rem padding + 2rem ::after)
     return element.scrollHeight - element.clientHeight <= element.scrollTop + threshold;
 }
 
@@ -2076,6 +2077,30 @@ function sendCanWaypointCommand() {
         const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
         appendStatusMessage(`❌ Waypoint error: ${message}`);
     });
+}
+
+/**
+ * Update sinusoid statistics display when slider changes
+ * @param {number} points - Number of waypoints
+ */
+function updateSinusoidStats(points) {
+    const numPoints = parseInt(points, 10) || 50;
+    const totalDuration = 6000; // 6 seconds in ms
+    
+    // Calculate interval between points
+    const intervalMs = Math.round(totalDuration / (numPoints - 1));
+    
+    // Calculate frequency in Hz (1000ms / interval)
+    const freqHz = (1000 / intervalMs).toFixed(1);
+    
+    // Calculate points per second
+    const pointsPerSecond = (numPoints / (totalDuration / 1000)).toFixed(1);
+    
+    // Update UI elements
+    document.getElementById('waypointDensityValue').textContent = numPoints;
+    document.getElementById('waypointIntervalValue').textContent = intervalMs;
+    document.getElementById('waypointFreqValue').textContent = freqHz;
+    document.getElementById('waypointRateValue').textContent = pointsPerSecond;
 }
 
 function sendCanWaypointSequence() {
@@ -4279,6 +4304,24 @@ function stopEncoderTest(jointType = null) {
 }
 
 /**
+ * Toggle CAN Diagnostic panel visibility
+ */
+function toggleCanDiagnostic() {
+    const panel = document.getElementById('canDiagnosticPanel');
+    const icon = document.getElementById('canDiagnosticIcon');
+    
+    if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        icon.classList.remove('fa-plus-circle');
+        icon.classList.add('fa-minus-circle');
+    } else {
+        panel.style.display = 'none';
+        icon.classList.remove('fa-minus-circle');
+        icon.classList.add('fa-plus-circle');
+    }
+}
+
+/**
  * Runs CAN bus diagnostic test
  * Tests Motor CAN (J4) communication with motors
  */
@@ -4697,6 +4740,9 @@ function fetchJointConfig() {
                 jointConfigData = response.config;
                 console.log('Joint configuration loaded:', jointConfigData);
                 updateCanMotionJoint();
+                
+                // Initialize sinusoid stats with default slider value
+                updateSinusoidStats($("#waypointDensity").val() || 50);
                 
                 // Show expected mapping grid for initially selected joint
                 const initialJoint = $("#jointSelect").val();
