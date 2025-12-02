@@ -9,8 +9,20 @@
 #include <Arduino.h>
 #include <global.h>
 
+// Waypoint buffer depth: number of waypoints that can be queued per DOF
+// 
+// Memory calculation:
+//   sizeof(WaypointEntry) = 12 bytes (with padding)
+//   Buffer per DOF = DEPTH * 12 bytes
+//   
+// Examples:
+//   100 waypoints = 1.2 KB per DOF (supports ~12s trajectory @ 120ms intervals)
+//   500 waypoints = 6 KB per DOF   (supports ~60s trajectory @ 120ms intervals)
+//
+// Pico 2 has 520 KB RAM, current usage ~30 KB (5.8%), plenty of headroom.
+// 
 #ifndef WAYPOINT_BUFFER_DEPTH
-#define WAYPOINT_BUFFER_DEPTH 8
+#define WAYPOINT_BUFFER_DEPTH 500
 #endif
 
 enum class WaypointState : uint8_t {

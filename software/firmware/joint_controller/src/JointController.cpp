@@ -709,13 +709,41 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
   float antagonist_min = linear_equations[dof_index].antagonist_safe_min;
   float antagonist_max = linear_equations[dof_index].antagonist_safe_max;
 
+  // Track consecutive CAN errors to detect persistent issues
+  static uint8_t consecutive_can_errors = 0;
+  static const uint8_t MAX_CAN_ERRORS = 3;
+
   // Check motors for this DOF
   for (int motor_idx = 0; motor_idx < config.motor_count; motor_idx++) {
     if (config.motors[motor_idx].dof_index == dof_index) {
       LKM_Motor *motor = motors[motor_idx];
       if (motor != nullptr) {
-        float motor_angle = motor->getMultiAngleSync().angle;
+        // Get motor angle with timeout protection
+        MultiAngleData angle_data = motor->getMultiAngleSync();
+        float motor_angle = angle_data.angle;
         bool is_agonist   = config.motors[motor_idx].is_agonist;
+        
+        // Check if the read was successful (angle of 0.0 with no prior movement is suspicious)
+        // Also check for very large angles that indicate read errors
+        bool read_likely_failed = (motor_angle == 0.0f && consecutive_can_errors > 0) ||
+                                  (abs(motor_angle) > 10000.0f);
+        
+        if (read_likely_failed) {
+          consecutive_can_errors++;
+          LOG_WARN("[Safety] Motor " + String(motor_idx) + " CAN read suspicious (angle=" + 
+                   String(motor_angle, 1) + "), errors=" + String(consecutive_can_errors));
+          
+          if (consecutive_can_errors >= MAX_CAN_ERRORS) {
+            violation_message = "CAN communication failure - motor " + String(motor_idx) + 
+                                " not responding after " + String(MAX_CAN_ERRORS) + " attempts";
+            return false;
+          }
+          // Skip this motor check but don't fail yet
+          continue;
+        }
+        
+        // Successful read - reset error counter
+        consecutive_can_errors = 0;
 
         if (is_agonist) {
           // Agonist motor check
