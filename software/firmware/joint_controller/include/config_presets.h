@@ -143,7 +143,7 @@ const JointConfig KNEE_RIGHT_CONFIG = {
                 .name           = "extensor",
                 .invert         = true,
                 .is_agonist     = false, // Agonist motor for extension
-                .max_torque     = 500.0f,
+                .max_torque     = 150.0f, // Reduced for safer waypoint testing
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
@@ -155,7 +155,7 @@ const JointConfig KNEE_RIGHT_CONFIG = {
                 .name           = "flexor",
                 .invert         = true,
                 .is_agonist     = true, // Antagonist motor for flexion
-                .max_torque     = 500.0f,
+                .max_torque     = 150.0f, // Reduced for safer waypoint testing
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,

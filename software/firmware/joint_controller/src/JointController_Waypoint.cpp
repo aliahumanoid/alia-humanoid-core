@@ -28,8 +28,8 @@
 // External time sync function (defined in core1.cpp)
 extern uint32_t getAbsoluteTimeMs();
 
-// Cycle counter for outer/inner loop division
-static int cycle_count = 0;
+// Cycle counter for outer/inner loop division (wraps at 1000 to prevent overflow)
+static uint16_t cycle_count = 0;
 
 // Constants from moveMultiDOF_cascade
 #define SAMPLING_PERIOD_US 2000  // 2 ms = 500 Hz
@@ -41,10 +41,13 @@ static float previous_error_q[MAX_DOFS] = {0}; // Previous error for derivative
 static float delta_theta[MAX_DOFS] = {0};      // Outer PID output
 
 // Safety check counter (for periodic motor checks in HOLDING mode)
-static int safety_check_counter = 0;
+static uint16_t safety_check_counter = 0;
 
 // Track previous state to detect MOVING → HOLDING transitions
 static WaypointState prev_dof_state[MAX_DOFS] = {WaypointState::IDLE};
+
+// Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
+static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 
 // Timing constants
 static const float outer_loop_dt = OUTER_LOOP_DIV * SAMPLING_PERIOD_US / 1000000.0f; // ~10ms = 0.01s
@@ -66,7 +69,8 @@ static const float inner_loop_dt = SAMPLING_PERIOD_US / 1000000.0f;             
  * @return true if any DOF is actively moving
  */
 bool JointController::executeWaypointMovement() {
-  cycle_count++;
+  // Wrap cycle_count to prevent overflow (1000 cycles = 2 seconds at 500Hz)
+  cycle_count = (cycle_count + 1) % 1000;
   safety_check_counter++; // Increment for periodic safety checks
   bool any_movement = false;
   
@@ -79,7 +83,19 @@ bool JointController::executeWaypointMovement() {
     // This saves CPU time when no waypoint control is active
     WaypointState dof_state = waypoint_buffer_state(dof);
     if (dof_state == WaypointState::IDLE) {
+      // Mark PID reset needed for when this DOF becomes active
+      pid_reset_needed[dof] = true;
       continue; // Skip this DOF entirely
+    }
+    
+    // === RESET PID STATE when transitioning to active movement ===
+    // This prevents integral windup from previous sequences
+    if (pid_reset_needed[dof]) {
+      error_integral_q[dof] = 0.0f;
+      previous_error_q[dof] = 0.0f;
+      delta_theta[dof] = 0.0f;
+      pid_reset_needed[dof] = false;
+      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID state reset");
     }
     
     // === CHECK WAYPOINT TRANSITION ===
@@ -91,14 +107,24 @@ bool JointController::executeWaypointMovement() {
         waypoint_buffer_pop(dof);
         waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms);
         
-        LOG_INFO("[Waypoint] DOF " + String(dof) + " REACHED: " + 
-                  String(next_waypoint.target_angle_deg, 2) + "° at t=" + String(t_now));
+        // Reduce logging overhead: only log every 50th waypoint to avoid serial bottleneck
+        // at high waypoint densities (e.g., 500 waypoints @ 12ms = 6000 waypoints/min)
+        static uint16_t waypoint_log_counter[MAX_DOFS] = {0};
+        waypoint_log_counter[dof]++;
+        if (waypoint_log_counter[dof] >= 50) {
+          LOG_INFO("[Waypoint] DOF " + String(dof) + " progress: " + 
+                    String(next_waypoint.target_angle_deg, 2) + "° at t=" + String(t_now));
+          waypoint_log_counter[dof] = 0;
+        }
         
         // Check if more waypoints available
         WaypointEntry peek_next;
         if (!waypoint_buffer_peek(dof, peek_next)) {
           // No more waypoints - will enter HOLDING mode in outer loop
-          LOG_INFO("[Waypoint] DOF " + String(dof) + " buffer empty, entering HOLDING");
+          // Always log this important transition
+          LOG_INFO("[Waypoint] DOF " + String(dof) + " sequence complete (" + 
+                    String(next_waypoint.target_angle_deg, 2) + "°), entering HOLDING");
+          waypoint_log_counter[dof] = 0; // Reset for next sequence
         }
       }
     }
@@ -175,21 +201,30 @@ bool JointController::executeWaypointMovement() {
         
         if (just_entered_holding) {
           LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
+          // Reset PID integral to prevent windup carrying over to next sequence
+          error_integral_q[dof] = 0.0f;
+          // Mark that PID needs full reset when next sequence starts
+          pid_reset_needed[dof] = true;
         }
       }
       
       // Determine if we should check safety:
-      // - Always check in MOVING mode (every outer loop cycle = 100 Hz)
-      // - Check immediately when entering HOLDING mode
-      // - Check periodically in HOLDING mode (every 100 cycles)
-      bool should_check_safety = has_waypoints || just_entered_holding || (is_holding && safety_check_counter >= 100);
+      // - Always check joint limits in MOVING mode (every outer loop cycle = 100 Hz)
+      // - Check periodically in HOLDING mode (every 20 cycles = ~200ms at 100Hz)
+      // NOTE: We do NOT check immediately when entering HOLDING because motors may still be settling
+      bool should_check_safety = has_waypoints || (is_holding && safety_check_counter >= 20);
       
       if (should_check_safety) {
         String safety_message;
-        // Check motors (tendon breakage) only in HOLDING mode:
-        // - Immediately when entering HOLDING (to catch issues right away)
-        // - Periodically every 100 cycles (to catch issues during long holds)
-        bool check_motors = is_holding && (just_entered_holding || (safety_check_counter >= 100));
+        // Check motors (tendon breakage) only in HOLDING mode periodically
+        // NOT immediately when entering HOLDING - motors need time to settle
+        bool check_motors = is_holding && (safety_check_counter >= 20);
+        
+        // Log when we're doing a periodic motor check in HOLDING mode
+        if (check_motors) {
+          LOG_DEBUG("[Waypoint] DOF " + String(dof) + " periodic motor safety check (counter=" + 
+                    String(safety_check_counter) + ")");
+        }
         
         if (!checkSafetyForDof(dof, q_curr, safety_message, check_motors)) {
           // Safety violation detected - stop all motors immediately
@@ -200,6 +235,9 @@ bool JointController::executeWaypointMovement() {
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
           waypoint_buffer_clear(dof);
           prev_dof_state[dof] = WaypointState::IDLE;
+          
+          // Mark PID reset needed for next sequence
+          pid_reset_needed[dof] = true;
           
           // Continue checking other DOFs (don't return, just skip this one)
           continue;
@@ -245,7 +283,28 @@ bool JointController::executeWaypointMovement() {
     }
     
     // === INNER LOOP @ 500 Hz (Motor Control) ===
-    // Execute every cycle (same as moveMultiDOF_cascade)
+    // In HOLDING mode, reduce frequency to 100 Hz (every 5 cycles) to reduce CAN load
+    // while still maintaining good position holding.
+    // In MOVING mode, run at full 500 Hz for precise trajectory tracking.
+    // 
+    // NOTE: CAN buffer overflow issue was observed when running at full 500 Hz in HOLDING.
+    // The MCP2515 RX buffer would accumulate stale motor responses, causing occasional
+    // garbage readings (e.g., -134140420096 degrees). The flush mechanism in LKM_Motor
+    // handles this, but reducing frequency in HOLDING minimizes the issue.
+    // See: LKM_Motor::getMultiAngleSync() for the flush and retry logic.
+    WaypointState current_dof_state = waypoint_buffer_state(dof);
+    bool dof_is_holding = (current_dof_state == WaypointState::HOLDING);
+    
+    static uint16_t holding_control_counter[MAX_DOFS] = {0};
+    if (dof_is_holding) {
+      holding_control_counter[dof]++;
+      if (holding_control_counter[dof] < 5) {
+        continue;  // Skip motor control in HOLDING, only run every 5 cycles (~100 Hz)
+      }
+      holding_control_counter[dof] = 0;
+    } else {
+      holding_control_counter[dof] = 0;  // Reset counter when not holding
+    }
     
     // Find motors for this DOF
     LKM_Motor *agonist = nullptr;
@@ -322,8 +381,72 @@ bool JointController::executeWaypointMovement() {
                         cascade_influence * (0.5f * delta_theta[dof] - 0.5f * stiffness_ref);
     
     // Read current motor angles
-    float theta_A_curr = agonist->getMultiAngleSync().angle;
-    float theta_B_curr = antagonist->getMultiAngleSync().angle;
+    MultiAngleData data_A = agonist->getMultiAngleSync();
+    MultiAngleData data_B = antagonist->getMultiAngleSync();
+    float theta_A_curr = data_A.angle;
+    float theta_B_curr = data_B.angle;
+    
+    // === SANITY CHECK: Detect obviously invalid readings ===
+    // Values outside ±100000° are clearly garbage (CAN corruption)
+    bool invalid_A = (theta_A_curr < -100000.0f || theta_A_curr > 100000.0f || isnan(theta_A_curr));
+    bool invalid_B = (theta_B_curr < -100000.0f || theta_B_curr > 100000.0f || isnan(theta_B_curr));
+    
+    if (invalid_A || invalid_B) {
+      static uint32_t last_invalid_log = 0;
+      if (millis() - last_invalid_log > 100) { // Log max every 100ms
+        LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ: A=" + 
+                  String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
+        last_invalid_log = millis();
+      }
+      // Skip this cycle entirely - don't send any torque command
+      continue;
+    }
+    
+    // === DIAGNOSTIC: Detect suspicious motor readings ===
+    // Check for sudden large jumps in motor angle (possible CAN corruption)
+    static float last_theta_A[MAX_DOFS] = {0};
+    static float last_theta_B[MAX_DOFS] = {0};
+    static bool first_read[MAX_DOFS] = {true, true, true};
+    static uint8_t consecutive_errors[MAX_DOFS] = {0};
+    
+    if (!first_read[dof]) {
+      float jump_A = abs(theta_A_curr - last_theta_A[dof]);
+      float jump_B = abs(theta_B_curr - last_theta_B[dof]);
+      
+      // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
+      // Reduced from 50° to 30° for earlier detection
+      if (jump_A > 30.0f || jump_B > 30.0f) {
+        consecutive_errors[dof]++;
+        
+        LOG_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP #" + 
+                  String(consecutive_errors[dof]) + "!");
+        LOG_ERROR("  Agonist: " + String(last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) + 
+                  " (jump=" + String(jump_A, 2) + "°)");
+        LOG_ERROR("  Antagonist: " + String(last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) + 
+                  " (jump=" + String(jump_B, 2) + "°)");
+        
+        // After 3 consecutive errors, trigger emergency stop
+        if (consecutive_errors[dof] >= 3) {
+          LOG_ERROR("[Waypoint] DOF " + String(dof) + " - 3 consecutive CAN errors, EMERGENCY STOP!");
+          stopAllMotors();
+          waypoint_buffer_clear(dof);
+          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+          consecutive_errors[dof] = 0;
+          first_read[dof] = true;
+          continue;
+        }
+        
+        // Skip this cycle to avoid sending bad commands, use last known good values
+        continue;
+      } else {
+        // Good reading - reset error counter
+        consecutive_errors[dof] = 0;
+      }
+    }
+    
+    last_theta_A[dof] = theta_A_curr;
+    last_theta_B[dof] = theta_B_curr;
+    first_read[dof] = false;
     
     // Inner PID for motors (compute torque commands)
     float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
@@ -335,6 +458,18 @@ bool JointController::executeWaypointMovement() {
     command_A = constrain(command_A, -max_torque_A, max_torque_A);
     command_B = constrain(command_B, -max_torque_B, max_torque_B);
     
+    // === DIAGNOSTIC: Log extreme torque commands ===
+    if (abs(command_A) >= max_torque_A * 0.95f || abs(command_B) >= max_torque_B * 0.95f) {
+      static uint32_t last_torque_warn = 0;
+      if (millis() - last_torque_warn > 500) { // Log max every 500ms
+        LOG_WARN("[Waypoint DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
+                 " B=" + String(command_B, 0) + " (max=" + String(max_torque_A, 0) + ")");
+        LOG_WARN("  refs: A=" + String(theta_A_ref, 2) + " B=" + String(theta_B_ref, 2));
+        LOG_WARN("  curr: A=" + String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
+        last_torque_warn = millis();
+      }
+    }
+    
     // Send torque commands to motors
     agonist->setTorque((int)command_A);
     antagonist->setTorque((int)command_B);
@@ -343,7 +478,8 @@ bool JointController::executeWaypointMovement() {
   
   // Reset safety check counter after processing all DOFs
   // This ensures all DOFs in HOLDING mode are checked in the same cycle
-  if (safety_check_counter >= 100) {
+  // Using 20 cycles = ~200ms at 100Hz outer loop rate
+  if (safety_check_counter >= 20) {
     safety_check_counter = 0;
   }
   

@@ -853,55 +853,89 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
  */
 LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   MultiAngleData data;
-  data.angle    = 0.0;
+  data.angle    = NAN;  // Use NAN to indicate error (distinguishable from valid angles)
   data.waitTime = 0;
 
   unsigned long targetID = 0x140 + _motorID;
+  unsigned long expectedResponseID = targetID;  // LKM motors respond with same ID
   unsigned char cmd[8]   = {0x92, 0, 0, 0, 0, 0, 0, 0};
 
-  if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
-    LOG_ERROR("ERROR sending READ_ML_ANGLE.");
-    return data;
+  // Flush any stale messages in the RX buffer before sending new request.
+  // This prevents reading old/stale data from previous failed requests.
+  // 
+  // NOTE: Stale messages are expected when running motor control at high frequency
+  // (e.g., 100-500 Hz). The MCP2515 has only 2 RX buffers, and motor responses
+  // can accumulate if not read in time. This flush mechanism ensures we always
+  // get fresh data. Occasional garbage readings (e.g., -134140420096 degrees)
+  // were observed without this, caused by reading stale/corrupted buffer data.
+  int flushed = 0;
+  while (_can->checkReceive() == CAN_MSGAVAIL && flushed < 5) {
+    unsigned long dummyId;
+    unsigned char dummyLen;
+    unsigned char dummyBuf[8];
+    _can->readMsgBuf(&dummyId, &dummyLen, dummyBuf);
+    flushed++;
+  }
+  // Log only if we flushed more than expected (3+) and throttle to every 10 seconds
+  if (flushed >= 3) {
+    static uint32_t last_flush_log = 0;
+    if (millis() - last_flush_log > 10000) {
+      LOG_WARN("[CAN] Flushed " + String(flushed) + " stale messages before motor " + String(_motorID) + " read");
+      last_flush_log = millis();
+    }
   }
 
-  unsigned long startTime = micros();
-  // Wait for 2000 µs (2 ms)
-  while (micros() - startTime < 2000) {
-    if (_can->checkReceive() == CAN_MSGAVAIL) {
-      unsigned long canId;
-      unsigned char len;
-      unsigned char rcvBuf[8];
-      if (_can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK) {
-        if (rcvBuf[0] == 0x92) {
-          data.waitTime = micros() - startTime;
-          // Build a 56-bit value from bytes 1-7
-          uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
-                          ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
-                          ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
-                          ((uint64_t)rcvBuf[1]);
-          int64_t motorAngle = ((int64_t)temp << 8) >> 8;
-          // motorAngle is in 0.01° units; convert to degrees and apply reduction
-          data.angle = (motorAngle / 100.0) / _reductionGear;
-          if (applyOffset) {
-            data.angle = (data.angle - offsetEncoder) * (invertEncoder ? -1 : 1);
-          } else {
-            data.angle = data.angle * (invertEncoder ? -1 : 1);
-          }
-          // Optional debug output:
-          // Serial.print("Angle with offset: ");
-          // Serial.println(data.angle);
-          // Serial.print("Offset: ");
-          // Serial.println(offsetEncoder);
-          // Serial.print("Inversion: ");
-          // Serial.println(invertEncoder);
-          // Serial.print("Reduction: ");
-          // Serial.println(_reductionGear);
+  // Retry up to 2 times on failure
+  const int MAX_RETRIES = 2;
+  
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
+      if (retry == MAX_RETRIES - 1) {
+        LOG_ERROR("ERROR sending READ_ML_ANGLE (after " + String(MAX_RETRIES) + " retries).");
+      }
+      delayMicroseconds(100);  // Brief pause before retry
+      continue;
+    }
 
-          return data;
+    unsigned long startTime = micros();
+    // Wait for 2000 µs (2 ms)
+    while (micros() - startTime < 2000) {
+      if (_can->checkReceive() == CAN_MSGAVAIL) {
+        unsigned long canId;
+        unsigned char len;
+        unsigned char rcvBuf[8];
+        if (_can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK) {
+          // IMPORTANT: Verify this is the response from OUR motor (correct CAN ID)
+          // and the correct command response (0x92)
+          if (canId == expectedResponseID && rcvBuf[0] == 0x92) {
+            data.waitTime = micros() - startTime;
+            // Build a 56-bit value from bytes 1-7
+            uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
+                            ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
+                            ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
+                            ((uint64_t)rcvBuf[1]);
+            int64_t motorAngle = ((int64_t)temp << 8) >> 8;
+            // motorAngle is in 0.01° units; convert to degrees and apply reduction
+            data.angle = (motorAngle / 100.0) / _reductionGear;
+            if (applyOffset) {
+              data.angle = (data.angle - offsetEncoder) * (invertEncoder ? -1 : 1);
+            } else {
+              data.angle = data.angle * (invertEncoder ? -1 : 1);
+            }
+            return data;  // Success!
+          }
+          // Wrong CAN ID or command - this is a stale/wrong message, continue waiting
         }
       }
     }
+    
+    // Timeout on this attempt, will retry if attempts remain
+    if (retry < MAX_RETRIES - 1) {
+      delayMicroseconds(200);  // Brief pause before retry
+    }
   }
-  LOG_WARN("Timeout: no response from READ_ML_ANGLE.");
-  return data;
+  
+  // All retries failed
+  LOG_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
+  return data;  // Returns NAN angle to indicate error
 }
