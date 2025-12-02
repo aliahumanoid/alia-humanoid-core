@@ -370,7 +370,7 @@
                 <!-- Joint & Connection Setup -->
                 <div class="bg-white rounded-lg shadow-md p-6 mb-8">
                     <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointSelectionContent')">
-                        <span><i class="fas fa-cog mr-2"></i>Joint & Connection Setup</span>
+                        <span><i class="fas fa-cog mr-2 text-blue-600"></i>Configuration</span>
                         <i class="fas fa-chevron-up chevron-icon"></i>
                     </h2>
 
@@ -1141,8 +1141,8 @@
 
                 <!-- CAN Motion Control (Waypoints) -->
                 <div class="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-lg shadow-md p-6 mb-8 border border-indigo-200">
-                    <h2 class="text-xl font-semibold mb-4 text-indigo-700 section-header" onclick="toggleSection('canMotionContent')">
-                        <span><i class="fas fa-route mr-2"></i>CAN Motion Control</span>
+                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('canMotionContent')">
+                        <span><i class="fas fa-route mr-2 text-indigo-600"></i>Trajectory Control</span>
                         <i class="fas fa-chevron-up chevron-icon"></i>
                     </h2>
 
@@ -1155,15 +1155,12 @@
                             </button>
                         </div>
 
-                        <!-- Waypoint Controls -->
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                            <div>
-                                <label for="canWaypointJoint" class="block text-xs font-medium text-gray-600">Joint</label>
-                                <select id="canWaypointJoint"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm">
-                                    <option value="">Loading...</option>
-                                </select>
-                            </div>
+                        <!-- Selected Joint Display + Waypoint Controls -->
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-xs font-medium text-gray-500">Target:</span>
+                            <span id="canMotionJointLabel" class="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-sm font-semibold">KNEE_LEFT</span>
+                        </div>
+                        <div class="grid grid-cols-3 gap-3">
                             <div>
                                 <label for="canWaypointDof" class="block text-xs font-medium text-gray-600">DOF</label>
                                 <select id="canWaypointDof"
@@ -1238,8 +1235,8 @@
 
                 <!-- Joint Movement -->
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                        <h2 class="text-xl font-semibold mb-4 text-indigo-700 section-header" onclick="toggleSection('jointMovementContent')">
-                            <span><i class="fas fa-arrows-alt mr-2"></i>Joint Movement</span>
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointMovementContent')">
+                            <span><i class="fas fa-arrows-alt mr-2 text-indigo-600"></i>Direct Movement</span>
                             <i class="fas fa-chevron-up chevron-icon"></i>
                         </h2>
 
