@@ -71,6 +71,7 @@ const JointConfig KNEE_LEFT_CONFIG = {
                       5.0f, // More conservative range for auto-mapping (vs 0.0f limit)
                   .auto_mapping_max_angle =
                       95.0f, // More conservative range for auto-mapping (vs 100.0f limit)
+                  .auto_mapping_invert_direction = false // Default behavior
 
               }}},
     .motors = {{                     // Motor 0: extensor (agonist for DOF 0)
@@ -111,11 +112,11 @@ const JointConfig KNEE_RIGHT_CONFIG = {
           .motion =
               {
                   .path_steps      = 1000,
-                  .max_speed       = 0.55f * PI,
-                  .accel_time      = 0.2f,
-                  .sampling_period = 1000,
+                  .max_speed       = 5.0f * PI,
+                  .accel_time      = 0.25f,
+                  .sampling_period = 3000,
                   .holding_position_error_threshold =
-                      2.0f // Holding position error threshold (degrees)
+                      10.0f // Holding position error threshold (degrees)
               },
           .limits = {.min_angle = 0.0f, .max_angle = 100.0f},
           .zero_mapping =
@@ -125,37 +126,36 @@ const JointConfig KNEE_RIGHT_CONFIG = {
                   .zero_angle_offset              = 0.0f,
                   .pretension_torque              = -35,
                   .pretension_timeout             = 100,
-                  .tensioning_torque              = 30.0f,
-                  .auto_mapping_step              = 1.0f,
-                  .auto_mapping_settle_time       = 200,
-                  .auto_mapping_speed             = -1.0f,
-                  .auto_mapping_resistance_torque = -20.0f,
-                  .position_threshold             = 0.5f,
-                  .auto_mapping_min_angle =
-                      5.0f, // More conservative range for auto-mapping (vs 0.0f limit)
-                  .auto_mapping_max_angle =
-                      95.0f, // More conservative range for auto-mapping (vs 100.0f limit)
+                  .tensioning_torque              = -50.0f,
+                  .auto_mapping_step              = 10.0f,
+                  .auto_mapping_settle_time       = 400,
+                  .auto_mapping_speed             = -6.0f,
+                  .auto_mapping_resistance_torque = -10.0f,
+                  .position_threshold             = 0.1f,
+                  .auto_mapping_min_angle         = 5.0f, 
+                  .auto_mapping_max_angle         = 95.0f, 
+                  .auto_mapping_invert_direction  = true // INVERTED LOGIC for Knee Right
 
               }}},
     .motors = {{                     // Motor 0: extensor (agonist for DOF 0)
-                .id             = 1, // Sequential ID: 1 for agonist
+                .id             = 2, // Sequential ID: 2 for agonist
                 .dof_index      = 0,
                 .name           = "extensor",
-                .invert         = false,
-                .is_agonist     = true, // Agonist motor for extension
-                .max_torque     = 1500.0f,
+                .invert         = true,
+                .is_agonist     = false, // Agonist motor for extension
+                .max_torque     = 500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
                                    .kd  = PID_DEFAULT_INNER_KD,
                                    .tau = 0.005f}},
                {                     // Motor 1: flexor (antagonist for DOF 0)
-                .id             = 2, // Sequential ID: 2 for antagonist
+                .id             = 1, // Sequential ID: 1 for antagonist
                 .dof_index      = 0,
                 .name           = "flexor",
-                .invert         = false,
-                .is_agonist     = false, // Antagonist motor for flexion
-                .max_torque     = 1500.0f,
+                .invert         = true,
+                .is_agonist     = true, // Antagonist motor for flexion
+                .max_torque     = 500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
@@ -199,6 +199,7 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                   .position_threshold             = 0.1f,
                   .auto_mapping_min_angle         = -20.0f,
                   .auto_mapping_max_angle         = 20.0f,
+                  .auto_mapping_invert_direction  = false // Default behavior
 
               }},
          {// DOF 1: inversion-eversion
@@ -235,6 +236,7 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                       -20.0f, // More conservative range for auto-mapping (vs -25.0f limit)
                   .auto_mapping_max_angle =
                       20.0f, // More conservative range for auto-mapping (vs 25.0f limit)
+                  .auto_mapping_invert_direction = false // Default behavior
 
               }}},
     .motors = {{                     // Motor 0: plantar flexion (agonist for DOF 0)
@@ -322,6 +324,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                   .position_threshold             = 0.1f,
                   .auto_mapping_min_angle         = -20.0f,
                   .auto_mapping_max_angle         = 20.0f,
+                  .auto_mapping_invert_direction  = false // Default behavior
 
               }},
          {// DOF 1: inversion-eversion
@@ -358,6 +361,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                       -20.0f, // More conservative range for auto-mapping (vs -25.0f limit)
                   .auto_mapping_max_angle =
                       20.0f, // More conservative range for auto-mapping (vs 25.0f limit)
+                  .auto_mapping_invert_direction = false // Default behavior
 
               }}},
     .motors = {{                     // Motor 0: plantar flexion (agonist for DOF 0)
@@ -446,6 +450,7 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .auto_mapping_min_angle         = -25.0f,
                    .auto_mapping_max_angle =
                        115.0f, // More conservative range for auto-mapping (vs 120.0f limit)
+                   .auto_mapping_invert_direction = false // Default behavior
 
                }},
           {// DOF 1: abduction-adduction
@@ -479,6 +484,7 @@ const JointConfig HIP_LEFT_CONFIG = {
                        -40.0f, // More conservative range for auto-mapping (vs -45.0f limit)
                    .auto_mapping_max_angle =
                        40.0f, // More conservative range for auto-mapping (vs 45.0f limit)
+                   .auto_mapping_invert_direction = false // Default behavior
 
                }},
           {// DOF 2: internal-external rotation
@@ -512,6 +518,7 @@ const JointConfig HIP_LEFT_CONFIG = {
                        -35.0f, // More conservative range for auto-mapping (vs -40.0f limit)
                    .auto_mapping_max_angle =
                        35.0f, // More conservative range for auto-mapping (vs 40.0f limit)
+                   .auto_mapping_invert_direction = false // Default behavior
 
                }}},
      .motors = {                      // DOF 0: flexion‑extension (2 motors)
@@ -628,6 +635,7 @@ const JointConfig HIP_RIGHT_CONFIG = {
                        -25.0f, // More conservative range for auto-mapping (vs -30.0f limit)
                    .auto_mapping_max_angle =
                        85.0f, // More conservative range for auto-mapping (vs 120.0f limit)
+                   .auto_mapping_invert_direction = false // Default behavior
 
                }},
           {// DOF 1: abduction-adduction
@@ -661,6 +669,7 @@ const JointConfig HIP_RIGHT_CONFIG = {
                        -40.0f, // More conservative range for auto-mapping (vs -45.0f limit)
                    .auto_mapping_max_angle =
                        40.0f, // More conservative range for auto-mapping (vs 45.0f limit)
+                   .auto_mapping_invert_direction = false // Default behavior
 
                }},
           {                                       // DOF 2: internal-external rotation
@@ -694,6 +703,7 @@ const JointConfig HIP_RIGHT_CONFIG = {
                        -35.0f, // More conservative range for auto-mapping (vs -40.0f limit)
                    .auto_mapping_max_angle =
                        35.0f, // More conservative range for auto-mapping (vs 40.0f limit)
+                   .auto_mapping_invert_direction = false // Default behavior
 
                }}},
      .motors = {                      // DOF 0: flexion‑extension (2 motors)

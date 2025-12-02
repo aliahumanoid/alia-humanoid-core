@@ -136,7 +136,11 @@
 #define CMD_GET_MOVEMENT_DATA 54
 #endif
 
-// Reserved: 55-59 for future measurement commands
+#ifndef CMD_CAN_DIAG
+#define CMD_CAN_DIAG 55
+#endif
+
+// Reserved: 56-59 for future measurement commands
 
 // --- Special Commands ---
 #ifndef CMD_UNKNOWN
@@ -234,6 +238,7 @@
 #define SERIAL_CMD_START_TEST_ENCODER "START_TEST_ENCODER"
 #define SERIAL_CMD_STOP_TEST_ENCODER "STOP_TEST_ENCODER"
 #define SERIAL_CMD_GET_MOVEMENT_DATA "GET_MOVEMENT_DATA"
+#define SERIAL_CMD_CAN_DIAG "CAN_DIAG"
 
 // ============================================================================
 // PARAMETER NAMES
@@ -355,6 +360,8 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_STOP_TEST_ENCODER;
   } else if (strcmp(cmd_name, SERIAL_CMD_GET_MOVEMENT_DATA) == 0) {
     return CMD_GET_MOVEMENT_DATA;
+  } else if (strcmp(cmd_name, SERIAL_CMD_CAN_DIAG) == 0) {
+    return CMD_CAN_DIAG;
   }
 
   return CMD_UNKNOWN;

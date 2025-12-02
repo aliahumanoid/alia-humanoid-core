@@ -23,7 +23,7 @@
 // Set the joint type for this PICO board
 // Possible values: JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT, JOINT_ANKLE_LEFT,
 // JOINT_ANKLE_RIGHT, JOINT_HIP_LEFT, JOINT_HIP_RIGHT
-#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
+// #define ACTIVE_JOINT JOINT_KNEE_RIGHT // Configured in main_common.h
 
 // CAN ID assignment scheme for motors:
 // - IDs always start from 1
@@ -50,8 +50,10 @@ const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
 bool init_prg = true;
 // command array
 char command[100];
-// SERVO CANBUS
+// SERVO CANBUS (J4 CAN_Servo - Motor communication)
 MCP_CAN CAN(&SPI1, CAN_CS_PIN);
+// HOST CANBUS (J5 CAN_Controller - Host/Jetson communication)
+MCP_CAN CAN_HOST(&SPI1, CAN_HOST_CS_PIN);
 // JOINT ENCODER board with 3 encoders
 Encoders encoder1(PIN_RX, PIN_CS, PIN_SCK, PIN_TX);
 
@@ -148,24 +150,189 @@ void setup() {
   SPI1.setTX(11);
   SPI1.setSCK(10);
   SPI1.begin();
+  // Note: SPI speed is set in mcp_can library (see lib/mcp_can/mcp_can.cpp)
 
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // Initialize CAN module
+  // Initialize Motor CAN module (J4 CAN_Servo)
   if (CAN.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
-    LOG_INFO("CAN module initialized successfully on SPI1.");
+    LOG_INFO("Motor CAN (J4) initialized successfully on SPI1, CS=GP" + String(CAN_CS_PIN));
   } else {
-    LOG_ERROR("Failed to initialize CAN module on SPI1!");
-    LOG_INFO("Continuing without CAN (normal for serial-only testing)");
-    // NOTE: Removed while(1) to allow serial-only testing without CAN hardware
+    LOG_ERROR("Failed to initialize Motor CAN on SPI1!");
+    LOG_INFO("Continuing without Motor CAN (normal for serial-only testing)");
   }
-  // set the CAN mode to normal
+  
+  // === STARTUP LOOPBACK TEST ===
+  LOG_INFO("=== MCP2515 LOOPBACK TEST AT STARTUP ===");
+  if (CAN.setMode(MCP_LOOPBACK) == CAN_OK) {
+    LOG_INFO("Loopback mode: ENABLED");
+    
+    // Send test message
+    unsigned char testData[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
+    unsigned long testId = 0x7FF;
+    
+    byte sendResult = CAN.sendMsgBuf(testId, 0, 8, testData);
+    if (sendResult == CAN_OK) {
+      LOG_INFO("Loopback TX: OK");
+      
+      delay(10);
+      
+      if (CAN.checkReceive() == CAN_MSGAVAIL) {
+        unsigned long rxId;
+        unsigned char rxLen;
+        unsigned char rxBuf[8];
+        
+        if (CAN.readMsgBuf(&rxId, &rxLen, rxBuf) == CAN_OK) {
+          // Log what we received
+          LOG_INFO("RX ID=0x" + String(rxId, HEX) + " Len=" + String(rxLen));
+          String rxDataStr = "RX Data: ";
+          for (int i = 0; i < rxLen; i++) {
+            rxDataStr += String(rxBuf[i], HEX) + " ";
+          }
+          LOG_INFO(rxDataStr);
+          
+          bool dataMatch = (rxId == testId) && (rxLen == 8);
+          for (int i = 0; i < 8 && dataMatch; i++) {
+            if (rxBuf[i] != testData[i]) dataMatch = false;
+          }
+          
+          if (dataMatch) {
+            LOG_INFO("✓ LOOPBACK TEST PASSED - SPI + MCP2515 OK!");
+          } else {
+            LOG_ERROR("✗ LOOPBACK DATA MISMATCH!");
+            LOG_ERROR("Expected ID=0x7FF, Data=DE AD BE EF 12 34 56 78");
+            // Check if this is a stale message - try reading again
+            if (CAN.checkReceive() == CAN_MSGAVAIL) {
+              LOG_WARN("More messages in buffer - trying second read...");
+              if (CAN.readMsgBuf(&rxId, &rxLen, rxBuf) == CAN_OK) {
+                LOG_INFO("2nd RX ID=0x" + String(rxId, HEX) + " Len=" + String(rxLen));
+                String rx2Str = "2nd RX Data: ";
+                for (int i = 0; i < rxLen; i++) {
+                  rx2Str += String(rxBuf[i], HEX) + " ";
+                }
+                LOG_INFO(rx2Str);
+                
+                // Check if second message matches
+                dataMatch = (rxId == testId) && (rxLen == 8);
+                for (int i = 0; i < 8 && dataMatch; i++) {
+                  if (rxBuf[i] != testData[i]) dataMatch = false;
+                }
+                if (dataMatch) {
+                  LOG_INFO("✓ 2nd message matched - buffer had stale data");
+                }
+              }
+            }
+          }
+        } else {
+          LOG_ERROR("✗ LOOPBACK RX read failed");
+        }
+      } else {
+        LOG_ERROR("✗ LOOPBACK RX: No message received");
+      }
+    } else {
+      LOG_ERROR("✗ LOOPBACK TX failed (code " + String(sendResult) + ")");
+    }
+  } else {
+    LOG_ERROR("✗ Failed to enter loopback mode - SPI PROBLEM!");
+  }
+  LOG_INFO("=== END LOOPBACK TEST ===");
+  
+  // Return to normal mode
   if (CAN.setMode(MCP_NORMAL) != CAN_OK) {
-    LOG_ERROR("Failed to set normal mode.");
+    LOG_ERROR("Failed to set Motor CAN to normal mode.");
   } else {
-    LOG_INFO("Normal mode set successfully.");
+    LOG_INFO("Motor CAN normal mode set successfully.");
   }
+
+  // Initialize Host CAN module (J5 CAN_Controller)
+  if (CAN_HOST.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
+    LOG_INFO("Host CAN (J5) initialized successfully on SPI1, CS=GP" + String(CAN_HOST_CS_PIN));
+    
+    // SAFETY: Flush any stale messages from MCP2515 RX buffers
+    // This prevents old waypoints from executing after a reset
+    int flushed = 0;
+    unsigned long flush_start = millis();
+    while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && (millis() - flush_start) < 100) {
+      unsigned long rx_id;
+      unsigned char len;
+      unsigned char buf[8];
+      CAN_HOST.readMsgBuf(&rx_id, &len, buf);
+      flushed++;
+    }
+    if (flushed > 0) {
+      LOG_WARN("Host CAN: Flushed " + String(flushed) + " stale messages from RX buffer");
+    }
+  } else {
+    LOG_ERROR("Failed to initialize Host CAN on SPI1!");
+    LOG_INFO("Continuing without Host CAN (waypoints via serial only)");
+  }
+  
+  // === HOST CAN LOOPBACK TEST ===
+  LOG_INFO("=== HOST CAN (J5) LOOPBACK TEST ===");
+  if (CAN_HOST.setMode(MCP_LOOPBACK) == CAN_OK) {
+    LOG_INFO("Host CAN Loopback mode: ENABLED");
+    
+    unsigned char testData[8] = {0xCA, 0xFE, 0xBA, 0xBE, 0x11, 0x22, 0x33, 0x44};
+    unsigned long testId = 0x123;
+    
+    byte sendResult = CAN_HOST.sendMsgBuf(testId, 0, 8, testData);
+    if (sendResult == CAN_OK) {
+      LOG_INFO("Host CAN Loopback TX: OK");
+      
+      delay(10);
+      
+      if (CAN_HOST.checkReceive() == CAN_MSGAVAIL) {
+        unsigned long rxId;
+        unsigned char rxLen;
+        unsigned char rxBuf[8];
+        
+        if (CAN_HOST.readMsgBuf(&rxId, &rxLen, rxBuf) == CAN_OK) {
+          LOG_INFO("Host CAN RX ID=0x" + String(rxId, HEX) + " Len=" + String(rxLen));
+          String rxDataStr = "Host CAN RX Data: ";
+          for (int i = 0; i < rxLen; i++) {
+            rxDataStr += String(rxBuf[i], HEX) + " ";
+          }
+          LOG_INFO(rxDataStr);
+          
+          bool dataMatch = (rxId == testId) && (rxLen == 8);
+          for (int i = 0; i < 8 && dataMatch; i++) {
+            if (rxBuf[i] != testData[i]) dataMatch = false;
+          }
+          
+          if (dataMatch) {
+            LOG_INFO("✓ HOST CAN LOOPBACK PASSED!");
+          } else {
+            LOG_ERROR("✗ HOST CAN LOOPBACK DATA MISMATCH!");
+            LOG_ERROR("Expected ID=0x123, Data=CA FE BA BE 11 22 33 44");
+          }
+        } else {
+          LOG_ERROR("✗ Host CAN Loopback RX read failed");
+        }
+      } else {
+        LOG_ERROR("✗ Host CAN Loopback RX: No message received");
+      }
+    } else {
+      LOG_ERROR("✗ Host CAN Loopback TX failed (code " + String(sendResult) + ")");
+    }
+  } else {
+    LOG_ERROR("✗ Host CAN failed to enter loopback mode");
+  }
+  LOG_INFO("=== END HOST CAN LOOPBACK TEST ===");
+  
+  if (CAN_HOST.setMode(MCP_NORMAL) != CAN_OK) {
+    LOG_ERROR("Failed to set Host CAN to normal mode.");
+  } else {
+    LOG_INFO("Host CAN normal mode set successfully.");
+  }
+
+  // Initialize waypoint buffers for CAN-based control
+  waypoint_buffers_init(ACTIVE_JOINT_CONFIG.dof_count);
+  LOG_INFO("Waypoint buffers initialized for " + String(ACTIVE_JOINT_CONFIG.dof_count) + " DOFs");
+
+  // Verify CS pins are HIGH (inactive) after initialization
+  LOG_INFO("CS pin state: Motor CAN (GP" + String(CAN_CS_PIN) + ")=" + String(digitalRead(CAN_CS_PIN)) +
+           ", Host CAN (GP" + String(CAN_HOST_CS_PIN) + ")=" + String(digitalRead(CAN_HOST_CS_PIN)));
 
   LOG_INFO("Joint firmware starting!");
 

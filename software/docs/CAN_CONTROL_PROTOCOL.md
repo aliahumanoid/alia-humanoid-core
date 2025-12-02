@@ -41,7 +41,7 @@
 | **Time Reference** | Absolute timestamp (uint32_t ms) | Eliminates clock drift across 6-20 nodes |
 | **Trajectory Gen** | Host-side (sparse waypoints) | Controller simple, host flexible |
 | **Update Rate** | 50-100 Hz (host) | Balance bandwidth/reactivity, 10-20ms margin |
-| **Buffer Depth** | 2 waypoints | Smooth transitions, jitter tolerance |
+| **Buffer Depth** | 2 waypoints (configurable) | Smooth transitions, jitter tolerance |
 | **Sync Method** | Periodic NTP-like | Re-sync every 10-60s, drift compensation |
 | **Interpolation** | Linear (controller-side) | Low CPU, sufficient with dense waypoints |
 | **Transport** | Mutually exclusive (CAN OR Serial) | Clean architecture, compile-time switch |
@@ -138,44 +138,64 @@ struct CanCmd_EmergencyStop {
 
 ## 4. CAN ID Allocation
 
-### 4.1 Command Messages (Host → Controllers)
+### 4.1 Priority-Based Allocation
+
+**CAN Priority Rule**: Lower CAN ID = Higher Priority (CAN arbitration)
 
 ```
-0x000: Emergency Stop (broadcast, highest priority)
-0x001: Reserved (future sync trigger)
-0x002: Time Sync (broadcast)
-0x010: Ankle Right command
-0x020: Ankle Left command
-0x030: Knee Right command
-0x040: Knee Left command
-0x050: Hip Right command
-0x060: Hip Left command
-...
-0x140: Joint 20 command (future expansion)
+Priority Level 0 (Highest - Emergency):
+  0x000: Emergency Stop (broadcast)
+  
+Priority Level 1 (System Control):
+  0x002: Time Sync (broadcast)
+  
+Priority Level 2 (Motor Control - CRITICAL for PID loop @ 500 Hz):
+  0x140-0x144: Motor torque commands (Pico → Motors)
+  0x280: Multi-motor torque broadcast (Pico → 4 Motors)
+  
+Priority Level 3 (Trajectory Commands - 50-100 Hz):
+  0x300-0x31F: Waypoint commands (Host → Pico)
+    0x300: Ankle Right waypoint
+    0x301: Ankle Left waypoint
+    0x302: Knee Right waypoint
+    0x303: Knee Left waypoint
+    0x304: Hip Right waypoint
+    0x305: Hip Left waypoint
+    ...
+    0x31F: Joint 32 waypoint (future expansion)
+    
+Priority Level 4 (Status Feedback - Lowest priority):
+  0x400-0x4FF: Status messages (Pico → Host)
+    0x400: Ankle Right status
+    0x401: Ankle Left status
+    0x402: Knee Right status
+    0x403: Knee Left status
+    0x404: Hip Right status
+    0x405: Hip Left status
+    ...
+    0x41F: Joint 32 status
 ```
 
-**Address Space**: 0x000-0x1FF (512 IDs)  
-**Allocation**: 0x010 + (joint_id × 0x10)  
-**Max Joints**: 20 nodes
+### 4.2 Rationale for New Allocation
 
----
+| Range | Purpose | Frequency | Priority Justification |
+|-------|---------|-----------|------------------------|
+| `0x000-0x002` | Emergency/Sync | On-demand | Must preempt everything |
+| `0x140-0x280` | Motor Control | 500 Hz | **CRITICAL**: PID loop stability depends on low latency |
+| `0x300-0x31F` | Waypoints | 50-100 Hz | Medium: Trajectory updates, not time-critical per-frame |
+| `0x400-0x4FF` | Status | 50 Hz | Low: Monitoring only, can tolerate delays |
 
-### 4.2 Status Messages (Controllers → Host)
+**Key Change**: Motor torque commands (0x140-0x280) now have **higher priority** than waypoint commands (0x300-0x31F), ensuring the inner PID loop @ 500 Hz is never starved by trajectory updates.
 
-```
-0x200: Reserved
-0x210: Ankle Right status
-0x220: Ankle Left status
-0x230: Knee Right status
-0x240: Knee Left status
-0x250: Hip Right status
-0x260: Hip Left status
-...
-0x340: Joint 20 status
-```
+### 4.3 Address Space Summary
 
-**Address Space**: 0x200-0x3FF  
-**Allocation**: 0x200 + (joint_id × 0x10)
+| Message Type | CAN ID Range | Allocation Formula | Max Nodes |
+|--------------|--------------|-------------------|-----------|
+| **Emergency Stop** | 0x000 | Fixed | Broadcast |
+| **Time Sync** | 0x002 | Fixed | Broadcast |
+| **Motor Commands** | 0x140-0x280 | Fixed (LKM protocol) | 4 motors + broadcast |
+| **Waypoint Commands** | 0x300-0x31F | 0x300 + joint_id | 32 joints |
+| **Status Feedback** | 0x400-0x4FF | 0x400 + joint_id | 256 joints |
 
 ---
 
@@ -217,7 +237,7 @@ WaypointBuffer waypoint_buffers[MAX_DOFS];
 
 For 3 DOFs (ankle): **~96 bytes** (minimal RAM usage!)
 
-**Note**: Unlike `moveMultiDOF_cascade` which pre-generates 100-point trajectory arrays, this implementation uses **simple linear interpolation** between waypoints. Smoothness comes from the **density of waypoints** (50-100 Hz from host), not from complex trajectory generation.
+**Note**: Unlike `moveMultiDOF_cascade` which pre-generates 100-point trajectory arrays, this implementation uses **simple linear interpolation** between waypoints. Smoothness comes from the **density of waypoints** (50-100 Hz from host), not from complex trajectory generation. `WAYPOINT_BUFFER_DEPTH` defaults to 2, but it can be increased (e.g., 4) when experimenting with >100 Hz updates to absorb jitter.
 
 ---
 
@@ -448,10 +468,16 @@ void onTimeSyncReceived(CanCmd_TimeSync sync) {
 uint32_t get_absolute_time_ms() {
     if (!clock_synced) {
         LOG_WARN("Clock not synced! Using local time");
+        set_controller_flag(STATUS_UNSYNCED);  // Expose state to host
         return millis();
     }
+    set_controller_flag(STATUS_SYNCED);
     return millis() + clock_offset_ms;
 }
+
+// set_controller_flag(flag):
+// Lightweight helper that marks controller-wide flags (not per-DOF) so the host
+// can see UNSYNCED/SYNCED state in the periodic status telemetry.
 ```
 
 ---
@@ -553,7 +579,7 @@ Knee_Right buffer (dof=0):
 
 ### 6.5 Trajectory Execution Timeline
 
-**Note**: The controller uses **simple linear interpolation** between consecutive waypoints. Smoothness comes from **waypoint density** (50-100 Hz from host), not from complex trajectory generation.
+**Note**: The controller uses **simple linear interpolation** between consecutive waypoints. Smoothness comes from **waypoint density** (50-100 Hz from host), not from complex trajectory generation. Each DOF on a joint board maintains its **own buffer** and interpolation state, so multi-DOF joints (e.g., ankle pitch/roll) run fully in parallel while sharing the same CAN ID.
 
 **Scenario**: Host sends waypoints @ 50 Hz (20 ms spacing) for 2 joints
 
@@ -781,6 +807,12 @@ if (time.time() - last_status_time[joint_id] > STATUS_TIMEOUT_MS/1000.0) {
 }
 ```
 
+> **Firmware status (Nov 15, 2025)**  
+> `HostCanInterface` on the RP2040 now listens for `0x002` frames, updates
+> `clock_offset_ms`, and exposes `host_can.getAbsoluteTimeMs()` so that
+> `updateTrajectory_Linear` can consume the absolute host timeline as soon as
+> the dual-MCP2515 wiring is in place.
+
 ---
 
 ### 8.2 Clock Drift Detection
@@ -806,10 +838,16 @@ if (buffer_full) {
     // Option A: Reject new waypoint (safe)
     LOG_WARN("Buffer full, rejecting waypoint");
     set_status_flag(STATUS_BUFFER_FULL);
+    notify_host_buffer_full();
     
     // Option B: Force-insert (aggressive, may cause discontinuity)
     // overwrite_oldest_waypoint(new_wp);
 }
+
+// Host side pseudo-flow when STATUS_BUFFER_FULL is seen:
+// 1. Throttle waypoint publish rate for that joint
+// 2. Retry once buffer flag clears (status poll @50 Hz)
+// 3. If flag persists > COMMAND_TIMEOUT_MS → alert operator
 ```
 
 ---
@@ -873,13 +911,21 @@ build_flags =
 
 ---
 
+### 8.4 CAN controller faults
+
+- Monitor MCP2515 TX/RX error counters via `readRxTxErrorCount()`. If either exceeds 96, issue a soft reset (`mcp2515.reset()`) and re-enter initialization.
+- If a controller performs >3 resets in <10 s, raise `STATUS_ERROR` and notify host so it can fall back to serial or halt.
+- Host keeps a rolling log of CAN errors to correlate with wiring issues or power dips.
+
+---
+
 ## 12. References
 
 - MCP2515 Datasheet: [Microchip MCP2515](https://www.microchip.com/en-us/product/MCP2515)
 - CAN 2.0B Specification: ISO 11898-1
 - RP2040 SPI: [Pico SDK Documentation](https://raspberrypi.github.io/pico-sdk-doxygen/)
 - Existing Serial Protocol: `software/firmware/joint_controller/PROTOCOL.md`
-- Time Sync Implementation: `software/firmware/joint_controller/src/core0.cpp:203-230`
+- Time Sync Broadcast Example: Section 5.3 (this document)
 
 ---
 
