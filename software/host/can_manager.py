@@ -10,10 +10,12 @@ CAN ID Allocation (Priority-Optimized):
 - 0x000: Emergency Stop (Priority Level 0 - Highest)
 - 0x002: Time Sync (Priority Level 1 - System)
 - 0x140-0x280: Motor Commands (Priority Level 2 - CRITICAL @ 500 Hz)
-- 0x300-0x31F: Waypoint Commands (Priority Level 3 - Trajectory @ 50-100 Hz)
+- 0x300-0x37F: Single-DOF Waypoint Commands (Priority Level 3 - Legacy)
+- 0x380-0x39F: Multi-DOF Waypoint Commands (Priority Level 3 - Optimized)
 - 0x400-0x4FF: Status Feedback (Priority Level 4 - Lowest @ 10-50 Hz)
 
 Note: Motor commands have higher priority than waypoints to ensure PID loop stability.
+Multi-DOF waypoints are recommended for production use (66% less CAN traffic).
 """
 from __future__ import annotations
 
@@ -231,6 +233,95 @@ class CanManager:
             "t_arrival_ms": arrival_time_ms,
             "mode": mode,
             "arbitration_id": f"0x{arbitration_id:03X}",
+        }
+
+    def send_multi_dof_waypoint(
+        self,
+        joint_name: str,
+        angles_deg: list,
+        t_offset_ms: int,
+    ) -> Dict[str, Any]:
+        """
+        Send Multi-DOF waypoint command to a joint (optimized format).
+        
+        This is the recommended format for production use, as it sends all DOFs
+        of a joint in a single CAN frame, reducing bus traffic by 66%.
+        
+        Format (8 bytes):
+            Byte 0-1: int16_t dof0_angle (0.01° resolution, 0x7FFF = unused)
+            Byte 2-3: int16_t dof1_angle (0.01° resolution, 0x7FFF = unused)
+            Byte 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF = unused)
+            Byte 6-7: uint16_t t_offset_ms (offset from CURRENT time, like single-DOF)
+        
+        Args:
+            joint_name: Host joint key (e.g., 'KNEE_LEFT')
+            angles_deg: List of target angles [dof0, dof1, dof2] in degrees.
+                        Use None for unused DOFs.
+            t_offset_ms: Time offset from current time in milliseconds (0-65535).
+                        Same semantics as single-DOF arrival_offset_ms.
+        
+        Returns:
+            Dict with frame details for debugging.
+        
+        Example:
+            # 3-DOF joint (ankle): all DOFs used, arrive in 1 second
+            send_multi_dof_waypoint('ANKLE_RIGHT', [45.0, 10.0, -5.0], 1000)
+            
+            # 1-DOF joint (knee): only DOF0 used, arrive in 500ms
+            send_multi_dof_waypoint('KNEE_RIGHT', [90.0, None, None], 500)
+        """
+        self._ensure_connection()
+
+        joint_key = joint_name.upper()
+        if joint_key not in JOINTS:
+            raise ValueError(f"Unknown joint '{joint_name}'.")
+
+        joint_info = JOINTS[joint_key]
+        joint_id = joint_info["id"]
+        
+        # Multi-DOF waypoint uses 0x380 base
+        arbitration_id = 0x380 + joint_id
+        
+        # Sentinel value for unused DOF
+        UNUSED_DOF = 0x7FFF
+        
+        # Convert angles to 0.01° resolution, use sentinel for None/unused
+        angle_counts = []
+        for i in range(3):
+            if i < len(angles_deg) and angles_deg[i] is not None:
+                counts = int(round(angles_deg[i] * 100))
+                counts = max(min(counts, 32767), -32768)
+                angle_counts.append(counts)
+            else:
+                angle_counts.append(UNUSED_DOF)
+        
+        # Clamp t_offset to uint16 range
+        t_offset_ms = max(0, min(t_offset_ms, 65535))
+        
+        # Pack payload: 3x int16 angles + 1x uint16 offset
+        payload = struct.pack("<hhhH", 
+                              angle_counts[0], 
+                              angle_counts[1], 
+                              angle_counts[2], 
+                              t_offset_ms)
+        
+        # Build context string for logging
+        angles_str = ", ".join(
+            f"DOF{i}={angles_deg[i]:.2f}°" if i < len(angles_deg) and angles_deg[i] is not None else f"DOF{i}=unused"
+            for i in range(3)
+        )
+        context = f"MultiDOF joint={joint_key} id={joint_id} {angles_str} t_offset={t_offset_ms}ms"
+        
+        self._send_frame(arbitration_id, payload, context=context)
+
+        return {
+            "joint": joint_key,
+            "joint_id": joint_id,
+            "angles_deg": angles_deg,
+            "angle_counts": angle_counts,
+            "t_offset_ms": t_offset_ms,
+            "arbitration_id": f"0x{arbitration_id:03X}",
+            "format": "multi_dof",
         }
 
     # ------------------------------------------------------------------

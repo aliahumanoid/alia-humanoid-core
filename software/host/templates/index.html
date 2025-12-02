@@ -496,6 +496,32 @@
                                     </select>
                                 </div>
                             </div>
+                            <!-- Waypoint Density Control for Test Sequence -->
+                            <div class="bg-purple-50 p-3 rounded-md border border-purple-200">
+                                <label for="waypointDensity" class="block text-xs font-medium text-purple-700 mb-1">
+                                    <i class="fas fa-wave-square mr-1"></i>Sinusoid Waypoint Density: <span id="waypointDensityValue">50</span> points
+                                </label>
+                                <input type="range" id="waypointDensity" min="6" max="500" value="50" step="1"
+                                    class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
+                                    oninput="document.getElementById('waypointDensityValue').textContent = this.value" />
+                                <div class="flex justify-between text-xs text-purple-500 mt-1">
+                                    <span>6 pts (Δt=1000ms)</span>
+                                    <span>100 pts (Δt=60ms)</span>
+                                    <span>500 pts (Δt=12ms)</span>
+                                </div>
+                                <!-- Waypoint Format Toggle -->
+                                <div class="mt-3 flex items-center gap-3">
+                                    <span class="text-xs font-medium text-purple-700">Format:</span>
+                                    <label class="inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" id="useMultiDofFormat" class="sr-only peer" checked>
+                                        <div class="relative w-11 h-6 bg-gray-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                                        <span class="ms-2 text-xs text-purple-700" id="formatLabel">Multi-DOF (optimized)</span>
+                                    </label>
+                                </div>
+                                <p class="text-xs text-purple-500 mt-1" id="formatDescription">
+                                    ✅ Recommended: 66% less CAN traffic, all DOFs in one frame
+                                </p>
+                            </div>
                             <div class="flex justify-end gap-2">
                                 <button id="sendCanWaypointBtn" type="button"
                                     class="px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600">
@@ -503,8 +529,8 @@
                                 </button>
                                 <button id="sendCanWaypointSequenceBtn" type="button"
                                     class="px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600"
-                                    title="Send a test sequence of 5 waypoints">
-                                    <i class="fas fa-list mr-1"></i>Send Test Sequence
+                                    title="Send a sinusoidal test sequence with configurable density">
+                                    <i class="fas fa-wave-square mr-1"></i>Send Sinusoid
                                 </button>
                             </div>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -562,6 +588,20 @@
                                 </div>
                         </div>
                     </div>
+
+                        <!-- CAN Bus Diagnostic -->
+                        <div class="mb-4 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                            <h3 class="text-lg font-semibold mb-2 text-yellow-800">
+                                <i class="fas fa-stethoscope mr-2"></i>CAN Bus Diagnostic
+                            </h3>
+                            <p class="text-sm text-yellow-700 mb-3">
+                                Test Motor CAN (J4) communication. Host CAN (J5) disabled for debugging.
+                            </p>
+                            <button onclick="runCanDiagnostic()"
+                                class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded">
+                                <i class="fas fa-network-wired mr-2"></i>Run CAN Diagnostic
+                            </button>
+                        </div>
 
                         <div style="height: 400px;">
                             <canvas id="kneeChart"></canvas>

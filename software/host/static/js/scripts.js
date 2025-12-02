@@ -2079,78 +2079,163 @@ function sendCanWaypointSequence() {
     const joint = $("#canWaypointJoint").val();
     const dofIndex = parseInt($("#canWaypointDof").val(), 10);
     const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
+    
+    // Get waypoint density from UI (default 10 points)
+    const waypointDensity = parseInt($("#waypointDensity").val(), 10) || 10;
 
     if (!joint) {
         appendStatusMessage("⚠️ Select a joint for the waypoint sequence test.");
         return;
     }
 
-    // Define a test sequence: 0° → 5° → -5° → 10° → 0°
-    const testSequence = [
-        { angle: 0, delay: 1000 },   // Start at 0° after 1s
-        { angle: 5, delay: 1000 },   // Move to 5° after 1s
-        { angle: -5, delay: 1000 },  // Move to -5° after 1s
-        { angle: 10, delay: 1000 },  // Move to 10° after 1s
-        { angle: 0, delay: 1000 }    // Return to 0° after 1s
-    ];
-
-    appendStatusMessage(`🚀 Sending test sequence for ${joint} DOF${dofIndex} (${testSequence.length} waypoints)...`);
+    // Check which format to use
+    const useMultiDof = $("#useMultiDofFormat").is(':checked');
+    const formatName = useMultiDof ? "Multi-DOF (optimized)" : "Single-DOF (legacy)";
 
     // Disable button during sequence
     const btn = $("#sendCanWaypointSequenceBtn");
     btn.prop('disabled', true);
     btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
 
-    // Send waypoints sequentially with proper timing
-    let cumulativeDelay = 0;
-    let successCount = 0;
+    // Generate a sinusoidal trajectory with configurable density
+    // Parameters:
+    // - Center angle: 45° (middle of KNEE range 0°-100°)
+    // - Amplitude: 10° (oscillates between 35° and 55°)
+    // - Duration: 6 seconds (2 complete cycles = 0.33 Hz)
+    // - Number of points: waypointDensity
+    const centerAngle = 45;
+    const amplitude = 10;
+    const totalDuration = 6000;  // 6 seconds in ms
+    const numCycles = 2;  // 2 complete sine waves
+    const frequency = numCycles / (totalDuration / 1000);  // Hz
+    
+    // Generate waypoints along the sinusoid
+    // Calculate initial offset based on number of waypoints:
+    // - With staggerTime of 5ms and 500 waypoints, it takes 2.5s to send all
+    // - We need to ensure the first waypoint arrives AFTER we've sent enough
+    //   waypoints to fill the buffer and stay ahead of execution
+    // - Formula: max(500ms, staggerTime * waypointDensity * 0.5)
+    //   This ensures we have at least half the waypoints sent before execution starts
+    const staggerTime = Math.max(5, Math.min(50, 300 / waypointDensity));
+    const sendTime = staggerTime * waypointDensity;  // Total time to send all waypoints
+    const initialOffset = Math.max(500, Math.min(3000, sendTime * 0.6));  // 60% of send time, max 3s
+    
+    const testSequence = [];
+    for (let i = 0; i < waypointDensity; i++) {
+        const t = (i / (waypointDensity - 1)) * totalDuration;  // Time in ms (0 to totalDuration)
+        const tSeconds = t / 1000;
+        // Sinusoidal angle: center + amplitude * sin(2π * frequency * t)
+        const angle = centerAngle + amplitude * Math.sin(2 * Math.PI * frequency * tSeconds);
+        testSequence.push({
+            angle: Math.round(angle * 100) / 100,  // Round to 2 decimal places
+            arrival_offset_ms: Math.round(t) + initialOffset  // Add initial offset
+        });
+    }
+    
+    // Calculate delta-t between points for logging
+    const deltaT = Math.round(totalDuration / (waypointDensity - 1));
+    
+    appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint} DOF${dofIndex}`);
+    appendStatusMessage(`   📊 ${waypointDensity} waypoints, Δt=${deltaT}ms, duration=${totalDuration/1000}s`);
+    appendStatusMessage(`   📈 ${numCycles} cycles @ ${frequency.toFixed(2)}Hz, amplitude=±${amplitude}°`);
+    appendStatusMessage(`   📦 Format: ${formatName}`);
 
-    testSequence.forEach((waypoint, index) => {
-        cumulativeDelay += waypoint.delay;
-        
+    // === PARALLEL SENDING with setTimeout ===
+    const INTRA_WAYPOINT_DELAY = 0.5;  // 0.5ms between waypoints
+    
+    let successCount = 0;
+    let failCount = 0;
+
+    appendStatusMessage(`📡 Sending ${testSequence.length} waypoints (${INTRA_WAYPOINT_DELAY}ms interval)...`);
+
+    // Stream ALL waypoints with staggered setTimeout
+    testSequence.forEach((waypoint, idx) => {
         setTimeout(() => {
-            $.ajax({
-                url: '/can/waypoint',
-                method: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify({
+            // Choose endpoint and payload based on format
+            let url, payload;
+            
+            if (useMultiDof) {
+                // Multi-DOF format: all DOFs in one frame, uses t_offset_ms
+                // For single-DOF test, we set only the target DOF and null for others
+                const angles = [null, null, null];
+                angles[dofIndex] = waypoint.angle;
+                
+                url = '/can/multi_dof_waypoint';
+                payload = {
+                    joint: joint,
+                    angles_deg: angles,
+                    t_offset_ms: waypoint.arrival_offset_ms  // Already includes initialOffset
+                };
+            } else {
+                // Legacy single-DOF format
+                url = '/can/waypoint';
+                payload = {
                     joint: joint,
                     dof_index: dofIndex,
                     angle_deg: waypoint.angle,
-                    arrival_offset_ms: waypoint.delay,
+                    arrival_offset_ms: waypoint.arrival_offset_ms,
                     mode: mode
-                })
+                };
+            }
+            
+            $.ajax({
+                url: url,
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(payload)
             }).done(response => {
                 if (response.status === 'success') {
                     successCount++;
-                    appendStatusMessage(`  ✓ Waypoint ${index + 1}/${testSequence.length}: ${waypoint.angle}° (arrival in ${waypoint.delay}ms)`);
                 } else {
-                    appendStatusMessage(`  ✗ Waypoint ${index + 1} failed: ${response.message}`);
+                    failCount++;
+                    appendStatusMessage(`  ✗ Waypoint ${idx + 1} failed: ${response.message}`);
                 }
                 
-                // Re-enable button after last waypoint
-                if (index === testSequence.length - 1) {
+                // Log progress every 50 waypoints
+                if ((idx + 1) % 50 === 0 || idx === testSequence.length - 1) {
+                    appendStatusMessage(`  📊 Sent ${idx + 1}/${testSequence.length} waypoints`);
+                }
+                
+                // Last waypoint sent
+                if (idx === testSequence.length - 1) {
+                    appendStatusMessage(`📤 All ${successCount}/${testSequence.length} waypoints queued. Executing...`);
+                    // Wait for sequence to complete
+                    const waitTime = totalDuration + initialOffset + 500;
                     setTimeout(() => {
                         btn.prop('disabled', false);
-                        btn.html('<i class="fas fa-list mr-1"></i>Send Test Sequence');
-                        appendStatusMessage(`✅ Sequence complete: ${successCount}/${testSequence.length} waypoints sent successfully`);
-                    }, 500);
+                        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
+                        appendStatusMessage(`✅ Sequence execution complete`);
+                    }, waitTime);
                 }
             }).fail(xhr => {
+                failCount++;
                 const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-                appendStatusMessage(`  ✗ Waypoint ${index + 1} error: ${message}`);
+                appendStatusMessage(`  ✗ Waypoint ${idx + 1} error: ${message}`);
                 
-                // Re-enable button on error
-                if (index === testSequence.length - 1) {
+                if (idx === testSequence.length - 1) {
                     setTimeout(() => {
                         btn.prop('disabled', false);
-                        btn.html('<i class="fas fa-list mr-1"></i>Send Test Sequence');
+                        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
                     }, 500);
                 }
             });
-        }, index * 100); // Stagger requests by 100ms to avoid overwhelming the system
+        }, idx * INTRA_WAYPOINT_DELAY);
     });
 }
+
+// Update format label when toggle changes
+$(document).ready(function() {
+    $("#useMultiDofFormat").on('change', function() {
+        const isMultiDof = $(this).is(':checked');
+        if (isMultiDof) {
+            $("#formatLabel").text("Multi-DOF (optimized)");
+            $("#formatDescription").html("✅ Recommended: 66% less CAN traffic, all DOFs in one frame");
+        } else {
+            $("#formatLabel").text("Single-DOF (legacy)");
+            $("#formatDescription").html("⚠️ Legacy format: 3 frames per 3-DOF joint");
+        }
+    });
+});
 
 function startCanStatusPolling() {
     if (canStatusPollHandle) {
@@ -4223,6 +4308,24 @@ function stopEncoderTest(jointType = null) {
     updateEncoderTestUI(false, currentEncoderJointType);
     
     currentEncoderJointType = null;
+}
+
+/**
+ * Runs CAN bus diagnostic test
+ * Tests Motor CAN (J4) communication with motors
+ */
+function runCanDiagnostic() {
+    const joint = $("#jointSelect").val();
+    
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint first");
+        return;
+    }
+    
+    appendStatusMessage(`🔍 Running CAN diagnostic for ${joint}...`);
+    appendStatusMessage(`   Motor CAN (J4) only - Host CAN (J5) disabled`);
+    
+    sendCommand('can-diag');
 }
 
 /**
