@@ -37,8 +37,7 @@
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
 // Priority Level 3: Trajectory Commands
-#define CAN_ID_WAYPOINT_BASE 0x300       // 0x300-0x31F for single-DOF waypoints (legacy)
-#define CAN_ID_MULTI_DOF_WAYPOINT_BASE 0x380  // 0x380-0x39F for multi-DOF waypoints (optimized)
+#define CAN_ID_MULTI_DOF_WAYPOINT_BASE 0x380  // 0x380-0x39F for multi-DOF waypoints
 
 // Priority Level 4: Status Feedback
 #define CAN_ID_STATUS_BASE 0x400    // 0x400-0x4FF for status (NEW: was 0x200)
@@ -112,119 +111,6 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
   clock_synced = true;
 
   LOG_INFO("[CAN] Time sync: host=" + String(t_host_ms) + " local=" + String(t_local) + " (synced)");
-}
-
-/**
- * @brief Handle Waypoint frame from host
- * @param id CAN ID (encodes joint and DOF)
- * @param data CAN frame data (8 bytes)
- * @param len Frame length
- */
-void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
-  if (len < 8) {
-    LOG_WARN("[CAN] Waypoint frame too short (" + String(len) + " bytes)");
-    return;
-  }
-
-  if (!clock_synced) {
-    LOG_WARN("[CAN] Waypoint dropped: clock not synchronized");
-    return;
-  }
-  
-  // SAFETY: Require minimum uptime before accepting waypoints
-  // This prevents stale messages from MCP2515 buffer from executing after reset
-  if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
-    LOG_WARN("[CAN] Waypoint dropped: system startup (uptime=" + String(millis()) + "ms < " + 
-             String(MIN_UPTIME_FOR_WAYPOINTS_MS) + "ms)");
-    return;
-  }
-
-  // Parse waypoint (from CAN_CONTROL_PROTOCOL.md)
-  struct {
-    uint8_t dof_index;
-    int16_t target_angle;    // 0.01° resolution
-    uint32_t t_arrival_ms;   // Absolute arrival time
-    uint8_t mode;            // LINEAR/SMOOTH
-  } __attribute__((packed)) waypoint;
-
-  memcpy(&waypoint, data, sizeof(waypoint));
-
-  // Verify DOF index
-  if (waypoint.dof_index >= waypoint_buffers_get_dof_count()) {
-    LOG_WARN("[CAN] Waypoint DOF " + String(waypoint.dof_index) + " exceeds configured DOFs");
-    return;
-  }
-  
-  // SAFETY: Verify system is ready for movement (linear equations + calibrated offsets)
-  if (active_joint_controller != nullptr && !active_joint_controller->isSystemReadyForMovement()) {
-    LOG_ERROR("[CAN] Waypoint REJECTED: System not ready - run recalcOffset first!");
-    return;
-  }
-
-  // Convert host timestamp to local time
-  uint32_t t_arrival_local = hostTimeToLocal(waypoint.t_arrival_ms);
-  
-  // Convert to WaypointEntry
-  WaypointEntry entry{};
-  entry.dof_index = waypoint.dof_index;
-  entry.target_angle_deg = static_cast<float>(waypoint.target_angle) / 100.0f;
-  entry.t_arrival_ms = t_arrival_local;  // Store in local time reference
-  entry.mode = waypoint.mode;
-
-  // Check if this is the first waypoint for this DOF (transition from IDLE to MOVING)
-  WaypointState current_state = waypoint_buffer_state(waypoint.dof_index);
-  bool is_first_waypoint = (current_state == WaypointState::IDLE);
-
-  // Push to buffer
-  if (!waypoint_buffer_push(waypoint.dof_index, entry)) {
-    LOG_WARN("[CAN] Waypoint buffer full for DOF " + String(waypoint.dof_index));
-    return;
-  }
-
-  // Initialize movement if first waypoint OR resuming from HOLDING
-  // In both cases, we need to set prev_angle/prev_time to current values
-  bool needs_init = is_first_waypoint || (current_state == WaypointState::HOLDING);
-  
-  if (needs_init && active_joint_controller != nullptr) {
-    // Get current joint angle as starting point
-    bool is_valid = false;
-    float current_angle = active_joint_controller->getCurrentAngle(waypoint.dof_index, is_valid);
-    
-    if (is_valid) {
-      uint32_t t_now = getAbsoluteTimeMs();
-      
-      // === COMPREHENSIVE SAFETY CHECK ===
-      // Checks: velocity limits, angle limits, time validity, mapping limits
-      String safety_violation;
-      if (!active_joint_controller->checkWaypointSafety(waypoint.dof_index, current_angle, 
-                                                        entry.target_angle_deg, entry.t_arrival_ms, 
-                                                        t_now, safety_violation)) {
-        // Safety check failed - log error and trigger emergency stop
-        LOG_ERROR("[CAN SAFETY] " + safety_violation);
-        emergency_stop_requested = true;
-        return; // Drop waypoint
-      }
-      
-      // Safety check passed - initialize/update movement start point
-      waypoint_buffer_set_prev(waypoint.dof_index, current_angle, t_now);
-      waypoint_buffer_set_state(waypoint.dof_index, WaypointState::MOVING);
-      
-      if (is_first_waypoint) {
-        LOG_INFO("[CAN] DOF " + String(waypoint.dof_index) + " transitioned IDLE → MOVING (start=" + 
-                 String(current_angle, 3) + "° at t=" + String(t_now) + " ms)");
-      } else {
-        LOG_INFO("[CAN] DOF " + String(waypoint.dof_index) + " resumed HOLDING → MOVING (start=" + 
-                 String(current_angle, 3) + "° at t=" + String(t_now) + " ms)");
-      }
-    } else {
-      LOG_WARN("[CAN] Cannot read current angle for DOF " + String(waypoint.dof_index) + ", waypoint queued but state unchanged");
-    }
-  }
-
-  uint32_t t_now = millis();
-  int32_t time_until_arrival = (int32_t)entry.t_arrival_ms - (int32_t)t_now;
-  LOG_INFO("[CAN] Waypoint queued DOF=" + String(waypoint.dof_index) + " angle=" + String(entry.target_angle_deg, 3) +
-           " deg t_arrival=" + String(entry.t_arrival_ms) + " (in " + String(time_until_arrival) + " ms)");
 }
 
 /**
@@ -406,11 +292,8 @@ void pollHostCan() {
       LOG_WARN("[CAN_HOST] RX EMERGENCY_STOP frame");
       emergency_stop_requested = true;
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
-      // Multi-DOF Waypoint (0x380-0x39F) - optimized format, all DOFs in one frame
+      // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
-    } else if (rx_id >= CAN_ID_WAYPOINT_BASE && rx_id < CAN_ID_MULTI_DOF_WAYPOINT_BASE) {
-      // Single-DOF Waypoint (0x300-0x37F) - legacy format, one DOF per frame
-      handleWaypointFrame(rx_id, buf, len);
     }
     // Note: Motor responses (0x140+) are on the Motor CAN bus, not here
 

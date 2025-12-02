@@ -1,18 +1,21 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 1.2  
+**Document Version:** 1.3  
 **Date:** 2024-12-02  
 **Status:** Design Specification (Indicative)  
 **Authors:** Alia Robotics Team
 
+**Changelog v1.3:**
+- **Removed Single-DOF Waypoint (0x300-0x31F)**: Deprecated in favor of Multi-DOF format
+- Multi-DOF Waypoint is now the only waypoint format (simpler, more efficient)
+
 **Changelog v1.2:**
-- **Multi-DOF Waypoint timing fix**: Changed `t_offset_ms` from "offset from time sync" to "offset from current time" (same semantics as Single-DOF `arrival_offset_ms`)
-- Added sentinel value `0x7FFF` for unused DOFs in Multi-DOF format
-- Updated Python/C++ examples with improved clarity
+- Multi-DOF Waypoint timing fix: `t_offset_ms` as offset from current time
+- Added sentinel value `0x7FFF` for unused DOFs
 
 **Changelog v1.1:**
 - Added CAN Gateway architecture (Section 2.4)
-- Added Multi-DOF Waypoint Frame specification (Section 4.2.4)
+- Added Multi-DOF Waypoint Frame specification
 - Updated bandwidth analysis for optimized protocol
 - Added comparison with commercial humanoid robots
 
@@ -574,10 +577,10 @@ For the final **CAN Expansion Board**, we recommend specific components to simpl
 | 0x000 | Emergency Stop | **Level 0** (Highest) | On-demand | Host → All |
 | 0x002 | Time Sync | **Level 1** (System) | 10 Hz | Host → All |
 | 0x140-0x280 | Motor Torque Commands | **Level 2** (CRITICAL) | 500 Hz | Controller → Motors |
-| 0x300-0x31F | Waypoint Commands | **Level 3** (Trajectory) | 50-100 Hz | Host → Controller |
+| 0x380-0x39F | Waypoint Commands | **Level 3** (Trajectory) | 50-100 Hz | Host → Controller |
 | 0x400-0x4FF | Status/Feedback | **Level 4** (Lowest) | 10-50 Hz | Controller → Host |
 
-**Key Design**: Motor torque commands (0x140-0x280) have **higher priority** than waypoint commands (0x300-0x31F) to ensure the inner PID loop @ 500 Hz is never starved by trajectory updates. This is critical for control stability.
+**Key Design**: Motor torque commands (0x140-0x280) have **higher priority** than waypoint commands (0x380-0x39F) to ensure the inner PID loop @ 500 Hz is never starved by trajectory updates. This is critical for control stability.
 
 ### 4.2 Message Types
 
@@ -655,24 +658,7 @@ if (emergency_stop_requested) {
 }
 ```
 
-#### 4.2.3 Single-DOF Waypoint (ID: 0x300-0x31F) - Legacy
-**Purpose**: Stream target positions for single DOF (legacy format)
-
-**Format (8 bytes, packed):**
-```
-Byte 0:    uint8_t  dof_index (0-2 for 3-DOF joint)
-Byte 1-2:  int16_t  target_angle (0.01° resolution, ±327.67°)
-Byte 3-6:  uint32_t t_arrival_ms (absolute time, synchronized)
-Byte 7:    uint8_t  mode (0=LINEAR, 1=SMOOTH, future use)
-```
-
-**Frequency**: 50-100 Hz per DOF  
-**Latency**: < 200 µs  
-**Buffer Depth**: 20 waypoints per DOF (200 ms @ 100 Hz)
-
-**Note:** This format requires 3 CAN frames for a 3-DOF joint. See **Multi-DOF Waypoint (4.2.6)** for optimized format.
-
-#### 4.2.4 Multi-DOF Waypoint (ID: 0x380-0x39F) - Recommended
+#### 4.2.3 Waypoint (ID: 0x380-0x39F)
 **Purpose**: Stream target positions for all DOFs of a joint in a single frame
 
 **Format (8 bytes, packed):**
@@ -685,20 +671,16 @@ Byte 6-7:  uint16_t t_offset_ms (offset from CURRENT time, 0-65535 ms)
 
 **CAN ID**: `0x380 + joint_id` (0x380 = Ankle Right, 0x381 = Ankle Left, etc.)
 
-**Advantages over Single-DOF format:**
-| Aspect | Single-DOF (0x300) | Multi-DOF (0x380) |
-|--------|-------------------|-------------------|
-| Frames per 3-DOF joint | 3 | **1** |
-| Bandwidth usage | 333 bits | **111 bits** |
-| Synchronization | Implicit (same t_arrival) | **Explicit (single frame)** |
-| Latency | 3× frame time | **1× frame time** |
+**Key Features:**
+- All DOFs in a single CAN frame (8 bytes)
+- 66% less CAN traffic compared to per-DOF frames
+- Explicit synchronization between DOFs
 
 **Time Reference:**
-- Uses **relative offset** from **current time** (same semantics as Single-DOF `arrival_offset_ms`)
+- Uses **relative offset** from **current time**
 - Firmware calculates: `t_arrival = t_now + t_offset_ms`
 - Reduces payload from 4 bytes to 2 bytes
 - Maximum offset: 65.535 seconds (sufficient for 50+ waypoints @ 100 Hz)
-- **Note:** This approach is simpler and more robust than using time sync offsets, as it doesn't require precise time synchronization between host and controller
 
 **Example (Python):**
 ```python
@@ -712,7 +694,7 @@ def send_multi_dof_waypoint(bus, joint_id, angles_deg, t_offset_ms):
         bus: python-can Bus instance
         joint_id: 0-31 (joint index)
         angles_deg: [dof0, dof1, dof2] angles in degrees (use None for unused DOFs)
-        t_offset_ms: offset from current time in ms (same as Single-DOF arrival_offset_ms)
+        t_offset_ms: offset from current time in ms
     
     Example:
         # 3-DOF joint (ankle): all DOFs used, arrive in 1 second
@@ -752,13 +734,12 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
         int16_t dof0_angle;
         int16_t dof1_angle;
         int16_t dof2_angle;
-        uint16_t t_offset_ms;  // Offset from CURRENT time (same as Single-DOF)
+        uint16_t t_offset_ms;  // Offset from CURRENT time
     } __attribute__((packed)) waypoint;
     
     memcpy(&waypoint, data, sizeof(waypoint));
     
     // Calculate absolute arrival time from current time + offset
-    // This matches Single-DOF behavior: t_arrival = t_now + offset
     uint32_t t_now = millis();  // Or getAbsoluteTimeMs()
     uint32_t t_arrival = t_now + waypoint.t_offset_ms;
     
@@ -785,50 +766,6 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
 - For joints with fewer than 3 DOFs (e.g., knee = 1 DOF), set unused angles to `0x7FFF` (sentinel)
 - Controller skips DOFs with sentinel value
 - Example: Knee joint sends `[angle, 0x7FFF, 0x7FFF, t_offset]`
-
-**Example:**
-```python
-# Host sends waypoint
-def send_waypoint(bus, joint_id, dof_index, target_angle_deg, t_arrival_ms, mode=0):
-    target_angle_int = int(target_angle_deg * 100)  # 0.01° resolution
-    data = struct.pack('<BhIB', 
-        dof_index,
-        target_angle_int,
-        t_arrival_ms,
-        mode
-    ) + b'\x00'  # Padding to 8 bytes
-    
-    msg = can.Message(
-        arbitration_id=0x300 + joint_id,  # NEW: 0x300 base instead of 0x010
-        data=data,
-        is_extended_id=False
-    )
-    bus.send(msg)
-```
-
-**Controller Processing:**
-```cpp
-void handleWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
-  struct {
-    uint8_t dof_index;
-    int16_t target_angle;
-    uint32_t t_arrival_ms;
-    uint8_t mode;
-  } __attribute__((packed)) waypoint;
-  
-  memcpy(&waypoint, data, sizeof(waypoint));
-  
-  // Convert to WaypointEntry
-  WaypointEntry entry{};
-  entry.dof_index = waypoint.dof_index;
-  entry.target_angle_deg = static_cast<float>(waypoint.target_angle) / 100.0f;
-  entry.t_arrival_ms = waypoint.t_arrival_ms;
-  entry.mode = waypoint.mode;
-  
-  // Push to buffer
-  waypoint_buffer_push(waypoint.dof_index, entry);
-}
-```
 
 #### 4.2.4 Motor Commands (ID: 0x140-0x1FF)
 **Purpose**: Send torque/position commands to LKM servos
@@ -858,7 +795,7 @@ Byte 6-7:  uint16_t error_code
 
 ### 4.3 Bandwidth Analysis
 
-#### 4.3.1 Per Joint (Single-DOF Waypoint - Legacy)
+#### 4.3.1 Per Joint
 
 | Message Type | Freq (Hz) | Frame/s | Bandwidth | Notes |
 |--------------|-----------|---------|-----------|-------|
@@ -1681,8 +1618,7 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | 0x010-0x13F | 16-319 | Reserved (Future High Priority) | - | - |
 | 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
 | 0x200-0x2FF | 512-767 | Reserved | - | - |
-| 0x300-0x31F | 768-799 | Single-DOF Waypoint (Legacy) | Host → Ctrl | **Level 3** (Medium) |
-| 0x320-0x37F | 800-895 | Reserved | - | - |
+| 0x300-0x37F | 768-895 | Reserved | - | - |
 | **0x380** | 896 | **Multi-DOF Waypoint Joint 0** (Ankle R) | Host → Ctrl | **Level 3** (Medium) |
 | **0x381** | 897 | **Multi-DOF Waypoint Joint 1** (Ankle L) | Host → Ctrl | **Level 3** (Medium) |
 | **0x382** | 898 | **Multi-DOF Waypoint Joint 2** (Knee R) | Host → Ctrl | **Level 3** (Medium) |

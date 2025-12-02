@@ -402,81 +402,16 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
 
     @app.route('/can/waypoint', methods=['POST'])
     def send_can_waypoint():
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        data = request.get_json() or {}
-        joint = data.get('joint')
-        dof_index = data.get('dof_index')
-        angle_deg = data.get('angle_deg')
-        t_arrival_ms = data.get('t_arrival_ms')
-        arrival_offset_ms = data.get('arrival_offset_ms', 50)
-        mode = data.get('mode', 0x01)
-
-        if not joint:
-            return jsonify({
-                "status": "error",
-                "message": "Joint is required"
-            }), 400
-        if dof_index is None:
-            return jsonify({
-                "status": "error",
-                "message": "dof_index is required"
-            }), 400
-        if angle_deg is None:
-            return jsonify({
-                "status": "error",
-                "message": "angle_deg is required"
-            }), 400
-
-        try:
-            dof_index = int(dof_index)
-            angle_deg = float(angle_deg)
-            if t_arrival_ms is None:
-                arrival_offset_ms = max(int(arrival_offset_ms), 1)
-                t_arrival_ms = int(time.time() * 1000) + arrival_offset_ms
-            else:
-                t_arrival_ms = int(t_arrival_ms)
-            mode = int(mode) & 0xFF
-        except ValueError as exc:
-            return jsonify({
-                "status": "error",
-                "message": f"Invalid parameter: {exc}"
-            }), 400
-
-        try:
-            details = can_manager.send_waypoint(joint, dof_index, angle_deg, t_arrival_ms, mode)
-            return jsonify({
-                "status": "success",
-                "message": f"Waypoint queued for {joint} DOF {dof_index}",
-                "details": details
-            })
-        except ValueError as exc:
-            return jsonify({
-                "status": "error",
-                "message": str(exc)
-            }), 400
-        except Exception as exc:
-            logger.exception("Failed to send waypoint")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to send waypoint: {exc}"
-            }), 500
-
-    @app.route('/can/multi_dof_waypoint', methods=['POST'])
-    def send_can_multi_dof_waypoint():
         """
-        Send Multi-DOF waypoint command (optimized format).
+        Send waypoint command using Multi-DOF format.
         
-        This is the recommended format for production use, as it sends all DOFs
-        of a joint in a single CAN frame, reducing bus traffic by 66%.
+        Sends all DOFs of a joint in a single CAN frame (8 bytes).
         
         Request JSON:
             {
                 "joint": "ANKLE_RIGHT",
                 "angles_deg": [45.0, 10.0, -5.0],  // DOF0, DOF1, DOF2 (use null for unused)
-                "t_offset_ms": 1000                // Offset from last time sync
+                "t_offset_ms": 1000                // Offset from current time
             }
         """
         unavailable = can_unavailable_response()
