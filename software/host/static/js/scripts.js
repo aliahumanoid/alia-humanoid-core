@@ -346,7 +346,6 @@ $(document).ready(function() {
     $("#sendCanWaypointBtn").on('click', sendCanWaypointCommand);
     $("#sendCanWaypointSequenceBtn").on('click', sendCanWaypointSequence);
     $("#sendCanEmergency").on('click', sendCanEmergencyStop);
-    $("#canWaypointJoint").on('change', updateCanWaypointDofOptions);
 
     // Initialize charts
     initializeCharts();
@@ -355,6 +354,9 @@ $(document).ready(function() {
     $("#jointSelect").change(function() {
         const joint = $(this).val();
         updateSerialPortSelectUI(joint);
+        
+        // Update CAN Motion Control panel (joint label + DOF options)
+        updateCanMotionJoint();
         
         // Update DOF tab availability based on joint configuration
         updateDofTabsAvailability(joint);
@@ -1998,24 +2000,25 @@ function sendCanEmergencyStop() {
     });
 }
 
-function populateCanWaypointJointOptions() {
-    const select = $("#canWaypointJoint");
-    if (!select.length || !jointConfigData || !jointConfigData.joints) {
-        return;
+/**
+ * Update CAN Motion Control panel to reflect selected joint
+ * Called when jointSelect changes
+ */
+function updateCanMotionJoint() {
+    const joint = $("#jointSelect").val();
+    
+    // Update the joint label in CAN Motion Control panel
+    const label = $("#canMotionJointLabel");
+    if (label.length) {
+        label.text(joint);
     }
-
-    select.empty();
-    Object.keys(jointConfigData.joints).forEach(key => {
-        const hostKey = key.toUpperCase();
-        const niceName = jointConfigData.joints[key].name || hostKey.replace('_', ' ');
-        select.append(`<option value="${hostKey}">${niceName}</option>`);
-    });
-
+    
+    // Update DOF options based on selected joint
     updateCanWaypointDofOptions();
 }
 
 function updateCanWaypointDofOptions() {
-    const joint = $("#canWaypointJoint").val();
+    const joint = $("#jointSelect").val();
     const dofSelect = $("#canWaypointDof");
     if (!joint || !dofSelect.length || !jointConfigData || !jointConfigData.joints) {
         return;
@@ -2036,13 +2039,13 @@ function updateCanWaypointDofOptions() {
 }
 
 function sendCanWaypointCommand() {
-    const joint = $("#canWaypointJoint").val();
+    const joint = $("#jointSelect").val();
     const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
     const angle = parseFloat($("#canWaypointAngle").val());
     const arrivalOffset = parseInt($("#canWaypointArrival").val(), 10) || 50;
 
     if (!joint) {
-        appendStatusMessage("⚠️ Select a joint for the waypoint test.");
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
         return;
     }
     if (Number.isNaN(angle)) {
@@ -2076,7 +2079,7 @@ function sendCanWaypointCommand() {
 }
 
 function sendCanWaypointSequence() {
-    const joint = $("#canWaypointJoint").val();
+    const joint = $("#jointSelect").val();
     const dofIndex = parseInt($("#canWaypointDof").val(), 10);
     const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
     
@@ -2084,7 +2087,7 @@ function sendCanWaypointSequence() {
     const waypointDensity = parseInt($("#waypointDensity").val(), 10) || 10;
 
     if (!joint) {
-        appendStatusMessage("⚠️ Select a joint for the waypoint sequence test.");
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
         return;
     }
 
@@ -4693,7 +4696,7 @@ function fetchJointConfig() {
             if (response.status === 'success' && response.config) {
                 jointConfigData = response.config;
                 console.log('Joint configuration loaded:', jointConfigData);
-                populateCanWaypointJointOptions();
+                updateCanMotionJoint();
                 
                 // Show expected mapping grid for initially selected joint
                 const initialJoint = $("#jointSelect").val();
