@@ -2037,10 +2037,9 @@ function updateCanWaypointDofOptions() {
 
 function sendCanWaypointCommand() {
     const joint = $("#canWaypointJoint").val();
-    const dofIndex = $("#canWaypointDof").val();
+    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
     const angle = parseFloat($("#canWaypointAngle").val());
     const arrivalOffset = parseInt($("#canWaypointArrival").val(), 10) || 50;
-    const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
 
     if (!joint) {
         appendStatusMessage("⚠️ Select a joint for the waypoint test.");
@@ -2051,21 +2050,22 @@ function sendCanWaypointCommand() {
         return;
     }
 
+    // Build Multi-DOF format: set only the target DOF, null for others
+    const angles = [null, null, null];
+    angles[dofIndex] = angle;
+
     $.ajax({
         url: '/can/waypoint',
         method: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({
             joint: joint,
-            dof_index: dofIndex,
-            angle_deg: angle,
-            arrival_offset_ms: arrivalOffset,
-            mode: mode
+            angles_deg: angles,
+            t_offset_ms: arrivalOffset
         })
     }).done(response => {
         if (response.status === 'success') {
-            const details = response.details || {};
-            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${details.dof_index ?? dofIndex} @ ${details.angle_deg ?? angle}°`);
+            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${dofIndex} @ ${angle}°`);
         } else {
             appendStatusMessage(`⚠️ ${response.message || 'Failed to send waypoint'}`);
         }
