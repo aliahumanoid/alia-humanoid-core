@@ -2088,9 +2088,6 @@ function sendCanWaypointSequence() {
         return;
     }
 
-    // Check which format to use
-    const useMultiDof = $("#useMultiDofFormat").is(':checked');
-    const formatName = useMultiDof ? "Multi-DOF (optimized)" : "Single-DOF (legacy)";
 
     // Disable button during sequence
     const btn = $("#sendCanWaypointSequenceBtn");
@@ -2138,7 +2135,6 @@ function sendCanWaypointSequence() {
     appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint} DOF${dofIndex}`);
     appendStatusMessage(`   📊 ${waypointDensity} waypoints, Δt=${deltaT}ms, duration=${totalDuration/1000}s`);
     appendStatusMessage(`   📈 ${numCycles} cycles @ ${frequency.toFixed(2)}Hz, amplitude=±${amplitude}°`);
-    appendStatusMessage(`   📦 Format: ${formatName}`);
 
     // === PARALLEL SENDING with setTimeout ===
     const INTRA_WAYPOINT_DELAY = 0.5;  // 0.5ms between waypoints
@@ -2151,38 +2147,20 @@ function sendCanWaypointSequence() {
     // Stream ALL waypoints with staggered setTimeout
     testSequence.forEach((waypoint, idx) => {
         setTimeout(() => {
-            // Choose endpoint and payload based on format
-            let url, payload;
+            // Multi-DOF format: all DOFs in one frame
+            // For single-DOF test, we set only the target DOF and null for others
+            const angles = [null, null, null];
+            angles[dofIndex] = waypoint.angle;
             
-            if (useMultiDof) {
-                // Multi-DOF format: all DOFs in one frame, uses t_offset_ms
-                // For single-DOF test, we set only the target DOF and null for others
-                const angles = [null, null, null];
-                angles[dofIndex] = waypoint.angle;
-                
-                url = '/can/multi_dof_waypoint';
-                payload = {
+            $.ajax({
+                url: '/can/waypoint',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
                     joint: joint,
                     angles_deg: angles,
                     t_offset_ms: waypoint.arrival_offset_ms  // Already includes initialOffset
-                };
-            } else {
-                // Legacy single-DOF format
-                url = '/can/waypoint';
-                payload = {
-                    joint: joint,
-                    dof_index: dofIndex,
-                    angle_deg: waypoint.angle,
-                    arrival_offset_ms: waypoint.arrival_offset_ms,
-                    mode: mode
-                };
-            }
-            
-            $.ajax({
-                url: url,
-                method: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify(payload)
+                })
             }).done(response => {
                 if (response.status === 'success') {
                     successCount++;
@@ -2223,19 +2201,6 @@ function sendCanWaypointSequence() {
     });
 }
 
-// Update format label when toggle changes
-$(document).ready(function() {
-    $("#useMultiDofFormat").on('change', function() {
-        const isMultiDof = $(this).is(':checked');
-        if (isMultiDof) {
-            $("#formatLabel").text("Multi-DOF (optimized)");
-            $("#formatDescription").html("✅ Recommended: 66% less CAN traffic, all DOFs in one frame");
-        } else {
-            $("#formatLabel").text("Single-DOF (legacy)");
-            $("#formatDescription").html("⚠️ Legacy format: 3 frames per 3-DOF joint");
-        }
-    });
-});
 
 function startCanStatusPolling() {
     if (canStatusPollHandle) {

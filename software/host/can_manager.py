@@ -10,12 +10,10 @@ CAN ID Allocation (Priority-Optimized):
 - 0x000: Emergency Stop (Priority Level 0 - Highest)
 - 0x002: Time Sync (Priority Level 1 - System)
 - 0x140-0x280: Motor Commands (Priority Level 2 - CRITICAL @ 500 Hz)
-- 0x300-0x37F: Single-DOF Waypoint Commands (Priority Level 3 - Legacy)
-- 0x380-0x39F: Multi-DOF Waypoint Commands (Priority Level 3 - Optimized)
+- 0x380-0x39F: Multi-DOF Waypoint Commands (Priority Level 3 - @ 50-100 Hz)
 - 0x400-0x4FF: Status Feedback (Priority Level 4 - Lowest @ 10-50 Hz)
 
 Note: Motor commands have higher priority than waypoints to ensure PID loop stability.
-Multi-DOF waypoints are recommended for production use (66% less CAN traffic).
 """
 from __future__ import annotations
 
@@ -180,60 +178,6 @@ class CanManager:
         payload = bytes([reason_code & 0xFF]) + bytes(7)
         self._send_frame(0x000, payload, context=f"E-Stop reason={reason_code}")
         return {"reason": reason_code}
-
-    def send_waypoint(
-        self,
-        joint_name: str,
-        dof_index: int,
-        angle_deg: float,
-        arrival_time_ms: int,
-        mode: int = 0x01,
-    ) -> Dict[str, Any]:
-        """
-        Send waypoint command to a specific joint/DOF.
-
-        Args:
-            joint_name: Host joint key (e.g., 'KNEE_LEFT')
-            dof_index: Target DOF index within joint (0..N)
-            angle_deg: Target angle in degrees
-            arrival_time_ms: Absolute timeline when target should be reached
-            mode: Trajectory mode (see CAN_CONTROL_PROTOCOL)
-        """
-        self._ensure_connection()
-
-        joint_key = joint_name.upper()
-        if joint_key not in JOINTS:
-            raise ValueError(f"Unknown joint '{joint_name}'.")
-
-        joint_info = JOINTS[joint_key]
-        if dof_index < 0 or dof_index >= len(joint_info["dofs"]):
-            raise ValueError(f"Invalid DOF index {dof_index} for joint {joint_key}.")
-
-        joint_id = joint_info["id"]
-        # NEW: 0x300 base for waypoints (Priority Level 3)
-        # Motor commands (0x140-0x280) have higher priority for PID stability
-        arbitration_id = 0x300 + joint_id
-
-        # Convert to 0.01° resolution within signed int16
-        angle_counts = int(round(angle_deg * 100))
-        angle_counts = max(min(angle_counts, 32767), -32768)
-
-        payload = struct.pack("<BhIB", dof_index & 0xFF, angle_counts, arrival_time_ms & 0xFFFFFFFF, mode & 0xFF)
-        context = (
-            f"Waypoint joint={joint_key} id={joint_id} dof={dof_index} angle={angle_deg:.2f}° "
-            f"(counts={angle_counts}) arrival={arrival_time_ms} mode={mode}"
-        )
-        self._send_frame(arbitration_id, payload, context=context)
-
-        return {
-            "joint": joint_key,
-            "dof_index": dof_index,
-            "angle_deg": angle_deg,
-            "angle_counts": angle_counts,
-            "t_arrival_ms": arrival_time_ms,
-            "mode": mode,
-            "arbitration_id": f"0x{arbitration_id:03X}",
-        }
 
     def send_multi_dof_waypoint(
         self,
