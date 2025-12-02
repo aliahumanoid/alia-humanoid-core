@@ -367,18 +367,17 @@
                 <!-- Left column: Joint Selection, Setup, PID, Mapping -->
                 <div class="resizable-column pt-4 px-4 pb-0" style="width: 60%; flex-basis: 60%;">
 
-                <!-- Joint Selection -->
+                <!-- Joint & Connection Setup -->
                 <div class="bg-white rounded-lg shadow-md p-6 mb-8">
                     <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointSelectionContent')">
-                        <span>Joint Selection</span>
+                        <span><i class="fas fa-cog mr-2"></i>Joint & Connection Setup</span>
                         <i class="fas fa-chevron-up chevron-icon"></i>
                     </h2>
 
-                    <div id="jointSelectionContent" class="section-content">
-                    <div class="grid grid-cols-1 gap-4">
+                    <div id="jointSelectionContent" class="section-content space-y-4">
+                        <!-- Joint Selection -->
                         <div>
-                            <label for="jointSelect" class="block text-sm font-medium text-gray-700">Select
-                                Joint:</label>
+                            <label for="jointSelect" class="block text-sm font-medium text-gray-700">Select Joint:</label>
                             <select id="jointSelect"
                                 class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
                                 <option value="KNEE_LEFT" selected>Left Knee</option>
@@ -389,8 +388,10 @@
                                 <option value="HIP_RIGHT">Right Hip</option>
                             </select>
                         </div>
+
+                        <!-- Serial Port -->
                         <div>
-                            <label for="serialPortSelect" class="block text-sm font-medium text-gray-700">Serial Port:</label>
+                            <label for="serialPortSelect" class="block text-sm font-medium text-gray-700">Serial Port (Debug):</label>
                             <div class="mt-1 flex items-center space-x-2">
                                 <select id="serialPortSelect"
                                     class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
@@ -404,18 +405,12 @@
                             </div>
                             <p id="serialPortHint" class="text-xs text-gray-500 mt-1"></p>
                         </div>
-                    </div>
-                    </div>
-                </div>
 
-                <div class="bg-white rounded-lg shadow-md p-6 mb-8">
-                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('hostCanControlContent')">
-                        <span>Host CAN Control</span>
-                        <i class="fas fa-chevron-up chevron-icon"></i>
-                    </h2>
-                    <div id="hostCanControlContent" class="section-content space-y-4">
-                        <div>
-                            <label for="canInterfaceSelect" class="block text-sm font-medium text-gray-700">CAN Interface:</label>
+                        <!-- CAN Interface -->
+                        <div class="pt-3 border-t border-gray-200">
+                            <label for="canInterfaceSelect" class="block text-sm font-medium text-gray-700">
+                                <i class="fas fa-network-wired mr-1"></i>CAN Interface:
+                            </label>
                             <div class="mt-1 flex items-center space-x-2">
                                 <select id="canInterfaceSelect"
                                     class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
@@ -434,10 +429,12 @@
                             </div>
                             <p id="canInterfaceHint" class="text-xs text-gray-500 mt-1"></p>
                         </div>
-                        <div id="canControlPanel" class="bg-gray-50 rounded-lg p-4 space-y-4">
+
+                        <!-- CAN Connection Status & Controls -->
+                        <div id="canControlPanel" class="bg-gray-50 rounded-lg p-3 space-y-3">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <p class="text-sm font-semibold text-gray-700">Connection</p>
+                                    <p class="text-sm font-semibold text-gray-700">CAN Connection</p>
                                     <p id="canConnectionDetails" class="text-xs text-gray-500">Select interface and press Connect</p>
                                 </div>
                                 <span id="canConnectionBadge"
@@ -445,91 +442,17 @@
                             </div>
                             <div class="flex flex-wrap gap-2">
                                 <button id="connectCanBtn" type="button"
-                                    class="px-3 py-2 rounded-md bg-green-500 text-white hover:bg-green-600">
+                                    class="px-3 py-1.5 rounded-md bg-green-500 text-white text-sm hover:bg-green-600">
                                     <i class="fas fa-plug mr-1"></i>Connect
                                 </button>
                                 <button id="disconnectCanBtn" type="button"
-                                    class="px-3 py-2 rounded-md bg-gray-500 text-white hover:bg-gray-600">
+                                    class="px-3 py-1.5 rounded-md bg-gray-500 text-white text-sm hover:bg-gray-600">
                                     <i class="fas fa-unlink mr-1"></i>Disconnect
                                 </button>
                                 <button id="sendCanTimeSync" type="button"
-                                    class="px-3 py-2 rounded-md bg-blue-500 text-white hover:bg-blue-600">
+                                    class="px-3 py-1.5 rounded-md bg-blue-500 text-white text-sm hover:bg-blue-600">
                                     <i class="fas fa-clock mr-1"></i>Time Sync
                                 </button>
-                                <button id="sendCanEmergency" type="button"
-                                    class="px-3 py-2 rounded-md bg-red-500 text-white hover:bg-red-600">
-                                    <i class="fas fa-exclamation-triangle mr-1"></i>E-Stop
-                                </button>
-                            </div>
-                            <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
-                                <div>
-                                    <label for="canWaypointJoint" class="block text-xs font-medium text-gray-600">Joint</label>
-                                    <select id="canWaypointJoint"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                        <option value="">Loading joints...</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label for="canWaypointDof" class="block text-xs font-medium text-gray-600">DOF</label>
-                                    <select id="canWaypointDof"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                        <option value="0">DOF 0</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label for="canWaypointAngle" class="block text-xs font-medium text-gray-600">Angle (°)</label>
-                                    <input type="number" id="canWaypointAngle" value="5"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50" />
-                                </div>
-                                <div>
-                                    <label for="canWaypointArrival" class="block text-xs font-medium text-gray-600">Arrival Offset (ms)</label>
-                                    <input type="number" id="canWaypointArrival" value="50"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50" />
-                                </div>
-                                <div>
-                                    <label for="canWaypointMode" class="block text-xs font-medium text-gray-600">Mode</label>
-                                    <select id="canWaypointMode"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                        <option value="1" selected>LINEAR (default)</option>
-                                        <option value="0">DIRECT</option>
-                                        <option value="2">SMOOTH (future)</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <!-- Waypoint Density Control for Test Sequence -->
-                            <div class="bg-purple-50 p-3 rounded-md border border-purple-200">
-                                <label for="waypointDensity" class="block text-xs font-medium text-purple-700 mb-1">
-                                    <i class="fas fa-wave-square mr-1"></i>Sinusoid Waypoint Density: <span id="waypointDensityValue">50</span> points
-                                </label>
-                                <input type="range" id="waypointDensity" min="6" max="500" value="50" step="1"
-                                    class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
-                                    oninput="document.getElementById('waypointDensityValue').textContent = this.value" />
-                                <div class="flex justify-between text-xs text-purple-500 mt-1">
-                                    <span>6 pts (Δt=1000ms)</span>
-                                    <span>100 pts (Δt=60ms)</span>
-                                    <span>500 pts (Δt=12ms)</span>
-                                </div>
-                            </div>
-                            <div class="flex justify-end gap-2">
-                                <button id="sendCanWaypointBtn" type="button"
-                                    class="px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600">
-                                    <i class="fas fa-paper-plane mr-1"></i>Send Waypoint
-                                </button>
-                                <button id="sendCanWaypointSequenceBtn" type="button"
-                                    class="px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600"
-                                    title="Send a sinusoidal test sequence with configurable density">
-                                    <i class="fas fa-wave-square mr-1"></i>Send Sinusoid
-                                </button>
-                            </div>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
-                                    <p class="text-xs font-semibold text-gray-600 uppercase mb-1">Latest Status</p>
-                                    <div id="canStatusList" class="space-y-1 min-h-[40px]"></div>
-                                </div>
-                                <div>
-                                    <p class="text-xs font-semibold text-gray-600 uppercase mb-1">Recent Frames</p>
-                                    <div id="canRawMessages" class="space-y-1 min-h-[40px]"></div>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -1213,8 +1136,105 @@
                 <!-- Resize handle between left and right columns -->
                 <div class="resize-handle"></div>
 
-                <!-- Right column: Movement, Charts, Measurements -->
+                <!-- Right column: Motion Control, Movement, Charts, Measurements -->
                 <div class="resizable-column pt-4 px-4 pb-0" style="width: 40%; flex-basis: 40%;">
+
+                <!-- CAN Motion Control (Waypoints) -->
+                <div class="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-lg shadow-md p-6 mb-8 border border-indigo-200">
+                    <h2 class="text-xl font-semibold mb-4 text-indigo-700 section-header" onclick="toggleSection('canMotionContent')">
+                        <span><i class="fas fa-route mr-2"></i>CAN Motion Control</span>
+                        <i class="fas fa-chevron-up chevron-icon"></i>
+                    </h2>
+
+                    <div id="canMotionContent" class="section-content space-y-4">
+                        <!-- Emergency Stop - Always visible and prominent -->
+                        <div class="flex justify-end">
+                            <button id="sendCanEmergency" type="button"
+                                class="px-4 py-2 rounded-md bg-red-500 text-white hover:bg-red-600 font-semibold shadow-md">
+                                <i class="fas fa-exclamation-triangle mr-1"></i>E-STOP
+                            </button>
+                        </div>
+
+                        <!-- Waypoint Controls -->
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            <div>
+                                <label for="canWaypointJoint" class="block text-xs font-medium text-gray-600">Joint</label>
+                                <select id="canWaypointJoint"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm">
+                                    <option value="">Loading...</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="canWaypointDof" class="block text-xs font-medium text-gray-600">DOF</label>
+                                <select id="canWaypointDof"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm">
+                                    <option value="0">DOF 0</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="canWaypointAngle" class="block text-xs font-medium text-gray-600">Angle (°)</label>
+                                <input type="number" id="canWaypointAngle" value="45"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
+                            </div>
+                            <div>
+                                <label for="canWaypointArrival" class="block text-xs font-medium text-gray-600">Offset (ms)</label>
+                                <input type="number" id="canWaypointArrival" value="500"
+                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
+                            </div>
+                        </div>
+
+                        <!-- Send Single Waypoint -->
+                        <div class="flex gap-2">
+                            <button id="sendCanWaypointBtn" type="button"
+                                class="flex-1 px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600 font-medium">
+                                <i class="fas fa-crosshairs mr-1"></i>Send Waypoint
+                            </button>
+                        </div>
+
+                        <!-- Sinusoid Test Section -->
+                        <div class="bg-purple-50 p-4 rounded-md border border-purple-200">
+                            <h3 class="text-sm font-semibold text-purple-700 mb-2">
+                                <i class="fas fa-wave-square mr-1"></i>Sinusoidal Trajectory Test
+                            </h3>
+                            <div class="mb-3">
+                                <label for="waypointDensity" class="block text-xs font-medium text-purple-600 mb-1">
+                                    Waypoint Density: <span id="waypointDensityValue" class="font-bold">50</span> points
+                                </label>
+                                <input type="range" id="waypointDensity" min="6" max="250" value="50" step="1"
+                                    class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
+                                    oninput="document.getElementById('waypointDensityValue').textContent = this.value" />
+                                <div class="flex justify-between text-xs text-purple-400 mt-1">
+                                    <span>6 pts</span>
+                                    <span>100 pts</span>
+                                    <span>250 pts</span>
+                                </div>
+                            </div>
+                            <button id="sendCanWaypointSequenceBtn" type="button"
+                                class="w-full px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600 font-medium"
+                                title="Send a 6-second sinusoidal test sequence (2 cycles, ±10° around 45°)">
+                                <i class="fas fa-play mr-1"></i>Execute Sinusoid Test
+                            </button>
+                            <p class="text-xs text-purple-500 mt-2 text-center">
+                                6s duration • 2 cycles @ 0.33Hz • ±10° amplitude
+                            </p>
+                        </div>
+
+                        <!-- Hidden mode selector (keep for compatibility) -->
+                        <input type="hidden" id="canWaypointMode" value="1" />
+
+                        <!-- Status Display -->
+                        <div class="grid grid-cols-2 gap-3 text-xs">
+                            <div class="bg-white rounded p-2 border">
+                                <p class="font-semibold text-gray-600 uppercase mb-1">Status</p>
+                                <div id="canStatusList" class="space-y-1 min-h-[30px] text-gray-700"></div>
+                            </div>
+                            <div class="bg-white rounded p-2 border">
+                                <p class="font-semibold text-gray-600 uppercase mb-1">Recent Frames</p>
+                                <div id="canRawMessages" class="space-y-1 min-h-[30px] font-mono text-gray-600"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- Joint Movement -->
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
