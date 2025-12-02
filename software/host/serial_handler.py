@@ -42,7 +42,7 @@ class SerialHandler:
         listening: Threading event controlling message listener
         serial_lock: Thread lock for serial write operations
     """
-    def __init__(self, socketio: SocketIO, port: str):
+    def __init__(self, socketio: SocketIO, port: str, serial_logger: Optional[SerialLogger] = None):
         self.socketio = socketio
         self.serial_port = port
         self.listening = threading.Event()
@@ -97,8 +97,9 @@ class SerialHandler:
         self.sequence_movement_data = []  # Accumulates movement data for all steps
         self.sequence_current_step = 0
 
-        # Initialize logger for serial communication
-        self.serial_logger = SerialLogger("logs/serial_communication.log")
+        # Initialize logger for communication (shared with CAN if provided)
+        self.serial_logger = serial_logger or SerialLogger("logs/serial_communication.log")
+        self._owns_logger = serial_logger is None
         self.serial_logger.log_info(f"Initializing SerialHandler for port: {port}")
 
     def pause_listening(self):

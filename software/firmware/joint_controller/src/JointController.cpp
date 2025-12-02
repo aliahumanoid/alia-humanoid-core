@@ -456,9 +456,12 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
 }
 
 // Stop all motors
+// Can be safely called from both Core0 and Core1 (noInterrupts() protects SPI1 access)
 void JointController::stopAllMotors() {
   for (int i = 0; i < config.motor_count; i++) {
-    motors[i]->motorStop();
+    if (motors[i] != nullptr) {
+      motors[i]->motorStop();
+    }
   }
   LOG_INFO("Stopping all motors in JointController");
 }
@@ -706,13 +709,41 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
   float antagonist_min = linear_equations[dof_index].antagonist_safe_min;
   float antagonist_max = linear_equations[dof_index].antagonist_safe_max;
 
+  // Track consecutive CAN errors to detect persistent issues
+  static uint8_t consecutive_can_errors = 0;
+  static const uint8_t MAX_CAN_ERRORS = 3;
+
   // Check motors for this DOF
   for (int motor_idx = 0; motor_idx < config.motor_count; motor_idx++) {
     if (config.motors[motor_idx].dof_index == dof_index) {
       LKM_Motor *motor = motors[motor_idx];
       if (motor != nullptr) {
-        float motor_angle = motor->getMultiAngleSync().angle;
+        // Get motor angle with timeout protection
+        MultiAngleData angle_data = motor->getMultiAngleSync();
+        float motor_angle = angle_data.angle;
         bool is_agonist   = config.motors[motor_idx].is_agonist;
+        
+        // Check if the read was successful (angle of 0.0 with no prior movement is suspicious)
+        // Also check for very large angles that indicate read errors
+        bool read_likely_failed = (motor_angle == 0.0f && consecutive_can_errors > 0) ||
+                                  (abs(motor_angle) > 10000.0f);
+        
+        if (read_likely_failed) {
+          consecutive_can_errors++;
+          LOG_WARN("[Safety] Motor " + String(motor_idx) + " CAN read suspicious (angle=" + 
+                   String(motor_angle, 1) + "), errors=" + String(consecutive_can_errors));
+          
+          if (consecutive_can_errors >= MAX_CAN_ERRORS) {
+            violation_message = "CAN communication failure - motor " + String(motor_idx) + 
+                                " not responding after " + String(MAX_CAN_ERRORS) + " attempts";
+            return false;
+          }
+          // Skip this motor check but don't fail yet
+          continue;
+        }
+        
+        // Successful read - reset error counter
+        consecutive_can_errors = 0;
 
         if (is_agonist) {
           // Agonist motor check
@@ -738,6 +769,85 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
   }
 
   return true; // All motors are within limits
+}
+
+bool JointController::checkWaypointSafety(uint8_t dof_index, float current_angle, float target_angle,
+                                          uint32_t t_arrival_ms, uint32_t t_now, String &violation_message) {
+  violation_message = "";
+
+  // === CHECK 1: DOF index validity ===
+  if (dof_index >= config.dof_count) {
+    violation_message = "WAYPOINT REJECTED: DOF index " + String(dof_index) + " out of range";
+    return false;
+  }
+
+  // === CHECK 2: Time validity (arrival must be in the future) ===
+  if (t_arrival_ms <= t_now) {
+    violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
+                        " arrival time in the past (t_arrival=" + String(t_arrival_ms) + 
+                        " ms, t_now=" + String(t_now) + " ms)";
+    return false;
+  }
+
+  // === CHECK 3: Target angle within joint limits ===
+  if (!isAngleInLimits(dof_index, target_angle)) {
+    const DofConfig &dof_config = config.dofs[dof_index];
+    violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
+                        " target angle " + String(target_angle, 2) + "° outside joint limits " +
+                        "[" + String(dof_config.limits.min_angle, 1) + " / " + 
+                        String(dof_config.limits.max_angle, 1) + "]";
+    return false;
+  }
+
+  // === CHECK 4: Target angle within mapping limits (more conservative) ===
+  if (!isAngleInMappingLimits(dof_index, target_angle)) {
+    float min_safe, max_safe;
+    if (hasValidEquations(dof_index)) {
+      min_safe = linear_equations[dof_index].joint_safe_min;
+      max_safe = linear_equations[dof_index].joint_safe_max;
+    } else {
+      const float CONSERVATIVE_MARGIN = 2.0f;
+      min_safe = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN;
+      max_safe = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN;
+    }
+    violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
+                        " target angle " + String(target_angle, 2) + "° outside safe mapping limits " +
+                        "[" + String(min_safe, 1) + " / " + String(max_safe, 1) + "]";
+    return false;
+  }
+
+  // === CHECK 5: Velocity safety (with emergency margin) ===
+  float angle_delta = abs(target_angle - current_angle);
+  float time_delta_s = (t_arrival_ms - t_now) / 1000.0f;
+
+  if (time_delta_s > 0.001f) { // Avoid division by zero (1ms minimum)
+    float requested_velocity_deg_s = angle_delta / time_delta_s;
+    float requested_velocity_rad_s = requested_velocity_deg_s * DEG_TO_RAD;
+    
+    float max_speed_rad_s = config.dofs[dof_index].motion.max_speed;
+    float max_speed_deg_s = max_speed_rad_s * RAD_TO_DEG;
+    
+    // Emergency margin: 2x max_speed is considered critically dangerous
+    const float EMERGENCY_MARGIN = 2.0f;
+    
+    if (requested_velocity_rad_s > max_speed_rad_s * EMERGENCY_MARGIN) {
+      // CRITICAL: Velocity exceeds safe limits by 2x
+      violation_message = "WAYPOINT REJECTED (EMERGENCY): DOF " + String(dof_index) + 
+                          " requested velocity " + String(requested_velocity_deg_s, 1) + " °/s (" +
+                          String(requested_velocity_rad_s, 2) + " rad/s) exceeds " +
+                          String(EMERGENCY_MARGIN, 1) + "x max_speed " + String(max_speed_deg_s, 1) + " °/s";
+      return false;
+    } else if (requested_velocity_rad_s > max_speed_rad_s) {
+      // WARNING: Velocity exceeds configured max but within safety margin
+      // Log warning but allow movement (PID will limit actual speed)
+      LOG_WARN("[WAYPOINT SAFETY] DOF " + String(dof_index) + 
+               " requested velocity " + String(requested_velocity_deg_s, 1) + " °/s exceeds max_speed " + 
+               String(max_speed_deg_s, 1) + " °/s. Movement allowed but may lag behind.");
+    }
+  }
+
+  // All checks passed
+  return true;
 }
 
 bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
@@ -891,8 +1001,17 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   float initial_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
 
   // Apply opposite torque to tension the system
-  agonist_motor->setTorque(-pretension_torque);
-  antagonist_motor->setTorque(pretension_torque);
+  // NEW: Check if inversion logic is requested
+  bool invert_logic = config.dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
+  float effective_agonist_torque = invert_logic ? pretension_torque : -pretension_torque;
+  float effective_antagonist_torque = invert_logic ? -pretension_torque : pretension_torque;
+  
+  agonist_motor->setTorque(effective_agonist_torque);
+  antagonist_motor->setTorque(effective_antagonist_torque);
+
+  if (invert_logic) {
+      LOG_INFO("Using INVERTED pretension logic for DOF " + String(dof_index));
+  }
 
   // Brief wait to allow system to react
   sleep_ms(100);
@@ -935,11 +1054,13 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Continue with full pretension
   sleep_ms(pretension_duration_ms - 100); // Subtract the 100 ms already elapsed
 
-  // Apply a lighter torque while maintaining tension during calibration
-  float holding_torque = pretension_torque / 2;
-  agonist_motor->setTorque(-holding_torque);
-  antagonist_motor->setTorque(holding_torque);
-  sleep_ms(150); // Brief pause to stabilize
+  // FIX: Maintain FULL pretension torque during measurement.
+  // Previously we reduced to (pretension_torque / 2), but this caused heavy joints 
+  // to sag due to gravity, failing the stability check.
+  agonist_motor->setTorque(effective_agonist_torque);
+  antagonist_motor->setTorque(effective_antagonist_torque);
+  
+  sleep_ms(300); // Increased pause to ensure absolute stability before reading
 
   // Verify that position is stable (no continuous movement)
   float stability_check_agonist    = agonist_motor->getMultiAngleSync(false).angle;
@@ -1008,11 +1129,21 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   LOG_DEBUG(String("Current antagonist motor angle (raw): ") + String(current_antagonist_angle));
 
   // Calculate new offsets
-  // CORRECT: The offset is the difference between expected and current angle, with inverted sign
-  // because the motor SUBTRACTS the offset instead of adding it
-  float new_agonist_offset = current_agonist_angle - expected_agonist_angle; // Inverted sign
-  float new_antagonist_offset =
-      current_antagonist_angle - expected_antagonist_angle; // Inverted sign
+  float new_agonist_offset;
+  float new_antagonist_offset;
+
+  if (invert_logic) {
+      // For INVERTED logic (e.g., Knee Right), the motor seems to ADD the offset
+      // or the sign relationship is reversed.
+      // Logic: If Raw + Offset = Target, then Offset = Target - Raw
+      new_agonist_offset = expected_agonist_angle - current_agonist_angle;
+      new_antagonist_offset = expected_antagonist_angle - current_antagonist_angle;
+  } else {
+      // For STANDARD logic (e.g., Ankle), the motor SUBTRACTS the offset
+      // Logic: If Raw - Offset = Target, then Offset = Raw - Target
+      new_agonist_offset = current_agonist_angle - expected_agonist_angle;
+      new_antagonist_offset = current_antagonist_angle - expected_antagonist_angle;
+  }
 
   LOG_DEBUG(String("New agonist offset: ") + String(new_agonist_offset));
   LOG_DEBUG(String("New antagonist offset: ") + String(new_antagonist_offset));

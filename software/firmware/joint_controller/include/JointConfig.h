@@ -152,6 +152,7 @@ struct ZeroMappingParams {
   // Safe mapping range (more conservative than absolute limits)
   float auto_mapping_min_angle;         // Minimum angle for auto-mapping (degrees)
   float auto_mapping_max_angle;         // Maximum angle for auto-mapping (degrees)
+  bool auto_mapping_invert_direction;   // NEW: Invert logic for motor movement during mapping
 };
 
 /**

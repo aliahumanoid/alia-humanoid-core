@@ -8,15 +8,26 @@ This module defines all HTTP endpoints for:
 - System configuration (joint limits, available commands)
 """
 from flask import jsonify, request, current_app, render_template
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from serial_manager import SerialManager
 from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
 import json
 import os
+import time
 import utils
 from pathlib import Path
+import logging
 
-def register_routes(app, serial_manager: SerialManager):
+# CAN interface detection
+try:
+    import can
+    CAN_AVAILABLE = True
+except ImportError:
+    CAN_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+def register_routes(app, serial_manager: SerialManager, can_manager=None):
     """
     Register all Flask routes for the joint controller application.
     
@@ -37,6 +48,14 @@ def register_routes(app, serial_manager: SerialManager):
                 400,
             )
         return handler, None, None
+
+    def can_unavailable_response():
+        if not CAN_AVAILABLE or can_manager is None:
+            return jsonify({
+                "status": "error",
+                "message": "CAN features not available on this host (python-can missing or disabled)."
+            }), 503
+        return None
 
     def load_mapping_from_file(joint_name: str):
         filename = f"mapping_data/{joint_name.lower()}_mapping.json"
@@ -97,6 +116,400 @@ def register_routes(app, serial_manager: SerialManager):
             "result": result,
             "mappings": serial_manager.get_joint_to_port_mapping(),
         })
+
+    @app.route('/can_interfaces', methods=['GET'])
+    def list_can_interfaces():
+        """
+        List available CAN interfaces detected on the system.
+        
+        Returns:
+            JSON with available CAN interfaces or error if python-can not available
+        """
+        if not CAN_AVAILABLE:
+            return jsonify({
+                "status": "error",
+                "message": "python-can library not installed",
+                "interfaces": []
+            }), 503
+        
+        try:
+            # Detect available CAN configurations
+            configs = can.detect_available_configs()
+            
+            # Format interfaces for UI
+            interfaces = []
+            for config in configs:
+                interface_type = config.get('interface', 'unknown')
+                channel = config.get('channel', 'N/A')
+                
+                # Create a display name
+                if interface_type == 'slcan':
+                    # Extract port name from channel for SLCAN
+                    display_name = f"SLCAN ({channel.split('/')[-1] if channel != 'N/A' else 'N/A'})"
+                else:
+                    display_name = f"{interface_type.upper()} ({channel})"
+                
+                interfaces.append({
+                    "interface": interface_type,
+                    "channel": channel,
+                    "display_name": display_name,
+                    "value": json.dumps(config)  # Serialize config for later use
+                })
+            
+            return jsonify({
+                "status": "success",
+                "interfaces": interfaces,
+                "count": len(interfaces)
+            })
+        
+        except Exception as e:
+            logger.exception("Error detecting CAN interfaces")
+            return jsonify({
+                "status": "error",
+                "message": f"Error detecting CAN interfaces: {str(e)}",
+                "interfaces": []
+            }), 500
+
+    @app.route('/can_test_init', methods=['POST'])
+    def test_can_init():
+        """
+        Test CAN bus initialization with selected interface.
+        
+        Expected JSON:
+            {
+                "config": "{\"interface\":\"slcan\",\"channel\":\"/dev/cu.usbmodem...\"}"
+            }
+        
+        Returns:
+            JSON with initialization result and bus information
+        """
+        if not CAN_AVAILABLE:
+            return jsonify({
+                "status": "error",
+                "message": "python-can library not installed"
+            }), 503
+        
+        try:
+            data = request.get_json()
+            config_str = data.get('config')
+            
+            if not config_str:
+                return jsonify({
+                    "status": "error",
+                    "message": "No CAN interface config provided"
+                }), 400
+            
+            # Parse config
+            config = json.loads(config_str)
+            interface = config.get('interface')
+            channel = config.get('channel')
+            
+            if not interface or not channel:
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid config: missing interface or channel"
+                }), 400
+            
+            # Try to initialize CAN bus
+            logger.info(f"Initializing CAN bus: {interface} on {channel} @ 1 Mbps")
+            
+            bus = can.Bus(
+                interface=interface,
+                channel=channel,
+                bitrate=1000000  # 1 Mbps
+            )
+            
+            # Get bus info
+            bus_info = {
+                "interface": interface,
+                "channel": channel,
+                "bitrate": "1 Mbps",
+                "channel_info": str(bus.channel_info) if hasattr(bus, 'channel_info') else "N/A"
+            }
+            
+            # Try to receive (non-blocking, 0.5s timeout)
+            logger.info("Testing message reception (0.5s timeout)...")
+            msg = bus.recv(timeout=0.5)
+            
+            if msg:
+                bus_info["test_message"] = {
+                    "arbitration_id": f"0x{msg.arbitration_id:03X}",
+                    "data": msg.data.hex(),
+                    "timestamp": msg.timestamp
+                }
+                logger.info(f"Received CAN message: {msg}")
+            else:
+                bus_info["test_message"] = None
+                logger.info("No CAN messages received (normal if no devices transmitting)")
+            
+            # Shutdown bus
+            bus.shutdown()
+            logger.info("CAN bus closed cleanly")
+            
+            return jsonify({
+                "status": "success",
+                "message": "CAN bus initialized successfully",
+                "bus_info": bus_info
+            })
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid config JSON: {e}")
+            return jsonify({
+                "status": "error",
+                "message": f"Invalid config format: {str(e)}"
+            }), 400
+        
+        except can.CanError as e:
+            logger.exception("CAN initialization error")
+            return jsonify({
+                "status": "error",
+                "message": f"CAN error: {str(e)}",
+                "error_type": "can_error"
+            }), 500
+        
+        except Exception as e:
+            logger.exception("Unexpected error during CAN test")
+            return jsonify({
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+                "error_type": "unknown"
+            }), 500
+
+    @app.route('/can/connect', methods=['POST'])
+    def connect_can_interface():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        config_payload = data.get('config')
+        bitrate_override = data.get('bitrate')
+
+        if isinstance(config_payload, str):
+            try:
+                config = json.loads(config_payload)
+            except json.JSONDecodeError as exc:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Invalid config JSON: {exc}"
+                }), 400
+        elif isinstance(config_payload, dict):
+            config = dict(config_payload)
+        else:
+            config = {}
+
+        if bitrate_override:
+            try:
+                config['bitrate'] = int(bitrate_override)
+            except ValueError:
+                return jsonify({
+                    "status": "error",
+                    "message": "bitrate must be an integer value"
+                }), 400
+
+        if 'bitrate' not in config:
+            config['bitrate'] = getattr(can_manager, "DEFAULT_BITRATE", 1_000_000)
+
+        try:
+            info = can_manager.connect(config)
+            return jsonify({
+                "status": "success",
+                "message": "CAN interface connected",
+                "info": info
+            })
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": str(exc)
+            }), 400
+        except Exception as exc:
+            logger.exception("Failed to connect CAN interface")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to connect: {exc}"
+            }), 500
+
+    @app.route('/can/disconnect', methods=['POST'])
+    def disconnect_can_interface():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            can_manager.disconnect()
+            return jsonify({
+                "status": "success",
+                "message": "CAN interface disconnected"
+            })
+        except Exception as exc:
+            logger.exception("Error while disconnecting CAN interface")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to disconnect: {exc}"
+            }), 500
+
+    @app.route('/can/status', methods=['GET'])
+    def get_can_status():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            state = can_manager.get_connection_state()
+            return jsonify({
+                "status": "success",
+                "state": state
+            })
+        except Exception as exc:
+            logger.exception("Unable to fetch CAN status")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to fetch status: {exc}"
+            }), 500
+
+    @app.route('/can/time_sync', methods=['POST'])
+    def send_can_time_sync():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        timestamp_ms = data.get('timestamp_ms')
+        if timestamp_ms is None:
+            timestamp_ms = int(time.time() * 1000)
+        else:
+            try:
+                timestamp_ms = int(timestamp_ms)
+            except ValueError:
+                return jsonify({
+                    "status": "error",
+                    "message": "timestamp_ms must be an integer"
+                }), 400
+
+        try:
+            result = can_manager.send_time_sync(timestamp_ms)
+            return jsonify({
+                "status": "success",
+                "message": f"Time sync broadcast at {result['timestamp_ms']} ms",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to send CAN time sync")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send time sync: {exc}"
+            }), 500
+
+    @app.route('/can/waypoint', methods=['POST'])
+    def send_can_waypoint():
+        """
+        Send waypoint command using Multi-DOF format.
+        
+        Sends all DOFs of a joint in a single CAN frame (8 bytes).
+        
+        Request JSON:
+            {
+                "joint": "ANKLE_RIGHT",
+                "angles_deg": [45.0, 10.0, -5.0],  // DOF0, DOF1, DOF2 (use null for unused)
+                "t_offset_ms": 1000                // Offset from current time
+            }
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        joint = data.get('joint')
+        angles_deg = data.get('angles_deg')
+        t_offset_ms = data.get('t_offset_ms')
+
+        if not joint:
+            return jsonify({
+                "status": "error",
+                "message": "Joint is required"
+            }), 400
+        if angles_deg is None or not isinstance(angles_deg, list):
+            return jsonify({
+                "status": "error",
+                "message": "angles_deg must be a list of up to 3 angles (use null for unused DOFs)"
+            }), 400
+        if t_offset_ms is None:
+            return jsonify({
+                "status": "error",
+                "message": "t_offset_ms is required (offset from last time sync)"
+            }), 400
+
+        try:
+            # Convert angles, keeping None for unused DOFs
+            processed_angles = []
+            for i, angle in enumerate(angles_deg[:3]):  # Max 3 DOFs
+                if angle is not None:
+                    processed_angles.append(float(angle))
+                else:
+                    processed_angles.append(None)
+            
+            t_offset_ms = int(t_offset_ms)
+            if t_offset_ms < 0 or t_offset_ms > 65535:
+                return jsonify({
+                    "status": "error",
+                    "message": "t_offset_ms must be 0-65535"
+                }), 400
+                
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": f"Invalid parameter: {exc}"
+            }), 400
+
+        try:
+            details = can_manager.send_multi_dof_waypoint(joint, processed_angles, t_offset_ms)
+            return jsonify({
+                "status": "success",
+                "message": f"Multi-DOF waypoint queued for {joint}",
+                "details": details
+            })
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": str(exc)
+            }), 400
+        except Exception as exc:
+            logger.exception("Failed to send multi-DOF waypoint")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send multi-DOF waypoint: {exc}"
+            }), 500
+
+    @app.route('/can/emergency_stop', methods=['POST'])
+    def send_can_emergency_stop():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        reason_code = data.get('reason_code', 0)
+
+        try:
+            reason_code = int(reason_code) & 0xFF
+        except ValueError:
+            return jsonify({
+                "status": "error",
+                "message": "reason_code must be integer"
+            }), 400
+
+        try:
+            result = can_manager.send_emergency_stop(reason_code)
+            return jsonify({
+                "status": "success",
+                "message": "Emergency stop broadcast",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to send emergency stop")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send emergency stop: {exc}"
+            }), 500
 
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
@@ -394,6 +807,9 @@ def register_routes(app, serial_manager: SerialManager):
                 handler.send_new_command(joint, dof, COMMANDS['START_TEST_ENCODER'])
             elif cmd == "stop-test-encoder":
                 handler.send_new_command(joint, dof, COMMANDS['STOP_TEST_ENCODER'])
+            elif cmd == "can-diag":
+                handler.send_new_command(joint, dof, COMMANDS['CAN_DIAG'])
+                message = f"CAN diagnostic started for {joint}"
             elif cmd == "reset-errors":
                 # Reset error counter and clear message queue
                 handler.status_message = []
@@ -760,6 +1176,19 @@ def register_routes(app, serial_manager: SerialManager):
         Starts sequence data collection
         """
         try:
+            data = request.get_json()
+            joint = data.get('joint')
+            
+            if not joint:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint)
+            if error:
+                return error, code
+            
             handler.start_sequence_data_collection()
             return jsonify({
                 "status": "success",
@@ -777,6 +1206,19 @@ def register_routes(app, serial_manager: SerialManager):
         Stops sequence data collection
         """
         try:
+            data = request.get_json()
+            joint = data.get('joint')
+            
+            if not joint:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint)
+            if error:
+                return error, code
+            
             handler.stop_sequence_data_collection()
             return jsonify({
                 "status": "success",
@@ -795,6 +1237,18 @@ def register_routes(app, serial_manager: SerialManager):
         Returns accumulated sequence movement data
         """
         try:
+            joint = request.args.get('joint')
+            
+            if not joint:
+                return jsonify({
+                    "status": "error",
+                    "message": "Joint name is required"
+                }), 400
+            
+            handler, error, code = handler_or_error(joint)
+            if error:
+                return error, code
+            
             data = handler.get_sequence_movement_data()
             return jsonify({
                 "status": "success",

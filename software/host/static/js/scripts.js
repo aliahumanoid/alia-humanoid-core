@@ -130,17 +130,21 @@ $(document).ready(function() {
         // Render DOF-specific buttons after limits are loaded (so zero_angle_offset is available)
         renderDofControlButtons();
     });
-    fetchSerialPortConfiguration();
     
     // Load joint configuration for auto-mapping grid visualization
     fetchJointConfig();
     
-    // Load PID values for the initially selected joint (KNEE_LEFT by default)
-    setTimeout(function() {
+    // Fetch serial port configuration first, then initialize joint selection
+    fetchSerialPortConfiguration().done(function() {
+        // Now that jointPortMapping is populated, we can safely select the joint
         const initialJoint = $("#jointSelect").val();
         sendCommand('select-joint', { joint: initialJoint });
         console.log('Initial PID values requested for joint:', initialJoint);
-    }, 500); // Small delay to ensure backend is ready
+    });
+    
+    // Fetch CAN interfaces after serial port configuration
+    fetchCanInterfaces({ showStatus: false });
+    startCanStatusPolling();
 
     socket.on('connect', function() {
         console.log('Websocket connected!');
@@ -335,6 +339,14 @@ $(document).ready(function() {
         }
     });
 
+    // CAN control handlers
+    $("#connectCanBtn").on('click', connectCanInterface);
+    $("#disconnectCanBtn").on('click', disconnectCanInterface);
+    $("#sendCanTimeSync").on('click', sendCanTimeSyncCommand);
+    $("#sendCanWaypointBtn").on('click', sendCanWaypointCommand);
+    $("#sendCanWaypointSequenceBtn").on('click', sendCanWaypointSequence);
+    $("#sendCanEmergency").on('click', sendCanEmergencyStop);
+
     // Initialize charts
     initializeCharts();
     
@@ -342,6 +354,9 @@ $(document).ready(function() {
     $("#jointSelect").change(function() {
         const joint = $(this).val();
         updateSerialPortSelectUI(joint);
+        
+        // Update CAN Motion Control panel (joint label + DOF options)
+        updateCanMotionJoint();
         
         // Update DOF tab availability based on joint configuration
         updateDofTabsAvailability(joint);
@@ -438,6 +453,29 @@ $(document).ready(function() {
 
     $("#refreshSerialPorts").on('click', function() {
         fetchSerialPortConfiguration({ showStatus: true });
+    });
+
+    $("#canInterfaceSelect").change(function() {
+        selectedCanInterface = $(this).val() || null;
+        updateCanInterfaceHint();
+        if (selectedCanInterface) {
+            try {
+                const config = JSON.parse(selectedCanInterface);
+                appendStatusMessage(`🔌 CAN interface selected: ${config.interface} on ${config.channel}`);
+            } catch (e) {
+                appendStatusMessage(`⚠️ Invalid CAN interface configuration`);
+            }
+        } else {
+            appendStatusMessage(`🔌 CAN interface deselected`);
+        }
+    });
+
+    $("#refreshCanInterfaces").on('click', function() {
+        fetchCanInterfaces({ showStatus: true });
+    });
+
+    $("#testCanInit").on('click', function() {
+        testCanInitialization();
     });
 
     // Start status polling
@@ -1470,12 +1508,13 @@ function appendStatusMessage(message) {
 }
 
 /**
- * Checks if element is scrolled to bottom (with 30px tolerance)
+ * Checks if element is scrolled to bottom (with tolerance for padding)
  * @param {HTMLElement} element - Element to check
  * @returns {boolean} True if element is scrolled to bottom
  */
 function isScrolledToBottom(element) {
-    const threshold = 30; // Tolerance in pixels
+    // Increased threshold to account for padding-bottom and ::after pseudo-element
+    const threshold = 100; // Tolerance in pixels (covers 3rem padding + 2rem ::after)
     return element.scrollHeight - element.clientHeight <= element.scrollTop + threshold;
 }
 
@@ -1639,6 +1678,564 @@ function assignSerialPortToJoint(joint, port) {
             serialPortAssignmentPending = false;
         }
     });
+}
+
+// =============================================================================
+// CAN INTERFACE MANAGEMENT
+// =============================================================================
+
+let availableCanInterfaces = [];
+let selectedCanInterface = null;
+let canConnectionState = {
+    connected: false,
+    last_status: {},
+    stats: {}
+};
+let canStatusPollHandle = null;
+
+function fetchCanInterfaces(options = {}) {
+    const { showStatus = false } = options;
+    return $.ajax({
+        url: '/can_interfaces',
+        method: 'GET',
+        dataType: 'json'
+    }).done(response => {
+        if (response.status === 'success') {
+            availableCanInterfaces = response.interfaces || [];
+            updateCanInterfaceSelectUI();
+            if (showStatus) {
+                appendStatusMessage(`🔌 CAN interfaces detected: ${availableCanInterfaces.length}`);
+            }
+        } else {
+            availableCanInterfaces = [];
+            updateCanInterfaceSelectUI();
+            if (showStatus) {
+                appendStatusMessage(`⚠️ ${response.message || 'No CAN interfaces found'}`);
+            }
+        }
+    }).fail((xhr, status, error) => {
+        appendStatusMessage(`⚠️ Error fetching CAN interfaces: ${error}`);
+        availableCanInterfaces = [];
+        updateCanInterfaceSelectUI();
+    });
+}
+
+function updateCanInterfaceSelectUI() {
+    const select = $("#canInterfaceSelect");
+    if (!select.length) {
+        return;
+    }
+
+    const currentSelection = select.val();
+    select.empty();
+    select.append('<option value="">Select CAN interface</option>');
+
+    availableCanInterfaces.forEach(iface => {
+        const option = $('<option></option>')
+            .val(iface.value)
+            .text(iface.display_name);
+        select.append(option);
+    });
+
+    // Restore previous selection if still available
+    if (currentSelection) {
+        select.val(currentSelection);
+    }
+
+    updateCanInterfaceHint();
+}
+
+function updateCanInterfaceHint() {
+    const hint = $("#canInterfaceHint");
+    if (!hint.length) {
+        return;
+    }
+
+    const selectedValue = $("#canInterfaceSelect").val();
+    
+    if (!selectedValue) {
+        hint.text('No CAN interface selected');
+        hint.removeClass('text-green-600').addClass('text-gray-500');
+        return;
+    }
+
+    try {
+        const config = JSON.parse(selectedValue);
+        hint.text(`Selected: ${config.interface} on ${config.channel}`);
+        hint.removeClass('text-gray-500').addClass('text-green-600');
+    } catch (e) {
+        hint.text('Invalid interface configuration');
+        hint.removeClass('text-green-600').addClass('text-red-600');
+    }
+}
+
+function testCanInitialization() {
+    const selectedValue = $("#canInterfaceSelect").val();
+    
+    if (!selectedValue) {
+        appendStatusMessage("⚠️ Please select a CAN interface first");
+        return;
+    }
+
+    const testBtn = $("#testCanInit");
+    testBtn.prop('disabled', true);
+    testBtn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Testing...');
+    
+    appendStatusMessage("🔄 Testing CAN bus initialization...");
+
+    $.ajax({
+        url: '/can_test_init',
+        method: 'POST',
+        contentType: 'application/json',
+        dataType: 'json',
+        data: JSON.stringify({ config: selectedValue }),
+        success: function(response) {
+            if (response.status === 'success') {
+                const info = response.bus_info;
+                appendStatusMessage(`✅ CAN bus initialized successfully!`);
+                appendStatusMessage(`   Interface: ${info.interface} on ${info.channel}`);
+                appendStatusMessage(`   Bitrate: ${info.bitrate}`);
+                
+                if (info.test_message) {
+                    appendStatusMessage(`   📨 Received message: ID=0x${info.test_message.arbitration_id}`);
+                } else {
+                    appendStatusMessage(`   ℹ️  No messages received (normal with no devices)`);
+                }
+            } else {
+                appendStatusMessage(`❌ CAN test failed: ${response.message}`);
+            }
+        },
+        error: function(xhr) {
+            const errorMsg = xhr.responseJSON?.message || 'Unknown error';
+            const errorType = xhr.responseJSON?.error_type || 'unknown';
+            
+            if (errorType === 'can_error') {
+                appendStatusMessage(`❌ CAN error: ${errorMsg}`);
+                appendStatusMessage(`   💡 Check: cable, termination, bitrate`);
+            } else {
+                appendStatusMessage(`❌ Test error: ${errorMsg}`);
+            }
+        },
+        complete: function() {
+            testBtn.prop('disabled', false);
+            testBtn.html('<i class="fas fa-vial mr-1"></i>Test');
+        }
+    });
+}
+
+function connectCanInterface() {
+    const selectedValue = $("#canInterfaceSelect").val();
+    
+    if (!selectedValue) {
+        appendStatusMessage("⚠️ Select a CAN interface before connecting.");
+        return;
+    }
+
+    const connectBtn = $("#connectCanBtn");
+    connectBtn.prop("disabled", true).html('<i class="fas fa-spinner fa-spin mr-1"></i>Connecting...');
+
+    $.ajax({
+        url: '/can/connect',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ config: selectedValue })
+    }).done(response => {
+        if (response.status === 'success') {
+            selectedCanInterface = selectedValue;
+            appendStatusMessage(`✅ ${response.message || 'CAN interface connected'}`);
+            fetchCanStatus({ showStatus: true });
+        } else {
+            appendStatusMessage(`❌ ${response.message || 'Failed to connect CAN interface'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ CAN connect error: ${message}`);
+    }).always(() => {
+        connectBtn.prop("disabled", false).html('<i class="fas fa-plug mr-1"></i>Connect');
+    });
+}
+
+function disconnectCanInterface() {
+    const disconnectBtn = $("#disconnectCanBtn");
+    disconnectBtn.prop("disabled", true).html('<i class="fas fa-spinner fa-spin mr-1"></i>Disconnecting...');
+
+    $.ajax({
+        url: '/can/disconnect',
+        method: 'POST'
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage("🔌 CAN interface disconnected");
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Failed to disconnect CAN interface'}`);
+        }
+        fetchCanStatus();
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ CAN disconnect error: ${message}`);
+    }).always(() => {
+        disconnectBtn.prop("disabled", false).html('<i class="fas fa-unlink mr-1"></i>Disconnect');
+    });
+}
+
+function fetchCanStatus(options = {}) {
+    const { showStatus = false } = options;
+    return $.ajax({
+        url: '/can/status',
+        method: 'GET',
+        dataType: 'json'
+    }).done(response => {
+        if (response.status === 'success') {
+            canConnectionState = response.state || {};
+            updateCanStatusUI(canConnectionState);
+            if (showStatus) {
+                appendStatusMessage(`ℹ️ CAN status: ${canConnectionState.connected ? 'connected' : 'disconnected'}`);
+            }
+        } else if (showStatus) {
+            appendStatusMessage(`⚠️ ${response.message || 'CAN status unavailable'}`);
+        }
+    }).fail(xhr => {
+        if (xhr.status === 503) {
+            updateCanStatusUI({ connected: false, error: 'CAN not available on this system' });
+            if (showStatus) {
+                appendStatusMessage('⚠️ CAN subsystem not available');
+            }
+        } else if (showStatus) {
+            appendStatusMessage(`⚠️ Error fetching CAN status: ${xhr.statusText}`);
+        }
+    });
+}
+
+function updateCanStatusUI(state = {}) {
+    const badge = $("#canConnectionBadge");
+    const details = $("#canConnectionDetails");
+    const statusList = $("#canStatusList");
+    const rawMessages = $("#canRawMessages");
+
+    const connected = !!state.connected;
+    if (badge.length) {
+        const baseClasses = "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold";
+        if (connected) {
+            badge.attr("class", `${baseClasses} bg-green-100 text-green-800`);
+            badge.text("Connected");
+        } else {
+            badge.attr("class", `${baseClasses} bg-gray-200 text-gray-700`);
+            badge.text("Disconnected");
+        }
+    }
+
+    if (details.length) {
+        if (connected && state.config) {
+            const cfg = state.config;
+            const bitrate = cfg.bitrate ? `${(cfg.bitrate / 1000).toFixed(0)} kbps` : 'unknown bitrate';
+            details.text(`${cfg.interface || '??'} @ ${cfg.channel || 'N/A'} (${bitrate})`);
+        } else if (state.error) {
+            details.text(state.error);
+        } else {
+            details.text('Select interface and press Connect');
+        }
+    }
+
+    if (statusList.length) {
+        statusList.empty();
+        if (state.last_status) {
+            Object.values(state.last_status).forEach(entry => {
+                const item = $('<div class="flex justify-between text-xs font-mono"></div>');
+                const joint = $('<span></span>').text(`${entry.joint} · DOF${entry.dof_index}`);
+                const value = $('<span></span>').text(`${entry.current_angle_deg.toFixed(2)}° → ${entry.target_angle_deg.toFixed(2)}° (${entry.progress_pct}% )`);
+                item.append(joint).append(value);
+                statusList.append(item);
+            });
+        } else {
+            statusList.append('<div class="text-xs text-gray-500">No status frames received yet</div>');
+        }
+    }
+
+    if (rawMessages.length) {
+        rawMessages.empty();
+        if (state.status_messages && state.status_messages.length > 0) {
+            state.status_messages.slice(0, 6).forEach(msg => {
+                const text = msg.type === "status"
+                    ? `${msg.data.arbitration_id} joint=${msg.data.joint} flags=0x${msg.data.flags.toString(16)}`
+                    : `${msg.frame.id} data=${msg.frame.data}`;
+                rawMessages.append(`<div class="text-xs font-mono">${text}</div>`);
+            });
+        } else {
+            rawMessages.append('<div class="text-xs text-gray-500">No frames logged</div>');
+        }
+    }
+}
+
+function sendCanTimeSyncCommand() {
+    $.ajax({
+        url: '/can/time_sync',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({})
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage(`🕒 Time sync @ ${response.result?.timestamp_ms || 'unknown'} ms`);
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Time sync failed'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Time sync error: ${message}`);
+    });
+}
+
+function sendCanEmergencyStop() {
+    $.ajax({
+        url: '/can/emergency_stop',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ reason_code: 1 })
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage('🛑 Emergency stop broadcast via CAN');
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Emergency stop failed'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Emergency stop error: ${message}`);
+    });
+}
+
+/**
+ * Update CAN Motion Control panel to reflect selected joint
+ * Called when jointSelect changes
+ */
+function updateCanMotionJoint() {
+    const joint = $("#jointSelect").val();
+    
+    // Update the joint label in CAN Motion Control panel
+    const label = $("#canMotionJointLabel");
+    if (label.length) {
+        label.text(joint);
+    }
+    
+    // Update DOF options based on selected joint
+    updateCanWaypointDofOptions();
+}
+
+function updateCanWaypointDofOptions() {
+    const joint = $("#jointSelect").val();
+    const dofSelect = $("#canWaypointDof");
+    if (!joint || !dofSelect.length || !jointConfigData || !jointConfigData.joints) {
+        return;
+    }
+
+    const configKey = joint.toLowerCase();
+    const jointEntry = jointConfigData.joints[configKey];
+    if (!jointEntry) {
+        dofSelect.empty().append('<option value="0">DOF 0</option>');
+        return;
+    }
+
+    dofSelect.empty();
+    jointEntry.dofs.forEach((dof, idx) => {
+        const label = dof.name ? dof.name.replace('_', ' ') : `DOF ${idx}`;
+        dofSelect.append(`<option value="${idx}">${idx} · ${label}</option>`);
+    });
+}
+
+function sendCanWaypointCommand() {
+    const joint = $("#jointSelect").val();
+    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
+    const angle = parseFloat($("#canWaypointAngle").val());
+    const arrivalOffset = parseInt($("#canWaypointArrival").val(), 10) || 50;
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
+        return;
+    }
+    if (Number.isNaN(angle)) {
+        appendStatusMessage("⚠️ Enter a valid angle in degrees.");
+        return;
+    }
+
+    // Build Multi-DOF format: set only the target DOF, null for others
+    const angles = [null, null, null];
+    angles[dofIndex] = angle;
+
+    $.ajax({
+        url: '/can/waypoint',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            joint: joint,
+            angles_deg: angles,
+            t_offset_ms: arrivalOffset
+        })
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${dofIndex} @ ${angle}°`);
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Failed to send waypoint'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Waypoint error: ${message}`);
+    });
+}
+
+/**
+ * Update sinusoid statistics display when slider changes
+ * @param {number} points - Number of waypoints
+ */
+function updateSinusoidStats(points) {
+    const numPoints = parseInt(points, 10) || 50;
+    const totalDuration = 6000; // 6 seconds in ms
+    
+    // Calculate interval between points
+    const intervalMs = Math.round(totalDuration / (numPoints - 1));
+    
+    // Calculate frequency in Hz (1000ms / interval)
+    const freqHz = (1000 / intervalMs).toFixed(1);
+    
+    // Calculate points per second
+    const pointsPerSecond = (numPoints / (totalDuration / 1000)).toFixed(1);
+    
+    // Update UI elements
+    document.getElementById('waypointDensityValue').textContent = numPoints;
+    document.getElementById('waypointIntervalValue').textContent = intervalMs;
+    document.getElementById('waypointFreqValue').textContent = freqHz;
+    document.getElementById('waypointRateValue').textContent = pointsPerSecond;
+}
+
+function sendCanWaypointSequence() {
+    const joint = $("#jointSelect").val();
+    const dofIndex = parseInt($("#canWaypointDof").val(), 10);
+    const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
+    
+    // Get waypoint density from UI (default 10 points)
+    const waypointDensity = parseInt($("#waypointDensity").val(), 10) || 10;
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
+        return;
+    }
+
+
+    // Disable button during sequence
+    const btn = $("#sendCanWaypointSequenceBtn");
+    btn.prop('disabled', true);
+    btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
+
+    // Generate a sinusoidal trajectory with configurable density
+    // Parameters:
+    // - Center angle: 45° (middle of KNEE range 0°-100°)
+    // - Amplitude: 10° (oscillates between 35° and 55°)
+    // - Duration: 6 seconds (2 complete cycles = 0.33 Hz)
+    // - Number of points: waypointDensity
+    const centerAngle = 45;
+    const amplitude = 10;
+    const totalDuration = 6000;  // 6 seconds in ms
+    const numCycles = 2;  // 2 complete sine waves
+    const frequency = numCycles / (totalDuration / 1000);  // Hz
+    
+    // Generate waypoints along the sinusoid
+    // Calculate initial offset based on number of waypoints:
+    // - With staggerTime of 5ms and 500 waypoints, it takes 2.5s to send all
+    // - We need to ensure the first waypoint arrives AFTER we've sent enough
+    //   waypoints to fill the buffer and stay ahead of execution
+    // - Formula: max(500ms, staggerTime * waypointDensity * 0.5)
+    //   This ensures we have at least half the waypoints sent before execution starts
+    const staggerTime = Math.max(5, Math.min(50, 300 / waypointDensity));
+    const sendTime = staggerTime * waypointDensity;  // Total time to send all waypoints
+    const initialOffset = Math.max(500, Math.min(3000, sendTime * 0.6));  // 60% of send time, max 3s
+    
+    const testSequence = [];
+    for (let i = 0; i < waypointDensity; i++) {
+        const t = (i / (waypointDensity - 1)) * totalDuration;  // Time in ms (0 to totalDuration)
+        const tSeconds = t / 1000;
+        // Sinusoidal angle: center + amplitude * sin(2π * frequency * t)
+        const angle = centerAngle + amplitude * Math.sin(2 * Math.PI * frequency * tSeconds);
+        testSequence.push({
+            angle: Math.round(angle * 100) / 100,  // Round to 2 decimal places
+            arrival_offset_ms: Math.round(t) + initialOffset  // Add initial offset
+        });
+    }
+    
+    // Calculate delta-t between points for logging
+    const deltaT = Math.round(totalDuration / (waypointDensity - 1));
+    
+    appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint} DOF${dofIndex}`);
+    appendStatusMessage(`   📊 ${waypointDensity} waypoints, Δt=${deltaT}ms, duration=${totalDuration/1000}s`);
+    appendStatusMessage(`   📈 ${numCycles} cycles @ ${frequency.toFixed(2)}Hz, amplitude=±${amplitude}°`);
+
+    // === PARALLEL SENDING with setTimeout ===
+    const INTRA_WAYPOINT_DELAY = 0.5;  // 0.5ms between waypoints
+    
+    let successCount = 0;
+    let failCount = 0;
+
+    appendStatusMessage(`📡 Sending ${testSequence.length} waypoints (${INTRA_WAYPOINT_DELAY}ms interval)...`);
+
+    // Stream ALL waypoints with staggered setTimeout
+    testSequence.forEach((waypoint, idx) => {
+        setTimeout(() => {
+            // Multi-DOF format: all DOFs in one frame
+            // For single-DOF test, we set only the target DOF and null for others
+            const angles = [null, null, null];
+            angles[dofIndex] = waypoint.angle;
+            
+            $.ajax({
+                url: '/can/waypoint',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    joint: joint,
+                    angles_deg: angles,
+                    t_offset_ms: waypoint.arrival_offset_ms  // Already includes initialOffset
+                })
+            }).done(response => {
+                if (response.status === 'success') {
+                    successCount++;
+                } else {
+                    failCount++;
+                    appendStatusMessage(`  ✗ Waypoint ${idx + 1} failed: ${response.message}`);
+                }
+                
+                // Log progress every 50 waypoints
+                if ((idx + 1) % 50 === 0 || idx === testSequence.length - 1) {
+                    appendStatusMessage(`  📊 Sent ${idx + 1}/${testSequence.length} waypoints`);
+                }
+                
+                // Last waypoint sent
+                if (idx === testSequence.length - 1) {
+                    appendStatusMessage(`📤 All ${successCount}/${testSequence.length} waypoints queued. Executing...`);
+                    // Wait for sequence to complete
+                    const waitTime = totalDuration + initialOffset + 500;
+                    setTimeout(() => {
+                        btn.prop('disabled', false);
+                        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
+                        appendStatusMessage(`✅ Sequence execution complete`);
+                    }, waitTime);
+                }
+            }).fail(xhr => {
+                failCount++;
+                const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+                appendStatusMessage(`  ✗ Waypoint ${idx + 1} error: ${message}`);
+                
+                if (idx === testSequence.length - 1) {
+                    setTimeout(() => {
+                        btn.prop('disabled', false);
+                        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
+                    }, 500);
+                }
+            });
+        }, idx * INTRA_WAYPOINT_DELAY);
+    });
+}
+
+
+function startCanStatusPolling() {
+    if (canStatusPollHandle) {
+        clearInterval(canStatusPollHandle);
+    }
+    fetchCanStatus();
+    canStatusPollHandle = setInterval(fetchCanStatus, 3000);
 }
 
 // --- Legacy chart functions (Mapping, Movement, Output) ---
@@ -3707,6 +4304,42 @@ function stopEncoderTest(jointType = null) {
 }
 
 /**
+ * Toggle CAN Diagnostic panel visibility
+ */
+function toggleCanDiagnostic() {
+    const panel = document.getElementById('canDiagnosticPanel');
+    const icon = document.getElementById('canDiagnosticIcon');
+    
+    if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        icon.classList.remove('fa-plus-circle');
+        icon.classList.add('fa-minus-circle');
+    } else {
+        panel.style.display = 'none';
+        icon.classList.remove('fa-minus-circle');
+        icon.classList.add('fa-plus-circle');
+    }
+}
+
+/**
+ * Runs CAN bus diagnostic test
+ * Tests Motor CAN (J4) communication with motors
+ */
+function runCanDiagnostic() {
+    const joint = $("#jointSelect").val();
+    
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint first");
+        return;
+    }
+    
+    appendStatusMessage(`🔍 Running CAN diagnostic for ${joint}...`);
+    appendStatusMessage(`   Motor CAN (J4) only - Host CAN (J5) disabled`);
+    
+    sendCommand('can-diag');
+}
+
+/**
  * Requests current encoder data from backend
  */
 function requestEncoderData() {
@@ -4106,6 +4739,10 @@ function fetchJointConfig() {
             if (response.status === 'success' && response.config) {
                 jointConfigData = response.config;
                 console.log('Joint configuration loaded:', jointConfigData);
+                updateCanMotionJoint();
+                
+                // Initialize sinusoid stats with default slider value
+                updateSinusoidStats($("#waypointDensity").val() || 50);
                 
                 // Show expected mapping grid for initially selected joint
                 const initialJoint = $("#jointSelect").val();

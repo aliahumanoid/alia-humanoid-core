@@ -137,6 +137,9 @@ void flushMovementSamples() {
 }
 
 // ============================================================================
+// NOTE: CAN polling has been moved to Core1 (see core1.cpp)
+// Core1 now handles ALL CAN communication (Host + Motor) to avoid SPI1 conflicts
+// ============================================================================
 // CORE0 MAIN LOOP - Serial Communication & Command Dispatch
 // ============================================================================
 
@@ -175,6 +178,9 @@ void core0_main_loop() {
     init_prg = false;
   }
 #pragma endregion
+
+  // NOTE: CAN polling has been moved to Core1 to avoid SPI1 conflicts
+  // Core1 now handles all CAN communication (Host + Motor)
 
 #pragma region Receive SerialData
   // check for incoming serial data:

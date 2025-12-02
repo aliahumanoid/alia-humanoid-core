@@ -41,9 +41,13 @@ const int PIN_CS  = 17;
 const int PIN_SCK = 18;
 const int PIN_TX  = 19;
 
-// CAN interface pins
+// CAN interface pins - Motor CAN (J4 CAN_Servo)
 #define CAN_CS_PIN 9
 #define CAN_INT_PIN 13
+
+// CAN interface pins - Host CAN (J5 CAN_Controller)
+#define CAN_HOST_CS_PIN 8
+#define CAN_HOST_INT_PIN 14
 
 // ============================================================================
 // DEVICE CONFIGURATION
