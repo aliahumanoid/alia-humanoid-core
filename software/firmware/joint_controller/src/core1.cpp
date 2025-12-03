@@ -18,6 +18,15 @@
  */
 
 #include "main_common.h"
+#include "hardware/sync.h"
+
+// RAM-resident function for waiting during flash operations
+// This MUST be in RAM because flash is inaccessible during erase/program
+static void __not_in_flash_func(wait_for_flash_complete)(void) {
+  while (flash_operation_in_progress) {
+    tight_loop_contents();  // CPU-friendly busy wait
+  }
+}
 
 // ============================================================================
 // DUAL CAN BUS ARCHITECTURE
@@ -326,6 +335,10 @@ void pollHostCan() {
  * - CMD_STOP_AUTO_MAPPING: Stop automatic joint calibration
  */
 void core1_loop() {
+  // NOTE: multicore_lockout_victim_init() was removed because it interferes
+  // with core1 startup. Flash operations now use a simpler approach:
+  // Core0 waits for Core1 to be in a safe state before flash write.
+  
   MovementResult last_movement_result; // To track last movement result
 
   // Timing for waypoint control @ 500 Hz (same as moveMultiDOF_cascade)
@@ -334,6 +347,13 @@ void core1_loop() {
   bool timing_initialized = false;
 
   while (true) {
+    // === CHECK FOR FLASH OPERATION ===
+    // If Core0 is performing a flash operation, wait in RAM until complete
+    // This prevents Core1 from crashing when XIP is disabled during flash erase/program
+    if (flash_operation_in_progress) {
+      wait_for_flash_complete();
+    }
+    
     // === POLL HOST CAN BUS ===
     // Poll dedicated Host CAN (J5) for TimeSync, Waypoints, Emergency Stop
     // Motor CAN (J4) is handled by LKM_Motor during motor operations

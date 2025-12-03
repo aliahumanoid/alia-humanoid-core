@@ -13,6 +13,9 @@
 #include <array>
 #include <cstring>
 
+// External flag for flash operation synchronization with Core1
+extern volatile bool flash_operation_in_progress;
+
 // ===================================================================
 // FLASH MEMORY CONFIGURATION
 // ===================================================================
@@ -154,6 +157,10 @@ void save_pid_only_data(struct PIDOnlyDeviceData data) {
   // Calculate number of sectors to erase (4KB each)
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
+  // Signal Core1 to enter RAM wait loop before flash operations
+  flash_operation_in_progress = true;
+  delay(5);  // Give Core1 time to enter the wait loop
+  
   // Atomic flash operation: disable interrupts during write
   uint32_t ints = save_and_disable_interrupts();
 
@@ -177,6 +184,9 @@ void save_pid_only_data(struct PIDOnlyDeviceData data) {
 
   // Restore interrupts
   restore_interrupts(ints);
+  
+  // Signal Core1 to resume normal operation
+  flash_operation_in_progress = false;
 
   // Print confirmation
   LOG_INFO("PID-only data saved successfully!");
@@ -376,6 +386,10 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
   // Calculate number of sectors to erase
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
+  // Signal Core1 to enter RAM wait loop before flash operations
+  flash_operation_in_progress = true;
+  delay(5);  // Give Core1 time to enter the wait loop
+  
   // Atomic flash operation
   uint32_t ints = save_and_disable_interrupts();
 
@@ -395,6 +409,9 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
   }
 
   restore_interrupts(ints);
+  
+  // Signal Core1 to resume normal operation
+  flash_operation_in_progress = false;
 
   // Print confirmation with equation details
   Serial.println("Linear equations saved to flash successfully!");

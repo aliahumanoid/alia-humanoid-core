@@ -48,14 +48,18 @@ const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
 
 // init program flag
 bool init_prg = true;
+// Flash operation synchronization flag
+volatile bool flash_operation_in_progress = false;
 // command array
 char command[100];
 // SERVO CANBUS (J4 CAN_Servo - Motor communication)
 MCP_CAN CAN(&SPI1, CAN_CS_PIN);
 // HOST CANBUS (J5 CAN_Controller - Host/Jetson communication)
 MCP_CAN CAN_HOST(&SPI1, CAN_HOST_CS_PIN);
-// JOINT ENCODER board with 3 encoders
-Encoders encoder1(PIN_RX, PIN_CS, PIN_SCK, PIN_TX);
+
+// NOTE: Direct encoder reading (DirectEncoders) is configured and initialized
+// in setup() after determining the number of DOFs for the active joint.
+// The global instance 'directEncoders' is defined in DirectEncoders.cpp
 
 // Time offset for synchronization
 float time_offset = 0;
@@ -355,8 +359,24 @@ void setup() {
   }
   LOG_INFO("Joint firmware started!");
 
-  // Initialize encoders
-  encoder1.begin();
+  // Initialize direct encoder reading (MT6835 sensors via SPI0)
+  // Configure which encoders are connected based on active joint DOF count
+  LOG_INFO("=== DIRECT ENCODER CONFIGURATION ===");
+  LOG_INFO("Active joint: " + String(ACTIVE_JOINT_CONFIG.name));
+  LOG_INFO("DOF count: " + String(ACTIVE_JOINT_CONFIG.dof_count));
+  
+  for (int i = 0; i < ACTIVE_JOINT_CONFIG.dof_count; i++) {
+    uint8_t encoder_channel = ACTIVE_JOINT_CONFIG.dofs[i].encoder_channel;
+    if (encoder_channel < DIRECT_ENCODER_COUNT) {
+      directEncoders.setEncoderConnected(encoder_channel, true);
+      LOG_INFO("Encoder " + String(encoder_channel) + " enabled for DOF " + String(i) + 
+               " (" + String(ACTIVE_JOINT_CONFIG.dofs[i].name) + ")");
+    }
+  }
+  
+  // Initialize direct encoders (SPI0 to MT6835 sensors)
+  directEncoders.begin();
+  LOG_INFO("=================================");
 
 #pragma endregion
 
@@ -385,8 +405,8 @@ void setup() {
   }
   LOG_DEBUG("------------------------------------");
 
-  // Initialize active joint controller
-  active_joint_controller = new JointController(ACTIVE_JOINT_CONFIG, &CAN, &encoder1);
+  // Initialize active joint controller (uses direct encoder reading)
+  active_joint_controller = new JointController(ACTIVE_JOINT_CONFIG, &CAN, &directEncoders);
   if (!active_joint_controller->init()) {
     LOG_ERROR("Failed to initialize controller for " + String(ACTIVE_JOINT_CONFIG.name) + "!");
     // Blink LED quickly to signal an error

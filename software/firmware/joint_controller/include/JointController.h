@@ -47,7 +47,7 @@
 #ifndef JOINT_CONTROLLER_H
 #define JOINT_CONTROLLER_H
 
-#include <Encoders.h>
+#include <DirectEncoders.h>
 #include <JointConfig.h>
 #include <LKM_Motor.h>
 #include <PID.h>
@@ -105,7 +105,7 @@ class JointController {
 private:
   JointConfig config;             // Joint configuration
   LKM_Motor **motors;             // Array of motor pointers
-  Encoders *encoders;             // Encoders pointer
+  DirectEncoders *encoders;       // Direct encoder reader (MT6835 via SPI0)
   PID **pid_controllers;          // PID controller per motor
   DofMovementData *dof_movement;  // Movement data per DOF
   DofMappingData_t *dof_mappings; // Mapping data per DOF (RAW from auto‑mapping)
@@ -155,9 +155,9 @@ public:
    * @brief Constructor
    * @param cfg Joint configuration
    * @param can CAN interface pointer
-   * @param enc Encoders pointer
+   * @param enc Direct encoders pointer (MT6835 via SPI0)
    */
-  JointController(const JointConfig &cfg, MCP_CAN *can, Encoders *enc);
+  JointController(const JointConfig &cfg, MCP_CAN *can, DirectEncoders *enc);
 
   /**
    * @brief Destructor

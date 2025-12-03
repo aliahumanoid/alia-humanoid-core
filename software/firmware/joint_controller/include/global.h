@@ -30,16 +30,21 @@
 // HARDWARE PIN DEFINITIONS
 // ============================================================================
 
-// SPI0 PICO MASTER -> PICO SLAVE
-// Wiring:
-// Master RX  GP16 <-> GP19  Slave TX
-// Master CS  GP17 <-> GP17  Slave CS
-// Master CK  GP18 <-> GP18  Slave CK
-// Master TX  GP19 <-> GP16  Slave RX
-const int PIN_RX  = 16;
-const int PIN_CS  = 17;
-const int PIN_SCK = 18;
-const int PIN_TX  = 19;
+// SPI0 - Direct MT6835 Encoder Reading
+// Connects directly to MT6835 magnetic encoders (no intermediate Pico)
+// Wiring (via jumpers on encoder board footprint):
+//   Controller GP16 (MISO) <- MT6835 SDO (all encoders, directly)
+//   Controller GP17        -> Encoder 1 CS (via GP0 on encoder footprint)
+//   Controller GP18 (SCK)  -> MT6835 SCK (all encoders, shared)
+//   Controller GP19 (MOSI) -> MT6835 SDI (all encoders, shared)
+//   Controller GP20        -> Encoder 2 CS (via GP1 on encoder footprint)
+//   Controller GP21        -> Encoder 3 CS (via GP2 on encoder footprint)
+#define ENCODER_SPI_MISO 16
+#define ENCODER_SPI_SCK  18
+#define ENCODER_SPI_MOSI 19
+#define ENCODER_CS_1     17  // CS for encoder DOF 0 (via GP0 on encoder footprint)
+#define ENCODER_CS_2     20  // CS for encoder DOF 1 (via GP1 on encoder footprint)
+#define ENCODER_CS_3     21  // CS for encoder DOF 2 (via GP2 on encoder footprint)
 
 // CAN interface pins - Motor CAN (J4 CAN_Servo)
 #define CAN_CS_PIN 9
