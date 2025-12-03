@@ -169,6 +169,126 @@ void flushMovementSamples() {
  * @see CommandParser.h for command parsing logic
  * @see shared_data.h for inter-core communication structures
  */
+
+// ============================================================================
+// SHARED DOF ANGLES UPDATE
+// ============================================================================
+
+/**
+ * @brief Update shared DOF angles from encoders (called every Core0 cycle)
+ * 
+ * This function provides a single point of encoder reading for the entire system.
+ * All components (Core1 waypoint control, UI encoder display, etc.) should read
+ * from shared_dof_angles instead of calling encoder functions directly.
+ * 
+ * Benefits:
+ * - Single SPI read per cycle (efficiency)
+ * - Consistent values across all consumers
+ * - Velocity calculation with proper dt
+ * - Deterministic timing
+ * 
+ * NOTE: Encoder reading is throttled to ~500Hz (every 2ms) to reduce SPI bus stress
+ * and avoid "Synchronization sequence not found" errors. The control loops run at
+ * 100Hz (outer) / 500Hz (inner), so 500Hz encoder updates are sufficient.
+ */
+void updateSharedDofAngles() {
+  static uint32_t last_update_us = 0;
+  static uint32_t last_encoder_read_us = 0;
+  
+  // Throttle encoder reads to ~500Hz (every 2000us = 2ms)
+  // This reduces SPI bus stress and prevents sync errors
+  static const uint32_t ENCODER_READ_INTERVAL_US = 2000;
+  
+  JointController *controller = active_joint_controller;
+  if (controller == nullptr) {
+    return;
+  }
+  
+  uint32_t now_us = time_us_32();
+  
+  // Skip encoder read if not enough time has passed
+  if (last_encoder_read_us > 0 && (now_us - last_encoder_read_us) < ENCODER_READ_INTERVAL_US) {
+    return;  // Keep previous values, they're still fresh enough
+  }
+  
+  // Consecutive error counters for emergency stop (one per DOF)
+  static uint8_t consecutive_errors[MAX_DOFS] = {0};
+  static const uint8_t ENCODER_ERROR_THRESHOLD = 25;  // 25 cycles @ 500Hz = 50ms
+  
+  // Update encoder data from hardware (single SPI transaction)
+  encoder1.update();
+  last_encoder_read_us = now_us;
+  
+  if (!encoder1.isDataValid()) {
+    // Mark all as invalid and increment error counters
+    for (uint8_t dof = 0; dof < MAX_DOFS; dof++) {
+      shared_dof_angles.valid[dof] = false;
+      consecutive_errors[dof]++;
+      
+      // Check for emergency stop condition
+      if (consecutive_errors[dof] >= ENCODER_ERROR_THRESHOLD && !emergency_stop_requested) {
+        emergency_stop_requested = true;
+        LOG_ERROR("[SAFETY] EMERGENCY STOP: Encoder SPI failed " + 
+                  String(ENCODER_ERROR_THRESHOLD) + " consecutive reads");
+      }
+    }
+    return;
+  }
+  
+  // now_us already set above for throttling check
+  float dt_s = (last_update_us > 0) ? (now_us - last_update_us) / 1000000.0f : 0.0f;
+  
+  uint8_t dof_count = controller->getConfig().dof_count;
+  shared_dof_angles.dof_count = dof_count;
+  
+  for (uint8_t dof = 0; dof < dof_count; dof++) {
+    bool is_valid = false;
+    float new_angle = controller->getCurrentAngle(dof, is_valid);
+    
+    if (is_valid) {
+      // Reset error counter on successful read
+      consecutive_errors[dof] = 0;
+      
+      // Calculate velocity if we have a previous reading
+      if (dt_s > 0.0001f && shared_dof_angles.valid[dof]) {
+        float angle_diff = new_angle - shared_dof_angles.angles[dof];
+        shared_dof_angles.velocities[dof] = angle_diff / dt_s;
+      } else {
+        shared_dof_angles.velocities[dof] = 0.0f;
+      }
+      
+      shared_dof_angles.angles[dof] = new_angle;
+      shared_dof_angles.valid[dof] = true;
+    } else {
+      // Increment error counter for this specific DOF
+      consecutive_errors[dof]++;
+      shared_dof_angles.valid[dof] = false;
+      shared_dof_angles.velocities[dof] = 0.0f;
+      
+      // Check for emergency stop condition per DOF
+      if (consecutive_errors[dof] >= ENCODER_ERROR_THRESHOLD && !emergency_stop_requested) {
+        emergency_stop_requested = true;
+        LOG_ERROR("[SAFETY] EMERGENCY STOP: Encoder DOF " + String(dof) + 
+                  " failed " + String(ENCODER_ERROR_THRESHOLD) + " consecutive reads");
+      }
+    }
+  }
+  
+  // Mark remaining DOFs as invalid
+  for (uint8_t dof = dof_count; dof < MAX_DOFS; dof++) {
+    shared_dof_angles.valid[dof] = false;
+    consecutive_errors[dof] = 0;  // Reset unused DOFs
+  }
+  
+  shared_dof_angles.timestamp_us = now_us;
+  shared_dof_angles.updated = true;
+  last_update_us = now_us;
+}
+
+// ============================================================================
+// CORE0 MAIN LOOP
+// ============================================================================
+
 void core0_main_loop() {
 
 #pragma region Init Core1 and SharedData
@@ -178,6 +298,9 @@ void core0_main_loop() {
     init_prg = false;
   }
 #pragma endregion
+
+  // Update shared DOF angles from encoders (single read point for entire system)
+  updateSharedDofAngles();
 
   // NOTE: CAN polling has been moved to Core1 to avoid SPI1 conflicts
   // Core1 now handles all CAN communication (Host + Motor)
@@ -558,18 +681,12 @@ void core0_main_loop() {
 
 #pragma region Streaming Data
 
-  // Stream encoder data if measuring is active
+  // Stream encoder data if measuring is active (uses shared_dof_angles)
   if (measuring_data_ext.flag == 1) {
-    if (active_joint_controller != nullptr) {
-      uint8_t dof = measuring_data_ext.dof_index;
-      if (dof < active_joint_controller->getConfig().dof_count) {
-        bool is_valid;
-        float angle = active_joint_controller->getCurrentAngle(dof, is_valid);
-        if (is_valid) {
-          Serial.println("EVT:ANGLE(" + String(ACTIVE_JOINT) + "," + String(dof) + "," +
-                         String(angle, 4) + ")");
-        }
-      }
+    uint8_t dof = measuring_data_ext.dof_index;
+    if (dof < shared_dof_angles.dof_count && shared_dof_angles.valid[dof]) {
+      Serial.println("EVT:ANGLE(" + String(ACTIVE_JOINT) + "," + String(dof) + "," +
+                     String(shared_dof_angles.angles[dof], 4) + ")");
     }
     delay(50); // Throttle streaming to ~20Hz
   }
@@ -691,71 +808,55 @@ void core0_main_loop() {
 #pragma endregion
 
 #pragma region TestEncoder
-  // Encoder test handling
+  // Encoder test handling - uses shared_dof_angles (updated by updateSharedDofAngles)
   if (encoder_test_active) {
     static unsigned long last_encoder_print_time = 0;
     // Send encoder data every 200ms
     if (millis() - last_encoder_print_time > 200) {
       last_encoder_print_time = millis();
 
-      // Update encoder data
-      encoder1.update();
+      // Use shared DOF angles (already updated by updateSharedDofAngles at start of loop)
+      JointController *controller = active_joint_controller;
 
-      // If the update completed successfully
-      if (encoder1.isDataValid()) {
-        // Get active controller
-        JointController *controller = active_joint_controller;
-
-        if (controller != nullptr) {
-          // Handle ALL case (all DOFs) or single DOF
-          if (encoder_test_all_dofs) {
-            // Send data for all DOFs of the joint
-            for (int dof = 0; dof < controller->getConfig().dof_count; dof++) {
-              // Get encoder channel for this DOF
-              uint8_t encoder_channel = controller->getConfig().dofs[dof].encoder_channel;
-
-              // Read encoder value
-              bool isValid;
-              float joint_angle     = encoder1.getJointAngle(encoder_channel, isValid);
-              int32_t encoder_count = encoder1.getCount(encoder_channel);
-
-              if (isValid) {
-                // Build output message for this DOF
-                char buffer[100];
-                snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld", 
-                         dof, joint_angle, encoder_count);
-                Serial.println(buffer);
-              } else {
-                char buffer[100];
-                snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ERROR=Invalid encoder data", dof);
-                Serial.println(buffer);
-              }
-            }
-          } else {
-            // Single DOF handling (original behavior)
-            uint8_t encoder_channel = controller->getConfig().dofs[encoder_test_dof_index].encoder_channel;
-
-            // Read encoder value
-            bool isValid;
-            float joint_angle     = encoder1.getJointAngle(encoder_channel, isValid);
+      if (controller != nullptr && shared_dof_angles.dof_count > 0) {
+        // Handle ALL case (all DOFs) or single DOF
+        if (encoder_test_all_dofs) {
+          // Send data for all DOFs of the joint
+          for (int dof = 0; dof < shared_dof_angles.dof_count; dof++) {
+            // Get encoder channel for this DOF (for raw count)
+            uint8_t encoder_channel = controller->getConfig().dofs[dof].encoder_channel;
             int32_t encoder_count = encoder1.getCount(encoder_channel);
 
-            if (isValid) {
-              // Build output message
+            if (shared_dof_angles.valid[dof]) {
+              // Build output message for this DOF using shared angles
               char buffer[100];
-              snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld",
-                       encoder_test_dof_index, joint_angle, encoder_count);
+              snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld", 
+                       dof, shared_dof_angles.angles[dof], encoder_count);
               Serial.println(buffer);
             } else {
-              Serial.println("EVT:ENCODER_DATA:ERROR=Invalid encoder data");
+              char buffer[100];
+              snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ERROR=Invalid encoder data", dof);
+              Serial.println(buffer);
             }
           }
         } else {
-          Serial.println("EVT:ENCODER_DATA:ERROR=Controller not found");
-          encoder_test_active = false; // Disable test on error
+          // Single DOF handling
+          uint8_t encoder_channel = controller->getConfig().dofs[encoder_test_dof_index].encoder_channel;
+          int32_t encoder_count = encoder1.getCount(encoder_channel);
+
+          if (shared_dof_angles.valid[encoder_test_dof_index]) {
+            // Build output message using shared angles
+            char buffer[100];
+            snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld",
+                     encoder_test_dof_index, shared_dof_angles.angles[encoder_test_dof_index], encoder_count);
+            Serial.println(buffer);
+          } else {
+            Serial.println("EVT:ENCODER_DATA:ERROR=Invalid encoder data");
+          }
         }
       } else {
-        Serial.println("EVT:ENCODER_DATA:ERROR=Encoder communication failed");
+        Serial.println("EVT:ENCODER_DATA:ERROR=Controller not found");
+        encoder_test_active = false; // Disable test on error
       }
     }
   }

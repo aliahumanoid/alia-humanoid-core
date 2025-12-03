@@ -15,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <math.h>
+#include "main_common.h"  // For shared_dof_angles
 
 // ============================================================================
 // EXTERNAL VARIABLES & HELPER FUNCTIONS
@@ -900,13 +901,12 @@ bool JointController::checkSafetyForAllDofs(String &violation_message, bool chec
   violation_message = "";
 
   for (int dof = 0; dof < config.dof_count; dof++) {
-    bool is_valid;
-    float current_angle = getCurrentAngle(dof, is_valid);
-
-    if (!is_valid) {
+    // Use shared_dof_angles (updated by Core0)
+    if (!shared_dof_angles.valid[dof]) {
       violation_message = "Invalid encoder reading for DOF " + String(dof);
       return false;
     }
+    float current_angle = shared_dof_angles.angles[dof];
 
     if (!checkSafetyForDof(dof, current_angle, violation_message, check_motors)) {
       return false;
@@ -1090,15 +1090,14 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
     LOG_INFO("System stable under tension.");
   }
 
-  // Read current joint angle
-  bool isValid;
-  float current_joint_angle = getCurrentAngle(dof_index, isValid);
-  if (!isValid) {
+  // Read current joint angle from shared state (updated by Core0)
+  if (!shared_dof_angles.valid[dof_index]) {
     LOG_ERROR("Cannot recalculate offsets: invalid encoder reading for DOF " +
               String(dof_index));
     stopDofMotors(dof_index);
     return false;
   }
+  float current_joint_angle = shared_dof_angles.angles[dof_index];
 
   // Calculate expected motor angles using linear equations (joint->motor)
   float expected_agonist_angle, expected_antagonist_angle;

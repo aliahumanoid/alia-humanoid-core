@@ -19,6 +19,7 @@
 #include <debug.h>
 #include <utils.h>
 #include <algorithm>
+#include "main_common.h"  // For shared_dof_angles
 
 // External variables for inter-core communication
 extern volatile bool emergency_stop_requested;
@@ -229,8 +230,8 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
   LOG_DEBUG("MAPPING POINT CHANGE — Current point: " + String(auto_mapping_state.current_point));
   LOG_DEBUG("Current position:");
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
-    bool isValid;
-    float current_angle = getCurrentAngle(i, isValid);
+    // Use shared_dof_angles (updated by Core0)
+    float current_angle = shared_dof_angles.valid[i] ? shared_dof_angles.angles[i] : 0.0f;
     LOG_DEBUG("  DOF " + String(i) + ": " + String(current_angle, 2) +
               "° (target was: " + String(auto_mapping_state.target_angles[i], 2) + "°)");
   }
@@ -296,15 +297,13 @@ bool JointController::acquireCurrentPoint(AutoMappingState_t &auto_mapping_state
   // Populate structure with current data
   auto_mapping_state.last_sample.timestamp = millis();
 
-  // Acquire DOF angles
+  // Acquire DOF angles from shared state (updated by Core0)
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
-    bool isValid;
-    auto_mapping_state.last_sample.dof_angles[i] = getCurrentAngle(i, isValid);
-
-    if (!isValid) {
+    if (!shared_dof_angles.valid[i]) {
       LOG_ERROR("Acquisition failed — invalid encoder reading for DOF " + String(i));
       return false;
     }
+    auto_mapping_state.last_sample.dof_angles[i] = shared_dof_angles.angles[i];
   }
 
   // Acquire motor angles
@@ -385,14 +384,12 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
   }
 
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
-    // Get current DOF angle
-    bool isValid;
-    float current_angle = getCurrentAngle(i, isValid);
-
-    if (!isValid) {
-    LOG_ERROR("Invalid encoder reading for DOF " + String(i));
+    // Get current DOF angle from shared state (updated by Core0)
+    if (!shared_dof_angles.valid[i]) {
+      LOG_ERROR("Invalid encoder reading for DOF " + String(i));
       continue;
     }
+    float current_angle = shared_dof_angles.angles[i];
 
     // Target angle for this DOF
     float target_angle = auto_mapping_state.target_angles[i];
@@ -611,14 +608,12 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
 bool JointController::isPositionReached(AutoMappingState_t &auto_mapping_state) {
   bool all_reached = true;
 
-  // Check stability for each DOF
+  // Check stability for each DOF using shared state (updated by Core0)
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
-    bool isValid;
-    float current_angle = getCurrentAngle(i, isValid);
-
-    if (!isValid) {
+    if (!shared_dof_angles.valid[i]) {
       return false; // Invalid encoder reading
     }
+    float current_angle = shared_dof_angles.angles[i];
 
     // Calculate error relative to target
     float error = fabs(auto_mapping_state.target_angles[i] - current_angle);
@@ -714,11 +709,9 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
     // Verify whether the position is now reached
     bool position_check_ok = true;
 
-    // Verify that all encoders are valid
+    // Verify that all encoders are valid using shared state (updated by Core0)
     for (int i = 0; i < auto_mapping_state.dof_count; i++) {
-      bool isValid;
-      getCurrentAngle(i, isValid);
-      if (!isValid) {
+      if (!shared_dof_angles.valid[i]) {
         position_check_ok = false;
         auto_mapping_state.consecutive_encoder_errors++;
 
