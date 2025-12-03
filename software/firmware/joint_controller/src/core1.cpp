@@ -204,8 +204,9 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     
     // Initialize movement if needed
     if (needs_init && active_joint_controller != nullptr) {
-      bool is_valid = false;
-      float current_angle = active_joint_controller->getCurrentAngle(dof, is_valid);
+      // Use shared DOF angles (updated by Core0)
+      bool is_valid = shared_dof_angles.valid[dof];
+      float current_angle = shared_dof_angles.angles[dof];
       
       if (is_valid) {
         // Safety check

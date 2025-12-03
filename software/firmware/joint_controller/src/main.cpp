@@ -99,6 +99,16 @@ volatile uint8_t movement_sample_joint_id   = 0;
 volatile bool movement_sample_overflow      = false;
 uint16_t movement_sample_counters[MAX_DOFS] = {0};
 
+// === SHARED DOF ANGLES (Updated by Core0, read by Core1) ===
+SharedDofAngles shared_dof_angles = {
+  .angles = {0},
+  .velocities = {0},
+  .timestamp_us = 0,
+  .valid = {false, false, false},
+  .updated = false,
+  .dof_count = 0
+};
+
 // === NEW INTER‑CORE COMMUNICATION SYSTEM ===
 // Double‑buffered command passing
 command_data_extended_t command_buffer[2] = {0};

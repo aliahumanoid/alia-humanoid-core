@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include "main_common.h"  // For shared_dof_angles
 
 // External variables for inter-core communication
 extern volatile bool emergency_stop_requested;
@@ -323,15 +324,14 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
   for (int i = 0; i < active_dof_count; i++) {
     int dof_idx = active_dof_indices[i];
-    bool isValid;
-    start_angles[dof_idx] = getCurrentAngle(dof_idx, isValid);
-
-    if (!isValid) {
+    // Use shared_dof_angles (updated by Core0)
+    if (!shared_dof_angles.valid[dof_idx]) {
       LOG_ERROR("Invalid joint encoder reading for DOF " + String(dof_idx));
       return MovementResult(MOVEMENT_ERROR,
                             "Error: Invalid joint encoder reading for DOF " + String(dof_idx) +
                                 "\n");
     }
+    start_angles[dof_idx] = shared_dof_angles.angles[dof_idx];
 
     // Read current motor angles
     float gamma_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
@@ -535,17 +535,15 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         for (int i = 0; i < active_dof_count; i++) {
           int dof_idx = active_dof_indices[i];
 
-          // Read current joint angle
-          bool isValid;
-          q_curr[dof_idx] = getCurrentAngle(dof_idx, isValid);
-
-          if (!isValid) {
+          // Read current joint angle from shared state (updated by Core0)
+          if (!shared_dof_angles.valid[dof_idx]) {
             stopAllMotors();
             Serial.println("ERROR: Invalid joint encoder reading for DOF " + String(dof_idx));
             return MovementResult(MOVEMENT_ERROR,
                                   "Error: Invalid joint encoder reading for DOF " +
                                       String(dof_idx) + "\n");
           }
+          q_curr[dof_idx] = shared_dof_angles.angles[dof_idx];
 
           // Interpolate desired angle as AVERAGE of agonist and antagonist trajectories
           // (joint angle - alpha_path). Both converge to the same target, so
@@ -723,14 +721,13 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           for (int i = 0; i < active_dof_count; i++) {
             int dof_idx = active_dof_indices[i];
 
-            bool isValid;
-            q_curr[dof_idx] = getCurrentAngle(dof_idx, isValid);
-
-            if (!isValid) {
+            // Use shared_dof_angles (updated by Core0)
+            if (!shared_dof_angles.valid[dof_idx]) {
               stopAllMotors();
               Serial.println("ERROR: Encoder issue during hold");
               return MovementResult(MOVEMENT_ERROR, "Error: Encoder issue during hold\n");
             }
+            q_curr[dof_idx] = shared_dof_angles.angles[dof_idx];
 
             // PERIODIC SAFETY CHECKS: run every 100 cycles to reduce overhead
             if (safety_check_counter >= 100) {
@@ -944,10 +941,9 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
     for (int i = 0; i < active_dof_count; i++) {
       int dof_idx = active_dof_indices[i];
-      bool isValid;
-      float final_angle = getCurrentAngle(dof_idx, isValid);
-
-      if (isValid) {
+      // Use shared_dof_angles (updated by Core0)
+      if (shared_dof_angles.valid[dof_idx]) {
+        float final_angle = shared_dof_angles.angles[dof_idx];
         float error = fabs(final_angle - local_target_angles[dof_idx]);
         LOG_INFO("DOF " + String(dof_idx) + ": target=" + String(local_target_angles[dof_idx], 2) +
                  " deg, final=" + String(final_angle, 2) + " deg, error=" + String(error, 3) +

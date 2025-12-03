@@ -149,6 +149,36 @@ void clearMovementSampleQueue();
 void flushMovementSamples();
 
 // ============================================================================
+// SHARED DOF ANGLES (Updated by Core0, read by Core1 and UI)
+// ============================================================================
+
+/**
+ * @brief Centralized DOF angle state updated by Core0 every cycle
+ * 
+ * This structure provides a single source of truth for DOF angles.
+ * Core0 reads from encoders and updates this structure.
+ * Core1 and other components read from here instead of directly from encoders.
+ * 
+ * Benefits:
+ * - Single I2C/SPI read per cycle (efficiency)
+ * - Consistent values across all consumers in the same cycle
+ * - Deterministic timing for control loops
+ */
+struct SharedDofAngles {
+  float angles[MAX_DOFS];           // Validated angles in degrees
+  float velocities[MAX_DOFS];       // Calculated velocities in deg/s
+  uint32_t timestamp_us;            // Microsecond timestamp of last update
+  bool valid[MAX_DOFS];             // Per-DOF validity flag
+  volatile bool updated;            // Flag set by Core0, cleared by Core1
+  uint8_t dof_count;                // Active DOF count
+};
+
+extern SharedDofAngles shared_dof_angles;
+
+// Function to update shared DOF angles (called by Core0)
+void updateSharedDofAngles();
+
+// ============================================================================
 // INTER-CORE COMMUNICATION (CORE0 <-> CORE1)
 // ============================================================================
 

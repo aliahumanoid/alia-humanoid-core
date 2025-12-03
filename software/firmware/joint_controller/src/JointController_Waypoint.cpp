@@ -24,6 +24,7 @@
 #include <waypoint_buffer.h>
 #include <Arduino.h>
 #include <debug.h>
+#include "main_common.h"  // For shared_dof_angles
 
 // External time sync function (defined in core1.cpp)
 extern uint32_t getAbsoluteTimeMs();
@@ -162,23 +163,20 @@ bool JointController::executeWaypointMovement() {
         
       } else {
         // HOLDING mode - maintain current position
-        bool is_valid = false;
-        q_des = getCurrentAngle(dof, is_valid);
-        
-        if (!is_valid) {
+        // Use shared DOF angles (updated by Core0)
+        if (!shared_dof_angles.valid[dof]) {
           LOG_WARN("[Waypoint] Invalid encoder for DOF " + String(dof) + ", skipping");
           continue;
         }
+        q_des = shared_dof_angles.angles[dof];
       }
       
-      // Read current angle
-      bool is_valid = false;
-      float q_curr = getCurrentAngle(dof, is_valid);
-      
-      if (!is_valid) {
+      // Read current angle from shared state (updated by Core0)
+      if (!shared_dof_angles.valid[dof]) {
         LOG_WARN("[Waypoint] Invalid encoder reading for DOF " + String(dof));
         continue;
       }
+      float q_curr = shared_dof_angles.angles[dof];
       
       // === RUNTIME SAFETY CHECK (same as moveMultiDOF_cascade) ===
       // Check joint limits, mapping limits, and optionally motor limits (tendon breakage)
