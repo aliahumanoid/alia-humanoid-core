@@ -23,7 +23,7 @@
 // LIBRARY INCLUDES
 // ============================================================================
 
-#include <Encoders.h>
+#include <DirectEncoders.h>
 #include <LKM_Motor.h>
 #include "pico/multicore.h"
 #include "version.h"
@@ -92,12 +92,17 @@ extern MCP_CAN CAN;
 // CAN bus controller for host commands (J5 CAN_Controller - SPI1 shared, different CS)
 extern MCP_CAN CAN_HOST;
 
-// Joint encoder board with 3 encoders
-extern Encoders encoder1;
+// Direct encoder reading (MT6835 sensors via SPI0)
+// Replaces the old encoder1 (Encoders class that used SPI slave)
+extern DirectEncoders directEncoders;
 
 // ============================================================================
 // SYSTEM STATE VARIABLES
 // ============================================================================
+
+// Flash operation synchronization
+// Core0 sets this before flash operations, Core1 checks and waits in RAM
+extern volatile bool flash_operation_in_progress;
 
 // Time offset for synchronization
 extern float time_offset;
@@ -160,7 +165,7 @@ void flushMovementSamples();
  * Core1 and other components read from here instead of directly from encoders.
  * 
  * Benefits:
- * - Single I2C/SPI read per cycle (efficiency)
+ * - Single SPI read per cycle (efficiency)
  * - Consistent values across all consumers in the same cycle
  * - Deterministic timing for control loops
  */

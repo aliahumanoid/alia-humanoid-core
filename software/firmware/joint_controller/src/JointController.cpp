@@ -89,7 +89,7 @@ static inline void logMovementSample(uint8_t dof_index, float joint_target, floa
 // ============================================================================
 
 // Constructor
-JointController::JointController(const JointConfig &cfg, MCP_CAN *can, Encoders *enc) {
+JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEncoders *enc) {
   config   = cfg;
   encoders = enc;
 
@@ -134,7 +134,7 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, Encoders 
     uint8_t encoder_channel = cfg.dofs[i].encoder_channel;
     bool invert             = cfg.dofs[i].encoder_invert;
     // Set inversion flag directly in encoders object
-    if (encoder_channel < ENCODER_COUNT) {
+    if (encoder_channel < DIRECT_ENCODER_COUNT) {
       encoders->setEncoderInvert(encoder_channel, invert);
       LOG_DEBUG("Set inversion flag for encoder " + String(encoder_channel) + ": " +
                 String(invert ? "true" : "false"));
@@ -263,14 +263,14 @@ bool JointController::init() {
     motors[i]->init();
   }
 
-  // Apply configured angular offsets for each DOF
+  // Apply configured angular offsets for each DOF (during init, don't save to flash)
   for (int i = 0; i < config.dof_count; i++) {
     float zero_offset = config.dofs[i].zero_mapping.zero_angle_offset;
     if (zero_offset != 0.0f) {
       uint8_t encoder_channel = config.dofs[i].encoder_channel;
       LOG_INFO(String("Applying angle offset for DOF ") + String(i) + ": " +
                String(zero_offset));
-      encoders->setJointOffset(encoder_channel, zero_offset);
+      encoders->setJointOffset(encoder_channel, zero_offset, false);  // No flash save during init
     }
   }
 
@@ -433,16 +433,14 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
   // Get the configured angular offset
   float zero_offset = config.dofs[dof_index].zero_mapping.zero_angle_offset;
 
-  // Zero ONLY the encoder for the specific channel for this DOF
-  encoders->zeroEncoders(encoder_channel);
+  // Request encoder reset - will be executed by Core0 on next update cycle
+  // This is thread-safe and avoids SPI conflicts between cores
+  encoders->requestReset(encoder_channel);
 
-  // Set the desired offset (or keep the previous one if equal)
+  // Note: Angular offset application is handled in the reset itself
+  // The offset from config will be applied after reset if needed
   if (zero_offset != 0.0f) {
-    Serial.print("Applying angular offset: ");
-    Serial.println(zero_offset);
-
-    // Set the encoder offset for this DOF
-    encoders->setJointOffset(encoder_channel, zero_offset);
+    LOG_INFO_F("Note: Angular offset of %.2f deg will be applied after reset", zero_offset);
   }
 
   // Zero motor offsets for this DOF
@@ -452,7 +450,7 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
     }
   }
 
-  LOG_INFO("Zero successfully set for DOF " + String(dof_index));
+  LOG_INFO("Zero request queued for DOF " + String(dof_index) + " (executes on Core0)");
   return true;
 }
 
@@ -484,158 +482,22 @@ void JointController::stopDofMotors(uint8_t dof_index) {
 // POSITION & ANGLE READING
 // ============================================================================
 
-// New method to validate encoder readings and detect SPI spikes
+// Read current angle of a DOF from shared memory (thread-safe, no SPI access)
+// Validation and spike detection is handled by DirectEncoders in Core0
 float JointController::getValidatedAngle(uint8_t dof_index, bool &is_valid) {
   if (dof_index >= config.dof_count) {
     is_valid = false;
     return 0.0f;
   }
 
-  // Get the raw reading
-  uint8_t encoder_channel = config.dofs[dof_index].encoder_channel;
-  float raw_angle         = encoders->getJointAngle(encoder_channel, is_valid);
-
-  if (!is_valid) {
-    // If the reading is invalid, return the last valid reading
-    return last_valid_angles[dof_index];
-  }
-
-  // Get the current timestamp
-  uint64_t current_time = time_us_64();
-
-  // If this is the first read or too much time has passed, accept the value
-  if (last_read_timestamps[dof_index] == 0 ||
-      (current_time - last_read_timestamps[dof_index]) > 1000000) { // > 1 second
-    last_valid_angles[dof_index]    = raw_angle;
-    last_read_timestamps[dof_index] = current_time;
-    return raw_angle;
-  }
-
-  // Calculate elapsed time in seconds
-  float dt = (current_time - last_read_timestamps[dof_index]) / 1000000.0f;
-
-  // Compute implicit speed
-  float angle_diff       = fabs(raw_angle - last_valid_angles[dof_index]);
-  float implied_velocity = angle_diff / dt; // degrees/second
-
-  // Convert to rad/s for comparison with max_speed
-  float implied_velocity_rad = implied_velocity * PI / 180.0f;
-
-  // Get the configured maximum speed for this DOF
-  float max_speed = config.dofs[dof_index].motion.max_speed;
-
-  // Check whether the implicit speed exceeds the limit with margin
-  if (implied_velocity_rad > max_speed * SPIKE_DETECTION_MARGIN) {
-    // Possible spike detected — re‑read multiple times to confirm
-    spike_counters[dof_index]++; // Increment spike counter
-
-    LOG_WARN(String("[SPIKE DETECT #") + String(spike_counters[dof_index]) + "] DOF " +
-             String(dof_index) + ": abnormal speed " + String(implied_velocity) +
-             "°/s (" + String(implied_velocity_rad) + " rad/s) > limit " +
-             String(max_speed * SPIKE_DETECTION_MARGIN) + " rad/s. Delta: " +
-             String(angle_diff) + "° in " + String(dt * 1000) +
-             " ms. Suspicious reading: " + String(raw_angle) +
-             "° (from " + String(last_valid_angles[dof_index]) + "°)");
-
-    float readings[MAX_CONSECUTIVE_READS];
-    bool all_valid = true;
-
-    for (int i = 0; i < MAX_CONSECUTIVE_READS; i++) {
-      bool read_valid;
-      readings[i] = encoders->getJointAngle(encoder_channel, read_valid);
-      if (!read_valid) {
-        all_valid = false;
-        break;
-      }
-      sleep_us(100); // Brief pause between readings
-    }
-
-    if (all_valid) {
-      // Calculate the average of the readings
-      float sum = 0.0f;
-      for (int i = 0; i < MAX_CONSECUTIVE_READS; i++) {
-        sum += readings[i];
-      }
-      float avg_reading = sum / MAX_CONSECUTIVE_READS;
-
-      // Calculate the standard deviation
-      float variance = 0.0f;
-      for (int i = 0; i < MAX_CONSECUTIVE_READS; i++) {
-        float diff = readings[i] - avg_reading;
-        variance += diff * diff;
-      }
-      float std_dev = sqrt(variance / MAX_CONSECUTIVE_READS);
-
-      // If readings are consistent (low deviation), use the average
-      if (std_dev < 1.0f) { // Threshold of 1 degree
-        raw_angle = avg_reading;
-
-        DBG_PRINT("[SPIKE CORRECTED] DOF ");
-        DBG_PRINT(dof_index);
-        DBG_PRINT(": Original reading ");
-        DBG_PRINT(last_valid_angles[dof_index]);
-        DBG_PRINT("° -> spike ");
-        DBG_PRINT(encoders->getJointAngle(encoder_channel, is_valid));
-        DBG_PRINT("° -> corrected to ");
-        DBG_PRINT(avg_reading);
-        DBG_PRINT("° (3 readings: ");
-        for (int i = 0; i < MAX_CONSECUTIVE_READS; i++) {
-          DBG_PRINT(readings[i]);
-          if (i < MAX_CONSECUTIVE_READS - 1)
-            DBG_PRINT(", ");
-        }
-        DBG_PRINT(", std dev: ");
-        DBG_PRINT(std_dev);
-        DBG_PRINTLN("°)");
-      } else {
-        // Inconsistent readings, keep the last valid value
-        is_valid = false;
-
-        DBG_PRINT("[SPIKE REJECTED] DOF ");
-        DBG_PRINT(dof_index);
-        DBG_PRINT(": Inconsistent readings (std dev: ");
-        DBG_PRINT(std_dev);
-        DBG_PRINT("°). 3 readings: ");
-        for (int i = 0; i < MAX_CONSECUTIVE_READS; i++) {
-          DBG_PRINT(readings[i]);
-          if (i < MAX_CONSECUTIVE_READS - 1)
-            DBG_PRINT(", ");
-        }
-        DBG_PRINT(". Keeping last valid value: ");
-        DBG_PRINT(last_valid_angles[dof_index]);
-        DBG_PRINTLN("°");
-
-        return last_valid_angles[dof_index];
-      }
-    } else {
-      // Not all readings are valid, keep the last value
-      is_valid = false;
-
-      DBG_PRINT("[SPIKE ERROR] DOF ");
-      DBG_PRINT(dof_index);
-      DBG_PRINT(": Invalid SPI readings during spike verification. Keeping last value: ");
-      DBG_PRINT(last_valid_angles[dof_index]);
-      DBG_PRINTLN("°");
-
-      return last_valid_angles[dof_index];
-    }
-  }
-
-  // Update historical values
-  last_valid_angles[dof_index]    = raw_angle;
-  last_read_timestamps[dof_index] = current_time;
-
-  return raw_angle;
+  // Read from shared memory (updated by Core0)
+  // This is thread-safe and does NOT access SPI
+  is_valid = shared_dof_angles.valid[dof_index];
+  return shared_dof_angles.angles[dof_index];
 }
 
-// Read current angle of a DOF
+// Read current angle of a DOF (alias for getValidatedAngle)
 float JointController::getCurrentAngle(uint8_t dof_index, bool &is_valid) {
-  if (dof_index >= config.dof_count) {
-    is_valid = false;
-    return 0.0f;
-  }
-
-  // Use new validation method that detects and filters SPI spikes
   return getValidatedAngle(dof_index, is_valid);
 }
 

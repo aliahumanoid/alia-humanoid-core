@@ -199,9 +199,10 @@ bool JointController::executeWaypointMovement() {
         
         if (just_entered_holding) {
           LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
-          // Reset PID integral to prevent windup carrying over to next sequence
-          error_integral_q[dof] = 0.0f;
-          // Mark that PID needs full reset when next sequence starts
+          // DO NOT reset PID integral here - we need it to maintain position
+          // against static loads (gravity, friction). The integral was compensating
+          // for steady-state error, and resetting it would cause drift.
+          // Only mark reset needed for when a NEW sequence starts (from IDLE).
           pid_reset_needed[dof] = true;
         }
       }
@@ -281,28 +282,9 @@ bool JointController::executeWaypointMovement() {
     }
     
     // === INNER LOOP @ 500 Hz (Motor Control) ===
-    // In HOLDING mode, reduce frequency to 100 Hz (every 5 cycles) to reduce CAN load
-    // while still maintaining good position holding.
-    // In MOVING mode, run at full 500 Hz for precise trajectory tracking.
-    // 
-    // NOTE: CAN buffer overflow issue was observed when running at full 500 Hz in HOLDING.
-    // The MCP2515 RX buffer would accumulate stale motor responses, causing occasional
-    // garbage readings (e.g., -134140420096 degrees). The flush mechanism in LKM_Motor
-    // handles this, but reducing frequency in HOLDING minimizes the issue.
+    // Run at full 500 Hz in both MOVING and HOLDING modes for best accuracy.
+    // The MCP2515 flush mechanism in LKM_Motor handles any CAN buffer issues.
     // See: LKM_Motor::getMultiAngleSync() for the flush and retry logic.
-    WaypointState current_dof_state = waypoint_buffer_state(dof);
-    bool dof_is_holding = (current_dof_state == WaypointState::HOLDING);
-    
-    static uint16_t holding_control_counter[MAX_DOFS] = {0};
-    if (dof_is_holding) {
-      holding_control_counter[dof]++;
-      if (holding_control_counter[dof] < 5) {
-        continue;  // Skip motor control in HOLDING, only run every 5 cycles (~100 Hz)
-      }
-      holding_control_counter[dof] = 0;
-    } else {
-      holding_control_counter[dof] = 0;  // Reset counter when not holding
-    }
     
     // Find motors for this DOF
     LKM_Motor *agonist = nullptr;

@@ -190,6 +190,9 @@ void flushMovementSamples() {
  * NOTE: Encoder reading is throttled to ~500Hz (every 2ms) to reduce SPI bus stress
  * and avoid "Synchronization sequence not found" errors. The control loops run at
  * 100Hz (outer) / 500Hz (inner), so 500Hz encoder updates are sufficient.
+ * 
+ * DIRECT ENCODER READING: Uses DirectEncoders class to read MT6835 sensors
+ * directly via SPI0, without intermediate encoder Pico.
  */
 void updateSharedDofAngles() {
   static uint32_t last_update_us = 0;
@@ -215,37 +218,25 @@ void updateSharedDofAngles() {
   static uint8_t consecutive_errors[MAX_DOFS] = {0};
   static const uint8_t ENCODER_ERROR_THRESHOLD = 25;  // 25 cycles @ 500Hz = 50ms
   
-  // Update encoder data from hardware (single SPI transaction)
-  encoder1.update();
+  // Update encoder data from hardware (direct SPI to MT6835)
+  directEncoders.update();
   last_encoder_read_us = now_us;
   
-  if (!encoder1.isDataValid()) {
-    // Mark all as invalid and increment error counters
-    for (uint8_t dof = 0; dof < MAX_DOFS; dof++) {
-      shared_dof_angles.valid[dof] = false;
-      consecutive_errors[dof]++;
-      
-      // Check for emergency stop condition
-      if (consecutive_errors[dof] >= ENCODER_ERROR_THRESHOLD && !emergency_stop_requested) {
-        emergency_stop_requested = true;
-        LOG_ERROR("[SAFETY] EMERGENCY STOP: Encoder SPI failed " + 
-                  String(ENCODER_ERROR_THRESHOLD) + " consecutive reads");
-      }
-    }
-    return;
-  }
-  
-  // now_us already set above for throttling check
+  // Calculate time delta for velocity
   float dt_s = (last_update_us > 0) ? (now_us - last_update_us) / 1000000.0f : 0.0f;
   
   uint8_t dof_count = controller->getConfig().dof_count;
   shared_dof_angles.dof_count = dof_count;
   
   for (uint8_t dof = 0; dof < dof_count; dof++) {
-    bool is_valid = false;
-    float new_angle = controller->getCurrentAngle(dof, is_valid);
+    // Check if this encoder had a valid read
+    bool is_valid = directEncoders.isEncoderConnected(dof) && 
+                    (directEncoders.getErrorCount(dof) == 0);
     
     if (is_valid) {
+      // Get angle directly from DirectEncoders (already in degrees with multi-turn)
+      float new_angle = directEncoders.getAngle(dof);
+      
       // Reset error counter on successful read
       consecutive_errors[dof] = 0;
       
@@ -825,7 +816,7 @@ void core0_main_loop() {
           for (int dof = 0; dof < shared_dof_angles.dof_count; dof++) {
             // Get encoder channel for this DOF (for raw count)
             uint8_t encoder_channel = controller->getConfig().dofs[dof].encoder_channel;
-            int32_t encoder_count = encoder1.getCount(encoder_channel);
+            int32_t encoder_count = directEncoders.getCount(encoder_channel);
 
             if (shared_dof_angles.valid[dof]) {
               // Build output message for this DOF using shared angles
@@ -842,7 +833,7 @@ void core0_main_loop() {
         } else {
           // Single DOF handling
           uint8_t encoder_channel = controller->getConfig().dofs[encoder_test_dof_index].encoder_channel;
-          int32_t encoder_count = encoder1.getCount(encoder_channel);
+          int32_t encoder_count = directEncoders.getCount(encoder_channel);
 
           if (shared_dof_angles.valid[encoder_test_dof_index]) {
             // Build output message using shared angles
