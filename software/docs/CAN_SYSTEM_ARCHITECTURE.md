@@ -1,9 +1,14 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 1.3  
-**Date:** 2024-12-02  
+**Document Version:** 1.4  
+**Date:** 2024-12-03  
 **Status:** Design Specification (Indicative)  
 **Authors:** Alia Robotics Team
+
+**Changelog v1.4:**
+- **Encoder Pico eliminated**: Direct MT6835 reading via SPI0 on joint controller
+- Updated Section 3.2 with new encoder architecture and multicore design
+- Core0 now handles encoder reading, Core1 handles CAN/motor control
 
 **Changelog v1.3:**
 - **Removed Single-DOF Waypoint (0x300-0x31F)**: Deprecated in favor of Multi-DOF format
@@ -459,10 +464,17 @@ If more than 20 joints are needed:
 
 **Current Implementation:**
 - **Microcontroller**: RP2350 (Dual-core ARM Cortex-M33 @ 150 MHz)
-- **CAN Interface**: MCP2515 via SPI1
+- **CAN Interface**: 2x MCP2515 via SPI1 (Motor CAN + Host CAN)
 - **Motor Interface**: 4x LKM Servo (CAN bus)
-- **Encoder Interface**: Custom 3-encoder board (SPI0)
+- **Encoder Interface**: Direct MT6835 reading via SPI0 (up to 3 encoders)
 - **Firmware**: Arduino framework (PlatformIO)
+
+**Encoder Architecture (December 2024 Update):**
+- Eliminated dedicated encoder Pico (was separate SPI slave)
+- MT6835 magnetic encoders now read directly by joint controller
+- SPI0 shared bus with individual CS pins (GP17, GP20, GP21)
+- Core0 handles encoder reading at ~500 Hz
+- Thread-safe `shared_dof_angles` structure for Core1 access
 
 **RP2350 Advantages over RP2040:**
 - ✅ **Faster CPU**: 150 MHz vs 133 MHz (13% faster)
@@ -472,11 +484,12 @@ If more than 20 joints are needed:
 - ✅ **Future-proof**: Latest generation, better support
 
 **Key Firmware Features:**
-- **Core0**: Serial communication (debug/config only)
-- **Core1**: CAN polling + Motor control + Movement execution
-- **No SPI conflicts**: Core1 has exclusive CAN access
+- **Core0**: Serial communication + Encoder reading (~500 Hz)
+- **Core1**: CAN polling + Motor control + Movement execution (~500 Hz)
+- **SPI isolation**: Core0 owns SPI0 (encoders), Core1 owns SPI1 (CAN)
 - **Waypoint buffer**: 20 waypoints per DOF (configurable)
 - **Time synchronization**: NTP-like protocol via CAN
+- **Flash storage**: Encoder offsets, PID parameters, linear equations (with multicore sync)
 
 **Memory Usage (RP2350):**
 - **RAM**: 20 KB / 520 KB (3.8%)
