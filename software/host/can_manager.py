@@ -9,9 +9,11 @@ Provides a high-level API for:
 CAN ID Allocation (Priority-Optimized):
 - 0x000: Emergency Stop (Priority Level 0 - Highest)
 - 0x002: Time Sync (Priority Level 1 - System)
+- 0x003: Encoder Stream Control (start/stop)
 - 0x140-0x280: Motor Commands (Priority Level 2 - CRITICAL @ 500 Hz)
 - 0x380-0x39F: Multi-DOF Waypoint Commands (Priority Level 3 - @ 50-100 Hz)
 - 0x400-0x4FF: Status Feedback (Priority Level 4 - Lowest @ 10-50 Hz)
+- 0x410: Encoder Stream Data (Controller → Host @ 200 Hz)
 
 Note: Motor commands have higher priority than waypoints to ensure PID loop stability.
 """
@@ -61,6 +63,11 @@ class CanManager:
             "last_error": None,
         }
         self._joint_id_lookup = {data["id"]: name for name, data in JOINTS.items()}
+        
+        # Encoder streaming state
+        self._encoder_stream_active = False
+        self._encoder_stream_callback = None
+        self._encoder_stream_data: deque = deque(maxlen=500)  # Buffer for streaming data
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -178,6 +185,51 @@ class CanManager:
         payload = bytes([reason_code & 0xFF]) + bytes(7)
         self._send_frame(0x000, payload, context=f"E-Stop reason={reason_code}")
         return {"reason": reason_code}
+
+    def start_encoder_stream(self) -> Dict[str, Any]:
+        """
+        Start encoder streaming via CAN at 200Hz.
+        
+        Sends control command (0x003) to enable high-frequency angle data.
+        Data arrives on 0x410 and is decoded in _handle_encoder_stream().
+        """
+        self._ensure_connection()
+        payload = bytes([0x01]) + bytes(7)  # 0x01 = start streaming
+        self._send_frame(0x003, payload, context="Encoder stream START")
+        self._encoder_stream_active = True
+        self._encoder_stream_data.clear()
+        self._log_can_info("Encoder streaming started @ 50Hz")
+        return {"streaming": True}
+
+    def stop_encoder_stream(self) -> Dict[str, Any]:
+        """
+        Stop encoder streaming via CAN.
+        """
+        self._ensure_connection()
+        payload = bytes([0x00]) + bytes(7)  # 0x00 = stop streaming
+        self._send_frame(0x003, payload, context="Encoder stream STOP")
+        self._encoder_stream_active = False
+        self._log_can_info("Encoder streaming stopped")
+        return {"streaming": False}
+
+    def is_encoder_streaming(self) -> bool:
+        """Check if encoder streaming is currently active."""
+        return self._encoder_stream_active
+
+    def get_encoder_stream_data(self) -> list:
+        """Get buffered encoder stream data (oldest first)."""
+        with self._lock:
+            data = list(self._encoder_stream_data)
+            self._encoder_stream_data.clear()
+        return data
+
+    def set_encoder_stream_callback(self, callback) -> None:
+        """
+        Set a callback for real-time encoder data.
+        
+        Callback signature: callback(angles_deg: list, timestamp_ms: int)
+        """
+        self._encoder_stream_callback = callback
 
     def send_multi_dof_waypoint(
         self,
@@ -304,30 +356,35 @@ class CanManager:
         if self._bus is None:
             raise RuntimeError("Cannot send frame: CAN bus not initialized.")
         
-        # If using SLCAN (serial interface), send ASCII command directly
+        # For SLCAN, write directly to the bus's underlying serial port
+        # This avoids opening a new connection that interferes with RX
         if self._current_config.get("interface") == "serial":
             try:
-                import serial
-                # Format: tiiildd...dd\r where iii=ID (3 hex), l=length (1 hex), dd=data (2 hex each)
-                can_id_hex = f"{arbitration_id:03X}"
-                length_hex = f"{len(data):01X}"
-                data_hex = data.hex().upper()
-                slcan_cmd = f"t{can_id_hex}{length_hex}{data_hex}\r"
-                
-                # Send directly to serial port
-                ser = serial.Serial(self._current_config["channel"], baudrate=115200, timeout=0.1)
-                ser.write(slcan_cmd.encode('ascii'))
-                ser.close()
+                # Access python-can's internal serial connection
+                serial_port = getattr(self._bus, 'serialPortOrig', None) or getattr(self._bus, '_ser', None)
+                if serial_port is None:
+                    # Fallback: try the standard send
+                    message = can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=False)
+                    self._bus.send(message)
+                else:
+                    # Format: tiiildd...dd\r where iii=ID (3 hex), l=length (1 hex), dd=data (2 hex each)
+                    can_id_hex = f"{arbitration_id:03X}"
+                    length_hex = f"{len(data):01X}"
+                    data_hex = data.hex().upper()
+                    slcan_cmd = f"t{can_id_hex}{length_hex}{data_hex}\r"
+                    serial_port.write(slcan_cmd.encode('ascii'))
                 
                 self._stats["tx_frames"] += 1
                 self._log_can_sent(arbitration_id, data, context)
                 return
             except Exception as exc:
                 err_msg = f"TX error id=0x{arbitration_id:03X}: {exc}"
-                self.logger.log_error(f"[CAN] {err_msg}")
+                self.logger.warning(f"[CAN] {err_msg}")
+                self._stats["errors"] += 1
+                self._stats["last_error"] = str(exc)
                 raise RuntimeError(err_msg) from exc
         
-        # Otherwise use python-can
+        # For other interfaces, use python-can directly
         message = can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=False)
         try:
             self._bus.send(message)
@@ -342,11 +399,23 @@ class CanManager:
 
     def _listen_loop(self) -> None:
         """Continuously read CAN messages and decode known frames."""
+        self._log_can_info("Listener thread started")
+        
+        # For SLCAN, use custom parsing since python-can has issues on macOS
+        if self._current_config and self._current_config.get("interface") == "serial":
+            self._slcan_listen_loop()
+            return
+        
+        # Standard python-can listener for other interfaces
+        loop_count = 0
         while not self._listener_stop.is_set():
             bus = self._bus
             if bus is None:
                 time.sleep(0.1)
                 continue
+            
+            loop_count += 1
+            
             try:
                 message = bus.recv(timeout=0.2)
             except can.CanError as exc:
@@ -358,15 +427,113 @@ class CanManager:
                 continue
 
             if message is None:
+                if loop_count % 25 == 0:
+                    self._log_can_info(f"Listener active, waiting for CAN frames... (loops={loop_count})")
                 continue
 
-            self._stats["rx_frames"] += 1
+            self._log_can_info(f"RX frame id=0x{message.arbitration_id:03X} len={len(message.data)}")
             self._last_rx_timestamp = time.time()
             self._handle_message(message)
+
+    def _slcan_listen_loop(self) -> None:
+        """Custom SLCAN listener that reads directly from serial port."""
+        import serial
+        
+        channel = self._current_config.get("channel")
+        self._log_can_info(f"Starting SLCAN listener on {channel}")
+        
+        try:
+            # Open separate serial connection for reading
+            ser = serial.Serial(channel, baudrate=115200, timeout=0.1)
+            buffer = ""
+            frame_count = 0
+            
+            while not self._listener_stop.is_set():
+                try:
+                    # Read available data
+                    if ser.in_waiting > 0:
+                        data = ser.read(ser.in_waiting).decode('ascii', errors='ignore')
+                        buffer += data
+                        
+                        # Process complete frames (terminated by \r or \n)
+                        while '\r' in buffer or '\n' in buffer:
+                            # Find end of frame
+                            end_idx = -1
+                            for i, c in enumerate(buffer):
+                                if c in '\r\n':
+                                    end_idx = i
+                                    break
+                            
+                            if end_idx == -1:
+                                break
+                            
+                            frame = buffer[:end_idx].strip()
+                            buffer = buffer[end_idx+1:]
+                            
+                            if frame and frame.startswith('t'):
+                                # Standard CAN frame: tiiildd...dd
+                                msg = self._decode_slcan_frame(frame)
+                                if msg:
+                                    frame_count += 1
+                                    self._last_rx_timestamp = time.time()
+                                    self._handle_message(msg)
+                                    
+                                    # Log every 50 frames
+                                    if frame_count % 50 == 0:
+                                        self._log_can_info(f"SLCAN RX: {frame_count} frames received")
+                    else:
+                        time.sleep(0.005)  # 5ms sleep when no data
+                        
+                except serial.SerialException as exc:
+                    self._log_can_error(f"SLCAN read error: {exc}")
+                    time.sleep(0.5)
+                    
+        except Exception as exc:
+            self._log_can_error(f"SLCAN listener failed: {exc}")
+        finally:
+            try:
+                ser.close()
+            except:
+                pass
+            self._log_can_info("SLCAN listener stopped")
+
+    def _decode_slcan_frame(self, frame: str):
+        """Decode SLCAN ASCII frame to can.Message."""
+        try:
+            # Format: tiiildd...dd where iii=ID (3 hex), l=length (1 hex), dd=data
+            if len(frame) < 5:
+                return None
+            
+            can_id = int(frame[1:4], 16)
+            length = int(frame[4], 16)
+            
+            if len(frame) < 5 + length * 2:
+                return None
+            
+            data_hex = frame[5:5 + length * 2]
+            data = bytes.fromhex(data_hex)
+            
+            return can.Message(
+                arbitration_id=can_id,
+                data=data,
+                is_extended_id=False,
+                timestamp=time.time()
+            )
+        except (ValueError, IndexError):
+            return None
 
     def _handle_message(self, message: "can.Message") -> None:
         arb_id = message.arbitration_id
         data = bytes(message.data)
+
+        # Encoder stream data (0x410) - high-frequency, minimal logging
+        if arb_id == 0x410 and len(data) >= 8:
+            self._handle_encoder_stream(data, message.timestamp)
+            return  # Don't log every frame
+        
+        # Debug: log any received CAN frame (throttled)
+        if arb_id >= 0x400:
+            self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
 
         # NEW: Status messages now use 0x400 base (Priority Level 4)
         if 0x400 <= arb_id < 0x500 and len(data) >= 8:
@@ -421,6 +588,60 @@ class CanManager:
                 self.socketio.emit("can_status", status_payload, namespace="/movement")
             except Exception:  # pragma: no cover - optional socket broadcast
                 self.logger.debug("SocketIO emit failed for CAN status", exc_info=True)
+
+    def _handle_encoder_stream(self, data: bytes, timestamp: float) -> None:
+        """
+        Decode encoder stream data from CAN (0x410).
+        
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t dof0_angle (0.01° resolution, 0x7FFF = invalid)
+        - Bytes 2-3: int16_t dof1_angle (0.01° resolution, 0x7FFF = invalid)
+        - Bytes 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF = invalid)
+        - Bytes 6-7: uint16_t t_offset_ms (ms since last time sync)
+        """
+        UNUSED_DOF = 0x7FFF
+        
+        # Unpack: 3x int16 angles + 1x uint16 timestamp
+        dof0_raw, dof1_raw, dof2_raw, t_ms = struct.unpack("<hhhH", data)
+        
+        # Convert to degrees (0.01° resolution)
+        angles_deg = []
+        for raw in [dof0_raw, dof1_raw, dof2_raw]:
+            if raw == UNUSED_DOF:
+                angles_deg.append(None)
+            else:
+                angles_deg.append(raw / 100.0)
+        
+        # Build data point
+        data_point = {
+            "timestamp": timestamp,
+            "t_ms": t_ms,
+            "angles_deg": angles_deg,
+        }
+        
+        # Buffer data
+        with self._lock:
+            self._encoder_stream_data.append(data_point)
+            buffer_size = len(self._encoder_stream_data)
+        
+        # Debug log (throttled to 1Hz)
+        self._stats["rx_frames"] += 1
+        if self._stats["rx_frames"] % 50 == 0:  # Log every 50 frames (~1/sec at 50Hz)
+            self._log_can_info(f"Encoder stream RX: {buffer_size} buffered, DOF0={angles_deg[0]:.2f}°" if angles_deg[0] else f"Encoder stream RX: {buffer_size} buffered")
+        
+        # Invoke callback if set (for real-time UI updates)
+        if self._encoder_stream_callback:
+            try:
+                self._encoder_stream_callback(angles_deg, t_ms)
+            except Exception:
+                pass  # Don't let callback errors break streaming
+        
+        # Emit via SocketIO for real-time UI updates
+        if self.socketio:
+            try:
+                self.socketio.emit("encoder_stream", data_point, namespace="/movement")
+            except Exception:
+                pass  # Don't let socket errors break streaming
 
     # ------------------------------------------------------------------
     # Logging helpers

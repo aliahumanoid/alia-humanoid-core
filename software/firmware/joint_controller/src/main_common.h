@@ -107,12 +107,16 @@ extern volatile bool flash_operation_in_progress;
 // Time offset for synchronization
 extern float time_offset;
 
-// Encoder test flags
+// Encoder test flags (Serial)
 extern bool encoder_test_active;
 extern uint8_t encoder_test_joint_id;
 extern uint8_t encoder_test_dof_index;
 extern bool encoder_test_all_dofs;
 extern unsigned long last_encoder_test_time;
+
+// Encoder streaming via CAN (high-frequency, Core1)
+extern volatile bool encoder_stream_can_active;
+extern volatile uint32_t encoder_stream_last_send_us;
 
 // Auto-mapping state
 extern AutoMappingState_t auto_mapping_state;

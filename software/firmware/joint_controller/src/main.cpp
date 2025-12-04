@@ -64,12 +64,16 @@ MCP_CAN CAN_HOST(&SPI1, CAN_HOST_CS_PIN);
 // Time offset for synchronization
 float time_offset = 0;
 
-// Encoder test flags
+// Encoder test flags (Serial - Core0)
 bool encoder_test_active             = false;
 uint8_t encoder_test_joint_id        = 0;
 uint8_t encoder_test_dof_index       = 0;
 bool encoder_test_all_dofs           = false; // NEW: test all DOFs
 unsigned long last_encoder_test_time = 0;
+
+// Encoder streaming via CAN (high-frequency - Core1)
+volatile bool encoder_stream_can_active = false;
+volatile uint32_t encoder_stream_last_send_us = 0;
 
 // Global variable for auto‑mapping state
 AutoMappingState_t auto_mapping_state = {0};

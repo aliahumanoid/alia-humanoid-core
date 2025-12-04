@@ -42,6 +42,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 
 // Priority Level 1: System Control
 #define CAN_ID_TIME_SYNC 0x002
+#define CAN_ID_ENCODER_STREAM_CTRL 0x003  // Encoder streaming control (start/stop)
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -50,6 +51,10 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 
 // Priority Level 4: Status Feedback
 #define CAN_ID_STATUS_BASE 0x400    // 0x400-0x4FF for status (NEW: was 0x200)
+#define CAN_ID_ENCODER_STREAM_DATA 0x410  // Encoder streaming data (Controller → Host)
+
+// Encoder streaming configuration
+#define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
 
 // Sentinel value for unused DOF in Multi-DOF waypoint
 #define MULTI_DOF_UNUSED 0x7FFF
@@ -256,6 +261,80 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
 }
 
 /**
+ * @brief Send encoder data via CAN for high-frequency streaming
+ * 
+ * Sends all DOF angles in a single CAN frame (same format as Multi-DOF Waypoint).
+ * Called from core1_loop() at ~200Hz when streaming is active.
+ * 
+ * Frame format (8 bytes):
+ * - Bytes 0-1: int16_t dof0_angle (0.01° resolution)
+ * - Bytes 2-3: int16_t dof1_angle (0.01° resolution, 0x7FFF if invalid)
+ * - Bytes 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF if invalid)
+ * - Bytes 6-7: uint16_t t_offset_ms (ms since last time sync)
+ */
+void sendEncoderStreamData() {
+  if (!encoder_stream_can_active) return;
+  
+  // Check timing - only send every ENCODER_STREAM_INTERVAL_US (5ms = 200Hz)
+  uint32_t now_us = time_us_32();
+  if ((now_us - encoder_stream_last_send_us) < ENCODER_STREAM_INTERVAL_US) {
+    return;
+  }
+  encoder_stream_last_send_us = now_us;
+  
+  extern MCP_CAN CAN_HOST;
+  
+  // Build encoder data frame (same format as Multi-DOF Waypoint for consistency)
+  struct __attribute__((packed)) {
+    int16_t dof0_angle;
+    int16_t dof1_angle;
+    int16_t dof2_angle;
+    uint16_t t_offset_ms;
+  } frame;
+  
+  // Read angles from shared_dof_angles (updated by Core0)
+  // NOTE: shared_dof_angles.angles[] are ALREADY in degrees (from DirectEncoders)
+  for (uint8_t dof = 0; dof < 3; dof++) {
+    if (dof < MAX_DOFS && shared_dof_angles.valid[dof]) {
+      // Convert to 0.01° resolution (same as waypoint format)
+      float angle_deg = shared_dof_angles.angles[dof];  // Already in degrees
+      int16_t angle_int = (int16_t)(angle_deg * 100.0f);
+      
+      if (dof == 0) frame.dof0_angle = angle_int;
+      else if (dof == 1) frame.dof1_angle = angle_int;
+      else frame.dof2_angle = angle_int;
+    } else {
+      // Mark as invalid/unused
+      if (dof == 0) frame.dof0_angle = MULTI_DOF_UNUSED;
+      else if (dof == 1) frame.dof1_angle = MULTI_DOF_UNUSED;
+      else frame.dof2_angle = MULTI_DOF_UNUSED;
+    }
+  }
+  
+  // Timestamp: ms since sync (or just millis() if not synced)
+  frame.t_offset_ms = (uint16_t)(millis() & 0xFFFF);
+  
+  // Send via Host CAN
+  uint8_t result = CAN_HOST.sendMsgBuf(CAN_ID_ENCODER_STREAM_DATA, 0, sizeof(frame), (uint8_t*)&frame);
+  
+  // Debug log (throttled to 1Hz to avoid flooding)
+  static uint32_t last_debug_log = 0;
+  static uint32_t frame_count = 0;
+  frame_count++;
+  
+  if (millis() - last_debug_log > 1000) {
+    if (result == CAN_OK) {
+      LOG_INFO("[CAN] Encoder stream: " + String(frame_count) + " frames sent, last DOF0=" + 
+               String(frame.dof0_angle / 100.0f, 2) + "°");
+    } else {
+      LOG_WARN("[CAN] Encoder stream send failed, result=" + String(result));
+    }
+    frame_count = 0;
+    last_debug_log = millis();
+  }
+}
+
+/**
  * @brief Poll Host CAN bus for commands from Jetson/Host
  * 
  * This function polls the dedicated Host CAN bus (J5 CAN_Controller) for:
@@ -301,6 +380,19 @@ void pollHostCan() {
     } else if (rx_id == CAN_ID_EMERGENCY_STOP) {
       LOG_WARN("[CAN_HOST] RX EMERGENCY_STOP frame");
       emergency_stop_requested = true;
+    } else if (rx_id == CAN_ID_ENCODER_STREAM_CTRL) {
+      // Encoder streaming control: byte 0 = 0x01 start, 0x00 stop
+      if (len >= 1) {
+        bool start = (buf[0] == 0x01);
+        encoder_stream_can_active = start;
+        if (start) {
+          // Reset timer to ensure immediate first send
+          encoder_stream_last_send_us = time_us_32() - ENCODER_STREAM_INTERVAL_US - 1;
+          LOG_INFO("[CAN_HOST] Encoder streaming STARTED @ 50Hz");
+        } else {
+          LOG_INFO("[CAN_HOST] Encoder streaming STOPPED");
+        }
+      }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
@@ -358,6 +450,11 @@ void core1_loop() {
     // Poll dedicated Host CAN (J5) for TimeSync, Waypoints, Emergency Stop
     // Motor CAN (J4) is handled by LKM_Motor during motor operations
     pollHostCan();
+
+    // === ENCODER STREAMING VIA CAN ===
+    // Send encoder data at 200Hz if streaming is active
+    // This reads from shared_dof_angles (updated by Core0)
+    sendEncoderStreamData();
 
     // === WAYPOINT-BASED MOVEMENT ===
     // Execute waypoint trajectory for all DOFs (if waypoints available)

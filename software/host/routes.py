@@ -511,6 +511,78 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": f"Unable to send emergency stop: {exc}"
             }), 500
 
+    # ===============================================================
+    # CAN ENCODER STREAMING ROUTES
+    # ===============================================================
+
+    @app.route('/can/encoder_stream/start', methods=['POST'])
+    def start_encoder_stream():
+        """
+        Start encoder streaming via CAN at 200Hz.
+        
+        The controller will send angle data on 0x410 until stopped.
+        Use /can/encoder_stream/data to retrieve buffered data.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            result = can_manager.start_encoder_stream()
+            return jsonify({
+                "status": "success",
+                "message": "Encoder streaming started @ 50Hz",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to start encoder streaming")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to start encoder streaming: {exc}"
+            }), 500
+
+    @app.route('/can/encoder_stream/stop', methods=['POST'])
+    def stop_encoder_stream():
+        """
+        Stop encoder streaming via CAN.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            result = can_manager.stop_encoder_stream()
+            return jsonify({
+                "status": "success",
+                "message": "Encoder streaming stopped",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to stop encoder streaming")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to stop encoder streaming: {exc}"
+            }), 500
+
+    @app.route('/can/encoder_stream/status', methods=['GET'])
+    def encoder_stream_status():
+        """
+        Check encoder streaming status and get buffered data.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        streaming = can_manager.is_encoder_streaming()
+        data = can_manager.get_encoder_stream_data()
+        
+        return jsonify({
+            "status": "success",
+            "streaming": streaming,
+            "buffer_count": len(data),
+            "data": data  # List of {timestamp, t_ms, angles_deg}
+        })
+
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
         popped = serial_manager.pop_status_message()
