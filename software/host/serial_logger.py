@@ -47,7 +47,8 @@ class SerialLogger:
     
     def __init__(self, log_file_path: str = "serial_communication.log", 
                  enable_error_filtering: bool = True,
-                 max_repeated_errors: int = 3):
+                 max_repeated_errors: int = 3,
+                 clear_previous_logs: bool = True):
         """
         Initialize serial logger
         
@@ -55,6 +56,7 @@ class SerialLogger:
             log_file_path (str): Log file path (will be modified to include timestamp)
             enable_error_filtering (bool): Whether to enable repeated error filtering
             max_repeated_errors (int): Maximum number of identical errors to log before filtering
+            clear_previous_logs (bool): Whether to clear all previous logs on startup
         """
         self.base_log_path = log_file_path
         self.start_time = datetime.now()
@@ -84,8 +86,12 @@ class SerialLogger:
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         
-        # Delete log files older than configured limit (default 10 days)
-        self._purge_old_logs(log_dir, base_name, extension)
+        # Clear all previous logs or just old ones
+        if clear_previous_logs:
+            self._clear_all_logs(log_dir, base_name, extension)
+        else:
+            # Delete log files older than configured limit (default 10 days)
+            self._purge_old_logs(log_dir, base_name, extension)
 
         self._create_new_log_file()
 
@@ -123,6 +129,24 @@ class SerialLogger:
 
 """
         return header
+
+    def _clear_all_logs(self, directory: str, base_name: str, extension: str) -> None:
+        """Delete all previous log files in the specified folder."""
+        try:
+            pattern = os.path.join(directory, f"{base_name}_*{extension}")
+            deleted_count = 0
+
+            for log_path in glob.glob(pattern):
+                try:
+                    os.remove(log_path)
+                    deleted_count += 1
+                except OSError as exc:
+                    print(f"⚠️ Cannot delete log {log_path}: {exc}")
+            
+            if deleted_count > 0:
+                print(f"🧹 Cleared {deleted_count} previous log file(s)")
+        except Exception as exc:
+            print(f"⚠️ Log cleanup failed: {exc}")
 
     def _purge_old_logs(self, directory: str, base_name: str, extension: str, keep_days: int = 10) -> None:
         """Delete logs older than *keep_days* days in the specified folder."""

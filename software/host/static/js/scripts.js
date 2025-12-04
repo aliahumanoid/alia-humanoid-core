@@ -4218,6 +4218,7 @@ function fetchJointPhysicalLimits() {
 
 /**
  * Starts encoder test for specified joint type
+ * Uses CAN streaming @ 200Hz when CAN is connected, otherwise uses Serial polling.
  * @param {string} jointType - KNEE, ANKLE, or HIP
  */
 function startEncoderTest(jointType) {
@@ -4226,10 +4227,6 @@ function startEncoderTest(jointType) {
     
     encoderTestActive = true;
     currentEncoderJointType = jointType;
-    
-    // Get selected interval for this joint
-    const intervalSelector = `#${jointType.toLowerCase()}EncoderInterval`;
-    const intervalMs = parseInt($(intervalSelector).val()) || 500;
     
     // Get currently selected full joint
     const selectedJoint = $("#jointSelect").val();
@@ -4256,7 +4253,51 @@ function startEncoderTest(jointType) {
         };
     }
     
-    // Send start command to backend
+    // Check if CAN is connected - use CAN streaming @ 200Hz
+    if (canConnectionState && canConnectionState.connected) {
+        // Start CAN encoder streaming
+        $.ajax({
+            url: '/can/encoder_stream/start',
+            type: 'POST'
+        }).done(response => {
+            if (response.status === 'success') {
+                appendStatusMessage(`🔄 Encoder streaming started via CAN @ 50Hz for ${jointType}`);
+                encoderStreamingViaCan = true;
+                
+                // Start polling for CAN stream data at high frequency
+                encoderTestInterval = setInterval(() => {
+                    if (encoderTestActive && encoderStreamingViaCan) {
+                        fetchCanEncoderStreamData();
+                    }
+                }, 50);  // Fetch every 50ms (20Hz polling, but data is 200Hz)
+            } else {
+                appendStatusMessage(`❌ Failed to start CAN encoder streaming: ${response.message}`);
+                fallbackToSerialEncoderTest(jointType);
+            }
+        }).fail(xhr => {
+            appendStatusMessage(`❌ CAN encoder streaming error: ${xhr.responseJSON?.message || 'Unknown error'}`);
+            fallbackToSerialEncoderTest(jointType);
+        });
+    } else {
+        // Use Serial polling (fallback)
+        fallbackToSerialEncoderTest(jointType);
+    }
+    
+    // Aggiorna UI
+    updateEncoderTestUI(true, jointType);
+}
+
+/**
+ * Fallback to serial encoder test when CAN is not available
+ */
+function fallbackToSerialEncoderTest(jointType) {
+    encoderStreamingViaCan = false;
+    
+    // Get selected interval for this joint
+    const intervalSelector = `#${jointType.toLowerCase()}EncoderInterval`;
+    const intervalMs = parseInt($(intervalSelector).val()) || 500;
+    
+    // Send start command to backend (serial)
     sendCommand('start-test-encoder');
     
     // Start periodic polling
@@ -4266,11 +4307,164 @@ function startEncoderTest(jointType) {
         }
     }, intervalMs);
     
-    appendStatusMessage(`🔄 Encoder test started for ${jointType} (interval: ${intervalMs}ms)`);
-    
-    // Aggiorna UI
-    updateEncoderTestUI(true, jointType);
+    appendStatusMessage(`🔄 Encoder test started for ${jointType} via Serial (interval: ${intervalMs}ms)`);
 }
+
+/**
+ * Fetch encoder stream data from CAN
+ */
+function fetchCanEncoderStreamData() {
+    $.ajax({
+        url: '/can/encoder_stream/status',
+        type: 'GET'
+    }).done(response => {
+        if (response.status === 'success' && response.data && response.data.length > 0) {
+            // Process each data point
+            response.data.forEach(point => {
+                const timestamp = Date.now();
+                encoderTestData.timestamps.push(timestamp);
+                
+                // Process each DOF angle
+                point.angles_deg.forEach((angle, dofIndex) => {
+                    if (angle !== null && encoderTestData.dofData[dofIndex]) {
+                        encoderTestData.dofData[dofIndex].timestamps.push(timestamp);
+                        encoderTestData.dofData[dofIndex].values.push(angle);
+                    }
+                });
+            });
+            
+            // Update chart if we have data
+            if (response.data.length > 0) {
+                const lastPoint = response.data[response.data.length - 1];
+                updateEncoderChartFromCanStream(lastPoint);
+            }
+        }
+    });
+}
+
+/**
+ * Update encoder display from CAN stream data
+ * Updates both the numeric display and the chart
+ */
+function updateEncoderChartFromCanStream(dataPoint) {
+    if (!dataPoint || !dataPoint.angles_deg || !currentEncoderJointType) return;
+    
+    const jointType = currentEncoderJointType.toLowerCase();
+    
+    // Update numeric displays (e.g., kneeEncoderDof0, ankleEncoderDof1, etc.)
+    dataPoint.angles_deg.forEach((angle, dofIndex) => {
+        const spanId = `${jointType}EncoderDof${dofIndex}`;
+        const span = document.getElementById(spanId);
+        if (span && angle !== null) {
+            span.textContent = angle.toFixed(2) + ' °';
+        }
+    });
+    
+    // Update chart - chart name is "kneeChart", "ankleChart", etc.
+    // For KNEE there's one chart, for ANKLE/HIP there might be per-DOF charts
+    if (jointType === 'knee') {
+        updateKneeChartFromStream(dataPoint);
+    } else if (jointType === 'ankle') {
+        updateAnkleChartFromStream(dataPoint);
+    } else if (jointType === 'hip') {
+        updateHipChartFromStream(dataPoint);
+    }
+}
+
+/**
+ * Update knee chart from stream data
+ * Note: kneeChart uses x:linear format with {x, y} data points
+ */
+function updateKneeChartFromStream(dataPoint) {
+    if (typeof kneeChart === 'undefined') return;
+    
+    // Use time in seconds as X value
+    if (!window.kneeChartStartTime) {
+        window.kneeChartStartTime = Date.now();
+    }
+    const timeSeconds = (Date.now() - window.kneeChartStartTime) / 1000;
+    
+    // DOF 0 is the only DOF for knee - add to first dataset (Encoder angle)
+    if (dataPoint.angles_deg[0] !== null) {
+        // Use dataset 0 for encoder data
+        kneeChart.data.datasets[0].data.push({
+            x: timeSeconds,
+            y: dataPoint.angles_deg[0]
+        });
+        
+        // Keep only last 100 points
+        if (kneeChart.data.datasets[0].data.length > 100) {
+            kneeChart.data.datasets[0].data.shift();
+        }
+    }
+    
+    // Throttle chart updates to ~10Hz for performance
+    if (!window.lastKneeChartUpdate || Date.now() - window.lastKneeChartUpdate > 100) {
+        kneeChart.update('none');  // No animation for performance
+        window.lastKneeChartUpdate = Date.now();
+    }
+}
+
+/**
+ * Update ankle charts from stream data
+ */
+function updateAnkleChartFromStream(dataPoint) {
+    // Ankle has 2 DOFs with separate charts: ankleChart0, ankleChart1
+    [0, 1].forEach(dofIndex => {
+        const chartVar = window[`ankleChart${dofIndex}`];
+        if (chartVar && dataPoint.angles_deg[dofIndex] !== null) {
+            const now = new Date();
+            const timeLabel = now.toLocaleTimeString('it-IT', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit',
+                hour12: false 
+            }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            
+            chartVar.data.labels.push(timeLabel);
+            chartVar.data.datasets[0].data.push(dataPoint.angles_deg[dofIndex]);
+            
+            if (chartVar.data.labels.length > 100) {
+                chartVar.data.labels.shift();
+                chartVar.data.datasets.forEach(ds => ds.data.shift());
+            }
+            
+            chartVar.update('none');
+        }
+    });
+}
+
+/**
+ * Update hip charts from stream data
+ */
+function updateHipChartFromStream(dataPoint) {
+    // Hip has 2 DOFs with separate charts: hipChart0, hipChart1
+    [0, 1].forEach(dofIndex => {
+        const chartVar = window[`hipChart${dofIndex}`];
+        if (chartVar && dataPoint.angles_deg[dofIndex] !== null) {
+            const now = new Date();
+            const timeLabel = now.toLocaleTimeString('it-IT', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit',
+                hour12: false 
+            }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            
+            chartVar.data.labels.push(timeLabel);
+            chartVar.data.datasets[0].data.push(dataPoint.angles_deg[dofIndex]);
+            
+            if (chartVar.data.labels.length > 100) {
+                chartVar.data.labels.shift();
+                chartVar.data.datasets.forEach(ds => ds.data.shift());
+            }
+            
+            chartVar.update('none');
+        }
+    });
+}
+
+// Track if encoder streaming is via CAN
+let encoderStreamingViaCan = false;
 
 /**
  * Stops encoder test
@@ -4292,10 +4486,23 @@ function stopEncoderTest(jointType = null) {
         encoderTestInterval = null;
     }
     
-    // Send stop command to backend
-    sendCommand('stop-test-encoder');
-    
-    appendStatusMessage(`⏹️ Encoder test stopped for ${currentEncoderJointType}`);
+    // Stop based on mode (CAN or Serial)
+    if (encoderStreamingViaCan) {
+        // Stop CAN streaming
+        $.ajax({
+            url: '/can/encoder_stream/stop',
+            type: 'POST'
+        }).done(response => {
+            appendStatusMessage(`⏹️ CAN encoder streaming stopped for ${currentEncoderJointType}`);
+        }).fail(() => {
+            appendStatusMessage(`⏹️ Encoder streaming stopped (error stopping CAN stream)`);
+        });
+        encoderStreamingViaCan = false;
+    } else {
+        // Stop serial test
+        sendCommand('stop-test-encoder');
+        appendStatusMessage(`⏹️ Encoder test stopped for ${currentEncoderJointType}`);
+    }
     
     // Aggiorna UI
     updateEncoderTestUI(false, currentEncoderJointType);
