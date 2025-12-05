@@ -12,7 +12,7 @@
 ```
 ┌─────────────┐  USB   ┌──────────────┐  CAN_H/L  ┌──────────────┐
 │   HOST PC   │◄──────►│ MKS CANable  │◄─────────►│ Controller 1 │
-│  (Python)   │        │  (USB-CAN)   │           │  (RP2040)    │
+│  (Python)   │        │  (USB-CAN)   │           │  (RP2350)    │
 └─────────────┘        └──────────────┘           └──────┬───────┘
                                 │                         │
                                 │                   MCP2515 #2
@@ -136,6 +136,52 @@ struct CanCmd_EmergencyStop {
 
 ---
 
+### 3.5 System: Encoder Stream Control
+
+```cpp
+// Host → All Controllers (broadcast)
+struct CanCmd_EncoderStreamControl {
+    uint8_t  action;          // 0x01 = start, 0x00 = stop
+    uint8_t  reserved[7];     // Reserved for future use
+} __attribute__((packed));   // 8 bytes
+
+// CAN ID: 0x003 (high priority, system control)
+```
+
+**Purpose**: Start/stop real-time encoder data streaming via CAN for UI visualization and debugging.
+
+**Actions**:
+- `0x00` = Stop streaming
+- `0x01` = Start streaming
+
+---
+
+### 3.6 Status: Encoder Stream Data
+
+```cpp
+// Controller → Host (periodic when streaming active)
+struct CanStatus_EncoderStream {
+    uint8_t  joint_id;        // Joint identifier
+    int16_t  angle_dof0;      // DOF0 angle (0.01° resolution)
+    int16_t  angle_dof1;      // DOF1 angle (0.01° resolution, 0x7FFF = unused)
+    int16_t  angle_dof2;      // DOF2 angle (0.01° resolution, 0x7FFF = unused)
+    uint8_t  timestamp_ms;    // Offset in ms since last packet (wraps at 255)
+} __attribute__((packed));   // 8 bytes
+
+// CAN ID: 0x410 (status priority)
+```
+
+**Stream Rate**: 50 Hz (20ms interval) - optimized for SLCAN compatibility
+
+**Use Cases**:
+- Real-time encoder visualization on host UI
+- Movement debugging and analysis
+- Encoder health monitoring during operation
+
+**Note**: When streaming is active, the controller sends encoder data every 20ms regardless of movement state.
+
+---
+
 ## 4. CAN ID Allocation
 
 ### 4.1 Priority-Based Allocation
@@ -148,6 +194,7 @@ Priority Level 0 (Highest - Emergency):
   
 Priority Level 1 (System Control):
   0x002: Time Sync (broadcast)
+  0x003: Encoder Stream Control (Host → Pico)
   
 Priority Level 2 (Motor Control - CRITICAL for PID loop @ 500 Hz):
   0x140-0x144: Motor torque commands (Pico → Motors)
@@ -165,7 +212,7 @@ Priority Level 3 (Trajectory Commands - 50-100 Hz):
     0x31F: Joint 32 waypoint (future expansion)
     
 Priority Level 4 (Status Feedback - Lowest priority):
-  0x400-0x4FF: Status messages (Pico → Host)
+  0x400-0x40F: Status messages (Pico → Host)
     0x400: Ankle Right status
     0x401: Ankle Left status
     0x402: Knee Right status
@@ -173,17 +220,20 @@ Priority Level 4 (Status Feedback - Lowest priority):
     0x404: Hip Right status
     0x405: Hip Left status
     ...
-    0x41F: Joint 32 status
+    0x40F: Joint 16 status
+  0x410: Encoder Stream Data (Pico → Host, 50 Hz)
+  0x411-0x4FF: Reserved for future status messages
 ```
 
 ### 4.2 Rationale for New Allocation
 
 | Range | Purpose | Frequency | Priority Justification |
 |-------|---------|-----------|------------------------|
-| `0x000-0x002` | Emergency/Sync | On-demand | Must preempt everything |
+| `0x000-0x003` | Emergency/Sync/Stream Ctrl | On-demand | Must preempt everything |
 | `0x140-0x280` | Motor Control | 500 Hz | **CRITICAL**: PID loop stability depends on low latency |
 | `0x300-0x31F` | Waypoints | 50-100 Hz | Medium: Trajectory updates, not time-critical per-frame |
-| `0x400-0x4FF` | Status | 50 Hz | Low: Monitoring only, can tolerate delays |
+| `0x400-0x40F` | Status | 50 Hz | Low: Monitoring only, can tolerate delays |
+| `0x410` | Encoder Stream Data | 50 Hz | Low: Real-time encoder visualization |
 
 **Key Change**: Motor torque commands (0x140-0x280) now have **higher priority** than waypoint commands (0x300-0x31F), ensuring the inner PID loop @ 500 Hz is never starved by trajectory updates.
 
@@ -193,9 +243,11 @@ Priority Level 4 (Status Feedback - Lowest priority):
 |--------------|--------------|-------------------|-----------|
 | **Emergency Stop** | 0x000 | Fixed | Broadcast |
 | **Time Sync** | 0x002 | Fixed | Broadcast |
+| **Encoder Stream Ctrl** | 0x003 | Fixed | Broadcast |
 | **Motor Commands** | 0x140-0x280 | Fixed (LKM protocol) | 4 motors + broadcast |
 | **Waypoint Commands** | 0x300-0x31F | 0x300 + joint_id | 32 joints |
-| **Status Feedback** | 0x400-0x4FF | 0x400 + joint_id | 256 joints |
+| **Status Feedback** | 0x400-0x40F | 0x400 + joint_id | 16 joints |
+| **Encoder Stream Data** | 0x410 | Fixed | Single stream |
 
 ---
 
@@ -458,7 +510,7 @@ volatile int32_t clock_offset_ms = 0;
 volatile bool clock_synced = false;
 
 void onTimeSyncReceived(CanCmd_TimeSync sync) {
-    uint32_t t_local = millis();  // RP2040 local time
+    uint32_t t_local = millis();  // RP2350 local time
     clock_offset_ms = sync.t_host_ms - t_local;
     clock_synced = true;
     
@@ -808,7 +860,7 @@ if (time.time() - last_status_time[joint_id] > STATUS_TIMEOUT_MS/1000.0) {
 ```
 
 > **Firmware status (Nov 15, 2025)**  
-> `HostCanInterface` on the RP2040 now listens for `0x002` frames, updates
+> `HostCanInterface` on the RP2350 now listens for `0x002` frames, updates
 > `clock_offset_ms`, and exposes `host_can.getAbsoluteTimeMs()` so that
 > `updateTrajectory_Linear` can consume the absolute host timeline as soon as
 > the dual-MCP2515 wiring is in place.
@@ -923,7 +975,7 @@ build_flags =
 
 - MCP2515 Datasheet: [Microchip MCP2515](https://www.microchip.com/en-us/product/MCP2515)
 - CAN 2.0B Specification: ISO 11898-1
-- RP2040 SPI: [Pico SDK Documentation](https://raspberrypi.github.io/pico-sdk-doxygen/)
+- RP2350 SPI: [Pico SDK Documentation](https://raspberrypi.github.io/pico-sdk-doxygen/)
 - Existing Serial Protocol: `software/firmware/joint_controller/PROTOCOL.md`
 - Time Sync Broadcast Example: Section 5.3 (this document)
 

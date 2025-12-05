@@ -992,7 +992,7 @@ for joint_name, can_interface in JOINT_CAN_MAPPING.items():
 schedule.every(0.1).seconds.do(can_manager.broadcast_time_sync)
 ```
 
-### 5.2 Firmware (C++ on RP2040 Pico)
+### 5.2 Firmware (C++ on RP2350 Pico 2)
 
 **Current Implementation** (from existing codebase):
 - **Core0**: Serial communication (debug/config only)
@@ -1294,7 +1294,7 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 **Time Sync Protocol:**
 - **Frequency**: 10 Hz (every 100 ms)
 - **Latency**: < 200 µs (CAN transmission)
-- **Drift**: < 1 ms per second (RP2040 crystal accuracy)
+- **Drift**: < 1 ms per second (RP2350 crystal accuracy)
 - **Correction**: Every 100 ms (sufficient for < 1 ms drift)
 
 **Multi-Joint Coordination:**
@@ -1315,7 +1315,7 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 
 **20 Joint Controllers:**
 - **3x CAN Expansion Boards** (8 + 8 + 4 channels)
-- **20x RP2040 Picos**
+- **20x RP2350 Pico 2**
 - **80x Motors** (4 per joint)
 - **Total Cost**: ~€610 (communication hardware only)
 
@@ -1380,7 +1380,7 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | **Subtotal Expansion Boards** | | | **€338** |
 | | | | |
 | **Pico Controllers** | | | |
-| RP2040 Pico | 20 | €5 | €100 |
+| RP2350 Pico 2 | 20 | €5 | €100 |
 | MCP2515 (motor CAN) | 20 | €6 | €120 |
 | TJA1050 (motor CAN) | 20 | €2.50 | €50 |
 | **Subtotal Picos** | | | **€270** |
@@ -1627,7 +1627,8 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | 0x000 | 0 | Emergency Stop | Host → All | Highest |
 | 0x001 | 1 | Reserved | - | - |
 | 0x002 | 2 | Time Sync | Host → All | High |
-| 0x003-0x00F | 3-15 | Reserved | - | - |
+| 0x003 | 3 | Encoder Stream Control | Host → Ctrl | High |
+| 0x004-0x00F | 4-15 | Reserved | - | - |
 | 0x010-0x13F | 16-319 | Reserved (Future High Priority) | - | - |
 | 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
 | 0x200-0x2FF | 512-767 | Reserved | - | - |
@@ -1639,7 +1640,26 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | ... | ... | ... | ... | ... |
 | **0x393** | 915 | **Multi-DOF Waypoint Joint 19** | Host → Ctrl | **Level 3** (Medium) |
 | 0x394-0x3FF | 916-1023 | Reserved Waypoints | - | - |
-| 0x400-0x4FF | 1024-1279 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
+| 0x400-0x40F | 1024-1039 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
+| **0x410** | 1040 | **Encoder Stream Data** | Ctrl → Host | **Level 4** (Low) |
+| 0x411-0x4FF | 1041-1279 | Reserved Status | - | - |
+
+**Encoder Stream Control (0x003):**
+```
+Byte 0:   uint8_t  action (0x01 = start, 0x00 = stop)
+Byte 1-7: Reserved (0x00)
+```
+
+**Encoder Stream Data (0x410):**
+```
+Byte 0:     uint8_t   joint_id
+Byte 1-2:   int16_t   angle_dof0 (0.01° resolution)
+Byte 3-4:   int16_t   angle_dof1 (0.01° resolution, 0x7FFF = unused)
+Byte 5-6:   int16_t   angle_dof2 (0.01° resolution, 0x7FFF = unused)
+Byte 7:     uint8_t   timestamp_offset (ms since last packet, wraps at 255)
+```
+**Frequency**: 50 Hz (20ms interval)
+**Purpose**: Real-time encoder feedback for UI visualization and debugging
 
 **Multi-DOF Waypoint Format (0x380-0x39F):**
 ```
@@ -1694,7 +1714,7 @@ Pin 3: GND (Black)
 
 **Problem: Time sync drift**
 - Increase sync frequency (10 Hz → 20 Hz)
-- Check RP2040 crystal accuracy
+- Check RP2350 crystal accuracy
 - Verify CAN latency (< 200 µs)
 
 ---
@@ -1715,7 +1735,7 @@ This document describes a **comprehensive, scalable, and cost-effective** CAN-ba
 2. Proceed with PCB design (CAN Expansion Board)
 3. Order components and begin prototyping
 4. Develop host software (Python CanManager)
-5. Integrate with existing firmware (RP2040 Pico)
+5. Integrate with existing firmware (RP2350 Pico 2)
 
 ---
 
