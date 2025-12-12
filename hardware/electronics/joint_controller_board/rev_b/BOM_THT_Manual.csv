@@ -1,0 +1,12 @@
+Designator,Footprint,Quantity,Manufacturer Part Number,Manufacturer,Description,Source,Notes
+U2,TO-220-5,1,LM2576HVT-12/LF03,Texas Instruments,Buck Converter 60V Input 12V Output 3A,Digi-Key 296-41559-5-ND,48V compatible - DA ORDINARE
+"Q1,Q2",TO-220-3,2,IRFB4110PBF,Infineon,N-Channel MOSFET 100V 180A,Digi-Key 448-IRFB4110PBF-ND,Già ordinato
+C1,CP_Radial_D10.0mm_P5.00mm,1,220uF 63V,Generic,Electrolytic Capacitor 220uF 63V Radial,Amazon,Ø10x20mm - DA ORDINARE
+C4,CP_Radial_D10.0mm_P5.00mm,1,100uF 63V,Rubycon,Electrolytic Capacitor 100uF 63V Radial,Digi-Key 1189-4028-ND,Già ordinato
+L1,Inductor_THT,1,SRR1210-330M,Bourns,Inductor 33uH 3.6A,Digi-Key 732-3415-ND,Già ordinato
+D1,DO-41,1,1N5817,Generic,Schottky Diode 20V 1A (Pico protection),In stock,Già disponibile
+F1,Fuse_Holder,1,3568,Keystone,Fuse Holder Automotive,Digi-Key 36-3568-ND,Già ordinato
+-,Fuse,1+,166.7000.4502,Littelfuse,Fuse 5A 80V Fast,Digi-Key F5156-ND,Spares recommended
+J1,TerminalBlock_2P_5.08mm,1,Generic,Generic,Terminal Block 2-pin 5.08mm,In stock,Già disponibile
+"J2,J3",XT60PW,2,XT60PW-M,Amass,XT60 PCB Mount 90deg,Amazon,Già ordinato
+U1,RPi_Pico,1,Raspberry Pi Pico 2,Raspberry Pi,Microcontroller Module,Various,Headers or socket

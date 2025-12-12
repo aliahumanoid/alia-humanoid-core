@@ -24,3 +24,11 @@ software/host/serial_communication_*.log
 
 # GitHub social preview (uploaded manually, not committed)
 social-preview.png
+
+# KiCad generated/backup files
+hardware/**/*-backups/
+hardware/**/fp-info-cache
+hardware/**/~*.lck
+
+# PlatformIO compile database (generated)
+software/**/compile_commands.json
