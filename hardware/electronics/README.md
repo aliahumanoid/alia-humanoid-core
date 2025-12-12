@@ -1,6 +1,6 @@
 # Alia Humanoid Electronics
 
-**Status:** Released (Rev A)  
+**Status:** Production (Rev B in manufacturing)  
 **License:** CC BY-NC-ND 4.0 (Phase 0) → See [hardware/LICENSE.md](../LICENSE.md)
 
 ---
@@ -11,25 +11,39 @@ Custom PCB designs for the Alia humanoid control system. Electronics release fol
 
 ## Boards
 
-### Joint Controller Board (Dual RP2040/RP2350)
+### Joint Controller Board
 
-**Purpose:** Main control board for joint actuation and sensor management
+**Purpose:** Main control board for joint actuation, sensor management, and hardware safety.
 
-**Features:**
-- Dual Raspberry Pi Pico (RP2040 or RP2350) slots
-  - Core 0: PID control loops, motor drive, safety limits
-  - Core 1: Serial communication, trajectory interpolation, logging
-- MT6835 magnetic encoder interface (SPI)
-- LKM motor driver integration (CAN/PWM)
-- Power distribution and regulation
-- Tendon tension sensor inputs
+**Architecture (Rev B):**
+- Single Raspberry Pi Pico 2 (RP2350) with dual-core operation:
+  - **Core 0:** Encoder reading, serial commands (~500 Hz)
+  - **Core 1:** CAN communication, motor control (~500 Hz)
+- Direct MT6835 magnetic encoder reading via SPI0 (up to 3 encoders)
+- Dual MCP2515 CAN controllers via SPI1 (Motor CAN + Host CAN)
+- LKM motor driver integration (CAN protocol)
+- **Hardware safety system** (Rev B): Independent watchdog + MOSFET power switch
 - Compact form factor for human-scale integration
 
-**Status:** ✅ Rev A released
+**Revisions:**
+
+| Rev | Status | Features |
+|-----|--------|----------|
+| **A** | ✅ Released | Basic control, dual Pico slots (legacy) |
+| **B** | �icing In Production | Single Pico, direct encoder reading, **48V-ready hardware safety** |
+
+**Rev B Key Features:**
+- Hardware watchdog (MAX6369) for MCU freeze detection
+- Dual MOSFET power switch (IRFB4110) with gate driver (UCC27282)
+- Buck converter (LM2576HVT-12) for 48V→12V gate supply
+- TVS protection (SMBJ60A) on power input
+- AND gate logic combining watchdog + software enable
+- 2oz copper for high-current paths
 
 **What's included:**
 - ✅ Gerber files (manufacturing-ready)
 - ✅ KiCad source files (schematic + PCB layout)
+- ✅ BOM files (SMD for PCBA, THT for manual assembly)
 - ✅ Assembly documentation
 
 ---
@@ -39,9 +53,15 @@ Custom PCB designs for the Alia humanoid control system. Electronics release fol
 ```
 electronics/
 └── joint_controller_board/
-    ├── rev_a/              → Revision A (initial release)
-    │   ├── gerber/         → Manufacturing files (Gerber + drill)
-    │   └── *.kicad_*       → KiCad source files (schematic + PCB)
+    ├── rev_a/              → Revision A (legacy, dual Pico)
+    │   └── *.kicad_*       → KiCad source files
+    │
+    ├── rev_b/              → Revision B (current, single Pico + safety)
+    │   ├── *.kicad_*       → KiCad source files
+    │   ├── *.gbr, *.drl    → Gerber/drill files
+    │   ├── BOM_*.csv       → Bills of materials
+    │   └── README.md       → Detailed documentation
+    │
     └── docs/               → Assembly guides, testing procedures
 ```
 

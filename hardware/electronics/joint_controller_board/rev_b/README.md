@@ -182,7 +182,7 @@ All active/passive components ordered. ~205€ total.
    - C1, C4 (electrolytic capacitors - watch polarity!)
    - L1 (inductor)
    - Q1, Q2 (MOSFETs - ensure proper orientation)
-   - U_BUCK (LM2576HVT-12 - check pinout)
+   - U2 (LM2576HVT-12 buck converter - check pinout)
    - F1 (fuse holder)
    - J1 (terminal block)
 
@@ -257,30 +257,6 @@ void watchdog_kick() {
 
 // Call watchdog_kick() in main loop at least every 500ms
 ```
-
----
-
-## KiCad Modifications Required (Rev B.2)
-
-Before ordering with PCBWay assembly, apply these changes in KiCad:
-
-### 1. Update U2 (Buck) Symbol and Value
-- **Old:** `LM2596T-12` (40V max input)
-- **New:** `LM2576HVT-12` (60V max input)
-- **Action:** In schematic, click U2 → Edit Properties → Change Value to `LM2576HVT-12`
-- **Footprint:** No change needed (same TO-220-5)
-
-### 2. Update C1 Footprint
-- **Old:** `CP_Radial_D6.3mm_P2.50mm` (220µF 25V)
-- **New:** `CP_Radial_D10.0mm_P5.00mm` (220µF 63V)
-- **Action:** In schematic, click C1 → Edit Properties → Change Footprint
-
-### 3. Regenerate Gerber & Position Files
-After changes:
-1. Update PCB from Schematic (F8)
-2. Re-run DRC
-3. File → Plot → Generate Gerber
-4. File → Fabrication Outputs → Component Placement
 
 ---
 

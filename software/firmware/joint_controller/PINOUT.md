@@ -73,6 +73,51 @@ GP17 (was slave CS)  ──────────────────► G
 - **CRC Check:** Enabled for data integrity
 - **Validation:** Spike detection, range check, status check
 
+## Hardware Safety System (Rev B)
+
+**Purpose**: Independent hardware-level safety cutoff for motor power.
+
+**GPIO Assignments:**
+- `GP15` → `SAFETY_WDT_KICK` (Watchdog kick pulse)
+- `GP22` → `SAFETY_ENABLE` (Motor power enable)
+
+**Architecture:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  GP15 (WDT_KICK) ──► MAX6369 Watchdog ──┐                          │
+│                                          ├──► AND Gate ──► Gate Driver ──► MOSFETs ──► Motor Power
+│  GP22 (ENABLE)   ───────────────────────┘                          │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Operation:**
+1. **GP15** must be toggled periodically (<1.6s) to keep watchdog happy
+2. **GP22** must be HIGH to enable motor power
+3. Both conditions (watchdog OK + software enable) required for power
+
+**Firmware Integration:**
+```cpp
+// In setup()
+pinMode(15, OUTPUT);  // WDT kick
+pinMode(22, OUTPUT);  // Safety enable
+digitalWrite(22, LOW); // Start disabled
+
+// In main loop (call every ~100ms)
+digitalWrite(15, HIGH);
+delayMicroseconds(10);
+digitalWrite(15, LOW);
+
+// Enable motor power when ready
+digitalWrite(22, HIGH);
+```
+
+**Safety Behavior:**
+- MCU freeze → Watchdog timeout → MOSFETs OFF → Motors coast to stop
+- Software disable (GP22 LOW) → Immediate power cutoff
+- Both paths independent of MCU software state
+
+---
+
 ## Other Pins
 
 - Onboard LED: `GP25`

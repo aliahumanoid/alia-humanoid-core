@@ -30,7 +30,7 @@ hardware/
 │   └── foot/          → Foot base + phalanges (5 toes)
 │
 └── electronics/       → PCB designs (Gerbers, schematics, BOM)
-    └── joint_controller_board/  → Dual RP2040/RP2350 control board (Q1 2026)
+    └── joint_controller_board/  → RP2350 control board with hardware safety (Rev B)
 ```
 
 ---
