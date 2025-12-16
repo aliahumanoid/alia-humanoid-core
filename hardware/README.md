@@ -25,6 +25,7 @@ hardware/
 │   └── collision/     → Simplified collision meshes (performance)
 │
 ├── mechanical/        → CAD sources & manufacturing files
+│   ├── BOM.csv        → Bill of Materials (complete parts catalog)
 │   ├── lower_leg/     → Shank structure (tibia/fibula analog)
 │   ├── ankle/         → 2-DOF ankle joint (validated Phase 0)
 │   └── foot/          → Foot base + phalanges (5 toes)

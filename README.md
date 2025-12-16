@@ -90,6 +90,7 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 - 🌐 **[Website](https://aliahumanoid.com)** — Project overview and roadmap
 - 📝 **[Public Updates](PUBLIC_UPDATES.md)** — Monthly transparent progress log
 - 📖 **[Documentation](software/README.md)** — Software architecture, protocols, build guides
+- 📐 **[Technical Specs](docs/specs/README.md)** — Joint specifications, motor specs, tendon specs
 
 ---
 
