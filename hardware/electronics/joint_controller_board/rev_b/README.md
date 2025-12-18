@@ -262,6 +262,11 @@ void watchdog_kick() {
 
 ## Changelog
 
+### Rev B.3 (December 2025)
+- **U4:** Fixed footprint VSSOP-8_3.0x3.0mm_P0.65mm → VSSOP-8_2.4x2.1mm_P0.5mm
+  - TI DCU package has 0.5mm pitch, not 0.65mm
+  - Discovered during PCBWay assembly (component didn't fit pads)
+
 ### Rev B.2 (December 2025)
 - **U_BUCK:** LM2596T-12 → LM2576HVT-12 (60V input for 48V operation)
 - **C1:** 220µF 25V → 220µF 63V with larger footprint (Ø10mm)
