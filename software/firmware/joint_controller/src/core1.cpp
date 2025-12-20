@@ -579,7 +579,7 @@ void core1_loop() {
     uint8_t command  = pending_command_type;
     command_data_ext = command_buffer[active_buffer]; // Atomic copy of structure
 
-    // Reset buffer flag
+    // Reset buffer flag IMMEDIATELY to free buffer for next command
     buffer_ready[active_buffer] = false;
 
     // Extract the components from the command data
@@ -662,19 +662,31 @@ void core1_loop() {
       break;
 
     case CMD_SET_ZERO_CURRENT_POS:
-      // Set current position as zero for the specific DOF
+      // Legacy: Now handled by Core0, but keep for compatibility
       if (controller->setZeroCurrentPos(dof_index)) {
-        // Signal the end of the zeroing procedure
         shared_data_ext.dof_index = dof_index;
         shared_data_ext.flag      = CMD1_END_ZERO;
         strcpy(shared_data_ext.message, "Current position set as zero for DOF");
       } else {
-        // Error during zeroing
         if (shared_data_ext.flag == 0) {
           strcpy(shared_data_ext.message, "ERROR: Failed to set zero position");
           shared_data_ext.flag = CMD1_FAIL_MOVE;
         }
       }
+      break;
+
+    case CMD_ZERO_MOTOR_ENCODERS:
+      // Zero motor encoder offsets for a specific DOF (delegated from Core0)
+      // This is called AFTER Core0 has reset the joint encoder
+      for (int m = 0; m < controller->getConfig().motor_count; m++) {
+        if (controller->getConfig().motors[m].dof_index == dof_index) {
+          LKM_Motor* motor = controller->getMotor(m);
+          if (motor != nullptr) {
+            motor->zeroEncoderOffset();
+          }
+        }
+      }
+      LOG_DEBUG_F("Motor encoders zeroed for DOF %d", dof_index);
       break;
 
     case CMD_MOVE_MULTI_DOF: {

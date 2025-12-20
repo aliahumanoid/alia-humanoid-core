@@ -86,7 +86,13 @@
 #define CMD_LOAD_LINEAR_EQUATIONS 35
 #endif
 
-// Reserved: 36-39 for future calibration commands
+// Internal command: Zero motor encoders only (delegated from Core0 to Core1)
+// This is NOT exposed via Serial - only used internally after SET_ZERO_CURRENT_POS
+#ifndef CMD_ZERO_MOTOR_ENCODERS
+#define CMD_ZERO_MOTOR_ENCODERS 36
+#endif
+
+// Reserved: 37-39 for future calibration commands
 
 // --- PID Control Commands (40-49) ---
 #ifndef CMD_SET_PID

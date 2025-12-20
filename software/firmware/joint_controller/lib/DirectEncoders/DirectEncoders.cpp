@@ -15,9 +15,10 @@ extern volatile bool flash_operation_in_progress;
 #define PI 3.14159265358979323846f
 #endif
 
-// SPI settings for MT6835 (1 MHz for better signal integrity with bridge wiring)
-// Reduced from 2 MHz to improve reliability over longer/bridged connections
-static SPISettings directEncoderSPISettings(1000000, MSBFIRST, SPI_MODE3);
+// SPI settings for MT6835
+// Reduced to 500 kHz for Encoder 2 flying wire reliability
+// TODO: Increase back to 1 MHz once wiring is verified
+static SPISettings directEncoderSPISettings(500000, MSBFIRST, SPI_MODE3);
 
 // ============================================================================
 // CONSTRUCTOR
@@ -41,6 +42,7 @@ DirectEncoders::DirectEncoders(bool *encoder_invert) {
     _error_counts[i] = 0;
     _skip_validation[i] = false;   // Inter-core sync flag
     _pending_reset[i] = false;     // Pending reset from Core1
+    _pending_target_angle_deg[i] = 0.0f;  // Target angle for reset
     _sensors[i] = nullptr;
   }
   
@@ -129,7 +131,7 @@ void DirectEncoders::update() {
     // Read with validation
     float raw_angle = readEncoderWithValidation(i, delta_us);
     
-    // Apply offset and normalize to [0, 2π]
+    // Apply offset and normalize to [0, 2π] for multi-turn tracking
     float angle = fmod(raw_angle - _offsets[i], 2 * PI);
     if (angle < 0) angle += 2 * PI;
     
@@ -150,7 +152,12 @@ void DirectEncoders::update() {
     _last_angles[i] = angle;
     
     // Compute total angle in degrees (with multi-turn)
-    _total_angles_deg[i] = (_turns[i] * 360.0f) + (angle * (180.0f / PI));
+    // Convert to signed range when within a single turn so negative angles remain negative
+    float angle_deg = angle * (180.0f / PI);
+    if (_turns[i] == 0 && angle_deg > 180.0f) {
+      angle_deg -= 360.0f;  // e.g., 310° → -50°
+    }
+    _total_angles_deg[i] = (_turns[i] * 360.0f) + angle_deg;
   }
 }
 
@@ -316,18 +323,21 @@ void DirectEncoders::resetAllEncoders() {
 // INTER-CORE RESET REQUESTS (thread-safe)
 // ============================================================================
 
-void DirectEncoders::requestReset(uint8_t encoder_index) {
+void DirectEncoders::requestReset(uint8_t encoder_index, float target_angle_deg) {
+  // NOTE: This function is called from Core1, so NO SERIAL LOGGING here!
+  // Serial is not thread-safe and will cause deadlock if Core0 is also using it.
+  
   if (encoder_index == 0xFF) {
-    // Request reset for all connected encoders
+    // Request reset for all connected encoders (all to 0°)
     for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
       if (_connected[i]) {
         _pending_reset[i] = true;
+        _pending_target_angle_deg[i] = 0.0f;
       }
     }
-    LOG_INFO("Reset requested for all encoders (will execute on Core0)");
   } else if (encoder_index < DIRECT_ENCODER_COUNT) {
     _pending_reset[encoder_index] = true;
-    LOG_INFO_F("Reset requested for encoder %d (will execute on Core0)", encoder_index + 1);
+    _pending_target_angle_deg[encoder_index] = target_angle_deg;
   }
   _pending_save_flash = true;  // Save after reset
 }
@@ -336,31 +346,59 @@ void DirectEncoders::processPendingResets() {
   bool any_reset = false;
   
   for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
-    if (_pending_reset[i] && _connected[i] && _sensors[i] != nullptr) {
-      _pending_reset[i] = false;  // Clear flag first
+    if (_pending_reset[i]) {
+      _pending_reset[i] = false;  // Always clear flag to prevent infinite loop
+      
+      if (!_connected[i] || _sensors[i] == nullptr) {
+        LOG_WARN_F("Encoder %d: Reset skipped - not connected", i + 1);
+        continue;
+      }
+      
+      float target_deg = _pending_target_angle_deg[i];  // Get target angle
       
       // Execute reset (this is safe because we're on Core0)
       float current_raw = _sensors[i]->getSensorAngle();
-      if (current_raw >= 0) {
-        _offsets[i] = current_raw;
-        _turns[i] = 0;
-        _last_angles[i] = 0.0f;
-        _last_valid_angles[i] = current_raw;
-        _total_angles_deg[i] = 0.0f;
-        _error_counts[i] = 0;
-        _skip_validation[i] = true;
-        
-        LOG_INFO_F("Encoder %d: Reset executed (offset = %.2f rad = %.2f deg)", 
-                   i + 1, current_raw, current_raw * 180.0f / PI);
-        any_reset = true;
+      if (current_raw < 0) {
+        LOG_ERROR_F("Encoder %d: Reset failed - could not read sensor", i + 1);
+        continue;
       }
+      
+      // Calculate the target angle in radians, normalized to [0, 2π]
+      float target_rad = target_deg * (PI / 180.0f);
+      if (target_rad < 0) target_rad += 2 * PI;  // e.g., -50° → 310° = 5.41 rad
+      
+      // CRITICAL: If encoder is inverted, we need to calculate the pre-inversion value
+      // In update(): angle_after_invert = 2π - angle_before_invert
+      // So to get target_rad after inversion, we need target_rad_before = 2π - target_rad
+      float target_rad_for_offset = target_rad;
+      if (_invert[i]) {
+        target_rad_for_offset = 2 * PI - target_rad;
+        LOG_DEBUG_F("Encoder %d: Inversion active, adjusted target %.2f° → %.2f rad pre-invert", 
+                    i + 1, target_deg, target_rad_for_offset);
+      }
+      
+      _offsets[i] = current_raw - target_rad_for_offset;
+      _turns[i] = 0;
+      _last_angles[i] = 0.0f;
+      _last_valid_angles[i] = current_raw;
+      _total_angles_deg[i] = target_deg;  // Start at target angle
+      _error_counts[i] = 0;
+      _skip_validation[i] = true;
+      
+      LOG_INFO_F("Encoder %d: Reset OK → angle = %.2f° (raw = %.2f rad, offset = %.2f rad, invert = %d)", 
+                 i + 1, target_deg, current_raw, _offsets[i], _invert[i] ? 1 : 0);
+      any_reset = true;
     }
   }
   
-  // Save to flash if any reset happened and flash save is pending
+  // Save to flash only if reset succeeded
   if (any_reset && _pending_save_flash) {
     _pending_save_flash = false;
     saveOffsetsToFlash();
+  } else if (!any_reset && _pending_save_flash) {
+    // Clear pending flag if no reset happened to avoid stale state
+    _pending_save_flash = false;
+    LOG_WARN("Flash save cancelled - no successful reset");
   }
 }
 
@@ -403,7 +441,10 @@ void DirectEncoders::setJointOffset(uint8_t encoder_index, float offset_deg, boo
   if (encoder_index >= DIRECT_ENCODER_COUNT) return;
   
   // Convert degrees to radians for internal storage
-  float offset_rad = offset_deg * (PI / 180.0f);
+  // NEGATE to match old additive semantics:
+  // Old: displayed_angle = raw + offset  (offset added)
+  // New: displayed_angle = raw - (-offset) = raw + offset  (offset subtracted, so negate)
+  float offset_rad = -offset_deg * (PI / 180.0f);
   _offsets[encoder_index] = offset_rad;
   
   // CRITICAL: Reset last_valid_angles to avoid spike detection after offset change

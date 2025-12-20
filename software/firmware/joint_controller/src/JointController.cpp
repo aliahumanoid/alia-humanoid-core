@@ -263,15 +263,21 @@ bool JointController::init() {
     motors[i]->init();
   }
 
-  // Apply configured angular offsets for each DOF (during init, don't save to flash)
-  for (int i = 0; i < config.dof_count; i++) {
-    float zero_offset = config.dofs[i].zero_mapping.zero_angle_offset;
-    if (zero_offset != 0.0f) {
-      uint8_t encoder_channel = config.dofs[i].encoder_channel;
-      LOG_INFO(String("Applying angle offset for DOF ") + String(i) + ": " +
-               String(zero_offset));
-      encoders->setJointOffset(encoder_channel, zero_offset, false);  // No flash save during init
+  // Apply configured angular offsets for each DOF ONLY if flash has no valid data
+  // If flash has valid calibration data, use that instead of defaults
+  if (!encoders->isFlashDataValid()) {
+    LOG_INFO("No valid flash calibration - applying default zero_angle_offsets");
+    for (int i = 0; i < config.dof_count; i++) {
+      float zero_offset = config.dofs[i].zero_mapping.zero_angle_offset;
+      if (zero_offset != 0.0f) {
+        uint8_t encoder_channel = config.dofs[i].encoder_channel;
+        LOG_INFO(String("Applying angle offset for DOF ") + String(i) + ": " +
+                 String(zero_offset));
+        encoders->setJointOffset(encoder_channel, zero_offset, false);
+      }
     }
+  } else {
+    LOG_INFO("Using calibration offsets from flash (skipping defaults)");
   }
 
   return true;
@@ -419,38 +425,22 @@ bool JointController::releaseAll() {
 }
 
 // Set current position as zero for a DOF without moving the joint
+// NOTE: Called from Core1 - minimize Serial usage to avoid deadlocks!
 bool JointController::setZeroCurrentPos(uint8_t dof_index) {
   if (dof_index >= config.dof_count) {
-    LOG_ERROR("Invalid DOF index in setZeroCurrentPos");
     return false;
   }
-
-  LOG_INFO("Setting current position as zero for DOF: " + String(dof_index));
 
   // Get the encoder channel for this DOF
   uint8_t encoder_channel = config.dofs[dof_index].encoder_channel;
 
-  // Get the configured angular offset
+  // Get the configured angular offset (this is what the current position should become)
   float zero_offset = config.dofs[dof_index].zero_mapping.zero_angle_offset;
 
-  // Request encoder reset - will be executed by Core0 on next update cycle
+  // Request encoder reset with target angle - will be executed by Core0 on next update cycle
   // This is thread-safe and avoids SPI conflicts between cores
-  encoders->requestReset(encoder_channel);
+  encoders->requestReset(encoder_channel, zero_offset);
 
-  // Note: Angular offset application is handled in the reset itself
-  // The offset from config will be applied after reset if needed
-  if (zero_offset != 0.0f) {
-    LOG_INFO_F("Note: Angular offset of %.2f deg will be applied after reset", zero_offset);
-  }
-
-  // Zero motor offsets for this DOF
-  for (int i = 0; i < config.motor_count; i++) {
-    if (config.motors[i].dof_index == dof_index) {
-      motors[i]->zeroEncoderOffset();
-    }
-  }
-
-  LOG_INFO("Zero request queued for DOF " + String(dof_index) + " (executes on Core0)");
   return true;
 }
 

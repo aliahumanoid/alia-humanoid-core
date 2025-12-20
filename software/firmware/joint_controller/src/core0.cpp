@@ -587,6 +587,43 @@ void core0_main_loop() {
                       break;
                     }
 
+                    case CMD_SET_ZERO_CURRENT_POS: {
+                      // Set zero: joint encoder on Core0, motor encoders delegated to Core1
+                      JointController *ctrl = active_joint_controller;
+                      if (ctrl != nullptr) {
+                        uint8_t dof = parsed_cmd.dof_index;
+                        const JointConfig& cfg = ctrl->getConfig();
+                        if (dof < cfg.dof_count) {
+                          uint8_t enc_channel = cfg.dofs[dof].encoder_channel;
+                          float zero_offset = cfg.dofs[dof].zero_mapping.zero_angle_offset;
+                          
+                          // 1. Reset joint encoder (MT6835) - Core0
+                          directEncoders.requestReset(enc_channel, zero_offset);
+                          
+                          LOG_INFO_F("Set Zero: DOF %d → joint encoder target %.2f°", dof, zero_offset);
+                          
+                          // 2. Delegate motor encoder zeroing to Core1 (requires CAN access)
+                          int next_buffer = (active_buffer + 1) % 2;
+                          command_buffer[next_buffer].joint_id = parsed_cmd.joint_id;
+                          command_buffer[next_buffer].dof_index = dof;
+                          pending_command_type = CMD_ZERO_MOTOR_ENCODERS;
+                          buffer_ready[next_buffer] = true;
+                          active_buffer = next_buffer;
+                          
+                          LOG_DEBUG("Delegating motor encoder zero to Core1");
+                          
+                          // Signal completion (Core1 will do motor zeroing async)
+                          shared_data_ext.dof_index = dof;
+                          shared_data_ext.flag = CMD1_END_ZERO;
+                          strcpy(shared_data_ext.message, "Zero position set");
+                        } else {
+                          LOG_ERROR("Invalid DOF index for Set Zero");
+                        }
+                      }
+                      handled_on_core0 = true;
+                      break;
+                    }
+
                     default:
                       // Command requires hardware access - will be dispatched to core1
                       break;

@@ -131,9 +131,12 @@ public:
   /**
    * @brief Request encoder reset from Core1 (thread-safe)
    * @param encoder_index Encoder index (0-2), or 0xFF for all
+   * @param target_angle_deg The angle (in degrees) that current position should represent.
+   *                         Default is 0.0, meaning current position becomes 0°.
+   *                         Use zero_angle_offset from config for proper calibration.
    * @note Core0 will execute the reset on next update() cycle
    */
-  void requestReset(uint8_t encoder_index);
+  void requestReset(uint8_t encoder_index, float target_angle_deg = 0.0f);
   
   /**
    * @brief Process pending reset requests (CALL FROM CORE0 ONLY!)
@@ -271,6 +274,7 @@ private:
   // Reset synchronization (for inter-core safety)
   volatile bool _skip_validation[DIRECT_ENCODER_COUNT];  // Skip spike validation after reset
   volatile bool _pending_reset[DIRECT_ENCODER_COUNT];    // Pending reset request from Core1
+  volatile float _pending_target_angle_deg[DIRECT_ENCODER_COUNT];  // Target angle for reset (degrees)
   volatile bool _pending_save_flash;                      // Pending flash save request
   
   // Data validity
