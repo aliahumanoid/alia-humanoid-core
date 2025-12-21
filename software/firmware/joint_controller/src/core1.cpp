@@ -314,8 +314,10 @@ void sendEncoderStreamData() {
   // Timestamp: ms since sync (or just millis() if not synced)
   frame.t_offset_ms = (uint16_t)(millis() & 0xFFFF);
   
-  // Send via Host CAN
-  uint8_t result = CAN_HOST.sendMsgBuf(CAN_ID_ENCODER_STREAM_DATA, 0, sizeof(frame), (uint8_t*)&frame);
+  // Send via Host CAN - use joint-specific CAN ID (0x410 + joint_id)
+  // This allows filtering by joint when multiple controllers are on the bus
+  uint32_t can_id = CAN_ID_ENCODER_STREAM_DATA + ACTIVE_JOINT;
+  uint8_t result = CAN_HOST.sendMsgBuf(can_id, 0, sizeof(frame), (uint8_t*)&frame);
   
   // Debug log (throttled to 1Hz to avoid flooding)
   static uint32_t last_debug_log = 0;
@@ -533,25 +535,16 @@ void core1_loop() {
         break;
 
       case 2: // Mapping completed
-        LOG_INFO("AUTO_MAP_COMPLETE: Auto-mapping completed successfully");
-
+        // NOTE: No Serial/LOG calls here to avoid conflicts with Core0
+        
         // Transfer acquired data to DofMappingData_t structures
         if (active_joint_controller->transferAutoMappingData(auto_mapping_state)) {
-          LOG_INFO("Auto-mapping data transferred successfully");
-
           // Compute linear equations from the raw mapping data just transferred
-          LOG_INFO("Computing linear equations on Pico from raw data...");
-          if (active_joint_controller->calculateLinearEquationsFromMappingData()) {
-            LOG_INFO("PICO_LINEAR_EQUATIONS: Linear equations computed successfully");
-            LOG_INFO("Compare these results with the Pi5 output for validation");
-          } else {
-            LOG_ERROR("ERROR: Unable to compute linear equations on Pico");
-          }
-        } else {
-          LOG_ERROR("ERROR: Unable to transfer auto-mapping data");
+          // (This function sets _pending_flash_save flag for Core0 to handle)
+          active_joint_controller->calculateLinearEquationsFromMappingData();
         }
 
-        // Signal completion
+        // Signal completion - Core0 will handle logging and flash save
         if (shared_data_ext.flag == 0) {
           strcpy(shared_data_ext.message, "Auto mapping completed successfully");
           shared_data_ext.flag = CMD1_AUTO_MAP_COMPLETE;
@@ -559,7 +552,7 @@ void core1_loop() {
         break;
 
       case 3: // Error
-        LOG_ERROR("AUTO_MAP_ERROR: Error during auto-mapping");
+        // NOTE: No Serial/LOG calls here to avoid conflicts with Core0
         if (shared_data_ext.flag == 0) {
           strcpy(shared_data_ext.message, "Auto-mapping error");
           shared_data_ext.flag = CMD1_FAIL_MOVE;

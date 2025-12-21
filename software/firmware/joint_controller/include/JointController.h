@@ -109,6 +109,9 @@ private:
   PID **pid_controllers;          // PID controller per motor
   DofMovementData *dof_movement;  // Movement data per DOF
   DofMappingData_t *dof_mappings; // Mapping data per DOF (RAW from auto‑mapping)
+  
+  // Inter-core flash save request (Core1 requests, Core0 executes)
+  volatile bool _pending_flash_save = false;
 
   // Interpolation functions
   float interpolate_data(float target_value, float *data1, float *data2, int size);
@@ -510,6 +513,7 @@ public:
   /**
    * @brief Save linear equations to flash
    * @return true if saving succeeded
+   * @note Should only be called from Core0 to avoid flash access conflicts
    */
   bool saveLinearEquationsToFlash();
 
@@ -518,6 +522,17 @@ public:
    * @return true if loading succeeded
    */
   bool loadLinearEquationsFromFlash();
+  
+  /**
+   * @brief Check if Core1 has requested a flash save
+   * @return true if flash save is pending
+   */
+  bool isPendingFlashSave() const { return _pending_flash_save; }
+  
+  /**
+   * @brief Clear the pending flash save flag (call after saving)
+   */
+  void clearPendingFlashSave() { _pending_flash_save = false; }
 
   /**
    * @brief Check whether auto‑mapping is active

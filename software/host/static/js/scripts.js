@@ -339,6 +339,49 @@ $(document).ready(function() {
         }
     });
 
+    // Listener for CAN encoder stream data (real-time via SocketIO)
+    socket.on('encoder_stream', function(data) {
+        // Only process if encoder test is active
+        if (!encoderTestActive || !currentEncoderJointType) return;
+        
+        // Filter by joint: only process data from the currently selected joint
+        // joint_name from server is like "ANKLE_RIGHT", currentEncoderJointType is like "ankle"
+        if (data.joint_name) {
+            const expectedPrefix = currentEncoderJointType.toUpperCase();
+            if (!data.joint_name.toUpperCase().startsWith(expectedPrefix)) {
+                return;  // Ignore data from other joints
+            }
+        }
+        
+        // Update the chart and display from real-time CAN data
+        if (data && data.angles_deg) {
+            updateEncoderChartFromCanStream(data);
+            
+            // Also store in data buffer for history
+            const timestamp = Date.now();
+            encoderTestData.timestamps.push(timestamp);
+            
+            data.angles_deg.forEach((angle, dofIndex) => {
+                if (angle !== null && encoderTestData.dofData[dofIndex]) {
+                    encoderTestData.dofData[dofIndex].timestamps.push(timestamp);
+                    encoderTestData.dofData[dofIndex].values.push(angle);
+                }
+            });
+            
+            // Limit buffer size
+            const maxDataPoints = 1000;
+            while (encoderTestData.timestamps.length > maxDataPoints) {
+                encoderTestData.timestamps.shift();
+            }
+            Object.values(encoderTestData.dofData).forEach(dofData => {
+                while (dofData.timestamps.length > maxDataPoints) {
+                    dofData.timestamps.shift();
+                    dofData.values.shift();
+                }
+            });
+        }
+    });
+
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
@@ -586,18 +629,16 @@ function initializeCharts() {
                 x: { 
                     type: 'linear',
                     position: 'bottom',
-                    min: 0,
-                    max: 100,
                     title: { 
                         display: true, 
                         text: 'Time (s)',
                         font: { size: 10 }
                     },
                     ticks: { 
-                        stepSize: 20,
                         font: { size: 9 }
                     },
                     grid: {
+                        display: true,
                         color: 'rgba(0, 0, 0, 0.1)'
                     }
                 }, 
@@ -4253,23 +4294,18 @@ function startEncoderTest(jointType) {
         };
     }
     
-    // Check if CAN is connected - use CAN streaming @ 200Hz
+    // Check if CAN is connected - use CAN streaming via SocketIO (real-time)
     if (canConnectionState && canConnectionState.connected) {
-        // Start CAN encoder streaming
+        // Start CAN encoder streaming - data arrives via SocketIO 'encoder_stream' event
         $.ajax({
             url: '/can/encoder_stream/start',
             type: 'POST'
         }).done(response => {
             if (response.status === 'success') {
-                appendStatusMessage(`🔄 Encoder streaming started via CAN @ 50Hz for ${jointType}`);
+                appendStatusMessage(`🔄 Encoder streaming started via CAN @ 50Hz for ${jointType} (SocketIO real-time)`);
                 encoderStreamingViaCan = true;
-                
-                // Start polling for CAN stream data at high frequency
-                encoderTestInterval = setInterval(() => {
-                    if (encoderTestActive && encoderStreamingViaCan) {
-                        fetchCanEncoderStreamData();
-                    }
-                }, 50);  // Fetch every 50ms (20Hz polling, but data is 200Hz)
+                // No polling needed - data arrives via SocketIO 'encoder_stream' event
+                // which is handled in the socket.on('encoder_stream', ...) listener
             } else {
                 appendStatusMessage(`❌ Failed to start CAN encoder streaming: ${response.message}`);
                 fallbackToSerialEncoderTest(jointType);
@@ -4319,8 +4355,17 @@ function fetchCanEncoderStreamData() {
         type: 'GET'
     }).done(response => {
         if (response.status === 'success' && response.data && response.data.length > 0) {
-            // Process each data point
-            response.data.forEach(point => {
+            // Filter data by current joint type
+            const expectedPrefix = currentEncoderJointType ? currentEncoderJointType.toUpperCase() : '';
+            const filteredData = response.data.filter(point => {
+                if (!point.joint_name || !expectedPrefix) return true;  // No filter if missing info
+                return point.joint_name.toUpperCase().startsWith(expectedPrefix);
+            });
+            
+            if (filteredData.length === 0) return;  // No data for current joint
+            
+            // Process each filtered data point
+            filteredData.forEach(point => {
                 const timestamp = Date.now();
                 encoderTestData.timestamps.push(timestamp);
                 
@@ -4333,11 +4378,9 @@ function fetchCanEncoderStreamData() {
                 });
             });
             
-            // Update chart if we have data
-            if (response.data.length > 0) {
-                const lastPoint = response.data[response.data.length - 1];
-                updateEncoderChartFromCanStream(lastPoint);
-            }
+            // Update chart with last filtered point
+            const lastPoint = filteredData[filteredData.length - 1];
+            updateEncoderChartFromCanStream(lastPoint);
         }
     });
 }
@@ -4407,60 +4450,96 @@ function updateKneeChartFromStream(dataPoint) {
 
 /**
  * Update ankle charts from stream data
+ * Throttled to ~10Hz to avoid overwhelming Chart.js
+ * Uses {x, y} format for linear x-axis (time in seconds)
  */
 function updateAnkleChartFromStream(dataPoint) {
-    // Ankle has 2 DOFs with separate charts: ankleChart0, ankleChart1
-    [0, 1].forEach(dofIndex => {
-        const chartVar = window[`ankleChart${dofIndex}`];
+    // Ankle has 2 DOFs with separate charts: ankleDof0Chart, ankleDof1Chart
+    // Note: These are global let variables, not window properties
+    const charts = [ankleDof0Chart, ankleDof1Chart];
+    
+    // Initialize start time if not set
+    if (!window.ankleChartStartTime) {
+        window.ankleChartStartTime = Date.now();
+    }
+    
+    // Calculate time in seconds since start
+    const now = Date.now();
+    const timeSeconds = (now - window.ankleChartStartTime) / 1000;
+    
+    // Throttle chart updates to ~10Hz (100ms interval)
+    if (!window.lastAnkleChartUpdate) window.lastAnkleChartUpdate = 0;
+    const shouldUpdateChart = (now - window.lastAnkleChartUpdate) > 100;
+    
+    charts.forEach((chartVar, dofIndex) => {
         if (chartVar && dataPoint.angles_deg[dofIndex] !== null) {
-            const now = new Date();
-            const timeLabel = now.toLocaleTimeString('it-IT', { 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit',
-                hour12: false 
-            }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            // Add data point as {x, y} for linear x-axis
+            chartVar.data.datasets[0].data.push({
+                x: timeSeconds,
+                y: dataPoint.angles_deg[dofIndex]
+            });
             
-            chartVar.data.labels.push(timeLabel);
-            chartVar.data.datasets[0].data.push(dataPoint.angles_deg[dofIndex]);
-            
-            if (chartVar.data.labels.length > 100) {
-                chartVar.data.labels.shift();
-                chartVar.data.datasets.forEach(ds => ds.data.shift());
+            // Limit buffer size to 500 points
+            if (chartVar.data.datasets[0].data.length > 500) {
+                chartVar.data.datasets[0].data.shift();
             }
-            
-            chartVar.update('none');
         }
     });
+    
+    // Only update chart rendering at throttled rate
+    if (shouldUpdateChart) {
+        charts.forEach(chartVar => {
+            if (chartVar) chartVar.update('none');
+        });
+        window.lastAnkleChartUpdate = now;
+    }
 }
 
 /**
  * Update hip charts from stream data
+ * Throttled to ~10Hz to avoid overwhelming Chart.js
+ * Uses {x, y} format for linear x-axis (time in seconds)
  */
 function updateHipChartFromStream(dataPoint) {
-    // Hip has 2 DOFs with separate charts: hipChart0, hipChart1
-    [0, 1].forEach(dofIndex => {
-        const chartVar = window[`hipChart${dofIndex}`];
+    // Hip has 2 DOFs with separate charts: hipDof0Chart, hipDof1Chart
+    // Note: These are global let variables, not window properties
+    const charts = [hipDof0Chart, hipDof1Chart];
+    
+    // Initialize start time if not set
+    if (!window.hipChartStartTime) {
+        window.hipChartStartTime = Date.now();
+    }
+    
+    // Calculate time in seconds since start
+    const now = Date.now();
+    const timeSeconds = (now - window.hipChartStartTime) / 1000;
+    
+    // Throttle chart updates to ~10Hz (100ms interval)
+    if (!window.lastHipChartUpdate) window.lastHipChartUpdate = 0;
+    const shouldUpdateChart = (now - window.lastHipChartUpdate) > 100;
+    
+    charts.forEach((chartVar, dofIndex) => {
         if (chartVar && dataPoint.angles_deg[dofIndex] !== null) {
-            const now = new Date();
-            const timeLabel = now.toLocaleTimeString('it-IT', { 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit',
-                hour12: false 
-            }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            // Add data point as {x, y} for linear x-axis
+            chartVar.data.datasets[0].data.push({
+                x: timeSeconds,
+                y: dataPoint.angles_deg[dofIndex]
+            });
             
-            chartVar.data.labels.push(timeLabel);
-            chartVar.data.datasets[0].data.push(dataPoint.angles_deg[dofIndex]);
-            
-            if (chartVar.data.labels.length > 100) {
-                chartVar.data.labels.shift();
-                chartVar.data.datasets.forEach(ds => ds.data.shift());
+            // Limit buffer size to 500 points
+            if (chartVar.data.datasets[0].data.length > 500) {
+                chartVar.data.datasets[0].data.shift();
             }
-            
-            chartVar.update('none');
         }
     });
+    
+    // Only update chart rendering at throttled rate
+    if (shouldUpdateChart) {
+        charts.forEach(chartVar => {
+            if (chartVar) chartVar.update('none');
+        });
+        window.lastHipChartUpdate = now;
+    }
 }
 
 // Track if encoder streaming is via CAN

@@ -552,8 +552,13 @@ void core0_main_loop() {
                     }
 
                     case CMD_START_TEST_ENCODER: {
-                      // Activate encoder test
-                      encoder_test_active    = true;
+                      // Activate encoder streaming via CAN ONLY (handled by Core1)
+                      // Serial streaming is disabled to avoid conflicts and data corruption
+                      encoder_stream_can_active = true;
+                      encoder_stream_last_send_us = time_us_32() - 100000; // Force immediate first send
+                      
+                      // DISABLE Serial streaming to avoid conflicts with CAN data
+                      encoder_test_active    = false;
                       encoder_test_joint_id  = parsed_cmd.joint_id;
                       encoder_test_dof_index = parsed_cmd.dof_index;
                       encoder_test_all_dofs  = parsed_cmd.all_dofs;
@@ -561,19 +566,20 @@ void core0_main_loop() {
                       handled_on_core0       = true;
 
                       if (encoder_test_all_dofs) {
-                        LOG_INFO("Encoder test enabled for ALL joint DOFs");
+                        LOG_INFO("Encoder streaming enabled via CAN @ 50Hz for ALL DOFs");
                       } else {
-                        LOG_INFO("Encoder test enabled for DOF " + String(parsed_cmd.dof_index));
+                        LOG_INFO("Encoder streaming enabled via CAN @ 50Hz for DOF " + String(parsed_cmd.dof_index));
                       }
                       break;
                     }
 
                     case CMD_STOP_TEST_ENCODER: {
-                      // Deactivate encoder test
+                      // Deactivate CAN encoder streaming
+                      encoder_stream_can_active = false;
                       encoder_test_active   = false;
                       encoder_test_all_dofs = false;
                       handled_on_core0      = true;
-                      LOG_INFO("Encoder test disabled");
+                      LOG_INFO("Encoder streaming disabled");
                       break;
                     }
 
@@ -695,6 +701,35 @@ void core0_main_loop() {
                      String(shared_data_ext.message) + ")");
       // Signal that mapping data is ready to be sent
       auto_mapping_data_ready_to_send = true;
+      
+      // Check if Core1 requested a flash save for linear equations
+      if (active_joint_controller != nullptr && active_joint_controller->isPendingFlashSave()) {
+        // Print equation summary (safe to do from Core0)
+        Serial.println("=== LINEAR EQUATIONS SUMMARY ===");
+        for (int dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+          DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
+          if (eq != nullptr && eq->calculated) {
+            Serial.println("DOF " + String(dof) + ":");
+            Serial.println("  Agonist: y = " + String(eq->agonist.slope, 4) +
+                           "*x + " + String(eq->agonist.intercept, 4) +
+                           " (R²=" + String(eq->agonist.r_squared, 3) + ")");
+            Serial.println("  Antagonist: y = " + String(eq->antagonist.slope, 4) +
+                           "*x + " + String(eq->antagonist.intercept, 4) +
+                           " (R²=" + String(eq->antagonist.r_squared, 3) + ")");
+            Serial.println("  Joint range: [" + String(eq->joint_safe_min, 1) + ", " +
+                           String(eq->joint_safe_max, 1) + "]°");
+          }
+        }
+        Serial.println("================================");
+        
+        // Save equations to flash (from Core0 - thread safe)
+        if (active_joint_controller->saveLinearEquationsToFlash()) {
+          Serial.println("RSP:LINEAR_EQUATIONS_SAVED(" + String(shared_data_ext.joint_id) + ")");
+        } else {
+          Serial.println("RSP:LINEAR_EQUATIONS_SAVE_FAILED(" + String(shared_data_ext.joint_id) + ")");
+        }
+        active_joint_controller->clearPendingFlashSave();
+      }
       break;
 
     default:
@@ -710,7 +745,8 @@ void core0_main_loop() {
 #pragma region Streaming Data
 
   // Stream encoder data if measuring is active (uses shared_dof_angles)
-  if (measuring_data_ext.flag == 1) {
+  // NOTE: Suspend measuring streaming during movement to avoid Serial conflicts with Core1
+  if (measuring_data_ext.flag == 1 && !movement_in_progress) {
     uint8_t dof = measuring_data_ext.dof_index;
     if (dof < shared_dof_angles.dof_count && shared_dof_angles.valid[dof]) {
       Serial.println("EVT:ANGLE(" + String(ACTIVE_JOINT) + "," + String(dof) + "," +
@@ -837,7 +873,8 @@ void core0_main_loop() {
 
 #pragma region TestEncoder
   // Encoder test handling - uses shared_dof_angles (updated by updateSharedDofAngles)
-  if (encoder_test_active) {
+  // NOTE: Suspend encoder streaming during movement to avoid Serial conflicts with Core1
+  if (encoder_test_active && !movement_in_progress) {
     static unsigned long last_encoder_print_time = 0;
     // Send encoder data every 200ms
     if (millis() - last_encoder_print_time > 200) {

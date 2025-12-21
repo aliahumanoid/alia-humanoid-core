@@ -20,13 +20,14 @@
 // LINEAR EQUATIONS & CALIBRATION
 // ============================================================================
 
-// NEW: Compute linear regression for a data set
+// Compute linear regression for a data set
+// NOTE: This function is called from Core1 - NO Serial/LOG calls allowed!
 LinearRegressionCoefficients
 JointController::calculateLinearRegression(float *x_data, float *y_data, int data_count) {
   LinearRegressionCoefficients result = {0, 0, 0, 0, 0, false};
 
   if (data_count < 2 || x_data == nullptr || y_data == nullptr) {
-    LOG_ERROR("Insufficient data for linear regression");
+    // Insufficient data - return invalid result silently (Core1 context)
     return result;
   }
 
@@ -49,7 +50,7 @@ JointController::calculateLinearRegression(float *x_data, float *y_data, int dat
   float denominator = data_count * sum_x_squared - sum_x * sum_x;
 
   if (fabs(denominator) < 1e-10) {
-    LOG_ERROR("Denominator too small in linear regression");
+    // Denominator too small - return invalid result silently (Core1 context)
     return result;
   }
 
@@ -85,11 +86,10 @@ JointController::calculateLinearRegression(float *x_data, float *y_data, int dat
   return result;
 }
 
-// NEW: Compute linear equations for all DOFs using linear regression
+// Compute linear equations for all DOFs using linear regression
+// NOTE: This function is called from Core1 - NO Serial/LOG calls allowed!
+// All logging is deferred to Core0 after completion to avoid Serial conflicts.
 bool JointController::calculateLinearEquationsFromMappingData() {
-  LOG_INFO("=== LINEAR EQUATIONS COMPUTATION ON PICO ===");
-  LOG_INFO("Analyzing raw mapping data with linear regression");
-
   bool all_calculated = true;
 
   for (int dof = 0; dof < config.dof_count; dof++) {
@@ -98,16 +98,13 @@ bool JointController::calculateLinearEquationsFromMappingData() {
     linear_equations[dof].limits_valid = false;
 
     if (mapping_data.flag != 1 || mapping_data.size <= 1) {
-      LOG_ERROR("ERROR: Mapping data not available for DOF " + String(dof));
+      // Data not available for this DOF
       linear_equations[dof].calculated       = false;
       linear_equations[dof].agonist.valid    = false;
       linear_equations[dof].antagonist.valid = false;
       all_calculated                         = false;
       continue;
     }
-
-    LOG_INFO("\n--- COMPUTATION FOR DOF " + String(dof) + " (" + String(config.dofs[dof].name) + ") ---");
-    LOG_INFO("Number of data points: " + String(mapping_data.size));
 
     // Compute regression for agonist motor
     linear_equations[dof].agonist = calculateLinearRegression(
@@ -120,70 +117,6 @@ bool JointController::calculateLinearEquationsFromMappingData() {
     // Verify successful computations
     if (linear_equations[dof].agonist.valid && linear_equations[dof].antagonist.valid) {
       linear_equations[dof].calculated = true;
-
-      // Print detailed results
-      LOG_INFO("AGONIST MOTOR:");
-      LOG_INFO("  Equation: y = " + String(linear_equations[dof].agonist.slope, 6) +
-               " * x + " + String(linear_equations[dof].agonist.intercept, 6));
-      LOG_INFO("  R^2 = " + String(linear_equations[dof].agonist.r_squared, 6));
-      LOG_INFO("  MSE = " + String(linear_equations[dof].agonist.mse, 6));
-      LOG_INFO("  Points: " + String(linear_equations[dof].agonist.data_points));
-
-      LOG_INFO("ANTAGONIST MOTOR:");
-      LOG_INFO("  Equation: y = " + String(linear_equations[dof].antagonist.slope, 6) +
-               " * x + " + String(linear_equations[dof].antagonist.intercept, 6));
-      LOG_INFO("  R^2 = " + String(linear_equations[dof].antagonist.r_squared, 6));
-      LOG_INFO("  MSE = " + String(linear_equations[dof].antagonist.mse, 6));
-      LOG_INFO("  Points: " + String(linear_equations[dof].antagonist.data_points));
-
-      // Compute validity range for equations
-      float min_joint_angle = mapping_data.joint_data[0];
-      float max_joint_angle = mapping_data.joint_data[0];
-      for (int i = 1; i < mapping_data.size; i++) {
-        if (mapping_data.joint_data[i] < min_joint_angle) {
-          min_joint_angle = mapping_data.joint_data[i];
-        }
-        if (mapping_data.joint_data[i] > max_joint_angle) {
-          max_joint_angle = mapping_data.joint_data[i];
-        }
-      }
-
-      Serial.println("VALID RANGE: [" + String(min_joint_angle, 2) + "°, " +
-                     String(max_joint_angle, 2) + "°]");
-
-      // Verification test: compute mean error over a few test points
-      float total_error_agonist    = 0.0f;
-      float total_error_antagonist = 0.0f;
-      int test_points              = min(5, mapping_data.size); // Test on first 5 points
-
-      LOG_INFO("ACCURACY CHECK (first " + String(test_points) + " points):");
-      for (int i = 0; i < test_points; i++) {
-        float joint_angle       = mapping_data.joint_data[i];
-        float actual_agonist    = mapping_data.agonist_data[i];
-        float actual_antagonist = mapping_data.antagonist_data[i];
-
-        float predicted_agonist = linear_equations[dof].agonist.slope * joint_angle +
-                                  linear_equations[dof].agonist.intercept;
-        float predicted_antagonist = linear_equations[dof].antagonist.slope * joint_angle +
-                                     linear_equations[dof].antagonist.intercept;
-
-        float error_agonist    = fabs(actual_agonist - predicted_agonist);
-        float error_antagonist = fabs(actual_antagonist - predicted_antagonist);
-
-        total_error_agonist += error_agonist;
-        total_error_antagonist += error_antagonist;
-
-        Serial.println("  Point " + String(i + 1) + ": Joint=" + String(joint_angle, 2) + "°");
-        Serial.println("    Agonist: actual=" + String(actual_agonist, 2) + "°, pred=" +
-                       String(predicted_agonist, 2) + "°, err=" + String(error_agonist, 3) + "°");
-        Serial.println("    Antagonist: actual=" + String(actual_antagonist, 2) +
-                       "°, pred=" + String(predicted_antagonist, 2) +
-                       "°, err=" + String(error_antagonist, 3) + "°");
-      }
-
-      LOG_INFO("MEAN ERROR:");
-      Serial.println("  Agonist: " + String(total_error_agonist / test_points, 3) + "°");
-      Serial.println("  Antagonist: " + String(total_error_antagonist / test_points, 3) + "°");
 
       // Compute and store safe limits for joint and motors
       const float PHYSICAL_SAFETY_MARGIN  = 1.0f;  // Margin on physical joint limits
@@ -245,17 +178,8 @@ bool JointController::calculateLinearEquationsFromMappingData() {
 
       linear_equations[dof].limits_valid = true;
 
-      LOG_INFO("SAVED LIMITS:");
-      Serial.println("  Joint safe: [" + String(linear_equations[dof].joint_safe_min, 2) + ", " +
-                     String(linear_equations[dof].joint_safe_max, 2) + "]°");
-      Serial.println("  Agonist safe: [" + String(linear_equations[dof].agonist_safe_min, 2) +
-                     ", " + String(linear_equations[dof].agonist_safe_max, 2) + "]°");
-      Serial.println("  Antagonist safe: [" +
-                     String(linear_equations[dof].antagonist_safe_min, 2) + ", " +
-                     String(linear_equations[dof].antagonist_safe_max, 2) + "]°");
-
     } else {
-      LOG_ERROR("ERROR: Unable to compute linear equations for DOF " + String(dof));
+      // Failed to compute equations for this DOF
       linear_equations[dof].calculated       = false;
       linear_equations[dof].agonist.valid    = false;
       linear_equations[dof].antagonist.valid = false;
@@ -264,33 +188,10 @@ bool JointController::calculateLinearEquationsFromMappingData() {
     }
   }
 
+  // Signal Core0 to save equations to flash and print summary
+  // Flash save is handled by Core0 to avoid crash (Serial conflicts)
   if (all_calculated) {
-    LOG_INFO("\n=== SUMMARY OF COMPUTED EQUATIONS ===");
-    for (int dof = 0; dof < config.dof_count; dof++) {
-      if (linear_equations[dof].calculated) {
-        Serial.println("DOF " + String(dof) + " (" + String(config.dofs[dof].name) + "):");
-        Serial.println("  Agonist: y = " + String(linear_equations[dof].agonist.slope, 4) +
-                       "*x + " + String(linear_equations[dof].agonist.intercept, 4) +
-                       " (R²=" + String(linear_equations[dof].agonist.r_squared, 3) + ")");
-        Serial.println("  Antagonist: y = " + String(linear_equations[dof].antagonist.slope, 4) +
-                       "*x + " + String(linear_equations[dof].antagonist.intercept, 4) +
-                       " (R²=" + String(linear_equations[dof].antagonist.r_squared, 3) + ")");
-      }
-    }
-    Serial.println("======================================");
-  }
-
-  // NEW: Automatically save equations to flash if all have been computed
-  if (all_calculated) {
-    LOG_INFO("\n=== AUTOMATIC FLASH SAVE ===");
-    if (saveLinearEquationsToFlash()) {
-      Serial.println("✓ Equations lineari saved automaticamente in flash");
-      LOG_INFO("\xE2\x9C\x93 System ready for standalone use without Pi5");
-      LOG_INFO("\xE2\x9C\x93 At next boot the equations will be loaded automatically");
-    } else {
-      LOG_ERROR("\xE2\x9C\x97 ERROR in automatic saving of equations");
-    }
-    Serial.println("==========================================");
+    _pending_flash_save = true;
   }
 
   return all_calculated;

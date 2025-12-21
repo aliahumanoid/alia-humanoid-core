@@ -50,6 +50,8 @@ const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
 bool init_prg = true;
 // Flash operation synchronization flag
 volatile bool flash_operation_in_progress = false;
+// Movement in progress flag (Core1 sets during movement, Core0 pauses streaming)
+volatile bool movement_in_progress = false;
 // command array
 char command[100];
 // SERVO CANBUS (J4 CAN_Servo - Motor communication)

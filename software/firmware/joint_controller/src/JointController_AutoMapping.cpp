@@ -852,18 +852,12 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
 // Transfer data from automatic mapping to DofMappingData_t structures
 // IMPORTANT NOTE: These are RAW temporary data that will be replaced
 // by PROCESSED (interpolated and extrapolated) data sent by Pi5
+// NOTE: This function is called from Core1 - NO Serial/LOG calls allowed!
 bool JointController::transferAutoMappingData(const AutoMappingState_t &auto_mapping_state) {
-  LOG_INFO("Transferring auto-mapping data...");
-  LOG_DEBUG("NOTE: These are RAW data to be replaced by processed data from Pi5");
-
   // Verify that there's data to transfer
   if (auto_mapping_state.acquired_points_count <= 0) {
-    LOG_ERROR("ERROR: No auto-mapping data available to transfer");
     return false;
   }
-
-  Serial.println("Transferring " + String(auto_mapping_state.acquired_points_count) +
-                 " raw points for " + String(auto_mapping_state.dof_count) + " DOF");
 
   // For each DOF, extract data and populate it in DofMappingData_t structure
   for (int dof = 0; dof < auto_mapping_state.dof_count; dof++) {
@@ -888,7 +882,7 @@ bool JointController::transferAutoMappingData(const AutoMappingState_t &auto_map
     }
 
     if (agonist_motor_index == -1 || antagonist_motor_index == -1) {
-      LOG_ERROR("Motors not found for DOF " + String(dof));
+      // Motors not found for DOF - skip silently (Core1 context)
       continue;
     }
 
@@ -928,21 +922,10 @@ bool JointController::transferAutoMappingData(const AutoMappingState_t &auto_map
       }
     }
 
-    Serial.println("DOF " + String(dof) + ": transferred " + String(mapping_data.size) +
-                   " points (sorted)");
-    LOG_INFO("  Joint angle range: " + String(mapping_data.joint_data[0], 2) + " -> " +
-                   String(mapping_data.joint_data[mapping_data.size - 1], 2));
-    LOG_INFO("  Agonist motor range: " + String(mapping_data.agonist_data[0], 2) + " -> " +
-                   String(mapping_data.agonist_data[mapping_data.size - 1], 2));
-    LOG_INFO("  Antagonist motor range: " + String(mapping_data.antagonist_data[0], 2) +
-                   " -> " + String(mapping_data.antagonist_data[mapping_data.size - 1], 2));
-
-    // CORRECTION: Set flag to indicate that data is ready to send
+    // Set flag to indicate that data is ready to send
     mapping_data.flag = 1;
-    LOG_DEBUG("DOF " + String(dof) + " flag set to 1 - data ready to send");
   }
 
-  LOG_INFO("Data transfer completed successfully");
   return true;
 }
 

@@ -526,9 +526,11 @@ class CanManager:
         arb_id = message.arbitration_id
         data = bytes(message.data)
 
-        # Encoder stream data (0x410) - high-frequency, minimal logging
-        if arb_id == 0x410 and len(data) >= 8:
-            self._handle_encoder_stream(data, message.timestamp)
+        # Encoder stream data (0x410-0x41F) - high-frequency, minimal logging
+        # Each joint uses 0x410 + joint_id to allow filtering when multiple controllers on bus
+        if 0x410 <= arb_id <= 0x41F and len(data) >= 8:
+            joint_id = arb_id - 0x410
+            self._handle_encoder_stream(data, message.timestamp, joint_id)
             return  # Don't log every frame
         
         # Debug: log any received CAN frame (throttled)
@@ -589,9 +591,12 @@ class CanManager:
             except Exception:  # pragma: no cover - optional socket broadcast
                 self.logger.debug("SocketIO emit failed for CAN status", exc_info=True)
 
-    def _handle_encoder_stream(self, data: bytes, timestamp: float) -> None:
+    def _handle_encoder_stream(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
         """
-        Decode encoder stream data from CAN (0x410).
+        Decode encoder stream data from CAN (0x410-0x41F).
+        
+        Each joint sends on its own CAN ID: 0x410 + joint_id
+        This allows filtering when multiple controllers are on the bus.
         
         Frame format (8 bytes):
         - Bytes 0-1: int16_t dof0_angle (0.01° resolution, 0x7FFF = invalid)
@@ -612,11 +617,16 @@ class CanManager:
             else:
                 angles_deg.append(raw / 100.0)
         
-        # Build data point
+        # Look up joint name from ID
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id}")
+        
+        # Build data point with joint info
         data_point = {
             "timestamp": timestamp,
             "t_ms": t_ms,
             "angles_deg": angles_deg,
+            "joint_id": joint_id,
+            "joint_name": joint_name,
         }
         
         # Buffer data
@@ -624,15 +634,21 @@ class CanManager:
             self._encoder_stream_data.append(data_point)
             buffer_size = len(self._encoder_stream_data)
         
-        # Debug log (throttled to 1Hz)
+        # Debug log (throttled to 1Hz per joint)
         self._stats["rx_frames"] += 1
-        if self._stats["rx_frames"] % 50 == 0:  # Log every 50 frames (~1/sec at 50Hz)
-            self._log_can_info(f"Encoder stream RX: {buffer_size} buffered, DOF0={angles_deg[0]:.2f}°" if angles_deg[0] else f"Encoder stream RX: {buffer_size} buffered")
+        # Track frames per joint for separate throttling
+        if not hasattr(self, '_rx_frames_per_joint'):
+            self._rx_frames_per_joint = {}
+        self._rx_frames_per_joint[joint_id] = self._rx_frames_per_joint.get(joint_id, 0) + 1
+        
+        if self._rx_frames_per_joint[joint_id] % 50 == 0:  # Log every 50 frames per joint
+            dof0_str = f"{angles_deg[0]:.2f}°" if angles_deg[0] is not None else "N/A"
+            self._log_can_info(f"Encoder stream RX [{joint_name}] (0x{0x410+joint_id:03X}): {buffer_size} buffered, DOF0={dof0_str}")
         
         # Invoke callback if set (for real-time UI updates)
         if self._encoder_stream_callback:
             try:
-                self._encoder_stream_callback(angles_deg, t_ms)
+                self._encoder_stream_callback(angles_deg, t_ms, joint_id)
             except Exception:
                 pass  # Don't let callback errors break streaming
         

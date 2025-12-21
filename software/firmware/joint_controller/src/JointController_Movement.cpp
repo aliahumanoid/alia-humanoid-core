@@ -31,6 +31,7 @@ extern volatile bool emergency_stop_requested;
 extern volatile bool buffer_ready[2];
 extern volatile int active_buffer;
 extern volatile uint8_t pending_command_type;
+extern volatile bool movement_in_progress;
 
 // External variables for movement sample logging
 extern queue_t movement_sample_queue;
@@ -105,6 +106,18 @@ public:
   }
 };
 
+// RAII guard for movement_in_progress flag
+// Ensures the flag is always reset when the function exits (normal or error)
+class MovementInProgressGuard {
+public:
+  MovementInProgressGuard() {
+    movement_in_progress = true;
+  }
+  ~MovementInProgressGuard() {
+    movement_in_progress = false;
+  }
+};
+
 // ============================================================================
 // CASCADE MOVEMENT CONTROL
 // ============================================================================
@@ -116,6 +129,10 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
                                                      uint64_t sampling_period, bool verbose,
                                                      int max_torque, bool smooth_transition) {
 
+  // RAII guard: Signal Core0 to suspend Serial streaming during movement
+  // Automatically resets to false when function exits (any return path)
+  MovementInProgressGuard movement_guard;
+  
   MovementExitCode exit_code = MOVEMENT_COMPLETED;
 
   // === SMOOTH TRANSITION HANDLING ===
@@ -958,6 +975,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
     LOG_INFO("=====================================");
   }
 
+  // movement_in_progress is automatically reset by MovementInProgressGuard destructor
   return MovementResult(exit_code, "");
 }
 

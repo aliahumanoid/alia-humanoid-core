@@ -105,6 +105,10 @@ extern DirectEncoders directEncoders;
 // Core0 sets this before flash operations, Core1 checks and waits in RAM
 extern volatile bool flash_operation_in_progress;
 
+// Movement in progress flag
+// Core1 sets this during movement execution to pause Serial streaming on Core0
+extern volatile bool movement_in_progress;
+
 // Time offset for synchronization
 extern float time_offset;
 
