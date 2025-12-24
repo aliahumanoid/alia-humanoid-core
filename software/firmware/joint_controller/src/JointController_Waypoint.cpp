@@ -86,17 +86,22 @@ bool JointController::executeWaypointMovement() {
     if (dof_state == WaypointState::IDLE) {
       // Mark PID reset needed for when this DOF becomes active
       pid_reset_needed[dof] = true;
+      prev_dof_state[dof] = WaypointState::IDLE;
       continue; // Skip this DOF entirely
     }
     
-    // === RESET PID STATE when transitioning to active movement ===
-    // This prevents integral windup from previous sequences
-    if (pid_reset_needed[dof]) {
+    // === RESET PID STATE when transitioning from IDLE to MOVING ===
+    // Only reset when starting a NEW sequence (from IDLE), not when resuming from HOLDING
+    // This prevents integral windup from previous sequences while preserving
+    // the integral compensation during HOLDING (needed for gravity/friction)
+    bool just_started_from_idle = (prev_dof_state[dof] == WaypointState::IDLE) && 
+                                   (dof_state == WaypointState::MOVING);
+    if (pid_reset_needed[dof] && just_started_from_idle) {
       error_integral_q[dof] = 0.0f;
       previous_error_q[dof] = 0.0f;
       delta_theta[dof] = 0.0f;
       pid_reset_needed[dof] = false;
-      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID state reset");
+      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID state reset (new sequence)");
     }
     
     // === CHECK WAYPOINT TRANSITION ===
@@ -121,10 +126,12 @@ bool JointController::executeWaypointMovement() {
         // Check if more waypoints available
         WaypointEntry peek_next;
         if (!waypoint_buffer_peek(dof, peek_next)) {
-          // No more waypoints - will enter HOLDING mode in outer loop
-          // Always log this important transition
-          LOG_INFO("[Waypoint] DOF " + String(dof) + " sequence complete (" + 
-                    String(next_waypoint.target_angle_deg, 2) + "°), entering HOLDING");
+          // No more waypoints - this was the LAST waypoint
+          // prev_angle is now set to this waypoint's target
+          float final_target = waypoint_buffer_prev_angle(dof);
+          LOG_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " + 
+                    String(next_waypoint.target_angle_deg, 2) + "° → prev_angle=" + 
+                    String(final_target, 2) + "°");
           waypoint_log_counter[dof] = 0; // Reset for next sequence
         }
       }
@@ -162,13 +169,10 @@ bool JointController::executeWaypointMovement() {
         q_des = prev_angle + (target_angle - prev_angle) * progress;
         
       } else {
-        // HOLDING mode - maintain current position
-        // Use shared DOF angles (updated by Core0)
-        if (!shared_dof_angles.valid[dof]) {
-          LOG_WARN("[Waypoint] Invalid encoder for DOF " + String(dof) + ", skipping");
-          continue;
-        }
-        q_des = shared_dof_angles.angles[dof];
+        // HOLDING mode - maintain TARGET position (last waypoint target)
+        // Use the last waypoint's target angle, NOT current encoder reading
+        // This ensures the PID keeps trying to reach and hold the target
+        q_des = waypoint_buffer_prev_angle(dof);
       }
       
       // Read current angle from shared state (updated by Core0)
@@ -198,12 +202,17 @@ bool JointController::executeWaypointMovement() {
         dof_state = WaypointState::HOLDING; // Update local variable for this cycle
         
         if (just_entered_holding) {
+          // Get the holding target for this DOF
+          float holding_target = waypoint_buffer_prev_angle(dof);
           LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
+          
+          // Send structured message for UI display
+          Serial.println("HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
+          
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
           // for steady-state error, and resetting it would cause drift.
-          // Only mark reset needed for when a NEW sequence starts (from IDLE).
-          pid_reset_needed[dof] = true;
+          // PID will be reset only when a new sequence starts from IDLE.
         }
       }
       

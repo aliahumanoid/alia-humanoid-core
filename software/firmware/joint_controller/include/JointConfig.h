@@ -39,13 +39,13 @@ constexpr float PID_DEFAULT_INNER_KD = 0.25f;
 
 // Default outer loop PID values (position control)
 // These control the joint position using the cascade architecture
-constexpr float PID_DEFAULT_OUTER_KP = 1.0f;
-constexpr float PID_DEFAULT_OUTER_KI = 0.1f;
+constexpr float PID_DEFAULT_OUTER_KP = 15.0f;
+constexpr float PID_DEFAULT_OUTER_KI = 0.01f;
 constexpr float PID_DEFAULT_OUTER_KD = 0.05f;
 
 // Default tendon control parameters
 constexpr float PID_DEFAULT_STIFFNESS_DEG = 1.0f;  // Tendon pretension reference (degrees)
-constexpr float PID_DEFAULT_CASCADE       = 0.25f; // Cascade influence factor (0.0-1.0)
+constexpr float PID_DEFAULT_CASCADE       = 1.0f;  // Cascade influence factor (0.0-1.0)
 
 // ============================================================================
 // SYSTEM LIMITS

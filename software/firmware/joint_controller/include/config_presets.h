@@ -370,7 +370,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .name           = "plantar_flexion",
                 .invert         = false,
                 .is_agonist     = true, // Agonist motor for plantar flexion
-                .max_torque     = 500.0f,
+                .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
@@ -382,7 +382,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .name           = "dorsal_flexion",
                 .invert         = false,
                 .is_agonist     = false, // Antagonist motor for dorsal flexion
-                .max_torque     = 500.0f,
+                .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
@@ -394,7 +394,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .name           = "inversion",
                 .invert         = false,
                 .is_agonist     = true, // Agonist motor for inversion
-                .max_torque     = 500.0f,
+                .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
@@ -406,7 +406,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .name           = "eversion",
                 .invert         = false,
                 .is_agonist     = false, // Antagonist motor for eversion
-                .max_torque     = 500.0f,
+                .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,

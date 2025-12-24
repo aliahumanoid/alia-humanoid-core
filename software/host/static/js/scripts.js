@@ -382,6 +382,14 @@ $(document).ready(function() {
         }
     });
 
+    // Listener for holding target updates (when DOF enters HOLDING mode)
+    socket.on('holding_target', function(data) {
+        if (data && data.dof !== undefined && data.angle !== undefined) {
+            // Update holding target display for this DOF
+            updateHoldingTargetDisplay(data.dof, data.angle);
+        }
+    });
+
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
@@ -583,6 +591,64 @@ function updateJointPanels() {
         $("#hipPanel").show();
         // Hip temporal charts are initialized automatically
     }
+    
+    // Update sinusoid parameters for the selected joint
+    updateSinusoidParamsForJoint(joint);
+}
+
+/**
+ * Update sinusoid parameters UI based on selected joint configuration
+ * Preloads min/max values from joint_config and shows/hides DOF containers
+ */
+function updateSinusoidParamsForJoint(jointName) {
+    if (!jointName) return;
+    
+    // Get joint config from jointConfigData (loaded from server via fetchJointConfig)
+    const jointKey = jointName.toLowerCase();
+    const jointConfig = jointConfigData?.joints?.[jointKey];
+    
+    if (!jointConfig) {
+        console.warn('Joint config not found for:', jointKey);
+        return;
+    }
+    
+    const dofCount = jointConfig.dof_count || 1;
+    const dofs = jointConfig.dofs || [];
+    
+    // Show/hide DOF containers based on dof_count
+    $("#sinusoidDof1Container").toggle(dofCount >= 2);
+    $("#sinusoidDof2Container").toggle(dofCount >= 3);
+    
+    // Update each DOF with values from config
+    dofs.forEach((dof, index) => {
+        const prefix = `#sinusoidDof${index}`;
+        
+        // Update DOF name
+        $(`${prefix}Name`).text(dof.name?.replace(/_/g, '-') || `DOF ${index}`);
+        
+        // Calculate sensible oscillation range (use auto_mapping range or 50% of full range)
+        let minOsc, maxOsc;
+        if (dof.auto_mapping_min_angle !== undefined && dof.auto_mapping_max_angle !== undefined) {
+            // Use auto-mapping range as default oscillation range
+            minOsc = dof.auto_mapping_min_angle;
+            maxOsc = dof.auto_mapping_max_angle;
+        } else {
+            // Use 50% of full range centered on middle
+            const center = (dof.min_angle + dof.max_angle) / 2;
+            const halfRange = (dof.max_angle - dof.min_angle) / 4;
+            minOsc = center - halfRange;
+            maxOsc = center + halfRange;
+        }
+        
+        $(`${prefix}Min`).val(Math.round(minOsc));
+        $(`${prefix}Max`).val(Math.round(maxOsc));
+        
+        // Set DOF 0 active by default, others unchecked
+        $(`${prefix}Active`).prop('checked', index === 0);
+    });
+    
+    // Update stats display
+    updateSinusoidStats();
 }
 
 function initializeCharts() {
@@ -2121,152 +2187,188 @@ function sendCanWaypointCommand() {
 }
 
 /**
- * Update sinusoid statistics display when slider changes
- * @param {number} points - Number of waypoints
+ * Update sinusoid statistics display when parameters change
+ * @param {number} points - Number of waypoints (optional, reads from UI if not provided)
  */
 function updateSinusoidStats(points) {
-    const numPoints = parseInt(points, 10) || 50;
-    const totalDuration = 6000; // 6 seconds in ms
+    const numPoints = parseInt(points, 10) || parseInt($("#waypointDensity").val(), 10) || 50;
+    const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
+    const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
+    const totalDurationSeconds = cycleDurationSeconds * numCycles;
+    const totalDurationMs = totalDurationSeconds * 1000;
     
     // Calculate interval between points
-    const intervalMs = Math.round(totalDuration / (numPoints - 1));
+    const intervalMs = Math.round(totalDurationMs / (numPoints - 1));
     
-    // Calculate frequency in Hz (1000ms / interval)
-    const freqHz = (1000 / intervalMs).toFixed(1);
+    // Calculate frequency in Hz (1 / cycle duration)
+    const freqHz = (1 / cycleDurationSeconds).toFixed(2);
     
     // Calculate points per second
-    const pointsPerSecond = (numPoints / (totalDuration / 1000)).toFixed(1);
+    const pointsPerSecond = (numPoints / totalDurationSeconds).toFixed(1);
     
     // Update UI elements
-    document.getElementById('waypointDensityValue').textContent = numPoints;
-    document.getElementById('waypointIntervalValue').textContent = intervalMs;
-    document.getElementById('waypointFreqValue').textContent = freqHz;
-    document.getElementById('waypointRateValue').textContent = pointsPerSecond;
+    const updateElement = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+    };
+    
+    updateElement('waypointDensityValue', numPoints);
+    updateElement('waypointIntervalValue', intervalMs);
+    updateElement('waypointFreqValue', (1000 / intervalMs).toFixed(1));
+    updateElement('waypointRateValue', pointsPerSecond);
+    updateElement('sinusoidCycleDurationDisplay', cycleDurationSeconds);
+    updateElement('sinusoidCyclesDisplay', numCycles);
+    updateElement('sinusoidTotalDuration', totalDurationSeconds);
+    updateElement('sinusoidTotalDurationDisplay', totalDurationSeconds);
+    updateElement('sinusoidFreqDisplay', freqHz);
 }
 
 function sendCanWaypointSequence() {
     const joint = $("#jointSelect").val();
-    const dofIndex = parseInt($("#canWaypointDof").val(), 10);
     const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
     
-    // Get waypoint density from UI (default 10 points)
-    const waypointDensity = parseInt($("#waypointDensity").val(), 10) || 10;
+    // Get parameters from UI
+    const waypointDensity = parseInt($("#waypointDensity").val(), 10) || 50;
+    const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
+    const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
+    const totalDurationSeconds = cycleDurationSeconds * numCycles;
+    const totalDuration = totalDurationSeconds * 1000;  // Convert to ms
+    const frequency = 1 / cycleDurationSeconds;  // Hz (frequency of a single cycle)
 
     if (!joint) {
         appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
         return;
     }
-
+    
+    // Get active DOFs and their oscillation parameters
+    const activeDofs = [];
+    for (let dof = 0; dof < 3; dof++) {
+        const isActive = $(`#sinusoidDof${dof}Active`).is(':checked');
+        const container = $(`#sinusoidDof${dof}Container`);
+        
+        if (isActive && (dof === 0 || container.is(':visible'))) {
+            const minAngle = parseFloat($(`#sinusoidDof${dof}Min`).val()) || -10;
+            const maxAngle = parseFloat($(`#sinusoidDof${dof}Max`).val()) || 10;
+            const centerAngle = (minAngle + maxAngle) / 2;
+            const amplitude = (maxAngle - minAngle) / 2;
+            
+            activeDofs.push({
+                index: dof,
+                centerAngle: centerAngle,
+                amplitude: amplitude,
+                minAngle: minAngle,
+                maxAngle: maxAngle
+            });
+        }
+    }
+    
+    if (activeDofs.length === 0) {
+        appendStatusMessage("⚠️ Select at least one DOF for the sinusoid test.");
+        return;
+    }
 
     // Disable button during sequence
     const btn = $("#sendCanWaypointSequenceBtn");
     btn.prop('disabled', true);
     btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
 
-    // Generate a sinusoidal trajectory with configurable density
-    // Parameters:
-    // - Center angle: 45° (middle of KNEE range 0°-100°)
-    // - Amplitude: 10° (oscillates between 35° and 55°)
-    // - Duration: 6 seconds (2 complete cycles = 0.33 Hz)
-    // - Number of points: waypointDensity
-    const centerAngle = 45;
-    const amplitude = 10;
-    const totalDuration = 6000;  // 6 seconds in ms
-    const numCycles = 2;  // 2 complete sine waves
-    const frequency = numCycles / (totalDuration / 1000);  // Hz
+    // Calculate timing parameters for batch sending
+    // Server sends with 2ms delay between waypoints
+    const BATCH_DELAY_MS = 2;
+    const batchSendTime = waypointDensity * BATCH_DELAY_MS;
+    // Initial offset must be > batch send time + network latency + processing margin
+    const initialOffset = Math.max(500, batchSendTime + 300);
     
-    // Generate waypoints along the sinusoid
-    // Calculate initial offset based on number of waypoints:
-    // - With staggerTime of 5ms and 500 waypoints, it takes 2.5s to send all
-    // - We need to ensure the first waypoint arrives AFTER we've sent enough
-    //   waypoints to fill the buffer and stay ahead of execution
-    // - Formula: max(500ms, staggerTime * waypointDensity * 0.5)
-    //   This ensures we have at least half the waypoints sent before execution starts
-    const staggerTime = Math.max(5, Math.min(50, 300 / waypointDensity));
-    const sendTime = staggerTime * waypointDensity;  // Total time to send all waypoints
-    const initialOffset = Math.max(500, Math.min(3000, sendTime * 0.6));  // 60% of send time, max 3s
-    
+    // Generate waypoints for all active DOFs
     const testSequence = [];
     for (let i = 0; i < waypointDensity; i++) {
-        const t = (i / (waypointDensity - 1)) * totalDuration;  // Time in ms (0 to totalDuration)
+        const t = (i / (waypointDensity - 1)) * totalDuration;  // Time in ms
         const tSeconds = t / 1000;
-        // Sinusoidal angle: center + amplitude * sin(2π * frequency * t)
-        const angle = centerAngle + amplitude * Math.sin(2 * Math.PI * frequency * tSeconds);
+        
+        // Calculate angles for each active DOF
+        const angles = [null, null, null];
+        activeDofs.forEach(dof => {
+            // Sinusoidal angle: center + amplitude * sin(2π * frequency * t)
+            const angle = dof.centerAngle + dof.amplitude * Math.sin(2 * Math.PI * frequency * tSeconds);
+            angles[dof.index] = Math.round(angle * 100) / 100;
+        });
+        
         testSequence.push({
-            angle: Math.round(angle * 100) / 100,  // Round to 2 decimal places
-            arrival_offset_ms: Math.round(t) + initialOffset  // Add initial offset
+            angles: angles,
+            arrival_offset_ms: Math.round(t) + initialOffset
         });
     }
+    
+    // Add FINAL waypoint at center position (0° for symmetric oscillation)
+    // This ensures the sequence ends exactly at center
+    // With batch mode, order is guaranteed so we push to the end
+    const finalAngles = [null, null, null];
+    activeDofs.forEach(dof => {
+        finalAngles[dof.index] = dof.centerAngle;  // Exactly at center
+    });
+    testSequence.push({
+        angles: finalAngles,
+        arrival_offset_ms: totalDuration + initialOffset + 200  // 200ms after last sinusoid point
+    });
     
     // Calculate delta-t between points for logging
     const deltaT = Math.round(totalDuration / (waypointDensity - 1));
     
-    appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint} DOF${dofIndex}`);
-    appendStatusMessage(`   📊 ${waypointDensity} waypoints, Δt=${deltaT}ms, duration=${totalDuration/1000}s`);
-    appendStatusMessage(`   📈 ${numCycles} cycles @ ${frequency.toFixed(2)}Hz, amplitude=±${amplitude}°`);
+    // Log active DOFs info
+    const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
+    const centerInfo = activeDofs.map(d => `${d.centerAngle}°`).join(', ');
+    appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint}`);
+    appendStatusMessage(`   📊 ${testSequence.length} waypoints (${waypointDensity} sinusoid + 1 final), Δt=${deltaT}ms`);
+    appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total @ ${frequency.toFixed(2)}Hz`);
+    appendStatusMessage(`   🎯 Active: ${dofInfo}`);
+    appendStatusMessage(`   🏁 Final target: ${centerInfo}`);
 
-    // === PARALLEL SENDING with setTimeout ===
-    const INTRA_WAYPOINT_DELAY = 0.5;  // 0.5ms between waypoints
+    // === DETERMINISTIC BATCH SENDING ===
+    // Send all waypoints in a single request - server forwards them sequentially
+    // This guarantees order and completeness (no lost waypoints)
     
-    let successCount = 0;
-    let failCount = 0;
-
-    appendStatusMessage(`📡 Sending ${testSequence.length} waypoints (${INTRA_WAYPOINT_DELAY}ms interval)...`);
-
-    // Stream ALL waypoints with staggered setTimeout
-    testSequence.forEach((waypoint, idx) => {
-        setTimeout(() => {
-            // Multi-DOF format: all DOFs in one frame
-            // For single-DOF test, we set only the target DOF and null for others
-            const angles = [null, null, null];
-            angles[dofIndex] = waypoint.angle;
+    appendStatusMessage(`📡 Sending ${testSequence.length} waypoints (batch mode)...`);
+    
+    // Convert to batch format
+    const batchPayload = testSequence.map(wp => ({
+        angles_deg: wp.angles,
+        t_offset_ms: wp.arrival_offset_ms
+    }));
+    
+    $.ajax({
+        url: '/can/waypoint_batch',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            joint: joint,
+            waypoints: batchPayload
+        })
+    }).done(response => {
+        if (response.status === 'success') {
+            const result = response.result || {};
+            appendStatusMessage(`📤 Batch sent: ${result.success}/${result.total} waypoints queued`);
             
-            $.ajax({
-                url: '/can/waypoint',
-                method: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify({
-                    joint: joint,
-                    angles_deg: angles,
-                    t_offset_ms: waypoint.arrival_offset_ms  // Already includes initialOffset
-                })
-            }).done(response => {
-                if (response.status === 'success') {
-                    successCount++;
-                } else {
-                    failCount++;
-                    appendStatusMessage(`  ✗ Waypoint ${idx + 1} failed: ${response.message}`);
-                }
-                
-                // Log progress every 50 waypoints
-                if ((idx + 1) % 50 === 0 || idx === testSequence.length - 1) {
-                    appendStatusMessage(`  📊 Sent ${idx + 1}/${testSequence.length} waypoints`);
-                }
-                
-                // Last waypoint sent
-                if (idx === testSequence.length - 1) {
-                    appendStatusMessage(`📤 All ${successCount}/${testSequence.length} waypoints queued. Executing...`);
-                    // Wait for sequence to complete
-                    const waitTime = totalDuration + initialOffset + 500;
-                    setTimeout(() => {
-                        btn.prop('disabled', false);
-                        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
-                        appendStatusMessage(`✅ Sequence execution complete`);
-                    }, waitTime);
-                }
-            }).fail(xhr => {
-                failCount++;
-                const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-                appendStatusMessage(`  ✗ Waypoint ${idx + 1} error: ${message}`);
-                
-                if (idx === testSequence.length - 1) {
-                    setTimeout(() => {
-                        btn.prop('disabled', false);
-                        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
-                    }, 500);
-                }
-            });
-        }, idx * INTRA_WAYPOINT_DELAY);
+            if (result.errors > 0) {
+                appendStatusMessage(`  ⚠️ ${result.errors} waypoints failed`);
+            }
+            
+            // Wait for sequence to complete
+            const waitTime = totalDuration + initialOffset + 500;
+            setTimeout(() => {
+                btn.prop('disabled', false);
+                btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
+                appendStatusMessage(`✅ Sequence execution complete`);
+            }, waitTime);
+        } else {
+            appendStatusMessage(`❌ Batch failed: ${response.message}`);
+            btn.prop('disabled', false);
+            btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Batch error: ${message}`);
+        btn.prop('disabled', false);
+        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
     });
 }
 
@@ -4386,6 +4488,45 @@ function fetchCanEncoderStreamData() {
 }
 
 /**
+ * Update holding target display for a specific DOF
+ * Shows the target angle that the controller is trying to hold
+ */
+function updateHoldingTargetDisplay(dof, angle) {
+    const jointType = $("#jointSelect").val()?.split('_')[0]?.toLowerCase() || '';
+    
+    // Update the holding target indicator
+    const indicatorId = `holdingTarget${jointType}Dof${dof}`;
+    let indicator = document.getElementById(indicatorId);
+    
+    // If indicator doesn't exist, create it dynamically near the encoder display
+    if (!indicator) {
+        // Try to find the encoder display span for this DOF
+        const encoderSpanId = `${jointType}EncoderDof${dof}`;
+        const encoderSpan = document.getElementById(encoderSpanId);
+        
+        if (encoderSpan && encoderSpan.parentElement) {
+            // Create holding target indicator
+            indicator = document.createElement('span');
+            indicator.id = indicatorId;
+            indicator.className = 'ml-2 text-xs font-medium text-purple-600 bg-purple-100 px-2 py-0.5 rounded';
+            indicator.title = 'Target angle being held by controller';
+            encoderSpan.parentElement.appendChild(indicator);
+        }
+    }
+    
+    if (indicator) {
+        indicator.innerHTML = `🎯 ${angle.toFixed(2)}°`;
+        
+        // Flash animation to show update
+        indicator.classList.add('animate-pulse');
+        setTimeout(() => indicator.classList.remove('animate-pulse'), 500);
+    }
+    
+    // Also log to console for debugging
+    console.log(`[HOLDING] DOF ${dof} → ${angle.toFixed(2)}°`);
+}
+
+/**
  * Update encoder display from CAN stream data
  * Updates both the numeric display and the chart
  */
@@ -4579,8 +4720,8 @@ function stopEncoderTest(jointType = null) {
         encoderStreamingViaCan = false;
     } else {
         // Stop serial test
-        sendCommand('stop-test-encoder');
-        appendStatusMessage(`⏹️ Encoder test stopped for ${currentEncoderJointType}`);
+    sendCommand('stop-test-encoder');
+    appendStatusMessage(`⏹️ Encoder test stopped for ${currentEncoderJointType}`);
     }
     
     // Aggiorna UI
@@ -5027,11 +5168,14 @@ function fetchJointConfig() {
                 console.log('Joint configuration loaded:', jointConfigData);
                 updateCanMotionJoint();
                 
+                // Initialize sinusoid parameters for the currently selected joint
+                const initialJoint = $("#jointSelect").val();
+                updateSinusoidParamsForJoint(initialJoint);
+                
                 // Initialize sinusoid stats with default slider value
                 updateSinusoidStats($("#waypointDensity").val() || 50);
                 
                 // Show expected mapping grid for initially selected joint
-                const initialJoint = $("#jointSelect").val();
                 showExpectedMappingGrid(initialJoint);
             } else {
                 console.error('Failed to load joint config:', response);

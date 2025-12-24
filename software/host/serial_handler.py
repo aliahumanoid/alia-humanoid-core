@@ -268,6 +268,22 @@ class SerialHandler:
                 # Other RSP messages
                 logger.info(f"Received RSP message: {line}")
                 self.status_message.append(f"{line}")
+        elif line.startswith("HOLDING_TARGET:"):
+            # Parse holding target message: HOLDING_TARGET:DOF=X:ANGLE=Y
+            self.status_message.append(f"🎯 {line}")
+            try:
+                parts = line.split(":")
+                dof = int(parts[1].split("=")[1])
+                angle = float(parts[2].split("=")[1])
+                logger.info(f"🎯 DOF {dof} holding at {angle:.2f}°")
+                # Emit SocketIO event for UI
+                if self.socketio:
+                    self.socketio.emit("holding_target", {
+                        "dof": dof,
+                        "angle": angle
+                    }, namespace="/movement")
+            except (IndexError, ValueError) as e:
+                logger.warning(f"Failed to parse HOLDING_TARGET message: {line}, error: {e}")
         elif line.strip():  # Messages without EVT: prefix are only logged
             logger.info(f"Received non-EVT message (logged only): {line}")
             # Add to status messages for UI anyway, but with distinctive prefix

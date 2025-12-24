@@ -480,6 +480,62 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": f"Unable to send multi-DOF waypoint: {exc}"
             }), 500
 
+    @app.route('/can/waypoint_batch', methods=['POST'])
+    def send_can_waypoint_batch():
+        """
+        Send a batch of waypoints in deterministic order.
+        
+        Request body:
+        {
+            "joint": "ANKLE_RIGHT",
+            "waypoints": [
+                {"angles_deg": [10.0, 5.0, null], "t_offset_ms": 500},
+                {"angles_deg": [15.0, 7.0, null], "t_offset_ms": 600},
+                ...
+            ]
+        }
+        
+        All waypoints are sent sequentially, guaranteeing order and completeness.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        joint = data.get('joint')
+        waypoints = data.get('waypoints', [])
+
+        if not joint:
+            return jsonify({
+                "status": "error",
+                "message": "Missing 'joint' parameter"
+            }), 400
+
+        if not waypoints or not isinstance(waypoints, list):
+            return jsonify({
+                "status": "error",
+                "message": "Missing or invalid 'waypoints' array"
+            }), 400
+
+        try:
+            result = can_manager.send_waypoint_batch(joint, waypoints)
+            return jsonify({
+                "status": "success",
+                "message": f"Batch of {result['success']}/{result['total']} waypoints sent to {joint}",
+                "result": result
+            })
+        except ValueError as exc:
+            return jsonify({
+                "status": "error",
+                "message": str(exc)
+            }), 400
+        except Exception as exc:
+            logger.exception("Failed to send waypoint batch")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to send waypoint batch: {exc}"
+            }), 500
+
     @app.route('/can/emergency_stop', methods=['POST'])
     def send_can_emergency_stop():
         unavailable = can_unavailable_response()

@@ -320,6 +320,57 @@ class CanManager:
             "format": "multi_dof",
         }
 
+    def send_waypoint_batch(
+        self,
+        joint_name: str,
+        waypoints: list,
+        inter_waypoint_delay_ms: float = 2.0,
+    ) -> Dict[str, Any]:
+        """
+        Send a batch of waypoints sequentially (deterministic order).
+        
+        This ensures all waypoints arrive in order and none are lost.
+        A small delay between waypoints prevents CAN buffer overflow.
+        
+        Args:
+            joint_name: Joint name (e.g., 'ANKLE_RIGHT')
+            waypoints: List of dicts with 'angles_deg' and 't_offset_ms'
+            inter_waypoint_delay_ms: Delay between waypoints (default 2ms)
+        
+        Returns:
+            Dict with batch statistics
+        """
+        import time
+        self._ensure_connection()
+        
+        success_count = 0
+        error_count = 0
+        delay_sec = inter_waypoint_delay_ms / 1000.0
+        
+        for i, wp in enumerate(waypoints):
+            try:
+                angles = wp.get('angles_deg', [None, None, None])
+                t_offset = wp.get('t_offset_ms', 0)
+                self.send_multi_dof_waypoint(joint_name, angles, t_offset)
+                success_count += 1
+                
+                # Small delay to prevent CAN buffer overflow
+                if i < len(waypoints) - 1:
+                    time.sleep(delay_sec)
+                    
+            except Exception as exc:
+                self.logger.warning(f"Waypoint {i} failed: {exc}")
+                error_count += 1
+        
+        self.logger.info(f"Waypoint batch complete: {success_count}/{len(waypoints)} sent")
+        
+        return {
+            "total": len(waypoints),
+            "success": success_count,
+            "errors": error_count,
+            "joint": joint_name,
+        }
+
     # ------------------------------------------------------------------
     # Telemetry accessors
     # ------------------------------------------------------------------

@@ -319,19 +319,22 @@ void sendEncoderStreamData() {
   uint32_t can_id = CAN_ID_ENCODER_STREAM_DATA + ACTIVE_JOINT;
   uint8_t result = CAN_HOST.sendMsgBuf(can_id, 0, sizeof(frame), (uint8_t*)&frame);
   
-  // Debug log (throttled to 1Hz to avoid flooding)
+  // Debug log (throttled to 10s to reduce log spam)
   static uint32_t last_debug_log = 0;
   static uint32_t frame_count = 0;
+  static uint32_t error_count = 0;
   frame_count++;
+  if (result != CAN_OK) error_count++;
   
-  if (millis() - last_debug_log > 1000) {
-    if (result == CAN_OK) {
-      LOG_INFO("[CAN] Encoder stream: " + String(frame_count) + " frames sent, last DOF0=" + 
+  if (millis() - last_debug_log > 10000) {
+    if (error_count == 0) {
+      LOG_DEBUG("[CAN] Encoder stream: " + String(frame_count) + " frames/10s, DOF0=" + 
                String(frame.dof0_angle / 100.0f, 2) + "°");
     } else {
-      LOG_WARN("[CAN] Encoder stream send failed, result=" + String(result));
+      LOG_WARN("[CAN] Encoder stream: " + String(error_count) + "/" + String(frame_count) + " errors");
     }
     frame_count = 0;
+    error_count = 0;
     last_debug_log = millis();
   }
 }
@@ -357,10 +360,13 @@ void pollHostCan() {
     return;
   }
   
-  // Debug: log that we received something on Host CAN
+  // Debug: log Host CAN activity (throttled to 30s to reduce spam)
   static uint32_t last_rx_log = 0;
-  if (millis() - last_rx_log > 1000) {  // Log max once per second
-    LOG_INFO("[CAN_HOST] Message available on J5");
+  static uint32_t rx_count = 0;
+  rx_count++;
+  if (millis() - last_rx_log > 30000) {
+    LOG_DEBUG("[CAN_HOST] " + String(rx_count) + " messages received in 30s");
+    rx_count = 0;
     last_rx_log = millis();
   }
 

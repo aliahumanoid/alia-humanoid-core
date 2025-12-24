@@ -1209,9 +1209,98 @@
 
                         <!-- Sinusoid Test Section -->
                         <div class="bg-purple-50 p-4 rounded-md border border-purple-200">
-                            <h3 class="text-sm font-semibold text-purple-700 mb-2">
+                            <h3 class="text-sm font-semibold text-purple-700 mb-3">
                                 <i class="fas fa-wave-square mr-1"></i>Sinusoidal Trajectory Test
                             </h3>
+                            
+                            <!-- DOF Oscillation Parameters -->
+                            <div id="sinusoidDofParams" class="mb-3 space-y-2">
+                                <!-- DOF 0 -->
+                                <div class="bg-white p-2 rounded border border-purple-100">
+                                    <div class="flex items-center justify-between mb-1">
+                                        <label class="text-xs font-semibold text-purple-700">
+                                            <input type="checkbox" id="sinusoidDof0Active" checked class="mr-1">
+                                            DOF 0
+                                        </label>
+                                        <span id="sinusoidDof0Name" class="text-xs text-purple-500">-</span>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label class="text-xs text-gray-500">Min (°)</label>
+                                            <input type="number" id="sinusoidDof0Min" value="-10" step="1"
+                                                class="w-full px-2 py-1 text-sm border rounded">
+                                        </div>
+                                        <div>
+                                            <label class="text-xs text-gray-500">Max (°)</label>
+                                            <input type="number" id="sinusoidDof0Max" value="10" step="1"
+                                                class="w-full px-2 py-1 text-sm border rounded">
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- DOF 1 -->
+                                <div id="sinusoidDof1Container" class="bg-white p-2 rounded border border-purple-100">
+                                    <div class="flex items-center justify-between mb-1">
+                                        <label class="text-xs font-semibold text-purple-700">
+                                            <input type="checkbox" id="sinusoidDof1Active" class="mr-1">
+                                            DOF 1
+                                        </label>
+                                        <span id="sinusoidDof1Name" class="text-xs text-purple-500">-</span>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label class="text-xs text-gray-500">Min (°)</label>
+                                            <input type="number" id="sinusoidDof1Min" value="-10" step="1"
+                                                class="w-full px-2 py-1 text-sm border rounded">
+                                        </div>
+                                        <div>
+                                            <label class="text-xs text-gray-500">Max (°)</label>
+                                            <input type="number" id="sinusoidDof1Max" value="10" step="1"
+                                                class="w-full px-2 py-1 text-sm border rounded">
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- DOF 2 (for HIP) -->
+                                <div id="sinusoidDof2Container" class="bg-white p-2 rounded border border-purple-100 hidden">
+                                    <div class="flex items-center justify-between mb-1">
+                                        <label class="text-xs font-semibold text-purple-700">
+                                            <input type="checkbox" id="sinusoidDof2Active" class="mr-1">
+                                            DOF 2
+                                        </label>
+                                        <span id="sinusoidDof2Name" class="text-xs text-purple-500">-</span>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label class="text-xs text-gray-500">Min (°)</label>
+                                            <input type="number" id="sinusoidDof2Min" value="-10" step="1"
+                                                class="w-full px-2 py-1 text-sm border rounded">
+                                        </div>
+                                        <div>
+                                            <label class="text-xs text-gray-500">Max (°)</label>
+                                            <input type="number" id="sinusoidDof2Max" value="10" step="1"
+                                                class="w-full px-2 py-1 text-sm border rounded">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Timing Parameters -->
+                            <div class="grid grid-cols-2 gap-2 mb-2">
+                                <div>
+                                    <label class="text-xs text-purple-600">Cycle Duration (s)</label>
+                                    <input type="number" id="sinusoidCycleDuration" value="3" min="0.5" max="30" step="0.5"
+                                        class="w-full px-2 py-1 text-sm border rounded" onchange="updateSinusoidStats()">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-purple-600">Number of Cycles</label>
+                                    <input type="number" id="sinusoidCycles" value="2" min="1" max="20" step="1"
+                                        class="w-full px-2 py-1 text-sm border rounded" onchange="updateSinusoidStats()">
+                                </div>
+                            </div>
+                            <div class="bg-purple-100 text-purple-800 text-xs px-2 py-1 rounded mb-3 text-center font-medium">
+                                ⏱️ Total Duration: <span id="sinusoidTotalDuration" class="font-bold">6</span>s
+                            </div>
+                            
+                            <!-- Waypoint Density -->
                             <div class="mb-3">
                                 <label for="waypointDensity" class="block text-xs font-medium text-purple-600 mb-1">
                                     Waypoint Density: <span id="waypointDensityValue" class="font-bold">50</span> points
@@ -1228,13 +1317,14 @@
                                     <span>250 pts</span>
                                 </div>
                             </div>
+                            
                             <button id="sendCanWaypointSequenceBtn" type="button"
                                 class="w-full px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600 font-medium"
-                                title="Send a 6-second sinusoidal test sequence (2 cycles, ±10° around 45°)">
+                                title="Send sinusoidal test sequence with configured parameters">
                                 <i class="fas fa-play mr-1"></i>Execute Sinusoid Test
                             </button>
                             <p class="text-xs text-purple-500 mt-2 text-center" id="sinusoidDescription">
-                                6s duration • 2 cycles @ 0.33Hz • ±10° amplitude • <span id="waypointRateValue">8.3</span> pts/s
+                                <span id="sinusoidCyclesDisplay">2</span> cycles × <span id="sinusoidCycleDurationDisplay">3</span>s = <span id="sinusoidTotalDurationDisplay">6</span>s • <span id="sinusoidFreqDisplay">0.33</span>Hz • <span id="waypointRateValue">8.3</span> pts/s
                             </p>
                         </div>
 
