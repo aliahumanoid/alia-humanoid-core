@@ -43,6 +43,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 // Priority Level 1: System Control
 #define CAN_ID_TIME_SYNC 0x002
 #define CAN_ID_ENCODER_STREAM_CTRL 0x003  // Encoder streaming control (start/stop)
+#define CAN_ID_PID_DIAG_CTRL 0x004        // PID diagnostics streaming control
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -52,9 +53,13 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 // Priority Level 4: Status Feedback
 #define CAN_ID_STATUS_BASE 0x400    // 0x400-0x4FF for status (NEW: was 0x200)
 #define CAN_ID_ENCODER_STREAM_DATA 0x410  // Encoder streaming data (Controller → Host)
+#define CAN_ID_PID_DIAG_DATA 0x420        // PID diagnostics (target, error) per joint
+#define CAN_ID_PID_TORQUE_DATA 0x430      // PID torque commands per joint
+#define CAN_ID_MOVEMENT_METRICS 0x440     // Movement metrics (per DOF, sent on HOLDING)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
+#define PID_DIAG_INTERVAL_US 50000        // 50ms = 20Hz for diagnostics
 
 // Sentinel value for unused DOF in Multi-DOF waypoint
 #define MULTI_DOF_UNUSED 0x7FFF
@@ -340,6 +345,135 @@ void sendEncoderStreamData() {
 }
 
 /**
+ * @brief Send PID diagnostic data via CAN for tuning
+ * 
+ * Sends two CAN frames:
+ * - Frame 1 (0x420 + joint): target and error for each DOF
+ * - Frame 2 (0x430 + joint): torque commands for each DOF pair
+ * 
+ * Called from core1_loop() at ~20Hz when diagnostic streaming is active.
+ */
+void sendPIDDiagStreamData() {
+  if (!pid_diag_stream_active) return;
+  if (!pid_diagnostics.valid) return;
+  
+  // Check timing - only send every PID_DIAG_INTERVAL_US (50ms = 20Hz)
+  static uint32_t last_send_us = 0;
+  uint32_t now_us = time_us_32();
+  if ((now_us - last_send_us) < PID_DIAG_INTERVAL_US) {
+    return;
+  }
+  last_send_us = now_us;
+  
+  extern MCP_CAN CAN_HOST;
+  
+  // Frame 1: Target and Error (0x420 + joint)
+  // Format: [target0, target1, error0, error1] - 8 bytes for 2 DOFs
+  struct __attribute__((packed)) {
+    int16_t target0;   // Target DOF0 (°×100)
+    int16_t target1;   // Target DOF1 (°×100)
+    int16_t error0;    // Error DOF0 (°×100)
+    int16_t error1;    // Error DOF1 (°×100)
+  } frame1;
+  
+  frame1.target0 = pid_diagnostics.target_deg_x100[0];
+  frame1.target1 = pid_diagnostics.target_deg_x100[1];
+  frame1.error0 = pid_diagnostics.error_deg_x100[0];
+  frame1.error1 = pid_diagnostics.error_deg_x100[1];
+  
+  uint32_t can_id_1 = CAN_ID_PID_DIAG_DATA + ACTIVE_JOINT;
+  CAN_HOST.sendMsgBuf(can_id_1, 0, sizeof(frame1), (uint8_t*)&frame1);
+  
+  // Frame 2: Torque commands (0x430 + joint)
+  // Format: [torqueA0, torqueB0, torqueA1, torqueB1] - 8 bytes for 2 DOFs
+  struct __attribute__((packed)) {
+    int16_t torque_A0;  // Torque agonist DOF0
+    int16_t torque_B0;  // Torque antagonist DOF0
+    int16_t torque_A1;  // Torque agonist DOF1
+    int16_t torque_B1;  // Torque antagonist DOF1
+  } frame2;
+  
+  frame2.torque_A0 = pid_diagnostics.torque_A[0];
+  frame2.torque_B0 = pid_diagnostics.torque_B[0];
+  frame2.torque_A1 = pid_diagnostics.torque_A[1];
+  frame2.torque_B1 = pid_diagnostics.torque_B[1];
+  
+  uint32_t can_id_2 = CAN_ID_PID_TORQUE_DATA + ACTIVE_JOINT;
+  CAN_HOST.sendMsgBuf(can_id_2, 0, sizeof(frame2), (uint8_t*)&frame2);
+}
+
+/**
+ * @brief Send movement metrics for a specific DOF via CAN
+ * 
+ * Called when metrics_ready[dof] is true (set when movement enters HOLDING).
+ * Sends 2 CAN frames with complete movement performance data.
+ * 
+ * Frame format (0x440 + joint*3 + dof):
+ * Frame 1: [rise_time, settle_time, overshoot, sse] (8 bytes)
+ * Frame 2: [max_torque_A, max_torque_B, duration, flags, dof] (8 bytes)
+ */
+void sendMovementMetrics(uint8_t dof) {
+  if (dof >= 3 || !metrics_ready[dof]) return;
+  
+  extern MCP_CAN CAN_HOST;
+  MovementMetrics& m = last_movement_metrics[dof];
+  
+  // Frame 1: Timing and accuracy metrics
+  struct __attribute__((packed)) {
+    uint16_t rise_time_ms;     // Rise time in ms
+    uint16_t settling_time_ms; // Settling time in ms
+    int16_t overshoot_x100;    // Overshoot % × 100
+    int16_t sse_x100;          // Steady-state error × 100
+  } frame1;
+  
+  frame1.rise_time_ms = m.rise_time_ms;
+  frame1.settling_time_ms = m.settling_time_ms;
+  frame1.overshoot_x100 = m.overshoot_x100;
+  frame1.sse_x100 = m.sse_x100;
+  
+  // CAN ID: 0x440 + joint*3 + dof (unique per joint per DOF)
+  uint32_t can_id_1 = CAN_ID_MOVEMENT_METRICS + ACTIVE_JOINT * 3 + dof;
+  CAN_HOST.sendMsgBuf(can_id_1, 0, sizeof(frame1), (uint8_t*)&frame1);
+  
+  // Frame 2: Torque and movement info (use next ID)
+  struct __attribute__((packed)) {
+    int16_t max_torque_A;        // Peak torque agonist
+    int16_t max_torque_B;        // Peak torque antagonist
+    uint16_t duration_ms;        // Total movement duration
+    uint8_t dof_index;           // DOF index
+    uint8_t flags;               // Status flags
+  } frame2;
+  
+  frame2.max_torque_A = m.max_torque_A;
+  frame2.max_torque_B = m.max_torque_B;
+  frame2.duration_ms = m.movement_duration_ms;
+  frame2.dof_index = m.dof_index;
+  frame2.flags = m.flags;
+  
+  // Use ID + 0x10 offset for second frame
+  uint32_t can_id_2 = CAN_ID_MOVEMENT_METRICS + 0x10 + ACTIVE_JOINT * 3 + dof;
+  CAN_HOST.sendMsgBuf(can_id_2, 0, sizeof(frame2), (uint8_t*)&frame2);
+  
+  // Clear the ready flag
+  metrics_ready[dof] = false;
+  
+  LOG_INFO("[CAN] Metrics sent for DOF " + String(dof) + ": rise=" + String(m.rise_time_ms) + 
+           "ms, settle=" + String(m.settling_time_ms) + "ms");
+}
+
+/**
+ * @brief Check and send any pending movement metrics
+ * Called from core1_loop() to dispatch metrics when ready
+ */
+void checkAndSendMetrics() {
+  for (uint8_t dof = 0; dof < 3; dof++) {
+    if (metrics_ready[dof]) {
+      sendMovementMetrics(dof);
+    }
+  }
+}
+
+/**
  * @brief Poll Host CAN bus for commands from Jetson/Host
  * 
  * This function polls the dedicated Host CAN bus (J5 CAN_Controller) for:
@@ -399,6 +533,17 @@ void pollHostCan() {
           LOG_INFO("[CAN_HOST] Encoder streaming STARTED @ 50Hz");
         } else {
           LOG_INFO("[CAN_HOST] Encoder streaming STOPPED");
+        }
+      }
+    } else if (rx_id == CAN_ID_PID_DIAG_CTRL) {
+      // PID diagnostics streaming control: byte 0 = 0x01 start, 0x00 stop
+      if (len >= 1) {
+        bool start = (buf[0] == 0x01);
+        pid_diag_stream_active = start;
+        if (start) {
+          LOG_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ 20Hz");
+        } else {
+          LOG_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
         }
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
@@ -463,6 +608,14 @@ void core1_loop() {
     // Send encoder data at 200Hz if streaming is active
     // This reads from shared_dof_angles (updated by Core0)
     sendEncoderStreamData();
+    
+    // === PID DIAGNOSTICS STREAMING VIA CAN ===
+    // Send PID target/error/torque data at 20Hz for tuning
+    sendPIDDiagStreamData();
+    
+    // === MOVEMENT METRICS VIA CAN ===
+    // Send performance metrics when a movement completes (enters HOLDING)
+    checkAndSendMetrics();
 
     // === WAYPOINT-BASED MOVEMENT ===
     // Execute waypoint trajectory for all DOFs (if waypoints available)

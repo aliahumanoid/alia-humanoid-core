@@ -104,6 +104,23 @@ bool JointController::executeWaypointMovement() {
       LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID state reset (new sequence)");
     }
     
+    // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
+    // Detect when a new movement starts:
+    // - IDLE → MOVING: first movement ever
+    // - HOLDING → MOVING: new movement after previous one completed
+    bool new_movement_started = (prev_dof_state[dof] != WaypointState::MOVING) && 
+                                 (dof_state == WaypointState::MOVING);
+    
+    if (metrics_tracking_enabled && new_movement_started && dof < 3) {
+      WaypointEntry first_wp;
+      if (waypoint_buffer_peek(dof, first_wp)) {
+        float start_angle = shared_dof_angles.valid[dof] ? shared_dof_angles.angles[dof] : 0.0f;
+        metrics_tracker[dof].reset(start_angle, first_wp.target_angle_deg);
+        LOG_DEBUG("[Metrics] DOF " + String(dof) + " tracking started: " + 
+                  String(start_angle, 2) + "° → " + String(first_wp.target_angle_deg, 2) + "°");
+      }
+    }
+    
     // === CHECK WAYPOINT TRANSITION ===
     // Check if we've reached the current waypoint target
     WaypointEntry next_waypoint;
@@ -213,6 +230,26 @@ bool JointController::executeWaypointMovement() {
           // against static loads (gravity, friction). The integral was compensating
           // for steady-state error, and resetting it would cause drift.
           // PID will be reset only when a new sequence starts from IDLE.
+          
+          // === METRICS: Finalize movement metrics ===
+          if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
+            // Update final target (in case it changed during movement)
+            metrics_tracker[dof].target_angle_deg = holding_target;
+            
+            // Finalize and store metrics
+            MovementMetrics m = metrics_tracker[dof].finalize();
+            m.dof_index = dof;
+            last_movement_metrics[dof] = m;
+            metrics_ready[dof] = true;
+            
+            // Stop tracking
+            metrics_tracker[dof].tracking_active = false;
+            
+            LOG_INFO("[Metrics] DOF " + String(dof) + " complete: rise=" + 
+                     String(m.rise_time_ms) + "ms, settle=" + String(m.settling_time_ms) + 
+                     "ms, overshoot=" + String(m.overshoot_x100 / 100.0f, 1) + 
+                     "%, sse=" + String(m.sse_x100 / 100.0f, 2) + "°");
+          }
         }
       }
       
@@ -288,6 +325,65 @@ bool JointController::executeWaypointMovement() {
       delta_theta[dof] = constrain(delta_theta[dof], -MAX_DELTA_THETA, MAX_DELTA_THETA);
       
       previous_error_q[dof] = error;
+      
+      // === METRICS: Update tracking during movement ===
+      if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
+        MetricsTracker& mt = metrics_tracker[dof];
+        float abs_error = fabs(error);
+        uint32_t elapsed_ms = millis() - mt.movement_start_ms;
+        
+        // Track maximum error
+        if (abs_error > mt.max_error_deg) {
+          mt.max_error_deg = abs_error;
+        }
+        
+        // Rise time: detect when we first reach 90% of target
+        if (!mt.reached_90_percent) {
+          float range = fabs(mt.target_angle_deg - mt.start_angle_deg);
+          float progress_toward_target = fabs(q_curr - mt.start_angle_deg);
+          if (range > 0.1f && progress_toward_target >= range * 0.9f) {
+            mt.reached_90_percent = true;
+            mt.rise_time_ms = elapsed_ms;
+          }
+        }
+        
+        // Overshoot: detect if we go past target
+        float overshoot_amount = (q_curr - mt.target_angle_deg) * mt.movement_direction;
+        if (overshoot_amount > 0 && overshoot_amount > mt.max_overshoot_deg) {
+          mt.max_overshoot_deg = overshoot_amount;
+          mt.overshoot_detected = true;
+        }
+        
+        // Settling: track when we enter and stay in ±0.5° band
+        const float SETTLING_BAND = 0.5f;
+        bool in_band = abs_error < SETTLING_BAND;
+        
+        if (in_band) {
+          if (!mt.in_settling_band) {
+            // Just entered the band
+            mt.in_settling_band = true;
+            mt.settling_enter_ms = elapsed_ms;
+            mt.settling_stable_count = 0;
+          } else {
+            // Still in band - increment stable count
+            mt.settling_stable_count++;
+            // After 10 consecutive cycles in band (~100ms), consider settled
+            if (mt.settling_stable_count >= 10 && mt.settling_time_ms == 0) {
+              mt.settling_time_ms = mt.settling_enter_ms;
+            }
+          }
+        } else {
+          // Exited band - reset
+          mt.in_settling_band = false;
+          mt.settling_stable_count = 0;
+        }
+        
+        // SSE tracking: accumulate error samples during HOLDING
+        if (is_holding) {
+          mt.sse_accumulator += abs_error;
+          mt.sse_sample_count++;
+        }
+      }
     }
     
     // === INNER LOOP @ 500 Hz (Motor Control) ===
@@ -463,7 +559,38 @@ bool JointController::executeWaypointMovement() {
     agonist->setTorque((int)command_A);
     antagonist->setTorque((int)command_B);
     
+    // === UPDATE PID DIAGNOSTICS for CAN streaming ===
+    // Store values for diagnostic stream (read by sendPIDDiagStreamData in core1.cpp)
+    // Use theta_0_joint (target from interpolation) and shared_dof_angles (current reading)
+    if (dof < 3) {
+      float q_curr_diag = shared_dof_angles.angles[dof];
+      pid_diagnostics.target_deg_x100[dof] = (int16_t)(theta_0_joint * 100.0f);
+      pid_diagnostics.error_deg_x100[dof] = (int16_t)((theta_0_joint - q_curr_diag) * 100.0f);
+      pid_diagnostics.torque_A[dof] = (int16_t)command_A;
+      pid_diagnostics.torque_B[dof] = (int16_t)command_B;
+      
+      // === METRICS: Track torque for movement metrics ===
+      if (metrics_tracking_enabled && metrics_tracker[dof].tracking_active) {
+        int16_t abs_A = abs((int16_t)command_A);
+        int16_t abs_B = abs((int16_t)command_B);
+        if (abs_A > metrics_tracker[dof].max_torque_A) {
+          metrics_tracker[dof].max_torque_A = abs_A;
+        }
+        if (abs_B > metrics_tracker[dof].max_torque_B) {
+          metrics_tracker[dof].max_torque_B = abs_B;
+        }
+        // Accumulate torque integral (energy proxy) - saturate to avoid overflow
+        uint32_t torque_sum = abs_A + abs_B;
+        if (metrics_tracker[dof].torque_integral < 0xFFFFFFFF - torque_sum) {
+          metrics_tracker[dof].torque_integral += torque_sum;
+        }
+      }
+    }
   }
+  
+  // Mark diagnostics as valid after processing all DOFs
+  pid_diagnostics.last_update_ms = millis();
+  pid_diagnostics.valid = true;
   
   // Reset safety check counter after processing all DOFs
   // This ensures all DOFs in HOLDING mode are checked in the same cycle

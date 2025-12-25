@@ -77,6 +77,16 @@ unsigned long last_encoder_test_time = 0;
 volatile bool encoder_stream_can_active = false;
 volatile uint32_t encoder_stream_last_send_us = 0;
 
+// PID diagnostics for tuning (updated by Core1 waypoint loop)
+volatile PIDDiagnostics pid_diagnostics = {0};
+volatile bool pid_diag_stream_active = false;
+
+// Movement metrics for PID tuning evaluation
+MetricsTracker metrics_tracker[3] = {};
+MovementMetrics last_movement_metrics[3] = {};
+volatile bool metrics_ready[3] = {false, false, false};
+volatile bool metrics_tracking_enabled = true;  // Enable by default
+
 // Global variable for auto‑mapping state
 AutoMappingState_t auto_mapping_state = {0};
 

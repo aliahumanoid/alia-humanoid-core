@@ -639,6 +639,59 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             "data": data  # List of {timestamp, t_ms, angles_deg}
         })
 
+    # ===============================================================
+    # CAN PID DIAGNOSTICS STREAMING ROUTES
+    # ===============================================================
+
+    @app.route('/can/pid_diag/start', methods=['POST'])
+    def start_pid_diag_stream():
+        """
+        Start PID diagnostics streaming via CAN at 20Hz.
+        
+        The controller will send target/error on 0x420 and torque on 0x430.
+        Data is emitted via SocketIO events: 'pid_diag' and 'pid_torque'.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            result = can_manager.start_pid_diag_stream()
+            return jsonify({
+                "status": "success",
+                "message": "PID diagnostics streaming started @ 20Hz",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to start PID diagnostics streaming")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to start PID diagnostics streaming: {exc}"
+            }), 500
+
+    @app.route('/can/pid_diag/stop', methods=['POST'])
+    def stop_pid_diag_stream():
+        """
+        Stop PID diagnostics streaming via CAN.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            result = can_manager.stop_pid_diag_stream()
+            return jsonify({
+                "status": "success",
+                "message": "PID diagnostics streaming stopped",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to stop PID diagnostics streaming")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to stop PID diagnostics streaming: {exc}"
+            }), 500
+
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
         popped = serial_manager.pop_status_message()

@@ -7,6 +7,8 @@ let mappingChart;
 let mappingCharts = {}; // Object to manage multiple charts for DOFs
 let movementChartsMultiDof = {}; // Multi-DOF movement charts
 let outputChart;
+let pidErrorChart, pidTorqueChart;  // PID diagnostics charts
+let pidDiagStreamActive = false;    // PID diagnostics streaming state
 let measurementData = {
     timestamps: [],
     jointData: {}
@@ -390,6 +392,26 @@ $(document).ready(function() {
         }
     });
 
+    // Listener for PID diagnostics data (target/error)
+    socket.on('pid_diag', function(data) {
+        if (!pidDiagStreamActive) return;
+        updatePidDiagDisplay(data);
+        updatePidErrorChart(data);
+    });
+
+    // Listener for PID torque data
+    socket.on('pid_torque', function(data) {
+        if (!pidDiagStreamActive) return;
+        updatePidTorqueDisplay(data);
+        updatePidTorqueChart(data);
+    });
+
+    // Listener for movement metrics (received when DOF enters HOLDING)
+    socket.on('movement_metrics', function(data) {
+        console.log('Movement metrics received:', data);
+        updateMovementMetricsDisplay(data);
+    });
+
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
@@ -747,6 +769,53 @@ function initializeCharts() {
     
     const hipDof1Ctx = document.getElementById('hipDof1Chart').getContext('2d');
     hipDof1Chart = new Chart(hipDof1Ctx, timeChartConfig('DOF 1', 'rgba(153, 102, 255, 1)'));
+
+    // PID Diagnostics Charts
+    const pidErrorCtx = document.getElementById('pidErrorChart');
+    if (pidErrorCtx) {
+        pidErrorChart = new Chart(pidErrorCtx.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    { label: 'DOF 0 Error', data: [], borderColor: 'rgba(255, 99, 132, 1)', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'DOF 1 Error', data: [], borderColor: 'rgba(54, 162, 235, 1)', borderWidth: 2, fill: false, pointRadius: 0 }
+                ]
+            },
+            options: {
+                responsive: true,
+                animation: false,
+                scales: {
+                    x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Time (s)' }, min: 0, max: 30 },
+                    y: { title: { display: true, text: 'Error (°)' } }
+                },
+                plugins: { legend: { position: 'top' } }
+            }
+        });
+    }
+
+    const pidTorqueCtx = document.getElementById('pidTorqueChart');
+    if (pidTorqueCtx) {
+        pidTorqueChart = new Chart(pidTorqueCtx.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    { label: 'DOF 0 Torque A', data: [], borderColor: 'rgba(75, 192, 192, 1)', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'DOF 0 Torque B', data: [], borderColor: 'rgba(255, 159, 64, 1)', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'DOF 1 Torque A', data: [], borderColor: 'rgba(153, 102, 255, 1)', borderWidth: 2, fill: false, pointRadius: 0, borderDash: [5,5] },
+                    { label: 'DOF 1 Torque B', data: [], borderColor: 'rgba(255, 99, 132, 1)', borderWidth: 2, fill: false, pointRadius: 0, borderDash: [5,5] }
+                ]
+            },
+            options: {
+                responsive: true,
+                animation: false,
+                scales: {
+                    x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Time (s)' }, min: 0, max: 30 },
+                    y: { title: { display: true, text: 'Torque' } }
+                },
+                plugins: { legend: { position: 'top' } }
+            }
+        });
+    }
 
     // Initialize multi-DOF mapping charts system
     initializeMappingChartsSystem();
@@ -4524,6 +4593,280 @@ function updateHoldingTargetDisplay(dof, angle) {
     
     // Also log to console for debugging
     console.log(`[HOLDING] DOF ${dof} → ${angle.toFixed(2)}°`);
+}
+
+// ============================================================================
+// PID DIAGNOSTICS FUNCTIONS
+// ============================================================================
+
+let pidDiagStartTime = null;
+
+/**
+ * Start PID diagnostics streaming
+ */
+function startPidDiagStream() {
+    $.ajax({
+        url: '/can/pid_diag/start',
+        type: 'POST'
+    }).done(response => {
+        if (response.status === 'success') {
+            pidDiagStreamActive = true;
+            pidDiagStartTime = Date.now();
+            appendStatusMessage('📊 PID diagnostics streaming started @ 20Hz');
+            $('#startPidDiagBtn').prop('disabled', true);
+            $('#stopPidDiagBtn').prop('disabled', false);
+        } else {
+            appendStatusMessage(`❌ Failed to start PID diagnostics: ${response.message}`);
+        }
+    }).fail(xhr => {
+        appendStatusMessage(`❌ PID diagnostics error: ${xhr.responseJSON?.message || 'Unknown error'}`);
+    });
+}
+
+/**
+ * Stop PID diagnostics streaming
+ */
+function stopPidDiagStream() {
+    $.ajax({
+        url: '/can/pid_diag/stop',
+        type: 'POST'
+    }).done(response => {
+        pidDiagStreamActive = false;
+        appendStatusMessage('📊 PID diagnostics streaming stopped');
+        $('#startPidDiagBtn').prop('disabled', false);
+        $('#stopPidDiagBtn').prop('disabled', true);
+    }).fail(xhr => {
+        appendStatusMessage(`❌ PID diagnostics stop error: ${xhr.responseJSON?.message || 'Unknown error'}`);
+    });
+}
+
+/**
+ * Clear PID diagnostics charts
+ */
+function clearPidDiagCharts() {
+    if (pidErrorChart) {
+        pidErrorChart.data.datasets.forEach(ds => ds.data = []);
+        pidErrorChart.update('none');
+    }
+    if (pidTorqueChart) {
+        pidTorqueChart.data.datasets.forEach(ds => ds.data = []);
+        pidTorqueChart.update('none');
+    }
+    pidDiagStartTime = Date.now();
+    appendStatusMessage('📊 PID diagnostics charts cleared');
+}
+
+// ============================================================================
+// MOVEMENT METRICS DISPLAY
+// ============================================================================
+
+// History of scores for each DOF
+let metricsHistory = [];
+const MAX_METRICS_HISTORY = 10;
+
+/**
+ * Update the movement metrics display when new data arrives
+ */
+function updateMovementMetricsDisplay(data) {
+    if (!data) return;
+    
+    const dof = data.dof;
+    const score = data.score || 0;
+    
+    // Get color based on score
+    const getScoreColor = (s) => {
+        if (s >= 80) return 'text-green-500';
+        if (s >= 60) return 'text-yellow-500';
+        if (s >= 40) return 'text-orange-500';
+        return 'text-red-500';
+    };
+    
+    const getBgColor = (s) => {
+        if (s >= 80) return 'border-green-300 bg-green-50';
+        if (s >= 60) return 'border-yellow-300 bg-yellow-50';
+        if (s >= 40) return 'border-orange-300 bg-orange-50';
+        return 'border-red-300 bg-red-50';
+    };
+    
+    // Update the appropriate DOF card
+    const prefix = `#metricsDof${dof}`;
+    
+    // Update score with color
+    $(prefix + 'Score')
+        .text(score + '/100')
+        .removeClass('text-gray-400 text-green-500 text-yellow-500 text-orange-500 text-red-500')
+        .addClass(getScoreColor(score));
+    
+    // Update card border color
+    $(prefix)
+        .removeClass('border-gray-200 border-green-300 border-yellow-300 border-orange-300 border-red-300 bg-gray-50 bg-green-50 bg-yellow-50 bg-orange-50 bg-red-50')
+        .addClass(getBgColor(score));
+    
+    // Update individual metrics
+    $(prefix + 'Rise').text(data.rise_time_ms + 'ms');
+    $(prefix + 'Settle').text(data.settling_time_ms + 'ms');
+    $(prefix + 'Overshoot').text(data.overshoot_pct?.toFixed(1) + '%');
+    $(prefix + 'Sse').text(data.sse_deg?.toFixed(2) + '°');
+    $(prefix + 'Torque').text(Math.max(Math.abs(data.max_torque_A || 0), Math.abs(data.max_torque_B || 0)));
+    $(prefix + 'Duration').text(data.duration_ms + 'ms');
+    
+    // Add to history
+    metricsHistory.unshift({
+        dof: dof,
+        score: score,
+        timestamp: new Date().toLocaleTimeString()
+    });
+    
+    // Trim history
+    if (metricsHistory.length > MAX_METRICS_HISTORY) {
+        metricsHistory = metricsHistory.slice(0, MAX_METRICS_HISTORY);
+    }
+    
+    // Update history display
+    updateMetricsHistoryDisplay();
+    
+    // Log to status
+    appendStatusMessage(`🏆 DOF ${dof} movement complete: Score ${score}/100 (rise=${data.rise_time_ms}ms, settle=${data.settling_time_ms}ms)`);
+}
+
+/**
+ * Update the metrics history display
+ */
+function updateMetricsHistoryDisplay() {
+    const $history = $('#metricsHistory');
+    
+    if (metricsHistory.length === 0) {
+        $history.html('<span class="text-gray-400">No data yet</span>');
+        return;
+    }
+    
+    const getScoreBadgeClass = (score) => {
+        if (score >= 80) return 'bg-green-500';
+        if (score >= 60) return 'bg-yellow-500';
+        if (score >= 40) return 'bg-orange-500';
+        return 'bg-red-500';
+    };
+    
+    const badges = metricsHistory.map((m, i) => {
+        const isLatest = i === 0;
+        const sizeClass = isLatest ? 'px-3 py-1 text-sm' : 'px-2 py-0.5';
+        const ringClass = isLatest ? 'ring-2 ring-offset-1 ring-gray-400' : '';
+        return `<span class="inline-flex items-center ${getScoreBadgeClass(m.score)} text-white rounded ${sizeClass} ${ringClass}" title="DOF${m.dof} @ ${m.timestamp}">
+            D${m.dof}: ${m.score}
+        </span>`;
+    }).join('');
+    
+    $history.html(badges);
+}
+
+/**
+ * Update PID diag display (target/error values)
+ */
+function updatePidDiagDisplay(data) {
+    if (!data) return;
+    
+    // Update target displays
+    if (data.target_deg) {
+        $('#pidDiagTarget0').text(data.target_deg[0]?.toFixed(2) + '°' || '--°');
+        $('#pidDiagTarget1').text(data.target_deg[1]?.toFixed(2) + '°' || '--°');
+    }
+    
+    // Update error displays
+    if (data.error_deg) {
+        const error0 = data.error_deg[0];
+        const error1 = data.error_deg[1];
+        
+        // Color code based on error magnitude
+        const formatError = (err) => {
+            if (err === undefined || err === null) return '--°';
+            const absErr = Math.abs(err);
+            const color = absErr < 0.5 ? 'text-green-600' : (absErr < 2 ? 'text-orange-600' : 'text-red-600');
+            return `<span class="${color}">${err.toFixed(2)}°</span>`;
+        };
+        
+        $('#pidDiagError0').html(formatError(error0));
+        $('#pidDiagError1').html(formatError(error1));
+    }
+}
+
+/**
+ * Update PID torque display
+ */
+function updatePidTorqueDisplay(data) {
+    if (!data) return;
+    
+    if (data.torque_A) {
+        $('#pidDiagTorqueA0').text(data.torque_A[0] || '--');
+        $('#pidDiagTorqueA1').text(data.torque_A[1] || '--');
+    }
+    if (data.torque_B) {
+        $('#pidDiagTorqueB0').text(data.torque_B[0] || '--');
+        $('#pidDiagTorqueB1').text(data.torque_B[1] || '--');
+    }
+}
+
+/**
+ * Update PID error chart with new data
+ */
+function updatePidErrorChart(data) {
+    if (!pidErrorChart || !data.error_deg) return;
+    
+    const timeSeconds = (Date.now() - pidDiagStartTime) / 1000;
+    
+    // Add data points
+    pidErrorChart.data.datasets[0].data.push({ x: timeSeconds, y: data.error_deg[0] });
+    pidErrorChart.data.datasets[1].data.push({ x: timeSeconds, y: data.error_deg[1] });
+    
+    // Limit data points
+    const maxPoints = 300;
+    pidErrorChart.data.datasets.forEach(ds => {
+        while (ds.data.length > maxPoints) ds.data.shift();
+    });
+    
+    // Update x-axis range to follow data
+    if (timeSeconds > 30) {
+        pidErrorChart.options.scales.x.min = timeSeconds - 30;
+        pidErrorChart.options.scales.x.max = timeSeconds;
+    }
+    
+    // Throttle updates
+    if (!window.lastPidErrorUpdate || Date.now() - window.lastPidErrorUpdate > 100) {
+        pidErrorChart.update('none');
+        window.lastPidErrorUpdate = Date.now();
+    }
+}
+
+/**
+ * Update PID torque chart with new data
+ */
+function updatePidTorqueChart(data) {
+    if (!pidTorqueChart || !data.torque_A || !data.torque_B) return;
+    
+    const timeSeconds = (Date.now() - pidDiagStartTime) / 1000;
+    
+    // Add data points (4 datasets: DOF0 A, DOF0 B, DOF1 A, DOF1 B)
+    pidTorqueChart.data.datasets[0].data.push({ x: timeSeconds, y: data.torque_A[0] });
+    pidTorqueChart.data.datasets[1].data.push({ x: timeSeconds, y: data.torque_B[0] });
+    pidTorqueChart.data.datasets[2].data.push({ x: timeSeconds, y: data.torque_A[1] });
+    pidTorqueChart.data.datasets[3].data.push({ x: timeSeconds, y: data.torque_B[1] });
+    
+    // Limit data points
+    const maxPoints = 300;
+    pidTorqueChart.data.datasets.forEach(ds => {
+        while (ds.data.length > maxPoints) ds.data.shift();
+    });
+    
+    // Update x-axis range to follow data
+    if (timeSeconds > 30) {
+        pidTorqueChart.options.scales.x.min = timeSeconds - 30;
+        pidTorqueChart.options.scales.x.max = timeSeconds;
+    }
+    
+    // Throttle updates
+    if (!window.lastPidTorqueUpdate || Date.now() - window.lastPidTorqueUpdate > 100) {
+        pidTorqueChart.update('none');
+        window.lastPidTorqueUpdate = Date.now();
+    }
 }
 
 /**

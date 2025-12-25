@@ -123,6 +123,172 @@ extern unsigned long last_encoder_test_time;
 extern volatile bool encoder_stream_can_active;
 extern volatile uint32_t encoder_stream_last_send_us;
 
+// ============================================================================
+// PID DIAGNOSTICS DATA (for tuning/debugging)
+// ============================================================================
+
+/**
+ * @brief Diagnostic data from PID control loop
+ * 
+ * Updated by Core1 during waypoint execution.
+ * Read by Core1 for CAN diagnostic streaming.
+ * All angles in degrees * 100 (int16_t for CAN efficiency).
+ */
+struct PIDDiagnostics {
+  volatile int16_t target_deg_x100[3];    // Target angle per DOF (°×100)
+  volatile int16_t error_deg_x100[3];     // PID error per DOF (°×100)
+  volatile int16_t torque_A[3];           // Torque command agonist per DOF
+  volatile int16_t torque_B[3];           // Torque command antagonist per DOF
+  volatile uint32_t last_update_ms;       // Timestamp of last update
+  volatile bool valid;                    // Data valid flag
+};
+
+extern volatile PIDDiagnostics pid_diagnostics;
+extern volatile bool pid_diag_stream_active;  // Enable diagnostic streaming
+
+// ============================================================================
+// MOVEMENT METRICS (for PID tuning evaluation)
+// ============================================================================
+
+/**
+ * @brief Performance metrics calculated during movement execution
+ * 
+ * These metrics are computed per-DOF during waypoint execution and
+ * sent via CAN when the DOF enters HOLDING state.
+ * Used for PID tuning evaluation and optimization.
+ */
+struct MovementMetrics {
+  // Timing metrics (milliseconds)
+  uint16_t rise_time_ms;          // Time to reach 90% of target
+  uint16_t settling_time_ms;      // Time to enter ±0.5° band permanently
+  
+  // Accuracy metrics (scaled: degrees × 100 for int16_t)
+  int16_t overshoot_x100;         // Maximum overshoot (% × 100, e.g., 250 = 2.5%)
+  int16_t sse_x100;               // Steady-state error (°×100)
+  int16_t max_error_x100;         // Maximum absolute error during movement (°×100)
+  
+  // Torque metrics
+  int16_t max_torque_A;           // Peak torque agonist
+  int16_t max_torque_B;           // Peak torque antagonist
+  uint16_t torque_integral;       // Sum of |torque| (energy proxy, saturated)
+  
+  // Movement info
+  int16_t start_angle_x100;       // Starting angle (°×100)
+  int16_t target_angle_x100;      // Target angle (°×100)
+  uint16_t movement_duration_ms;  // Total movement time
+  
+  // Status
+  uint8_t dof_index;              // Which DOF this is for
+  uint8_t flags;                  // Bit flags: 0=valid, 1=overshoot_detected, 2=timeout
+};
+
+/**
+ * @brief Runtime tracking state for metrics calculation (per DOF)
+ */
+struct MetricsTracker {
+  // State
+  bool tracking_active;           // Currently tracking a movement
+  uint32_t movement_start_ms;     // When movement started
+  float start_angle_deg;          // Angle at movement start
+  float target_angle_deg;         // Target angle to reach
+  float movement_direction;       // +1 or -1 (sign of target - start)
+  
+  // Rise time tracking
+  bool reached_90_percent;        // Flag for rise time detection
+  uint32_t rise_time_ms;          // When we reached 90%
+  
+  // Overshoot tracking
+  float max_overshoot_deg;        // Maximum overshoot in degrees
+  bool overshoot_detected;        // True if we went past target
+  
+  // Settling tracking
+  bool in_settling_band;          // Currently within ±0.5°
+  uint32_t settling_enter_ms;     // When we entered the band
+  uint32_t settling_time_ms;      // Final settling time (0 if not yet settled)
+  uint8_t settling_stable_count;  // Consecutive cycles in band
+  
+  // Error tracking
+  float max_error_deg;            // Maximum absolute error seen
+  float sse_accumulator;          // Accumulator for SSE calculation
+  uint16_t sse_sample_count;      // Number of samples in HOLDING
+  
+  // Torque tracking
+  int16_t max_torque_A;           // Peak torque agonist
+  int16_t max_torque_B;           // Peak torque antagonist
+  uint32_t torque_integral;       // Accumulated |torque|
+  
+  // Reset for new movement
+  void reset(float start, float target) {
+    tracking_active = true;
+    movement_start_ms = millis();
+    start_angle_deg = start;
+    target_angle_deg = target;
+    movement_direction = (target > start) ? 1.0f : -1.0f;
+    
+    reached_90_percent = false;
+    rise_time_ms = 0;
+    
+    max_overshoot_deg = 0.0f;
+    overshoot_detected = false;
+    
+    in_settling_band = false;
+    settling_enter_ms = 0;
+    settling_time_ms = 0;
+    settling_stable_count = 0;
+    
+    max_error_deg = 0.0f;
+    sse_accumulator = 0.0f;
+    sse_sample_count = 0;
+    
+    max_torque_A = 0;
+    max_torque_B = 0;
+    torque_integral = 0;
+  }
+  
+  // Finalize and build metrics struct
+  MovementMetrics finalize() {
+    MovementMetrics m;
+    m.dof_index = 0; // Will be set by caller
+    m.rise_time_ms = (uint16_t)min(rise_time_ms, 65535UL);
+    m.settling_time_ms = (uint16_t)min(settling_time_ms, 65535UL);
+    
+    // Calculate overshoot as percentage of movement range
+    float range = fabs(target_angle_deg - start_angle_deg);
+    float overshoot_pct = (range > 0.01f) ? (max_overshoot_deg / range * 100.0f) : 0.0f;
+    m.overshoot_x100 = (int16_t)(overshoot_pct * 100.0f);
+    
+    // SSE: average error in HOLDING
+    float sse = (sse_sample_count > 0) ? (sse_accumulator / sse_sample_count) : 0.0f;
+    m.sse_x100 = (int16_t)(sse * 100.0f);
+    
+    m.max_error_x100 = (int16_t)(max_error_deg * 100.0f);
+    m.max_torque_A = max_torque_A;
+    m.max_torque_B = max_torque_B;
+    m.torque_integral = (uint16_t)min(torque_integral / 100, 65535UL); // Scale down
+    
+    m.start_angle_x100 = (int16_t)(start_angle_deg * 100.0f);
+    m.target_angle_x100 = (int16_t)(target_angle_deg * 100.0f);
+    m.movement_duration_ms = (uint16_t)min(millis() - movement_start_ms, 65535UL);
+    
+    m.flags = 0;
+    if (tracking_active) m.flags |= 0x01; // Valid
+    if (overshoot_detected) m.flags |= 0x02;
+    
+    return m;
+  }
+};
+
+// Metrics trackers (one per DOF)
+extern MetricsTracker metrics_tracker[3];
+
+// Last computed metrics (one per DOF, updated when entering HOLDING)
+extern MovementMetrics last_movement_metrics[3];
+extern volatile bool metrics_ready[3];  // Flag to signal new metrics available
+
+// Flag to enable/disable metrics tracking (default: enabled)
+// Set to false for critical timing tests or to reduce overhead
+extern volatile bool metrics_tracking_enabled;
+
 // Auto-mapping state
 extern AutoMappingState_t auto_mapping_state;
 

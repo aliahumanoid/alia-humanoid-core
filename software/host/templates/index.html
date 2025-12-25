@@ -1071,6 +1071,192 @@
                         </div>
                     </div>
 
+                    <!-- PID Diagnostics (Real-time Tuning) -->
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('pidDiagContent')">
+                            <span><i class="fas fa-chart-line mr-2"></i>PID Diagnostics</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="pidDiagContent" class="section-content">
+                            <!-- Controls -->
+                            <div class="flex flex-wrap gap-2 mb-4">
+                                <button id="startPidDiagBtn" onclick="startPidDiagStream()"
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-play mr-2"></i>Start Diagnostics
+                                </button>
+                                <button id="stopPidDiagBtn" onclick="stopPidDiagStream()"
+                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-stop mr-2"></i>Stop
+                                </button>
+                                <button onclick="clearPidDiagCharts()"
+                                    class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-eraser mr-2"></i>Clear Charts
+                                </button>
+                            </div>
+
+                            <!-- Real-time values display -->
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                                <div class="bg-blue-50 p-3 rounded-md border border-blue-200">
+                                    <div class="text-xs text-blue-600 font-semibold">DOF 0 Target</div>
+                                    <div id="pidDiagTarget0" class="text-lg font-mono">--°</div>
+                                </div>
+                                <div class="bg-orange-50 p-3 rounded-md border border-orange-200">
+                                    <div class="text-xs text-orange-600 font-semibold">DOF 0 Error</div>
+                                    <div id="pidDiagError0" class="text-lg font-mono">--°</div>
+                                </div>
+                                <div class="bg-blue-50 p-3 rounded-md border border-blue-200">
+                                    <div class="text-xs text-blue-600 font-semibold">DOF 1 Target</div>
+                                    <div id="pidDiagTarget1" class="text-lg font-mono">--°</div>
+                                </div>
+                                <div class="bg-orange-50 p-3 rounded-md border border-orange-200">
+                                    <div class="text-xs text-orange-600 font-semibold">DOF 1 Error</div>
+                                    <div id="pidDiagError1" class="text-lg font-mono">--°</div>
+                                </div>
+                            </div>
+
+                            <!-- Torque display -->
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                                <div class="bg-green-50 p-3 rounded-md border border-green-200">
+                                    <div class="text-xs text-green-600 font-semibold">DOF 0 Torque A</div>
+                                    <div id="pidDiagTorqueA0" class="text-lg font-mono">--</div>
+                                </div>
+                                <div class="bg-red-50 p-3 rounded-md border border-red-200">
+                                    <div class="text-xs text-red-600 font-semibold">DOF 0 Torque B</div>
+                                    <div id="pidDiagTorqueB0" class="text-lg font-mono">--</div>
+                                </div>
+                                <div class="bg-green-50 p-3 rounded-md border border-green-200">
+                                    <div class="text-xs text-green-600 font-semibold">DOF 1 Torque A</div>
+                                    <div id="pidDiagTorqueA1" class="text-lg font-mono">--</div>
+                                </div>
+                                <div class="bg-red-50 p-3 rounded-md border border-red-200">
+                                    <div class="text-xs text-red-600 font-semibold">DOF 1 Torque B</div>
+                                    <div id="pidDiagTorqueB1" class="text-lg font-mono">--</div>
+                                </div>
+                            </div>
+
+                            <!-- Charts -->
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <!-- Error Chart -->
+                                <div class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                                    <h3 class="text-sm font-semibold text-gray-700 mb-2">
+                                        <i class="fas fa-crosshairs mr-1"></i>PID Error (Target - Actual)
+                                    </h3>
+                                    <canvas id="pidErrorChart" height="200"></canvas>
+                                </div>
+                                <!-- Torque Chart -->
+                                <div class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                                    <h3 class="text-sm font-semibold text-gray-700 mb-2">
+                                        <i class="fas fa-bolt mr-1"></i>Torque Commands
+                                    </h3>
+                                    <canvas id="pidTorqueChart" height="200"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Movement Metrics (Performance Scoring) -->
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('movementMetricsContent')">
+                            <span><i class="fas fa-trophy mr-2"></i>Movement Metrics</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="movementMetricsContent" class="section-content">
+                            <!-- Last Movement Results -->
+                            <div class="mb-4">
+                                <h3 class="text-sm font-semibold text-gray-700 mb-3">Last Movement Performance</h3>
+                                
+                                <!-- DOF Metrics Cards -->
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                                    <!-- DOF 0 Metrics -->
+                                    <div id="metricsDof0" class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                                        <div class="flex justify-between items-center mb-3">
+                                            <span class="font-semibold text-gray-700">DOF 0</span>
+                                            <span id="metricsDof0Score" class="text-2xl font-bold text-gray-400">--</span>
+                                        </div>
+                                        <div class="grid grid-cols-2 gap-2 text-sm">
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Rise Time:</span>
+                                                <span id="metricsDof0Rise" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Settling:</span>
+                                                <span id="metricsDof0Settle" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Overshoot:</span>
+                                                <span id="metricsDof0Overshoot" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">SSE:</span>
+                                                <span id="metricsDof0Sse" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Max Torque:</span>
+                                                <span id="metricsDof0Torque" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Duration:</span>
+                                                <span id="metricsDof0Duration" class="font-mono">--</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- DOF 1 Metrics -->
+                                    <div id="metricsDof1" class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                                        <div class="flex justify-between items-center mb-3">
+                                            <span class="font-semibold text-gray-700">DOF 1</span>
+                                            <span id="metricsDof1Score" class="text-2xl font-bold text-gray-400">--</span>
+                                        </div>
+                                        <div class="grid grid-cols-2 gap-2 text-sm">
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Rise Time:</span>
+                                                <span id="metricsDof1Rise" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Settling:</span>
+                                                <span id="metricsDof1Settle" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Overshoot:</span>
+                                                <span id="metricsDof1Overshoot" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">SSE:</span>
+                                                <span id="metricsDof1Sse" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Max Torque:</span>
+                                                <span id="metricsDof1Torque" class="font-mono">--</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Duration:</span>
+                                                <span id="metricsDof1Duration" class="font-mono">--</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Score Legend -->
+                                <div class="flex justify-center gap-4 text-xs text-gray-500 mb-4">
+                                    <span><span class="inline-block w-3 h-3 bg-green-500 rounded mr-1"></span>80-100: Excellent</span>
+                                    <span><span class="inline-block w-3 h-3 bg-yellow-500 rounded mr-1"></span>60-79: Good</span>
+                                    <span><span class="inline-block w-3 h-3 bg-orange-500 rounded mr-1"></span>40-59: Fair</span>
+                                    <span><span class="inline-block w-3 h-3 bg-red-500 rounded mr-1"></span>0-39: Poor</span>
+                                </div>
+                            </div>
+                            
+                            <!-- History -->
+                            <div>
+                                <h3 class="text-sm font-semibold text-gray-700 mb-2">Score History (Last 10)</h3>
+                                <div id="metricsHistory" class="flex gap-1 flex-wrap text-xs font-mono">
+                                    <span class="text-gray-400">No data yet</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
                         <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointMappingContent')">
                             <span>Joint Mapping</span>

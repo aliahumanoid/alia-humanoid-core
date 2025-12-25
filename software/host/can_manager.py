@@ -212,6 +212,29 @@ class CanManager:
         self._log_can_info("Encoder streaming stopped")
         return {"streaming": False}
 
+    def start_pid_diag_stream(self) -> Dict[str, Any]:
+        """
+        Start PID diagnostics streaming via CAN at 20Hz.
+        
+        Sends control command (0x004) to enable PID diagnostic data.
+        Data arrives on 0x420 (target/error) and 0x430 (torque).
+        """
+        self._ensure_connection()
+        payload = bytes([0x01]) + bytes(7)  # 0x01 = start streaming
+        self._send_frame(0x004, payload, context="PID diag stream START")
+        self._log_can_info("PID diagnostics streaming started @ 20Hz")
+        return {"streaming": True}
+
+    def stop_pid_diag_stream(self) -> Dict[str, Any]:
+        """
+        Stop PID diagnostics streaming via CAN.
+        """
+        self._ensure_connection()
+        payload = bytes([0x00]) + bytes(7)  # 0x00 = stop streaming
+        self._send_frame(0x004, payload, context="PID diag stream STOP")
+        self._log_can_info("PID diagnostics streaming stopped")
+        return {"streaming": False}
+
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
         return self._encoder_stream_active
@@ -584,6 +607,35 @@ class CanManager:
             self._handle_encoder_stream(data, message.timestamp, joint_id)
             return  # Don't log every frame
         
+        # PID diagnostics data (0x420-0x42F) - target and error
+        if 0x420 <= arb_id <= 0x42F and len(data) >= 8:
+            joint_id = arb_id - 0x420
+            self._handle_pid_diag_data(data, message.timestamp, joint_id)
+            return  # Don't log every frame
+        
+        # PID torque data (0x430-0x43F) - torque commands
+        if 0x430 <= arb_id <= 0x43F and len(data) >= 8:
+            joint_id = arb_id - 0x430
+            self._handle_pid_torque_data(data, message.timestamp, joint_id)
+            return  # Don't log every frame
+        
+        # Movement metrics data (0x440-0x44F) - timing/accuracy metrics
+        if 0x440 <= arb_id <= 0x44F and len(data) >= 8:
+            # Decode joint and DOF from ID: 0x440 + joint*3 + dof
+            offset = arb_id - 0x440
+            joint_id = offset // 3
+            dof = offset % 3
+            self._handle_movement_metrics_frame1(data, message.timestamp, joint_id, dof)
+            return
+        
+        # Movement metrics data (0x450-0x45F) - torque/duration metrics
+        if 0x450 <= arb_id <= 0x45F and len(data) >= 8:
+            offset = arb_id - 0x450
+            joint_id = offset // 3
+            dof = offset % 3
+            self._handle_movement_metrics_frame2(data, message.timestamp, joint_id, dof)
+            return
+        
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -709,6 +761,180 @@ class CanManager:
                 self.socketio.emit("encoder_stream", data_point, namespace="/movement")
             except Exception:
                 pass  # Don't let socket errors break streaming
+
+    def _handle_pid_diag_data(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode PID diagnostics data from CAN (0x420-0x42F).
+        
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t target0 (0.01° resolution)
+        - Bytes 2-3: int16_t target1 (0.01° resolution)
+        - Bytes 4-5: int16_t error0 (0.01° resolution)
+        - Bytes 6-7: int16_t error1 (0.01° resolution)
+        """
+        target0_raw, target1_raw, error0_raw, error1_raw = struct.unpack("<hhhh", data[:8])
+        
+        data_point = {
+            "type": "pid_diag",
+            "joint_id": joint_id,
+            "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
+            "target_deg": [target0_raw / 100.0, target1_raw / 100.0],
+            "error_deg": [error0_raw / 100.0, error1_raw / 100.0],
+            "timestamp": timestamp,
+        }
+        
+        # Emit via SocketIO for real-time UI updates
+        if self.socketio:
+            try:
+                self.socketio.emit("pid_diag", data_point, namespace="/movement")
+            except Exception:
+                pass
+
+    def _handle_pid_torque_data(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode PID torque command data from CAN (0x430-0x43F).
+        
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t torque_A0 (agonist DOF0)
+        - Bytes 2-3: int16_t torque_B0 (antagonist DOF0)
+        - Bytes 4-5: int16_t torque_A1 (agonist DOF1)
+        - Bytes 6-7: int16_t torque_B1 (antagonist DOF1)
+        """
+        torque_A0, torque_B0, torque_A1, torque_B1 = struct.unpack("<hhhh", data[:8])
+        
+        data_point = {
+            "type": "pid_torque",
+            "joint_id": joint_id,
+            "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
+            "torque_A": [torque_A0, torque_A1],
+            "torque_B": [torque_B0, torque_B1],
+            "timestamp": timestamp,
+        }
+        
+        # Emit via SocketIO for real-time UI updates
+        if self.socketio:
+            try:
+                self.socketio.emit("pid_torque", data_point, namespace="/movement")
+            except Exception:
+                pass
+
+    def _handle_movement_metrics_frame1(self, data: bytes, timestamp: float, joint_id: int, dof: int) -> None:
+        """
+        Decode movement metrics frame 1 from CAN (0x440-0x44F).
+        
+        Frame format (8 bytes):
+        - Bytes 0-1: uint16_t rise_time_ms
+        - Bytes 2-3: uint16_t settling_time_ms
+        - Bytes 4-5: int16_t overshoot (% × 100)
+        - Bytes 6-7: int16_t sse (° × 100)
+        """
+        rise_time, settling_time, overshoot_x100, sse_x100 = struct.unpack("<HHhh", data[:8])
+        
+        # Store partial metrics (wait for frame 2 to complete)
+        key = (joint_id, dof)
+        if not hasattr(self, '_pending_metrics'):
+            self._pending_metrics = {}
+        
+        self._pending_metrics[key] = {
+            "type": "movement_metrics",
+            "joint_id": joint_id,
+            "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
+            "dof": dof,
+            "rise_time_ms": rise_time,
+            "settling_time_ms": settling_time,
+            "overshoot_pct": overshoot_x100 / 100.0,
+            "sse_deg": sse_x100 / 100.0,
+            "timestamp": timestamp,
+        }
+        
+        self.logger.debug(f"Metrics frame 1: DOF {dof} rise={rise_time}ms settle={settling_time}ms")
+
+    def _handle_movement_metrics_frame2(self, data: bytes, timestamp: float, joint_id: int, dof: int) -> None:
+        """
+        Decode movement metrics frame 2 from CAN (0x450-0x45F).
+        
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t max_torque_A
+        - Bytes 2-3: int16_t max_torque_B
+        - Bytes 4-5: uint16_t duration_ms
+        - Byte 6: uint8_t dof_index
+        - Byte 7: uint8_t flags
+        """
+        max_torque_A, max_torque_B, duration_ms, dof_index, flags = struct.unpack("<hhHBB", data[:8])
+        
+        # Complete metrics with frame 1 data
+        key = (joint_id, dof)
+        if not hasattr(self, '_pending_metrics'):
+            self._pending_metrics = {}
+        
+        if key in self._pending_metrics:
+            metrics = self._pending_metrics.pop(key)
+            metrics["max_torque_A"] = max_torque_A
+            metrics["max_torque_B"] = max_torque_B
+            metrics["duration_ms"] = duration_ms
+            metrics["flags"] = flags
+            
+            # Calculate a score (0-100) based on metrics
+            score = self._calculate_movement_score(metrics)
+            metrics["score"] = score
+            
+            # Log the complete metrics
+            self.logger.info(
+                f"Movement metrics DOF {dof}: rise={metrics['rise_time_ms']}ms, "
+                f"settle={metrics['settling_time_ms']}ms, overshoot={metrics['overshoot_pct']:.1f}%, "
+                f"sse={metrics['sse_deg']:.2f}°, score={score}/100"
+            )
+            
+            # Emit via SocketIO for UI display
+            if self.socketio:
+                try:
+                    self.socketio.emit("movement_metrics", metrics, namespace="/movement")
+                except Exception:
+                    pass
+        else:
+            self.logger.warning(f"Metrics frame 2 received without frame 1 for DOF {dof}")
+
+    def _calculate_movement_score(self, metrics: dict) -> int:
+        """
+        Calculate a score 0-100 based on movement performance.
+        
+        Scoring breakdown:
+        - Rise time: 25 points (optimal: < 200ms)
+        - Settling time: 25 points (optimal: < 500ms)
+        - Overshoot: 25 points (optimal: < 5%)
+        - SSE: 25 points (optimal: < 0.1°)
+        """
+        score = 0
+        
+        # Rise time score (25 pts, linear decay 0-500ms)
+        rise_ms = metrics.get("rise_time_ms", 0)
+        if rise_ms <= 200:
+            score += 25
+        elif rise_ms < 500:
+            score += int(25 * (500 - rise_ms) / 300)
+        
+        # Settling time score (25 pts, linear decay 0-1000ms)
+        settle_ms = metrics.get("settling_time_ms", 0)
+        if settle_ms <= 500:
+            score += 25
+        elif settle_ms < 1000:
+            score += int(25 * (1000 - settle_ms) / 500)
+        
+        # Overshoot score (25 pts, linear decay 0-10%)
+        overshoot = abs(metrics.get("overshoot_pct", 0))
+        if overshoot <= 5:
+            score += 25
+        elif overshoot < 10:
+            score += int(25 * (10 - overshoot) / 5)
+        
+        # SSE score (25 pts, linear decay 0-0.5°)
+        sse = abs(metrics.get("sse_deg", 0))
+        if sse <= 0.1:
+            score += 25
+        elif sse < 0.5:
+            score += int(25 * (0.5 - sse) / 0.4)
+        
+        return min(100, max(0, score))
 
     # ------------------------------------------------------------------
     # Logging helpers
