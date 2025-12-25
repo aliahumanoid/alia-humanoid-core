@@ -108,10 +108,12 @@ bool JointController::executeWaypointMovement() {
     // Detect when a new movement starts:
     // - IDLE → MOVING: first movement ever
     // - HOLDING → MOVING: new movement after previous one completed
+    // Use !tracking_active as additional guard to prevent multiple initializations
     bool new_movement_started = (prev_dof_state[dof] != WaypointState::MOVING) && 
                                  (dof_state == WaypointState::MOVING);
     
-    if (metrics_tracking_enabled && new_movement_started && dof < 3) {
+    if (metrics_tracking_enabled && new_movement_started && dof < 3 && 
+        !metrics_tracker[dof].tracking_active) {
       WaypointEntry first_wp;
       if (waypoint_buffer_peek(dof, first_wp)) {
         float start_angle = shared_dof_angles.valid[dof] ? shared_dof_angles.angles[dof] : 0.0f;
@@ -233,22 +235,35 @@ bool JointController::executeWaypointMovement() {
           
           // === METRICS: Finalize movement metrics ===
           if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
+            MetricsTracker& mt = metrics_tracker[dof];
+            
             // Update final target (in case it changed during movement)
-            metrics_tracker[dof].target_angle_deg = holding_target;
+            float original_target = mt.target_angle_deg;
+            mt.target_angle_deg = holding_target;
             
             // Finalize and store metrics
-            MovementMetrics m = metrics_tracker[dof].finalize();
+            MovementMetrics m = mt.finalize();
             m.dof_index = dof;
             last_movement_metrics[dof] = m;
             metrics_ready[dof] = true;
             
             // Stop tracking
-            metrics_tracker[dof].tracking_active = false;
+            mt.tracking_active = false;
             
-            LOG_INFO("[Metrics] DOF " + String(dof) + " complete: rise=" + 
-                     String(m.rise_time_ms) + "ms, settle=" + String(m.settling_time_ms) + 
-                     "ms, overshoot=" + String(m.overshoot_x100 / 100.0f, 1) + 
-                     "%, sse=" + String(m.sse_x100 / 100.0f, 2) + "°");
+            // Detailed logging for debugging
+            LOG_INFO("[Metrics] DOF " + String(dof) + " FINAL:");
+            LOG_INFO("  start=" + String(mt.start_angle_deg, 2) + 
+                     "° → target=" + String(holding_target, 2) + 
+                     "° (orig=" + String(original_target, 2) + "°)");
+            LOG_INFO("  rise=" + String(m.rise_time_ms) + "ms (90%=" + 
+                     String(mt.reached_90_percent ? "yes" : "no") + ")");
+            LOG_INFO("  settle=" + String(m.settling_time_ms) + "ms, max_err=" + 
+                     String(mt.max_error_deg, 2) + "°");
+            LOG_INFO("  overshoot=" + String(m.overshoot_x100 / 100.0f, 1) + 
+                     "% (max=" + String(mt.max_overshoot_deg, 2) + 
+                     "°, dir=" + String(mt.movement_direction, 0) + ")");
+            LOG_INFO("  sse=" + String(m.sse_x100 / 100.0f, 2) + 
+                     "° (samples=" + String(mt.sse_sample_count) + ")");
           }
         }
       }
