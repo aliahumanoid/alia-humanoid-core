@@ -4710,10 +4710,16 @@ function updateMovementMetricsDisplay(data) {
     $(prefix + 'Torque').text(Math.max(Math.abs(data.max_torque_A || 0), Math.abs(data.max_torque_B || 0)));
     $(prefix + 'Duration').text(data.duration_ms + 'ms');
     
-    // Add to history
+    // Add to history (include full metrics data for auto-tune analysis)
     metricsHistory.unshift({
         dof: dof,
         score: score,
+        rise_time_ms: data.rise_time_ms,
+        settling_time_ms: data.settling_time_ms,
+        overshoot_pct: data.overshoot_pct,
+        sse_deg: data.sse_deg,
+        max_torque: Math.max(Math.abs(data.max_torque_A || 0), Math.abs(data.max_torque_B || 0)),
+        duration_ms: data.duration_ms,
         timestamp: new Date().toLocaleTimeString()
     });
     
@@ -4916,6 +4922,331 @@ function resetOscillationTest() {
  */
 function updateOscTestStatus(html) {
     $('#oscTestStatus').html(html);
+}
+
+// ============================================================================
+// AUTO-TUNE SUGGESTIONS
+// ============================================================================
+
+// Store current suggestions for later application
+let currentAutoTuneSuggestions = null;
+let autoTuneLoopActive = false;
+let autoTuneLoopTimer = null;
+let autoTuneIterations = 0;
+const MAX_AUTO_TUNE_ITERATIONS = 10;
+
+// Thresholds for problem detection
+const AUTO_TUNE_THRESHOLDS = {
+    overshoot_high: 5.0,        // % - above this is problematic
+    overshoot_very_high: 15.0,  // % - major overshoot
+    rise_time_slow: 500,        // ms
+    settling_slow: 800,         // ms
+    sse_high: 0.3,              // degrees
+    sse_very_high: 0.5,         // degrees
+    score_good: 75              // Above this, PID is considered well-tuned
+};
+
+// Adjustment factors for PID parameters
+const AUTO_TUNE_ADJUSTMENTS = {
+    overshoot_high: { kp: -0.10, kd: +0.20 },      // Reduce Kp, increase Kd
+    overshoot_very_high: { kp: -0.20, kd: +0.30 }, // More aggressive
+    rise_time_slow: { kp: +0.15 },                  // Increase Kp
+    settling_slow: { kd: +0.15 },                   // Increase Kd
+    sse_high: { ki: +0.25 },                        // Increase Ki
+    sse_very_high: { ki: +0.50 },                   // More aggressive Ki
+    oscillating: { kp: -0.15, kd: +0.25, ki: -0.10 } // Dampen oscillations
+};
+
+/**
+ * Analyze recent metrics and generate PID tuning suggestions
+ */
+function analyzeMetricsAndSuggest() {
+    const sampleSize = parseInt($('#autoTuneSampleSize').val()) || 3;
+    
+    // Get recent metrics for DOF 0 (primary tuning target)
+    // Filter by most recent DOF or allow DOF selection
+    const targetDof = parseInt($('#oscTestDof').val()) || 0;
+    
+    const recentMetrics = metricsHistory
+        .filter(m => m.dof === targetDof)
+        .slice(0, sampleSize);
+    
+    if (recentMetrics.length === 0) {
+        appendStatusMessage('⚠️ No metrics available for DOF ' + targetDof + '. Run some movements first.');
+        return;
+    }
+    
+    // Calculate averages from full metrics data
+    const avgScore = recentMetrics.reduce((sum, m) => sum + (m.score || 0), 0) / recentMetrics.length;
+    const riseTime = recentMetrics.reduce((sum, m) => sum + (m.rise_time_ms || 0), 0) / recentMetrics.length;
+    const overshoot = recentMetrics.reduce((sum, m) => sum + (m.overshoot_pct || 0), 0) / recentMetrics.length;
+    const settling = recentMetrics.reduce((sum, m) => sum + (m.settling_time_ms || 0), 0) / recentMetrics.length;
+    const sse = recentMetrics.reduce((sum, m) => sum + (m.sse_deg || 0), 0) / recentMetrics.length;
+    
+    appendStatusMessage(`📊 Analyzing ${recentMetrics.length} samples for DOF ${targetDof}`);
+    
+    // Update analysis display
+    $('#autoTuneAvgScore').text(avgScore.toFixed(1)).removeClass('text-gray-400')
+        .addClass(avgScore >= 75 ? 'text-green-600' : (avgScore >= 50 ? 'text-yellow-600' : 'text-red-600'));
+    $('#autoTuneAvgRise').text(riseTime + 'ms').removeClass('text-gray-400');
+    $('#autoTuneAvgOvershoot').text(overshoot.toFixed(1) + '%').removeClass('text-gray-400');
+    $('#autoTuneAvgSettling').text(settling + 'ms').removeClass('text-gray-400');
+    $('#autoTuneAvgSse').text(sse.toFixed(2) + '°').removeClass('text-gray-400');
+    
+    // Detect issues and generate suggestions
+    const issues = [];
+    const adjustments = { kp: 0, ki: 0, kd: 0 };
+    
+    // Check overshoot
+    if (overshoot > AUTO_TUNE_THRESHOLDS.overshoot_very_high) {
+        issues.push({ icon: '🚨', text: `Very high overshoot (${overshoot.toFixed(1)}%)`, severity: 'high' });
+        Object.entries(AUTO_TUNE_ADJUSTMENTS.overshoot_very_high).forEach(([k, v]) => adjustments[k] += v);
+    } else if (overshoot > AUTO_TUNE_THRESHOLDS.overshoot_high) {
+        issues.push({ icon: '⚠️', text: `High overshoot (${overshoot.toFixed(1)}%)`, severity: 'medium' });
+        Object.entries(AUTO_TUNE_ADJUSTMENTS.overshoot_high).forEach(([k, v]) => adjustments[k] += v);
+    }
+    
+    // Check rise time
+    if (riseTime > AUTO_TUNE_THRESHOLDS.rise_time_slow) {
+        issues.push({ icon: '🐢', text: `Slow rise time (${riseTime}ms)`, severity: 'medium' });
+        Object.entries(AUTO_TUNE_ADJUSTMENTS.rise_time_slow).forEach(([k, v]) => adjustments[k] += v);
+    }
+    
+    // Check settling time
+    if (settling > AUTO_TUNE_THRESHOLDS.settling_slow) {
+        issues.push({ icon: '⏳', text: `Slow settling (${settling}ms)`, severity: 'medium' });
+        Object.entries(AUTO_TUNE_ADJUSTMENTS.settling_slow).forEach(([k, v]) => adjustments[k] += v);
+    }
+    
+    // Check steady-state error
+    if (sse > AUTO_TUNE_THRESHOLDS.sse_very_high) {
+        issues.push({ icon: '🎯', text: `High steady-state error (${sse.toFixed(2)}°)`, severity: 'high' });
+        Object.entries(AUTO_TUNE_ADJUSTMENTS.sse_very_high).forEach(([k, v]) => adjustments[k] += v);
+    } else if (sse > AUTO_TUNE_THRESHOLDS.sse_high) {
+        issues.push({ icon: '🎯', text: `Moderate SSE (${sse.toFixed(2)}°)`, severity: 'medium' });
+        Object.entries(AUTO_TUNE_ADJUSTMENTS.sse_high).forEach(([k, v]) => adjustments[k] += v);
+    }
+    
+    // If score is good and no major issues, show "well tuned" message
+    if (issues.length === 0 || avgScore >= AUTO_TUNE_THRESHOLDS.score_good) {
+        $('#autoTuneSuggestionsPanel').hide();
+        $('#autoTuneNoSuggestions').show();
+        currentAutoTuneSuggestions = null;
+        appendStatusMessage('✅ PID analysis: No significant issues detected');
+        return;
+    }
+    
+    // Get current PID parameters
+    const currentKp = parseFloat($(`#outerPidDof${targetDof}Kp`).val()) || 15;
+    const currentKi = parseFloat($(`#outerPidDof${targetDof}Ki`).val()) || 0.01;
+    const currentKd = parseFloat($(`#outerPidDof${targetDof}Kd`).val()) || 0.05;
+    
+    // Calculate suggested values with bounds
+    const suggestedKp = Math.max(0.1, Math.min(50, currentKp * (1 + adjustments.kp)));
+    const suggestedKi = Math.max(0.001, Math.min(1, currentKi * (1 + adjustments.ki)));
+    const suggestedKd = Math.max(0, Math.min(2, currentKd * (1 + adjustments.kd)));
+    
+    // Build suggestions object
+    currentAutoTuneSuggestions = {
+        dof: targetDof,
+        current: { kp: currentKp, ki: currentKi, kd: currentKd },
+        suggested: { kp: suggestedKp, ki: suggestedKi, kd: suggestedKd },
+        adjustments: adjustments,
+        issues: issues
+    };
+    
+    // Update UI
+    displayAutoTuneSuggestions(currentAutoTuneSuggestions);
+    
+    appendStatusMessage(`🔍 Analysis complete: ${issues.length} issue(s) detected`);
+}
+
+/**
+ * Display auto-tune suggestions in the UI
+ */
+function displayAutoTuneSuggestions(suggestions) {
+    $('#autoTuneNoSuggestions').hide();
+    $('#autoTuneSuggestionsPanel').show();
+    $('#autoTuneDofLabel').text(`DOF ${suggestions.dof}`);
+    
+    // Build issues list
+    const issuesHtml = suggestions.issues.map(issue => {
+        const bgColor = issue.severity === 'high' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800';
+        return `<div class="p-1 ${bgColor} rounded">${issue.icon} ${issue.text}</div>`;
+    }).join('');
+    $('#autoTuneIssues').html(issuesHtml);
+    
+    // Build parameters table
+    const formatChange = (current, suggested) => {
+        const pctChange = ((suggested - current) / current * 100).toFixed(0);
+        const arrow = pctChange > 0 ? '↑' : '↓';
+        const color = pctChange > 0 ? 'text-green-600' : 'text-red-600';
+        return `<span class="${color}">${arrow}${Math.abs(pctChange)}%</span>`;
+    };
+    
+    const tableRows = [
+        { name: 'Kp', current: suggestions.current.kp, suggested: suggestions.suggested.kp, digits: 3 },
+        { name: 'Ki', current: suggestions.current.ki, suggested: suggestions.suggested.ki, digits: 4 },
+        { name: 'Kd', current: suggestions.current.kd, suggested: suggestions.suggested.kd, digits: 4 }
+    ].filter(row => row.current !== row.suggested).map(row => {
+        const changeHtml = formatChange(row.current, row.suggested);
+        return `<tr class="border-b border-amber-100">
+            <td class="px-2 py-1 font-semibold">${row.name}</td>
+            <td class="px-2 py-1 text-right font-mono">${row.current.toFixed(row.digits)}</td>
+            <td class="px-2 py-1 text-center">${changeHtml}</td>
+            <td class="px-2 py-1 text-right font-mono font-bold text-amber-700">${row.suggested.toFixed(row.digits)}</td>
+        </tr>`;
+    }).join('');
+    
+    $('#autoTuneSuggestionsTable').html(tableRows);
+}
+
+/**
+ * Apply the current auto-tune suggestions to PID parameters
+ */
+function applyAutoTuneSuggestions() {
+    if (!currentAutoTuneSuggestions) {
+        appendStatusMessage('⚠️ No suggestions to apply');
+        return;
+    }
+    
+    const dof = currentAutoTuneSuggestions.dof;
+    const suggested = currentAutoTuneSuggestions.suggested;
+    
+    // Update UI input fields
+    $(`#outerPidDof${dof}Kp`).val(suggested.kp.toFixed(4));
+    $(`#outerPidDof${dof}Ki`).val(suggested.ki.toFixed(4));
+    $(`#outerPidDof${dof}Kd`).val(suggested.kd.toFixed(4));
+    
+    // Save to device
+    savePidParams(dof);
+    
+    appendStatusMessage(`✅ Applied PID suggestions for DOF ${dof}: Kp=${suggested.kp.toFixed(3)}, Ki=${suggested.ki.toFixed(4)}, Kd=${suggested.kd.toFixed(4)}`);
+    
+    // Hide suggestions panel after applying
+    dismissAutoTuneSuggestions();
+}
+
+/**
+ * Dismiss suggestions without applying
+ */
+function dismissAutoTuneSuggestions() {
+    currentAutoTuneSuggestions = null;
+    $('#autoTuneSuggestionsPanel').hide();
+}
+
+/**
+ * Run one iteration of auto-tune: Apply suggestions and run test
+ */
+function runAutoTuneIteration() {
+    if (!currentAutoTuneSuggestions) {
+        appendStatusMessage('⚠️ No suggestions to test. Run analysis first.');
+        return;
+    }
+    
+    // Apply suggestions
+    applyAutoTuneSuggestions();
+    
+    // Wait a moment for PID to update, then run oscillation test
+    setTimeout(() => {
+        // Clear previous metrics for clean comparison
+        metricsHistory = [];
+        updateMovementMetricsHistory();
+        
+        // Start oscillation test
+        appendStatusMessage('🔄 Starting verification test...');
+        startOscillationTest();
+        
+        // After test completes, auto-analyze
+        // We'll use the existing test completion mechanism
+        // Set up a check to analyze when test is done
+        const checkTestComplete = setInterval(() => {
+            if (!oscTestActive) {
+                clearInterval(checkTestComplete);
+                // Wait for metrics to arrive
+                setTimeout(() => {
+                    appendStatusMessage('📊 Re-analyzing after parameter change...');
+                    analyzeMetricsAndSuggest();
+                }, 1000);
+            }
+        }, 500);
+        
+    }, 500);
+}
+
+/**
+ * Start automatic tuning loop
+ */
+function startAutoTuneLoop() {
+    if (autoTuneLoopActive) return;
+    
+    autoTuneLoopActive = true;
+    autoTuneIterations = 0;
+    
+    $('#autoTuneLoopStatus').show();
+    updateAutoTuneLoopProgress('Starting auto-tune loop...');
+    
+    autoTuneLoopStep();
+}
+
+/**
+ * One step of the auto-tune loop
+ */
+function autoTuneLoopStep() {
+    if (!autoTuneLoopActive) return;
+    
+    if (autoTuneIterations >= MAX_AUTO_TUNE_ITERATIONS) {
+        stopAutoTuneLoop('Max iterations reached');
+        return;
+    }
+    
+    autoTuneIterations++;
+    updateAutoTuneLoopProgress(`Iteration ${autoTuneIterations}/${MAX_AUTO_TUNE_ITERATIONS}`);
+    
+    // Run analysis
+    analyzeMetricsAndSuggest();
+    
+    // Check if we have suggestions
+    if (!currentAutoTuneSuggestions) {
+        stopAutoTuneLoop('PID well-tuned, no more adjustments needed');
+        return;
+    }
+    
+    // Apply and test
+    runAutoTuneIteration();
+    
+    // Schedule next iteration after test completes
+    const checkComplete = setInterval(() => {
+        if (!oscTestActive) {
+            clearInterval(checkComplete);
+            // Continue loop after short delay
+            autoTuneLoopTimer = setTimeout(() => {
+                autoTuneLoopStep();
+            }, 2000);
+        }
+    }, 500);
+}
+
+/**
+ * Stop auto-tune loop
+ */
+function stopAutoTuneLoop(reason = 'Stopped by user') {
+    autoTuneLoopActive = false;
+    
+    if (autoTuneLoopTimer) {
+        clearTimeout(autoTuneLoopTimer);
+        autoTuneLoopTimer = null;
+    }
+    
+    $('#autoTuneLoopStatus').hide();
+    appendStatusMessage(`⏹️ Auto-tune loop stopped: ${reason} (${autoTuneIterations} iterations)`);
+}
+
+/**
+ * Update auto-tune loop progress display
+ */
+function updateAutoTuneLoopProgress(text) {
+    $('#autoTuneLoopProgress').text(text);
 }
 
 /**

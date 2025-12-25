@@ -1339,6 +1339,127 @@
                         </div>
                     </div>
 
+                    <!-- Auto-Tune Suggestions -->
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('autoTuneContent')">
+                            <span><i class="fas fa-magic mr-2"></i>Auto-Tune Suggestions</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="autoTuneContent" class="section-content">
+                            <!-- Current Analysis -->
+                            <div class="mb-4 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg border border-blue-200">
+                                <div class="flex justify-between items-center mb-3">
+                                    <h3 class="text-sm font-semibold text-blue-800">
+                                        <i class="fas fa-chart-line mr-1"></i>Analysis (Last N Movements)
+                                    </h3>
+                                    <div class="flex items-center gap-2">
+                                        <label class="text-xs text-gray-600">Sample size:</label>
+                                        <input id="autoTuneSampleSize" type="number" value="3" min="1" max="10" 
+                                            class="w-16 text-xs rounded border-gray-300 px-2 py-1">
+                                        <button onclick="analyzeMetricsAndSuggest()" 
+                                            class="bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold py-1 px-3 rounded">
+                                            <i class="fas fa-sync-alt mr-1"></i>Analyze
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                <!-- Analysis Results -->
+                                <div id="autoTuneAnalysis" class="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                                    <div class="bg-white p-2 rounded shadow-sm">
+                                        <span class="text-gray-500">Avg Score</span>
+                                        <div id="autoTuneAvgScore" class="font-bold text-lg text-gray-400">--</div>
+                                    </div>
+                                    <div class="bg-white p-2 rounded shadow-sm">
+                                        <span class="text-gray-500">Avg Rise Time</span>
+                                        <div id="autoTuneAvgRise" class="font-bold text-gray-400">--</div>
+                                    </div>
+                                    <div class="bg-white p-2 rounded shadow-sm">
+                                        <span class="text-gray-500">Avg Overshoot</span>
+                                        <div id="autoTuneAvgOvershoot" class="font-bold text-gray-400">--</div>
+                                    </div>
+                                    <div class="bg-white p-2 rounded shadow-sm">
+                                        <span class="text-gray-500">Avg Settling</span>
+                                        <div id="autoTuneAvgSettling" class="font-bold text-gray-400">--</div>
+                                    </div>
+                                    <div class="bg-white p-2 rounded shadow-sm">
+                                        <span class="text-gray-500">Avg SSE</span>
+                                        <div id="autoTuneAvgSse" class="font-bold text-gray-400">--</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Suggestions Panel -->
+                            <div id="autoTuneSuggestionsPanel" class="mb-4 p-4 bg-gradient-to-r from-amber-50 to-orange-50 rounded-lg border border-amber-200" style="display: none;">
+                                <div class="flex justify-between items-center mb-3">
+                                    <h3 class="text-sm font-semibold text-amber-800">
+                                        <i class="fas fa-lightbulb mr-1"></i>Suggested Adjustments
+                                    </h3>
+                                    <span id="autoTuneDofLabel" class="text-xs bg-amber-200 text-amber-800 px-2 py-0.5 rounded">DOF 0</span>
+                                </div>
+                                
+                                <!-- Issues Detected -->
+                                <div id="autoTuneIssues" class="mb-3 text-xs space-y-1">
+                                    <!-- Populated dynamically -->
+                                </div>
+                                
+                                <!-- Parameter Changes Table -->
+                                <div class="overflow-x-auto mb-3">
+                                    <table class="w-full text-xs">
+                                        <thead>
+                                            <tr class="bg-amber-100 text-amber-800">
+                                                <th class="px-2 py-1 text-left">Parameter</th>
+                                                <th class="px-2 py-1 text-right">Current</th>
+                                                <th class="px-2 py-1 text-center">Change</th>
+                                                <th class="px-2 py-1 text-right">Suggested</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="autoTuneSuggestionsTable">
+                                            <!-- Populated dynamically -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                                
+                                <!-- Actions -->
+                                <div class="flex gap-2">
+                                    <button onclick="applyAutoTuneSuggestions()" 
+                                        class="bg-green-500 hover:bg-green-600 text-white text-xs font-bold py-2 px-4 rounded">
+                                        <i class="fas fa-check mr-1"></i>Apply Suggestions
+                                    </button>
+                                    <button onclick="dismissAutoTuneSuggestions()" 
+                                        class="bg-gray-400 hover:bg-gray-500 text-white text-xs font-bold py-2 px-4 rounded">
+                                        <i class="fas fa-times mr-1"></i>Dismiss
+                                    </button>
+                                    <button onclick="runAutoTuneIteration()" 
+                                        class="bg-purple-500 hover:bg-purple-600 text-white text-xs font-bold py-2 px-4 rounded">
+                                        <i class="fas fa-play mr-1"></i>Apply & Test
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- No Suggestions Message -->
+                            <div id="autoTuneNoSuggestions" class="p-4 bg-green-50 rounded-lg border border-green-200 text-center" style="display: none;">
+                                <i class="fas fa-check-circle text-green-500 text-2xl mb-2"></i>
+                                <p class="text-green-700 text-sm font-semibold">PID looks well-tuned!</p>
+                                <p class="text-green-600 text-xs">No significant improvements detected.</p>
+                            </div>
+
+                            <!-- Auto-Tune Loop Status -->
+                            <div id="autoTuneLoopStatus" class="p-4 bg-purple-50 rounded-lg border border-purple-200" style="display: none;">
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="text-sm font-semibold text-purple-800">
+                                        <i class="fas fa-cog fa-spin mr-1"></i>Auto-Tune Loop
+                                    </span>
+                                    <button onclick="stopAutoTuneLoop()" 
+                                        class="bg-red-500 hover:bg-red-600 text-white text-xs font-bold py-1 px-3 rounded">
+                                        <i class="fas fa-stop mr-1"></i>Stop
+                                    </button>
+                                </div>
+                                <div id="autoTuneLoopProgress" class="text-xs text-purple-700"></div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="bg-white rounded-lg shadow-md p-6 mb-8">
                         <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('jointMappingContent')">
                             <span>Joint Mapping</span>
