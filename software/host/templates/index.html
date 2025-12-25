@@ -1135,6 +1135,88 @@
                                 </div>
                             </div>
 
+                            <!-- Oscillation Test for PID Tuning -->
+                            <div class="bg-purple-50 p-4 rounded-md border border-purple-200 mb-4">
+                                <h3 class="text-sm font-semibold text-purple-700 mb-3">
+                                    <i class="fas fa-wave-square mr-1"></i>Oscillation Test (PID Tuning)
+                                </h3>
+                                <p class="text-xs text-purple-600 mb-3">
+                                    Oscillate between two points to evaluate PID performance. Each movement generates metrics.
+                                </p>
+                                
+                                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                                    <!-- DOF Selection -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">DOF</label>
+                                        <select id="oscTestDof" class="w-full p-2 border border-purple-300 rounded text-sm">
+                                            <option value="0">DOF 0</option>
+                                            <option value="1">DOF 1</option>
+                                        </select>
+                                    </div>
+                                    
+                                    <!-- Point A -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Point A (°)</label>
+                                        <input type="number" id="oscTestPointA" value="-10" step="1" 
+                                            class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
+                                    </div>
+                                    
+                                    <!-- Point B -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Point B (°)</label>
+                                        <input type="number" id="oscTestPointB" value="10" step="1" 
+                                            class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
+                                    </div>
+                                    
+                                    <!-- Pause Duration -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Pause (ms)</label>
+                                        <input type="number" id="oscTestPause" value="1000" step="100" min="500" 
+                                            class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
+                                    </div>
+                                </div>
+                                
+                                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                                    <!-- Move Duration -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Move Time (ms)</label>
+                                        <input type="number" id="oscTestMoveTime" value="500" step="100" min="200" 
+                                            class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
+                                    </div>
+                                    
+                                    <!-- Repetitions -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Repetitions</label>
+                                        <input type="number" id="oscTestReps" value="5" step="1" min="1" max="100" 
+                                            class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
+                                    </div>
+                                    
+                                    <!-- Status -->
+                                    <div class="col-span-2">
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Status</label>
+                                        <div id="oscTestStatus" class="p-2 bg-white border border-purple-200 rounded text-sm font-mono">
+                                            <span class="text-gray-400">Ready</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Controls -->
+                                <div class="flex gap-2">
+                                    <button id="oscTestStartBtn" onclick="startOscillationTest()"
+                                        class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded text-sm">
+                                        <i class="fas fa-play mr-1"></i>Start Oscillation
+                                    </button>
+                                    <button id="oscTestStopBtn" onclick="stopOscillationTest()" disabled
+                                        class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded text-sm disabled:opacity-50">
+                                        <i class="fas fa-stop mr-1"></i>Stop
+                                    </button>
+                                    <button onclick="resetOscillationTest()"
+                                        class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded text-sm">
+                                        <i class="fas fa-undo mr-1"></i>Reset
+                                    </button>
+                                </div>
+                            </div>
+
                             <!-- Charts -->
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <!-- Error Chart -->

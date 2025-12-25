@@ -4759,6 +4759,165 @@ function updateMetricsHistoryDisplay() {
     $history.html(badges);
 }
 
+// ============================================================================
+// OSCILLATION TEST FOR PID TUNING
+// ============================================================================
+
+let oscTestActive = false;
+let oscTestTimer = null;
+let oscTestCurrentRep = 0;
+let oscTestTotalReps = 0;
+let oscTestCurrentPoint = 'A';  // 'A' or 'B'
+let oscTestMetricsReceived = 0;
+
+/**
+ * Start oscillation test between two points
+ */
+function startOscillationTest() {
+    const dof = parseInt($('#oscTestDof').val());
+    const pointA = parseFloat($('#oscTestPointA').val());
+    const pointB = parseFloat($('#oscTestPointB').val());
+    const pauseMs = parseInt($('#oscTestPause').val());
+    const moveTimeMs = parseInt($('#oscTestMoveTime').val());
+    const reps = parseInt($('#oscTestReps').val());
+    
+    // Validation
+    if (isNaN(pointA) || isNaN(pointB) || pointA === pointB) {
+        appendStatusMessage('❌ Invalid points: A and B must be different');
+        return;
+    }
+    
+    oscTestActive = true;
+    oscTestCurrentRep = 0;
+    oscTestTotalReps = reps;
+    oscTestCurrentPoint = 'A';
+    oscTestMetricsReceived = 0;
+    
+    // Update UI
+    $('#oscTestStartBtn').prop('disabled', true);
+    $('#oscTestStopBtn').prop('disabled', false);
+    updateOscTestStatus(`Starting... 0/${reps} reps`);
+    
+    appendStatusMessage(`🔄 Oscillation test started: DOF${dof} ${pointA}° ↔ ${pointB}° × ${reps} reps`);
+    
+    // Start the oscillation loop
+    oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs);
+}
+
+/**
+ * Main oscillation loop
+ */
+function oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs) {
+    if (!oscTestActive) return;
+    
+    if (oscTestCurrentRep >= oscTestTotalReps) {
+        // Test complete
+        stopOscillationTest(true);
+        return;
+    }
+    
+    // Determine target angle
+    const targetAngle = oscTestCurrentPoint === 'A' ? pointA : pointB;
+    const direction = oscTestCurrentPoint === 'A' ? '→A' : '→B';
+    
+    updateOscTestStatus(`Rep ${oscTestCurrentRep + 1}/${oscTestTotalReps} ${direction} (${targetAngle}°)`);
+    
+    // Send waypoint
+    sendOscTestWaypoint(dof, targetAngle, moveTimeMs);
+    
+    // Schedule next movement after pause
+    const totalWait = moveTimeMs + pauseMs;
+    oscTestTimer = setTimeout(() => {
+        // Toggle point
+        if (oscTestCurrentPoint === 'A') {
+            oscTestCurrentPoint = 'B';
+        } else {
+            oscTestCurrentPoint = 'A';
+            oscTestCurrentRep++;  // Count one A→B→A as one rep
+        }
+        
+        // Continue loop
+        oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs);
+    }, totalWait);
+}
+
+/**
+ * Send a single waypoint for oscillation test
+ */
+function sendOscTestWaypoint(dof, angle, moveTimeMs) {
+    const joint = $('#jointSelect').val() || 'ANKLE_RIGHT';
+    
+    // Build angles array with null for unused DOFs
+    const angles = [null, null, null];
+    angles[dof] = angle;
+    
+    const data = {
+        joint: joint,
+        angles_deg: angles,
+        t_offset_ms: moveTimeMs
+    };
+    
+    $.ajax({
+        url: '/can/waypoint',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(data)
+    }).done(response => {
+        console.log(`Osc waypoint sent: DOF${dof} → ${angle}°`);
+    }).fail(xhr => {
+        console.error('Osc waypoint failed:', xhr.responseJSON);
+        appendStatusMessage(`❌ Oscillation waypoint failed`);
+    });
+}
+
+/**
+ * Stop oscillation test
+ */
+function stopOscillationTest(completed = false) {
+    oscTestActive = false;
+    
+    if (oscTestTimer) {
+        clearTimeout(oscTestTimer);
+        oscTestTimer = null;
+    }
+    
+    // Update UI
+    $('#oscTestStartBtn').prop('disabled', false);
+    $('#oscTestStopBtn').prop('disabled', true);
+    
+    if (completed) {
+        updateOscTestStatus(`✅ Complete! ${oscTestTotalReps} reps, ${metricsHistory.length} metrics`);
+        appendStatusMessage(`✅ Oscillation test complete: ${oscTestTotalReps} reps`);
+    } else {
+        updateOscTestStatus(`⏹️ Stopped at rep ${oscTestCurrentRep + 1}/${oscTestTotalReps}`);
+        appendStatusMessage(`⏹️ Oscillation test stopped`);
+    }
+}
+
+/**
+ * Reset oscillation test state
+ */
+function resetOscillationTest() {
+    stopOscillationTest();
+    updateOscTestStatus('<span class="text-gray-400">Ready</span>');
+    
+    // Optionally go to center position
+    const pointA = parseFloat($('#oscTestPointA').val());
+    const pointB = parseFloat($('#oscTestPointB').val());
+    const center = (pointA + pointB) / 2;
+    const dof = parseInt($('#oscTestDof').val());
+    
+    sendOscTestWaypoint(dof, center, 500);
+    appendStatusMessage(`🔄 Reset to center: ${center}°`);
+}
+
+/**
+ * Update oscillation test status display
+ */
+function updateOscTestStatus(html) {
+    $('#oscTestStatus').html(html);
+}
+
 /**
  * Update PID diag display (target/error values)
  */
