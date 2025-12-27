@@ -153,6 +153,16 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
  * @see CAN_SYSTEM_ARCHITECTURE.md section 4.2.4
  */
 void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
+  // Extract joint_id from CAN ID (0x380 + joint_id)
+  uint8_t waypoint_joint_id = id - CAN_ID_MULTI_DOF_WAYPOINT_BASE;
+  
+  // CRITICAL: Only process waypoints for THIS joint
+  // Multiple controllers share the same CAN bus, each must filter by joint_id
+  if (waypoint_joint_id != ACTIVE_JOINT) {
+    // Not for this joint, ignore silently
+    return;
+  }
+  
   if (len < 8) {
     LOG_WARN("[CAN] Multi-DOF Waypoint frame too short (" + String(len) + " bytes)");
     return;

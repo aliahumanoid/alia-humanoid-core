@@ -524,6 +524,17 @@ public:
   bool loadLinearEquationsFromFlash();
   
   /**
+   * @brief Recalculate safe limits based on current equations and physical limits
+   * 
+   * This recalculates joint_safe_min/max using the current equation data and 
+   * the physical limits from config, then saves to flash. Useful when the 
+   * limit calculation algorithm changes without needing to redo auto-mapping.
+   * 
+   * @return true if recalculation and save succeeded
+   */
+  bool recalculateSafeLimits();
+  
+  /**
    * @brief Check if Core1 has requested a flash save
    * @return true if flash save is pending
    */

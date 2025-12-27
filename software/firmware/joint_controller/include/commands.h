@@ -119,7 +119,11 @@
 #define CMD_LOAD_PID 45
 #endif
 
-// Reserved: 46-49 for future PID commands
+#ifndef CMD_RECALC_SAFE_LIMITS
+#define CMD_RECALC_SAFE_LIMITS 46
+#endif
+
+// Reserved: 47-49 for future PID commands
 
 // --- Measurement & Testing Commands (50-59) ---
 #ifndef CMD_START_MEASURING
@@ -237,6 +241,7 @@
 #define SERIAL_CMD_GET_PID_OUTER "GET_PID_OUTER"
 #define SERIAL_CMD_SAVE_PID "SAVE_PID"
 #define SERIAL_CMD_LOAD_PID "LOAD_PID"
+#define SERIAL_CMD_RECALC_SAFE_LIMITS "RECALC_SAFE_LIMITS"
 
 // --- Command Strings (Measurement & Testing) ---
 #define SERIAL_CMD_START_MEASURE "START_MEASURE"
@@ -354,6 +359,8 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_SAVE_PID;
   } else if (strcmp(cmd_name, SERIAL_CMD_LOAD_PID) == 0) {
     return CMD_LOAD_PID;
+  } else if (strcmp(cmd_name, SERIAL_CMD_RECALC_SAFE_LIMITS) == 0) {
+    return CMD_RECALC_SAFE_LIMITS;
   }
   // Measurement & Testing
   else if (strcmp(cmd_name, SERIAL_CMD_START_MEASURE) == 0) {

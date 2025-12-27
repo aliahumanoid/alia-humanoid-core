@@ -551,6 +551,22 @@ void core0_main_loop() {
                       break;
                     }
 
+                    case CMD_RECALC_SAFE_LIMITS: {
+                      // Recalculate safe limits from current equations using updated algorithm
+                      if (active_joint_controller != nullptr) {
+                        if (active_joint_controller->recalculateSafeLimits()) {
+                          Serial.println("RSP:SAFE_LIMITS_RECALCULATED(" + String(ACTIVE_JOINT) + ")");
+                        } else {
+                          Serial.println("RSP:SAFE_LIMITS_RECALC_FAILED(" + String(ACTIVE_JOINT) + ")");
+                          LOG_ERROR("Failed to recalculate safe limits for joint " + String(ACTIVE_JOINT));
+                        }
+                      } else {
+                        Serial.println("RSP:ERROR: Controller not initialized");
+                      }
+                      handled_on_core0 = true;
+                      break;
+                    }
+
                     case CMD_START_TEST_ENCODER: {
                       // Activate encoder streaming via CAN ONLY (handled by Core1)
                       // Serial streaming is disabled to avoid conflicts and data corruption

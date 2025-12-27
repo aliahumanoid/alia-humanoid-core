@@ -129,6 +129,7 @@ COMMANDS = {
     'GET_PID_OUTER': 'GET_PID_OUTER',  # Get outer loop parameters
     'SAVE_PID': 'SAVE_PID',      # Save PID parameters to flash
     'LOAD_PID': 'LOAD_PID',      # Load PID parameters from flash
+    'RECALC_SAFE_LIMITS': 'RECALC_SAFE_LIMITS',  # Recalculate safe limits from equations
     'GET_MOVEMENT_DATA': 'GET_MOVEMENT_DATA',  # Request movement data from firmware
     'CAN_DIAG': 'CAN_DIAG'       # CAN bus diagnostic test
 }

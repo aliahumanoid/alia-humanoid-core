@@ -362,3 +362,77 @@ bool JointController::loadLinearEquationsFromFlash() {
   return loaded_equations_count > 0;
 }
 
+// Recalculate safe limits based on current equations and physical limits
+bool JointController::recalculateSafeLimits() {
+  LOG_INFO("Recalculating safe limits from current equations...");
+  
+  int recalculated_count = 0;
+  
+  for (int dof = 0; dof < config.dof_count; dof++) {
+    if (!linear_equations[dof].calculated || !linear_equations[dof].agonist.valid || 
+        !linear_equations[dof].antagonist.valid) {
+      LOG_WARN("DOF " + String(dof) + ": No valid equations - skipping");
+      continue;
+    }
+    
+    // Get current mapping range from stored limits (before recalc)
+    // We need to derive the original mapping range from the motor limits
+    // Since motor limits are stored with MOTOR_SAFETY_MARGIN (20°), we can work backwards
+    float old_joint_min = linear_equations[dof].joint_safe_min;
+    float old_joint_max = linear_equations[dof].joint_safe_max;
+    
+    // Estimate mapping range from old safe limits (approximate)
+    // The mapping range was approximately the safe range before the margin was removed
+    float joint_mapping_min = old_joint_min;
+    float joint_mapping_max = old_joint_max;
+    
+    // Calculate new safe limits using the updated algorithm (no margin on physical limits)
+    const float MAPPING_EXTENSION_RATIO = 0.10f;
+    
+    float joint_range = joint_mapping_max - joint_mapping_min;
+    float joint_extension = joint_range * MAPPING_EXTENSION_RATIO;
+    float extended_joint_min = joint_mapping_min - joint_extension;
+    float extended_joint_max = joint_mapping_max + joint_extension;
+    
+    // Use physical limits directly from config (no margin)
+    float physical_min = config.dofs[dof].limits.min_angle;
+    float physical_max = config.dofs[dof].limits.max_angle;
+    
+    // Safe range = intersection of extended mapping and physical limits
+    float new_safe_min = max(extended_joint_min, physical_min);
+    float new_safe_max = min(extended_joint_max, physical_max);
+    
+    if (new_safe_min > new_safe_max) {
+      // If inverted, fall back to physical limits
+      new_safe_min = physical_min;
+      new_safe_max = physical_max;
+    }
+    
+    LOG_INFO("DOF " + String(dof) + ": Safe limits updated:");
+    LOG_INFO("  Old: [" + String(old_joint_min, 2) + "°, " + String(old_joint_max, 2) + "°]");
+    LOG_INFO("  New: [" + String(new_safe_min, 2) + "°, " + String(new_safe_max, 2) + "°]");
+    LOG_INFO("  Physical: [" + String(physical_min, 2) + "°, " + String(physical_max, 2) + "°]");
+    
+    linear_equations[dof].joint_safe_min = new_safe_min;
+    linear_equations[dof].joint_safe_max = new_safe_max;
+    linear_equations[dof].limits_valid = true;
+    
+    recalculated_count++;
+  }
+  
+  if (recalculated_count == 0) {
+    LOG_ERROR("No equations available to recalculate limits");
+    return false;
+  }
+  
+  // Save updated equations to flash
+  LOG_INFO("Saving recalculated limits to flash...");
+  if (saveLinearEquationsToFlash()) {
+    LOG_INFO("Safe limits recalculated and saved successfully!");
+    return true;
+  } else {
+    LOG_ERROR("Failed to save recalculated limits to flash");
+    return false;
+  }
+}
+

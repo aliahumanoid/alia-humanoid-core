@@ -1124,6 +1124,9 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             elif cmd == "save-pid":
                 handler.send_new_command(joint, 'ALL', COMMANDS['SAVE_PID'])
                 message = "PID save request sent"
+            elif cmd == "recalc-safe-limits":
+                handler.send_new_command(joint, 'ALL', COMMANDS['RECALC_SAFE_LIMITS'])
+                message = "Safe limits recalculation requested"
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')

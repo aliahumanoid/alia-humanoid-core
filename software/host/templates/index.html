@@ -1491,7 +1491,7 @@
                                 <div id="autoMappingGridDetails" class="text-gray-600 space-y-0.5"></div>
                             </div>
                             
-                            <div class="grid grid-cols-2 gap-2">
+                            <div class="grid grid-cols-3 gap-2">
                                 <button onclick="sendCommand('start-auto-mapping')"
                                     class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded text-sm">
                                     <i class="fas fa-robot mr-1"></i>Start
@@ -1499,6 +1499,11 @@
                                 <button onclick="sendCommand('stop-auto-mapping')"
                                     class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-3 rounded text-sm">
                                     <i class="fas fa-stop mr-1"></i>Stop
+                                </button>
+                                <button onclick="sendCommand('recalc-safe-limits')"
+                                    class="bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-3 rounded text-sm"
+                                    title="Recalculate safe movement limits without re-running auto-mapping">
+                                    <i class="fas fa-sync-alt mr-1"></i>Recalc Limits
                                 </button>
                                 </div>
                         </div>
