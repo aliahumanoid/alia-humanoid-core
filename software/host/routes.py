@@ -692,6 +692,47 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": f"Unable to stop PID diagnostics streaming: {exc}"
             }), 500
 
+    # ===============================================================
+    # CAN INTERPOLATION MODE ROUTE
+    # ===============================================================
+
+    @app.route('/can/interpolation_mode', methods=['POST'])
+    def set_interpolation_mode():
+        """
+        Set waypoint interpolation mode.
+        
+        POST body: { "mode": "linear" | "cosine" }
+        
+        - "linear": Step response for PID tuning (sharp transitions)
+        - "cosine": Smooth S-curve for operational movements (reduced vibrations)
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            data = request.get_json() or {}
+            mode = data.get("mode", "linear")
+            
+            if mode not in ["linear", "cosine"]:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Invalid mode '{mode}'. Use 'linear' or 'cosine'."
+                }), 400
+            
+            result = can_manager.set_interpolation_mode(mode)
+            return jsonify({
+                "status": "success",
+                "message": f"Interpolation mode set to: {mode}",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to set interpolation mode")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to set interpolation mode: {exc}"
+            }), 500
+
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
         popped = serial_manager.pop_status_message()

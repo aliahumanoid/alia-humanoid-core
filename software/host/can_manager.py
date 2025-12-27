@@ -235,6 +235,22 @@ class CanManager:
         self._log_can_info("PID diagnostics streaming stopped")
         return {"streaming": False}
 
+    def set_interpolation_mode(self, mode: str) -> Dict[str, Any]:
+        """
+        Set waypoint interpolation mode.
+        
+        Args:
+            mode: "linear" for step response (PID tuning) or "cosine" for smooth motion
+        
+        Sends control command (0x005) to set interpolation mode.
+        """
+        self._ensure_connection()
+        mode_value = 0 if mode == "linear" else 1
+        payload = bytes([mode_value]) + bytes(7)
+        self._send_frame(0x005, payload, context=f"Interpolation mode={mode}")
+        self._log_can_info(f"Interpolation mode set to: {mode}")
+        return {"mode": mode}
+
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
         return self._encoder_stream_active

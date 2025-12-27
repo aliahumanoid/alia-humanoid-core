@@ -44,6 +44,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_TIME_SYNC 0x002
 #define CAN_ID_ENCODER_STREAM_CTRL 0x003  // Encoder streaming control (start/stop)
 #define CAN_ID_PID_DIAG_CTRL 0x004        // PID diagnostics streaming control
+#define CAN_ID_INTERPOLATION_MODE 0x005   // Waypoint interpolation mode (linear/smooth)
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -60,6 +61,13 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
 #define PID_DIAG_INTERVAL_US 50000        // 50ms = 20Hz for diagnostics
+
+// Interpolation modes
+#define INTERPOLATION_LINEAR 0   // Linear interpolation (step response)
+#define INTERPOLATION_COSINE 1   // S-curve cosine (smooth motion)
+
+// Global interpolation mode (set via CAN command, used by waypoint execution)
+volatile uint8_t waypoint_interpolation_mode = INTERPOLATION_LINEAR;
 
 // Sentinel value for unused DOF in Multi-DOF waypoint
 #define MULTI_DOF_UNUSED 0x7FFF
@@ -554,6 +562,18 @@ void pollHostCan() {
           LOG_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ 20Hz");
         } else {
           LOG_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
+        }
+      }
+    } else if (rx_id == CAN_ID_INTERPOLATION_MODE) {
+      // Interpolation mode control: byte 0 = mode (0=linear, 1=cosine)
+      if (len >= 1) {
+        uint8_t mode = buf[0];
+        if (mode <= INTERPOLATION_COSINE) {
+          waypoint_interpolation_mode = mode;
+          const char* mode_name = (mode == INTERPOLATION_LINEAR) ? "LINEAR (step)" : "COSINE (smooth)";
+          LOG_INFO("[CAN_HOST] Interpolation mode set to: " + String(mode_name));
+        } else {
+          LOG_WARN("[CAN_HOST] Invalid interpolation mode: " + String(mode));
         }
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {

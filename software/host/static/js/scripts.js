@@ -4806,6 +4806,7 @@ function startOscillationTest() {
     const pauseMs = parseInt($('#oscTestPause').val());
     const moveTimeMs = parseInt($('#oscTestMoveTime').val());
     const reps = parseInt($('#oscTestReps').val());
+    const interpolationMode = $('#oscTestInterpolation').val() || 'linear';
     
     // Validation
     if (isNaN(pointA) || isNaN(pointB) || pointA === pointB) {
@@ -4813,21 +4814,35 @@ function startOscillationTest() {
         return;
     }
     
-    oscTestActive = true;
-    oscTestCurrentRep = 0;
-    oscTestTotalReps = reps;
-    oscTestCurrentPoint = 'A';
-    oscTestMetricsReceived = 0;
-    
-    // Update UI
-    $('#oscTestStartBtn').prop('disabled', true);
-    $('#oscTestStopBtn').prop('disabled', false);
-    updateOscTestStatus(`Starting... 0/${reps} reps`);
-    
-    appendStatusMessage(`🔄 Oscillation test started: DOF${dof} ${pointA}° ↔ ${pointB}° × ${reps} reps`);
-    
-    // Start the oscillation loop
-    oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs);
+    // Set interpolation mode via CAN before starting
+    $.ajax({
+        url: '/can/interpolation_mode',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: interpolationMode })
+    }).done(response => {
+        const modeLabel = interpolationMode === 'cosine' ? 'SMOOTH' : 'LINEAR';
+        appendStatusMessage(`⚙️ Interpolation mode set to: ${modeLabel}`);
+        
+        // Now start the oscillation test
+        oscTestActive = true;
+        oscTestCurrentRep = 0;
+        oscTestTotalReps = reps;
+        oscTestCurrentPoint = 'A';
+        oscTestMetricsReceived = 0;
+        
+        // Update UI
+        $('#oscTestStartBtn').prop('disabled', true);
+        $('#oscTestStopBtn').prop('disabled', false);
+        updateOscTestStatus(`Starting... 0/${reps} reps`);
+        
+        appendStatusMessage(`🔄 Oscillation test started: DOF${dof} ${pointA}° ↔ ${pointB}° × ${reps} reps (${modeLabel})`);
+        
+        // Start the oscillation loop
+        oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs);
+    }).fail(xhr => {
+        appendStatusMessage(`❌ Failed to set interpolation mode: ${xhr.responseJSON?.message || 'Unknown error'}`);
+    });
 }
 
 /**
@@ -4935,6 +4950,18 @@ function resetOscillationTest() {
     
     sendOscTestWaypoint(dof, center, 500);
     appendStatusMessage(`🔄 Reset to center: ${center}°`);
+}
+
+/**
+ * Handle interpolation mode change - show warning for smooth mode
+ */
+function onInterpolationModeChange() {
+    const mode = $('#oscTestInterpolation').val();
+    if (mode === 'cosine') {
+        $('#oscTestSmoothWarning').show();
+    } else {
+        $('#oscTestSmoothWarning').hide();
+    }
 }
 
 /**

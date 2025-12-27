@@ -25,9 +25,15 @@
 #include <Arduino.h>
 #include <debug.h>
 #include "main_common.h"  // For shared_dof_angles
+#include <math.h>  // For cosf, M_PI
 
 // External time sync function (defined in core1.cpp)
 extern uint32_t getAbsoluteTimeMs();
+
+// External interpolation mode (defined in core1.cpp, set via CAN command)
+extern volatile uint8_t waypoint_interpolation_mode;
+#define INTERPOLATION_LINEAR 0
+#define INTERPOLATION_COSINE 1
 
 // Cycle counter for outer/inner loop division (wraps at 1000 to prevent overflow)
 static uint16_t cycle_count = 0;
@@ -184,8 +190,16 @@ bool JointController::executeWaypointMovement() {
           progress = constrain(progress, 0.0f, 1.0f);
         }
         
-        // Linear interpolation: q_des = start + (end - start) × progress
-        q_des = prev_angle + (target_angle - prev_angle) * progress;
+        // Apply interpolation based on mode
+        float smooth_progress = progress;
+        if (waypoint_interpolation_mode == INTERPOLATION_COSINE) {
+          // S-curve using cosine: smooth start and end (zero acceleration at boundaries)
+          // smooth_progress = 0.5 * (1 - cos(π * progress))
+          smooth_progress = 0.5f * (1.0f - cosf(progress * M_PI));
+        }
+        
+        // Interpolation: q_des = start + (end - start) × smooth_progress
+        q_des = prev_angle + (target_angle - prev_angle) * smooth_progress;
         
       } else {
         // HOLDING mode - maintain TARGET position (last waypoint target)
@@ -446,7 +460,13 @@ bool JointController::executeWaypointMovement() {
       float time_elapsed = t_now - prev_time;
       float progress = (time_total > 0) ? (time_elapsed / time_total) : 0.0f;
       progress = constrain(progress, 0.0f, 1.0f);
-      theta_0_joint = prev_angle + (target_angle - prev_angle) * progress;
+      
+      // Apply interpolation based on mode
+      float smooth_progress = progress;
+      if (waypoint_interpolation_mode == INTERPOLATION_COSINE) {
+        smooth_progress = 0.5f * (1.0f - cosf(progress * M_PI));
+      }
+      theta_0_joint = prev_angle + (target_angle - prev_angle) * smooth_progress;
     } else {
       // HOLDING: use last known position
       theta_0_joint = waypoint_buffer_prev_angle(dof);

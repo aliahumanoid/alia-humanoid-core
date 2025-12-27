@@ -1191,11 +1191,37 @@
                                             class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
                                     </div>
                                     
+                                    <!-- Interpolation Mode -->
+                                    <div>
+                                        <label class="block text-xs font-medium text-purple-700 mb-1">Interpolation</label>
+                                        <select id="oscTestInterpolation" class="w-full p-2 border border-purple-300 rounded text-sm"
+                                            onchange="onInterpolationModeChange()">
+                                            <option value="linear" selected>Linear (Step)</option>
+                                            <option value="cosine">Smooth (Cosine)</option>
+                                        </select>
+                                    </div>
+                                    
                                     <!-- Status -->
-                                    <div class="col-span-2">
+                                    <div>
                                         <label class="block text-xs font-medium text-purple-700 mb-1">Status</label>
                                         <div id="oscTestStatus" class="p-2 bg-white border border-purple-200 rounded text-sm font-mono">
                                             <span class="text-gray-400">Ready</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- Warning for Smooth interpolation -->
+                                <div id="oscTestSmoothWarning" class="mb-3 p-3 bg-amber-50 border border-amber-300 rounded text-xs" style="display: none;">
+                                    <div class="flex items-start">
+                                        <i class="fas fa-exclamation-triangle text-amber-500 mr-2 mt-0.5"></i>
+                                        <div>
+                                            <span class="font-semibold text-amber-700">Attenzione:</span>
+                                            <span class="text-amber-600">
+                                                L'interpolazione smooth maschera la risposta reale del PID. 
+                                                Per il tuning PID, usa <strong>Linear (Step)</strong> per vedere 
+                                                chiaramente overshoot, oscillazioni e settling time.
+                                                Usa Smooth solo per movimenti operativi finali.
+                                            </span>
                                         </div>
                                     </div>
                                 </div>
