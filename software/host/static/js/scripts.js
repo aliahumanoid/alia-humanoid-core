@@ -395,6 +395,13 @@ $(document).ready(function() {
     // Listener for PID diagnostics data (target/error)
     socket.on('pid_diag', function(data) {
         if (!pidDiagStreamActive) return;
+        
+        // Filter by currently selected joint to avoid flickering from other controllers
+        const selectedJoint = $('#jointSelect').val();
+        if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) {
+            return;  // Ignore data from other joints
+        }
+        
         updatePidDiagDisplay(data);
         updatePidErrorChart(data);
     });
@@ -402,12 +409,25 @@ $(document).ready(function() {
     // Listener for PID torque data
     socket.on('pid_torque', function(data) {
         if (!pidDiagStreamActive) return;
+        
+        // Filter by currently selected joint to avoid flickering from other controllers
+        const selectedJoint = $('#jointSelect').val();
+        if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) {
+            return;  // Ignore data from other joints
+        }
+        
         updatePidTorqueDisplay(data);
         updatePidTorqueChart(data);
     });
 
     // Listener for movement metrics (received when DOF enters HOLDING)
     socket.on('movement_metrics', function(data) {
+        // Filter by currently selected joint
+        const selectedJoint = $('#jointSelect').val();
+        if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) {
+            return;  // Ignore metrics from other joints
+        }
+        
         console.log('Movement metrics received:', data);
         updateMovementMetricsDisplay(data);
     });
