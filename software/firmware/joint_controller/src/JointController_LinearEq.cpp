@@ -119,9 +119,11 @@ bool JointController::calculateLinearEquationsFromMappingData() {
       linear_equations[dof].calculated = true;
 
       // Compute and store safe limits for joint and motors
-      const float PHYSICAL_SAFETY_MARGIN  = 1.0f;  // Margin on physical joint limits
+      // NOTE: No margin on joint physical limits - use config limits directly
+      // The config limits already represent safe mechanical boundaries
+      // Overshoot beyond physical limits is prevented by the mechanical structure
       const float MAPPING_EXTENSION_RATIO = 0.10f; // Dynamic extension based on data
-      const float MOTOR_SAFETY_MARGIN     = 20.0f; // Margin for motors
+      const float MOTOR_SAFETY_MARGIN     = 20.0f; // Margin for motors (they can extend beyond joint range)
 
       float joint_mapping_min = mapping_data.joint_data[0];
       float joint_mapping_max = mapping_data.joint_data[0];
@@ -135,14 +137,16 @@ bool JointController::calculateLinearEquationsFromMappingData() {
       float extended_joint_min = joint_mapping_min - joint_extension;
       float extended_joint_max = joint_mapping_max + joint_extension;
 
-      float physical_min = config.dofs[dof].limits.min_angle + PHYSICAL_SAFETY_MARGIN;
-      float physical_max = config.dofs[dof].limits.max_angle - PHYSICAL_SAFETY_MARGIN;
+      // Use physical limits directly from config (no margin needed)
+      float physical_min = config.dofs[dof].limits.min_angle;
+      float physical_max = config.dofs[dof].limits.max_angle;
 
+      // Safe range = intersection of extended mapping and physical limits
       linear_equations[dof].joint_safe_min = max(extended_joint_min, physical_min);
       linear_equations[dof].joint_safe_max = min(extended_joint_max, physical_max);
 
       if (linear_equations[dof].joint_safe_min > linear_equations[dof].joint_safe_max) {
-        // If the resulting interval is inverted, fall back to physical limits with margin
+        // If the resulting interval is inverted, fall back to physical limits
         linear_equations[dof].joint_safe_min = physical_min;
         linear_equations[dof].joint_safe_max = physical_max;
       }
