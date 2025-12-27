@@ -518,6 +518,11 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             }), 400
 
         try:
+            # IMPORTANT: Force LINEAR interpolation for batch waypoints
+            # Batch waypoints form a trajectory - the trajectory itself provides smoothing.
+            # Applying cosine interpolation between closely-spaced waypoints would distort the curve.
+            can_manager.set_interpolation_mode('linear')
+            
             result = can_manager.send_waypoint_batch(joint, waypoints)
             return jsonify({
                 "status": "success",
