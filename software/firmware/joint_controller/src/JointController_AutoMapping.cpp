@@ -741,13 +741,11 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
       auto_mapping_state.position_reached = isPositionReached(auto_mapping_state);
 
       if (auto_mapping_state.position_reached) {
-        // Position reached, stop motors immediately
-        stopAllMotors();
-
-        // Start counting for stabilization
-        auto_mapping_state.settle_start_time = millis();
+        // Position reached - acquire point IMMEDIATELY without stopping
+        // The actual angle is recorded (even if slightly different from target)
+        // Linear regression works with any (motor_angle, joint_angle) pairs
         LOG_INFO("Position reached for point " + String(auto_mapping_state.current_point) +
-                 ", motors stopped, waiting " + String(auto_mapping_state.settle_time_ms) + "ms");
+                 " - acquiring on-the-fly");
       } else {
         // Position not yet reached, apply necessary torques
         applyTorquesForTargetPosition(auto_mapping_state);
@@ -757,47 +755,9 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
     }
   }
 
-  // Position reached, verify whether settle time has passed
-  if (millis() - auto_mapping_state.settle_start_time >= auto_mapping_state.settle_time_ms) {
-
-    // Before acquiring point, apply pretension torques to both motors
-    LOG_INFO("Applying pretension torques for point acquisition");
-    for (int i = 0; i < auto_mapping_state.dof_count; i++) {
-      // Find motors for this DOF
-      int agonist_index    = -1;
-      int antagonist_index = -1;
-
-      for (int j = 0; j < auto_mapping_state.motor_count; j++) {
-        if (config.motors[j].dof_index == i) {
-          if (agonist_index == -1) {
-            agonist_index = j;
-          } else {
-            antagonist_index = j;
-            break;
-          }
-        }
-      }
-
-      if (agonist_index != -1 && antagonist_index != -1) {
-        // Get pretension torque from configuration
-        float pretension_torque = config.dofs[i].zero_mapping.tensioning_torque;
-
-        // Apply opposite torques to create tension
-        motors[agonist_index]->setTorque(pretension_torque);
-        motors[antagonist_index]->setTorque(-pretension_torque);
-
-        LOG_DEBUG("  DOF " + String(i) + ": agonist torque=" + String(pretension_torque) +
-                  ", antagonist torque=" + String(-pretension_torque));
-      }
-    }
-
-    // Wait briefly to stabilize with new torques
-    const int PRETENSION_STABILIZE_MS = 500;
-    LOG_DEBUG("Waiting " + String(PRETENSION_STABILIZE_MS) +
-              "ms for stabilization with pretension torques");
-    sleep_ms(PRETENSION_STABILIZE_MS);
-
-    // Stabilization time completed, acquire point
+  // Position reached - acquire point immediately (no settle time needed)
+  if (auto_mapping_state.position_reached) {
+    // Acquire point on-the-fly - motors keep moving
     if (acquireCurrentPoint(auto_mapping_state)) {
       // Point acquired successfully, reset error counter
       auto_mapping_state.consecutive_encoder_errors = 0;
@@ -845,7 +805,7 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
     }
   }
 
-  // Still waiting for stabilization
+  // Position not yet reached, continue moving
   return 0; // In progress
 }
 

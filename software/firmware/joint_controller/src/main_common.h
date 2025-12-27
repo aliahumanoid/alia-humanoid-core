@@ -56,8 +56,8 @@
 // Set the joint type for this PICO board
 // Possible values: JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT, JOINT_ANKLE_LEFT,
 // JOINT_ANKLE_RIGHT, JOINT_HIP_LEFT, JOINT_HIP_RIGHT
-//#define ACTIVE_JOINT JOINT_KNEE_RIGHT
-#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
+#define ACTIVE_JOINT JOINT_KNEE_RIGHT
+//#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
 
 // CAN ID assignment scheme for motors:
 // - IDs always start from 1

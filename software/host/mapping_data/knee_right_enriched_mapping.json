@@ -1,0 +1,426 @@
+{
+  "actual_dof_count": 1,
+  "dof_0": {
+    "agonist_angles": [
+      4.77,
+      10.38,
+      36.44,
+      70.63,
+      180.09,
+      219.27,
+      248.2,
+      305.99,
+      319.58,
+      338.62
+    ],
+    "antagonist_angles": [
+      -0.21,
+      6.65,
+      31.45,
+      66.44,
+      175.27,
+      212.91,
+      240.13,
+      297.72,
+      314.38,
+      334.29
+    ],
+    "joint_angles": [
+      0.3,
+      1.72,
+      7.59,
+      15.54,
+      40.51,
+      49.05,
+      55.34,
+      67.86,
+      70.75,
+      75.16
+    ],
+    "interpolation": {
+      "agonist": {
+        "regression": {
+          "slope": 4.465277596859043,
+          "intercept": 2.0107152773561894,
+          "r2": 0.9998744792061645,
+          "equation": "y = 4.4653x + 2.0107",
+          "r2Text": "R\u00b2 = 0.9999"
+        },
+        "interpolated_points": [
+          {
+            "x": 0.3,
+            "y": 3.350298556413902,
+            "type": "interpolated"
+          },
+          {
+            "x": 6.3,
+            "y": 30.14196413756816,
+            "type": "interpolated"
+          },
+          {
+            "x": 12.3,
+            "y": 56.933629718722415,
+            "type": "interpolated"
+          },
+          {
+            "x": 18.3,
+            "y": 83.72529529987666,
+            "type": "interpolated"
+          },
+          {
+            "x": 24.3,
+            "y": 110.51696088103093,
+            "type": "interpolated"
+          },
+          {
+            "x": 30.3,
+            "y": 137.30862646218517,
+            "type": "interpolated"
+          },
+          {
+            "x": 36.3,
+            "y": 164.1002920433394,
+            "type": "interpolated"
+          },
+          {
+            "x": 42.3,
+            "y": 190.89195762449367,
+            "type": "interpolated"
+          },
+          {
+            "x": 48.3,
+            "y": 217.68362320564793,
+            "type": "interpolated"
+          },
+          {
+            "x": 54.3,
+            "y": 244.4752887868022,
+            "type": "interpolated"
+          },
+          {
+            "x": 60.3,
+            "y": 271.2669543679565,
+            "type": "interpolated"
+          },
+          {
+            "x": 66.3,
+            "y": 298.0586199491107,
+            "type": "interpolated"
+          },
+          {
+            "x": 72.3,
+            "y": 324.85028553026496,
+            "type": "interpolated"
+          }
+        ],
+        "extrapolated_points": [
+          {
+            "x": -8,
+            "y": -33.71150549751615,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": -2,
+            "y": -6.919839916361896,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": 81.16,
+            "y": 364.4126450384361,
+            "type": "extrapolated_high"
+          }
+        ],
+        "full_points": [
+          {
+            "x": -8,
+            "y": -33.71150549751615,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": -2,
+            "y": -6.919839916361896,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": 0.3,
+            "y": 3.350298556413902,
+            "type": "interpolated"
+          },
+          {
+            "x": 6.3,
+            "y": 30.14196413756816,
+            "type": "interpolated"
+          },
+          {
+            "x": 12.3,
+            "y": 56.933629718722415,
+            "type": "interpolated"
+          },
+          {
+            "x": 18.3,
+            "y": 83.72529529987666,
+            "type": "interpolated"
+          },
+          {
+            "x": 24.3,
+            "y": 110.51696088103093,
+            "type": "interpolated"
+          },
+          {
+            "x": 30.3,
+            "y": 137.30862646218517,
+            "type": "interpolated"
+          },
+          {
+            "x": 36.3,
+            "y": 164.1002920433394,
+            "type": "interpolated"
+          },
+          {
+            "x": 42.3,
+            "y": 190.89195762449367,
+            "type": "interpolated"
+          },
+          {
+            "x": 48.3,
+            "y": 217.68362320564793,
+            "type": "interpolated"
+          },
+          {
+            "x": 54.3,
+            "y": 244.4752887868022,
+            "type": "interpolated"
+          },
+          {
+            "x": 60.3,
+            "y": 271.2669543679565,
+            "type": "interpolated"
+          },
+          {
+            "x": 66.3,
+            "y": 298.0586199491107,
+            "type": "interpolated"
+          },
+          {
+            "x": 72.3,
+            "y": 324.85028553026496,
+            "type": "interpolated"
+          },
+          {
+            "x": 81.16,
+            "y": 364.4126450384361,
+            "type": "extrapolated_high"
+          }
+        ],
+        "extended_range": {
+          "min": -8,
+          "max": 83,
+          "originalMin": 0.3,
+          "originalMax": 75.16,
+          "extension": 7.486000000000001
+        }
+      },
+      "antagonist": {
+        "regression": {
+          "slope": 4.43875873792995,
+          "intercept": -2.465437879227352,
+          "r2": 0.9997381838478153,
+          "equation": "y = 4.4388x - 2.4654",
+          "r2Text": "R\u00b2 = 0.9997"
+        },
+        "interpolated_points": [
+          {
+            "x": 0.3,
+            "y": -1.1338102578483669,
+            "type": "interpolated"
+          },
+          {
+            "x": 6.3,
+            "y": 25.498742169731333,
+            "type": "interpolated"
+          },
+          {
+            "x": 12.3,
+            "y": 52.13129459731103,
+            "type": "interpolated"
+          },
+          {
+            "x": 18.3,
+            "y": 78.76384702489074,
+            "type": "interpolated"
+          },
+          {
+            "x": 24.3,
+            "y": 105.39639945247043,
+            "type": "interpolated"
+          },
+          {
+            "x": 30.3,
+            "y": 132.02895188005013,
+            "type": "interpolated"
+          },
+          {
+            "x": 36.3,
+            "y": 158.66150430762983,
+            "type": "interpolated"
+          },
+          {
+            "x": 42.3,
+            "y": 185.29405673520952,
+            "type": "interpolated"
+          },
+          {
+            "x": 48.3,
+            "y": 211.92660916278922,
+            "type": "interpolated"
+          },
+          {
+            "x": 54.3,
+            "y": 238.55916159036892,
+            "type": "interpolated"
+          },
+          {
+            "x": 60.3,
+            "y": 265.19171401794864,
+            "type": "interpolated"
+          },
+          {
+            "x": 66.3,
+            "y": 291.82426644552834,
+            "type": "interpolated"
+          },
+          {
+            "x": 72.3,
+            "y": 318.45681887310803,
+            "type": "interpolated"
+          }
+        ],
+        "extrapolated_points": [
+          {
+            "x": -8,
+            "y": -37.97550778266695,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": -2,
+            "y": -11.342955355087252,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": 81.16,
+            "y": 357.7842212911674,
+            "type": "extrapolated_high"
+          }
+        ],
+        "full_points": [
+          {
+            "x": -8,
+            "y": -37.97550778266695,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": -2,
+            "y": -11.342955355087252,
+            "type": "extrapolated_low"
+          },
+          {
+            "x": 0.3,
+            "y": -1.1338102578483669,
+            "type": "interpolated"
+          },
+          {
+            "x": 6.3,
+            "y": 25.498742169731333,
+            "type": "interpolated"
+          },
+          {
+            "x": 12.3,
+            "y": 52.13129459731103,
+            "type": "interpolated"
+          },
+          {
+            "x": 18.3,
+            "y": 78.76384702489074,
+            "type": "interpolated"
+          },
+          {
+            "x": 24.3,
+            "y": 105.39639945247043,
+            "type": "interpolated"
+          },
+          {
+            "x": 30.3,
+            "y": 132.02895188005013,
+            "type": "interpolated"
+          },
+          {
+            "x": 36.3,
+            "y": 158.66150430762983,
+            "type": "interpolated"
+          },
+          {
+            "x": 42.3,
+            "y": 185.29405673520952,
+            "type": "interpolated"
+          },
+          {
+            "x": 48.3,
+            "y": 211.92660916278922,
+            "type": "interpolated"
+          },
+          {
+            "x": 54.3,
+            "y": 238.55916159036892,
+            "type": "interpolated"
+          },
+          {
+            "x": 60.3,
+            "y": 265.19171401794864,
+            "type": "interpolated"
+          },
+          {
+            "x": 66.3,
+            "y": 291.82426644552834,
+            "type": "interpolated"
+          },
+          {
+            "x": 72.3,
+            "y": 318.45681887310803,
+            "type": "interpolated"
+          },
+          {
+            "x": 81.16,
+            "y": 357.7842212911674,
+            "type": "extrapolated_high"
+          }
+        ],
+        "extended_range": {
+          "min": -8,
+          "max": 83,
+          "originalMin": 0.3,
+          "originalMax": 75.16,
+          "extension": 7.486000000000001
+        }
+      },
+      "metadata": {
+        "original_data_points": 10,
+        "interpolated_points_count": 13,
+        "extrapolated_points_count": 3,
+        "total_points_count": 16,
+        "extrapolation_percent": 10,
+        "step_size": 6,
+        "original_median_step": 6.290000000000006
+      }
+    }
+  },
+  "dof_count": 1,
+  "file_timestamp": "2025-12-27T11:18:56.428819",
+  "joint_name": "KNEE_RIGHT",
+  "loaded_from_file": true,
+  "present_dofs": [
+    0
+  ],
+  "total_points": 10,
+  "saved_timestamp": "2025-12-27T11:18:56.941710",
+  "file_version": "3.1.1_enriched"
+}
