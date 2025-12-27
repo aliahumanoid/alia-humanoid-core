@@ -506,14 +506,17 @@ bool JointController::isAngleInLimits(uint8_t dof_index, float angle) {
 // ============================================================================
 
 // Check if an angle is within safety limits derived from equations
+// Small tolerance to account for encoder noise and floating point precision
+static const float LIMIT_TOLERANCE = 0.5f;  // Allow 0.5° beyond limits
+
 bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
   if (dof_index >= config.dof_count) {
     return false;
   }
 
   if (hasValidEquations(dof_index)) {
-    float min_angle = linear_equations[dof_index].joint_safe_min;
-    float max_angle = linear_equations[dof_index].joint_safe_max;
+    float min_angle = linear_equations[dof_index].joint_safe_min - LIMIT_TOLERANCE;
+    float max_angle = linear_equations[dof_index].joint_safe_max + LIMIT_TOLERANCE;
 
     bool in_limits = (angle >= min_angle && angle <= max_angle);
 
@@ -529,8 +532,8 @@ bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
 
   // Conservative fallback: use physical limits with margin if equations are unavailable
   const float CONSERVATIVE_MARGIN = 2.0f;
-  float joint_min                 = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN;
-  float joint_max                 = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN;
+  float joint_min                 = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN - LIMIT_TOLERANCE;
+  float joint_max                 = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN + LIMIT_TOLERANCE;
 
   bool in_limits = (angle >= joint_min && angle <= joint_max);
 

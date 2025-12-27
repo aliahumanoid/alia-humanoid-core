@@ -2360,16 +2360,6 @@ function sendCanWaypointSequence() {
     const btn = $("#sendCanWaypointSequenceBtn");
     btn.prop('disabled', true);
     btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
-    
-    // IMPORTANT: Force LINEAR interpolation for sinusoidal trajectories
-    // Sinusoids are already smooth curves - applying cosine interpolation would distort the waveform
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: 'linear' }),
-        async: false  // Synchronous to ensure mode is set before sending waypoints
-    });
 
     // Calculate timing parameters for batch sending
     // Server sends with 2ms delay between waypoints
