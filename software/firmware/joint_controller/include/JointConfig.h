@@ -44,7 +44,10 @@ constexpr float PID_DEFAULT_OUTER_KI = 0.01f;
 constexpr float PID_DEFAULT_OUTER_KD = 0.05f;
 
 // Default tendon control parameters
-constexpr float PID_DEFAULT_STIFFNESS_DEG = 1.0f;  // Tendon pretension reference (degrees)
+// STIFFNESS: Separates motor references to keep both tendons in tension
+// Higher values = more co-contraction = less vibration but more energy consumption
+// Increase if you see vibrations from slack tendons (especially under gravitational load)
+constexpr float PID_DEFAULT_STIFFNESS_DEG = 5.0f;  // Tendon pretension reference (degrees)
 constexpr float PID_DEFAULT_CASCADE       = 1.0f;  // Cascade influence factor (0.0-1.0)
 
 // ============================================================================

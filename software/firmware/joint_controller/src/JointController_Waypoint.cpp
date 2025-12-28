@@ -572,14 +572,11 @@ bool JointController::executeWaypointMovement() {
     float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_curr);
     
-    // === CO-CONTRACTION: Add minimum tension to both motors ===
-    // This keeps both tendons always under tension, reducing vibrations
-    // caused by slack tendons. The PID still controls the difference
-    // between A and B to generate movement.
-    // TODO: Make this configurable per-DOF or adaptive based on load
-    const float CO_CONTRACTION = 50.0f;  // mNm - base tension for both motors
-    command_A += CO_CONTRACTION;
-    command_B += CO_CONTRACTION;
+    // NOTE: Co-contraction is achieved through stiffness_ref parameter in cascade control
+    // theta_A_ref = theta_0 + 0.5*delta_theta + 0.5*stiffness_ref
+    // theta_B_ref = theta_0 + 0.5*delta_theta - 0.5*stiffness_ref
+    // The stiffness_ref separates motor references, creating constant tension on both tendons.
+    // Increase stiffness_ref (via UI) to reduce vibrations from slack tendons.
     
     // Apply torque limits from motor configuration
     float max_torque_A = config.motors[agonist_idx].max_torque;
