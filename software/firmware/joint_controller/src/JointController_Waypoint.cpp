@@ -578,25 +578,21 @@ bool JointController::executeWaypointMovement() {
     // The stiffness_ref separates motor references, creating constant tension on both tendons.
     // Increase stiffness_ref (via UI) to reduce vibrations from slack tendons.
     
-    // === TORQUE RATE LIMITER ===
-    // Prevents rapid torque fluctuations that cause vibrations in slow/final phases
-    // Limits how fast torque command can change per cycle (500 Hz → 2ms per cycle)
-    // TODO: Make configurable. Value 100 means max 50000 units/second rate of change
-    static float last_command_A[MAX_DOFS] = {0};
-    static float last_command_B[MAX_DOFS] = {0};
-    const float MAX_TORQUE_RATE = 100.0f;  // Max change per cycle
+    // === TORQUE LOW-PASS FILTER ===
+    // Attenuates high-frequency torque oscillations that cause vibrations
+    // Uses first-order IIR filter: output = alpha * input + (1-alpha) * prev_output
+    // Lower alpha = more filtering (smoother but slower response)
+    // Higher alpha = less filtering (faster response but may oscillate)
+    // At 500 Hz, alpha=0.15 gives cutoff frequency ~12 Hz (attenuates >12 Hz vibrations)
+    static float filtered_A[MAX_DOFS] = {0};
+    static float filtered_B[MAX_DOFS] = {0};
+    const float TORQUE_FILTER_ALPHA = 0.15f;  // Cutoff ~12 Hz at 500 Hz sampling
     
-    float delta_A = command_A - last_command_A[dof];
-    float delta_B = command_B - last_command_B[dof];
+    filtered_A[dof] = TORQUE_FILTER_ALPHA * command_A + (1.0f - TORQUE_FILTER_ALPHA) * filtered_A[dof];
+    filtered_B[dof] = TORQUE_FILTER_ALPHA * command_B + (1.0f - TORQUE_FILTER_ALPHA) * filtered_B[dof];
     
-    if (delta_A > MAX_TORQUE_RATE) command_A = last_command_A[dof] + MAX_TORQUE_RATE;
-    else if (delta_A < -MAX_TORQUE_RATE) command_A = last_command_A[dof] - MAX_TORQUE_RATE;
-    
-    if (delta_B > MAX_TORQUE_RATE) command_B = last_command_B[dof] + MAX_TORQUE_RATE;
-    else if (delta_B < -MAX_TORQUE_RATE) command_B = last_command_B[dof] - MAX_TORQUE_RATE;
-    
-    last_command_A[dof] = command_A;
-    last_command_B[dof] = command_B;
+    command_A = filtered_A[dof];
+    command_B = filtered_B[dof];
     
     // Apply torque limits from motor configuration
     float max_torque_A = config.motors[agonist_idx].max_torque;
