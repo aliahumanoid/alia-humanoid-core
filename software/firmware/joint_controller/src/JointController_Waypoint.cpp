@@ -578,6 +578,26 @@ bool JointController::executeWaypointMovement() {
     // The stiffness_ref separates motor references, creating constant tension on both tendons.
     // Increase stiffness_ref (via UI) to reduce vibrations from slack tendons.
     
+    // === TORQUE RATE LIMITER ===
+    // Prevents rapid torque fluctuations that cause vibrations in slow/final phases
+    // Limits how fast torque command can change per cycle (500 Hz → 2ms per cycle)
+    // TODO: Make configurable. Value 100 means max 50000 units/second rate of change
+    static float last_command_A[MAX_DOFS] = {0};
+    static float last_command_B[MAX_DOFS] = {0};
+    const float MAX_TORQUE_RATE = 100.0f;  // Max change per cycle
+    
+    float delta_A = command_A - last_command_A[dof];
+    float delta_B = command_B - last_command_B[dof];
+    
+    if (delta_A > MAX_TORQUE_RATE) command_A = last_command_A[dof] + MAX_TORQUE_RATE;
+    else if (delta_A < -MAX_TORQUE_RATE) command_A = last_command_A[dof] - MAX_TORQUE_RATE;
+    
+    if (delta_B > MAX_TORQUE_RATE) command_B = last_command_B[dof] + MAX_TORQUE_RATE;
+    else if (delta_B < -MAX_TORQUE_RATE) command_B = last_command_B[dof] - MAX_TORQUE_RATE;
+    
+    last_command_A[dof] = command_A;
+    last_command_B[dof] = command_B;
+    
     // Apply torque limits from motor configuration
     float max_torque_A = config.motors[agonist_idx].max_torque;
     float max_torque_B = config.motors[antagonist_idx].max_torque;
