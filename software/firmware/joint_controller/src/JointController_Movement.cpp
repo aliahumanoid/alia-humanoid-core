@@ -533,6 +533,11 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   // Time-window based CAN error tracking (shared utility from main_common.h)
   static CANErrorTracker canErrorTracker;
 
+  // Deadline-miss tracking for timing diagnostics
+  uint32_t deadline_miss_count = 0;      // Total deadline misses this movement
+  int64_t max_lateness_us = 0;           // Worst-case lateness in µs
+  uint64_t cycle_start_us = 0;           // Start of current cycle
+
   float outer_loop_dt =
       OUTER_LOOP_DIV * sampling_period / 1000000.0f;  // Time in seconds for outer PID
   float inner_loop_dt = sampling_period / 1000000.0f; // Time in seconds for inner PID
@@ -971,10 +976,17 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           // Other commands are ignored during holding
         }
 
-        // Sleep until next cycle
+        // Sleep until next cycle (with deadline-miss detection)
         int64_t sleep_time = next_time - time_us_64();
         if (sleep_time > 0) {
           sleep_us(sleep_time);
+        } else {
+          // Deadline miss in holding phase
+          deadline_miss_count++;
+          int64_t lateness = -sleep_time;
+          if (lateness > max_lateness_us) {
+            max_lateness_us = lateness;
+          }
         }
       }
 
@@ -997,10 +1009,23 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
       break;
     }
 
-    // Sleep until next cycle
+    // Sleep until next cycle (with deadline-miss detection)
     int64_t sleep_time = next_time - time_us_64();
     if (sleep_time > 0) {
       sleep_us(sleep_time);
+    } else {
+      // Deadline miss: cycle took longer than budget
+      deadline_miss_count++;
+      int64_t lateness = -sleep_time;
+      if (lateness > max_lateness_us) {
+        max_lateness_us = lateness;
+      }
+      // Log warning on first miss and every 100th miss
+      if (deadline_miss_count == 1 || deadline_miss_count % 100 == 0) {
+        LOG_WARN("[Movement] Deadline miss #" + String(deadline_miss_count) +
+                 " (late by " + String((int)lateness) + "µs, budget=" +
+                 String((int)sampling_period) + "µs)");
+      }
     }
   }
 
@@ -1038,6 +1063,17 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   LOG_INFO("\nCascade control completed successfully");
     LOG_INFO("Total cycles: " + String(cycle_count));
     LOG_INFO("Outer-loop cycles: " + String(cycle_count / OUTER_LOOP_DIV));
+
+    // Timing diagnostics
+    if (deadline_miss_count > 0) {
+      float miss_percent = 100.0f * deadline_miss_count / cycle_count;
+      LOG_WARN("Deadline misses: " + String(deadline_miss_count) + "/" + String(cycle_count) +
+               " (" + String(miss_percent, 1) + "%), max lateness: " +
+               String((int)max_lateness_us) + "µs");
+    } else {
+      LOG_INFO("Timing: No deadline misses (all cycles within " +
+               String((int)sampling_period) + "µs budget)");
+    }
     LOG_INFO("=====================================");
   }
 
