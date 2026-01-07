@@ -63,6 +63,12 @@ static WaypointState prev_dof_state[MAX_DOFS] = {WaypointState::IDLE};
 // Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
 static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 
+// === CAN ERROR TRACKING (file scope for reset on new movement) ===
+static float wp_last_theta_A[MAX_DOFS] = {0};
+static float wp_last_theta_B[MAX_DOFS] = {0};
+static bool wp_first_read[MAX_DOFS] = {true, true, true};
+static CANErrorTracker wp_canErrorTracker;
+
 // === MOTOR POINTER CACHE ===
 // Cache motor pointers to avoid searching every cycle (saves ~10µs per DOF per cycle)
 static LKM_Motor* cached_agonist[MAX_DOFS] = {nullptr};
@@ -117,7 +123,9 @@ bool JointController::executeWaypointMovement() {
   
   // Wrap cycle_count to prevent overflow (1000 cycles = 2 seconds at 500Hz)
   cycle_count = (cycle_count + 1) % 1000;
-  safety_check_counter++; // Increment for periodic safety checks
+  // Increment safety check counter with wrap to prevent overflow
+  // Counter wraps at 1000 to stay well within uint16_t range
+  safety_check_counter = (safety_check_counter + 1) % 1000;
   bool any_movement = false;
   
   uint32_t t_now = getAbsoluteTimeMs();
@@ -146,7 +154,12 @@ bool JointController::executeWaypointMovement() {
       resetOuterPID(dof);
       delta_theta[dof] = 0.0f;
       pid_reset_needed[dof] = false;
-      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID state reset (new sequence)");
+
+      // Clear CAN error history for this DOF to prevent old errors from triggering false stops
+      wp_canErrorTracker.clearErrors(dof);
+      wp_first_read[dof] = true;  // Reset jump detection for clean start
+
+      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (new sequence)");
     }
     
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
@@ -600,36 +613,34 @@ bool JointController::executeWaypointMovement() {
     // === DIAGNOSTIC: Detect suspicious motor readings ===
     // Check for sudden large jumps in motor angle (possible CAN corruption)
     // Uses time-window based detection via shared CANErrorTracker (main_common.h)
-    static float last_theta_A[MAX_DOFS] = {0};
-    static float last_theta_B[MAX_DOFS] = {0};
-    static bool first_read[MAX_DOFS] = {true, true, true};
-    static CANErrorTracker canErrorTracker;  // Shared utility class
+    // Variables are at file scope (wp_last_theta_A/B, wp_first_read, wp_canErrorTracker)
+    // so they can be reset when a new waypoint sequence starts
 
-    if (!first_read[dof]) {
-      float jump_A = fabs(theta_A_curr - last_theta_A[dof]);
-      float jump_B = fabs(theta_B_curr - last_theta_B[dof]);
+    if (!wp_first_read[dof]) {
+      float jump_A = fabs(theta_A_curr - wp_last_theta_A[dof]);
+      float jump_B = fabs(theta_B_curr - wp_last_theta_B[dof]);
 
       // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
       if (jump_A > 30.0f || jump_B > 30.0f) {
-        canErrorTracker.recordError(dof);
-        uint8_t recent_errors = canErrorTracker.countRecentErrors(dof);
+        wp_canErrorTracker.recordError(dof);
+        uint8_t recent_errors = wp_canErrorTracker.countRecentErrors(dof);
 
         LOG_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
                   String(recent_errors) + " errors in " + String(can_error_window_ms) + "ms)!");
-        LOG_ERROR("  Agonist: " + String(last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) +
+        LOG_ERROR("  Agonist: " + String(wp_last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) +
                   " (jump=" + String(jump_A, 2) + "°)");
-        LOG_ERROR("  Antagonist: " + String(last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) +
+        LOG_ERROR("  Antagonist: " + String(wp_last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) +
                   " (jump=" + String(jump_B, 2) + "°)");
 
         // Trigger emergency stop if too many errors within time window
-        if (canErrorTracker.shouldStop(dof)) {
+        if (wp_canErrorTracker.shouldStop(dof)) {
           LOG_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
                     " CAN errors in " + String(can_error_window_ms) + "ms, EMERGENCY STOP!");
           stopAllMotors();
           waypoint_buffer_clear(dof);
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
-          canErrorTracker.clearErrors(dof);
-          first_read[dof] = true;
+          wp_canErrorTracker.clearErrors(dof);
+          wp_first_read[dof] = true;
           continue;
         }
 
@@ -638,10 +649,10 @@ bool JointController::executeWaypointMovement() {
       }
       // Good reading - no need to reset anything, old errors expire naturally
     }
-    
-    last_theta_A[dof] = theta_A_curr;
-    last_theta_B[dof] = theta_B_curr;
-    first_read[dof] = false;
+
+    wp_last_theta_A[dof] = theta_A_curr;
+    wp_last_theta_B[dof] = theta_B_curr;
+    wp_first_read[dof] = false;
     
     // === UPDATE MOTOR ANGLE CACHE ===
     // This cache is used by checkMotorsInRange() to avoid redundant CAN reads

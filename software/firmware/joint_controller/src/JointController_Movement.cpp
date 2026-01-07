@@ -533,6 +533,15 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   // Time-window based CAN error tracking (shared utility from main_common.h)
   static CANErrorTracker canErrorTracker;
 
+  // Clear CAN error history at start of new movement
+  // This prevents old transient errors from triggering false emergency stops
+  canErrorTracker.clearAll();
+
+  // Reset first_motor_read flags for clean jump detection at movement start
+  for (int i = 0; i < MAX_DOFS; i++) {
+    first_motor_read[i] = true;
+  }
+
   // Deadline-miss tracking for timing diagnostics
   uint32_t deadline_miss_count = 0;      // Total deadline misses this movement
   int64_t max_lateness_us = 0;           // Worst-case lateness in µs
