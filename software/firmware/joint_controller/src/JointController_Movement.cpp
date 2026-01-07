@@ -352,6 +352,12 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
     float gamma_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
     float theta_curr = motor_pairs[i].antagonist->getMultiAngleSync().angle;
 
+    // Update motor angle cache for safety checks
+    cached_motor_angles.agonist[dof_idx] = gamma_curr;
+    cached_motor_angles.antagonist[dof_idx] = theta_curr;
+    cached_motor_angles.valid[dof_idx] = true;
+    cached_motor_angles.last_update_ms = millis();
+
     if (verbose) {
       LOG_DEBUG("DOF " + String(dof_idx) + " current motor angles:");
       LOG_DEBUG("  Agonist: " + String(gamma_curr, 6) + "°");
@@ -656,6 +662,12 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         float theta_A_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
         float theta_B_curr = motor_pairs[i].antagonist->getMultiAngleSync().angle;
 
+        // Update motor angle cache for safety checks
+        cached_motor_angles.agonist[dof_idx] = theta_A_curr;
+        cached_motor_angles.antagonist[dof_idx] = theta_B_curr;
+        cached_motor_angles.valid[dof_idx] = true;
+        cached_motor_angles.last_update_ms = millis();
+
         // Inner PID for motors
         float error_A = theta_A_ref[dof_idx] - theta_A_curr;
         float error_B = theta_B_ref[dof_idx] - theta_B_curr;
@@ -738,9 +750,10 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
             q_curr[dof_idx] = shared_dof_angles.angles[dof_idx];
 
             // PERIODIC SAFETY CHECKS: run every 100 cycles to reduce overhead
+            // check_motors=true enables motor range check via cache (includes tendon breakage warning)
             if (safety_check_counter >= 100) {
               String hold_safety_message;
-              if (!checkSafetyForDof(dof_idx, q_curr[dof_idx], hold_safety_message, false)) {
+              if (!checkSafetyForDof(dof_idx, q_curr[dof_idx], hold_safety_message, true)) {
                 stopAllMotors();
                 return MovementResult(MOVEMENT_SAFETY_STOP,
                                       "SAFETY ERROR: " + hold_safety_message + "\n");
@@ -817,35 +830,12 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           float theta_A_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
           float theta_B_curr = motor_pairs[i].antagonist->getMultiAngleSync().angle;
 
-          // PERIODIC SAFETY CHECK: Verify motor limits based on saved equations
-          if (safety_check_counter >= 100) {
-            float agonist_min    = linear_equations[dof_idx].agonist_safe_min;
-            float agonist_max    = linear_equations[dof_idx].agonist_safe_max;
-            float antagonist_min = linear_equations[dof_idx].antagonist_safe_min;
-            float antagonist_max = linear_equations[dof_idx].antagonist_safe_max;
-
-            // Verify agonist motor limits
-            if (theta_A_curr < agonist_min || theta_A_curr > agonist_max) {
-              stopAllMotors();
-              return MovementResult(
-                  MOVEMENT_SAFETY_STOP,
-                  "SAFETY ERROR: Agonist motor DOF " + String(dof_idx) +
-                      " out of range during hold: " + String(theta_A_curr, 1) +
-                      " deg (safe range: " + String(agonist_min, 1) + "-" +
-                      String(agonist_max, 1) + " deg)\n");
-            }
-
-            // Verify antagonist motor limits
-            if (theta_B_curr < antagonist_min || theta_B_curr > antagonist_max) {
-              stopAllMotors();
-              return MovementResult(
-                  MOVEMENT_SAFETY_STOP,
-                  "SAFETY ERROR: Antagonist motor DOF " + String(dof_idx) +
-                      " out of range during hold: " + String(theta_B_curr, 1) +
-                      " deg (safe range: " + String(antagonist_min, 1) + "-" +
-                      String(antagonist_max, 1) + " deg)\n");
-            }
-          }
+          // Update motor angle cache for safety checks
+          // Motor limit checks are now handled by checkSafetyForDof(..., true) in outer loop
+          cached_motor_angles.agonist[dof_idx] = theta_A_curr;
+          cached_motor_angles.antagonist[dof_idx] = theta_B_curr;
+          cached_motor_angles.valid[dof_idx] = true;
+          cached_motor_angles.last_update_ms = millis();
 
           float command_A = motor_pairs[i].pid_agonist->control(theta_A_ref[dof_idx], theta_A_curr);
           float command_B =
