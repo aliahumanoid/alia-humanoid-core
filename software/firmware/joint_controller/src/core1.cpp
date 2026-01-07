@@ -45,6 +45,9 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_ENCODER_STREAM_CTRL 0x003  // Encoder streaming control (start/stop)
 #define CAN_ID_PID_DIAG_CTRL 0x004        // PID diagnostics streaming control
 #define CAN_ID_INTERPOLATION_MODE 0x005   // Waypoint interpolation mode (linear/smooth)
+#define CAN_ID_LOOP_FREQUENCY 0x006       // Control loop frequencies (inner/outer)
+#define CAN_ID_PID_DIAG_FREQ 0x007        // PID diagnostics stream frequency
+#define CAN_ID_NOTCH_FILTER 0x008         // Notch filter configuration (enable/freq/Q)
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -60,7 +63,11 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
-#define PID_DIAG_INTERVAL_US 50000        // 50ms = 20Hz for diagnostics
+
+// PID diagnostics streaming - configurable frequency
+// Default: 50ms = 20Hz, can be changed via CAN for high-frequency training data
+#define PID_DIAG_DEFAULT_INTERVAL_US 50000    // 50ms = 20Hz (normal monitoring)
+volatile uint32_t pid_diag_interval_us = PID_DIAG_DEFAULT_INTERVAL_US;
 
 // Interpolation modes
 #define INTERPOLATION_LINEAR 0   // Linear interpolation (step response)
@@ -375,10 +382,10 @@ void sendPIDDiagStreamData() {
   if (!pid_diag_stream_active) return;
   if (!pid_diagnostics.valid) return;
   
-  // Check timing - only send every PID_DIAG_INTERVAL_US (50ms = 20Hz)
+  // Check timing - only send at configured interval (configurable via CAN)
   static uint32_t last_send_us = 0;
   uint32_t now_us = time_us_32();
-  if ((now_us - last_send_us) < PID_DIAG_INTERVAL_US) {
+  if ((now_us - last_send_us) < pid_diag_interval_us) {
     return;
   }
   last_send_us = now_us;
@@ -559,7 +566,8 @@ void pollHostCan() {
         bool start = (buf[0] == 0x01);
         pid_diag_stream_active = start;
         if (start) {
-          LOG_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ 20Hz");
+          uint32_t freq_hz = 1000000 / pid_diag_interval_us;
+          LOG_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ " + String(freq_hz) + "Hz");
         } else {
           LOG_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
         }
@@ -575,6 +583,79 @@ void pollHostCan() {
         } else {
           LOG_WARN("[CAN_HOST] Invalid interpolation mode: " + String(mode));
         }
+      }
+    } else if (rx_id == CAN_ID_LOOP_FREQUENCY) {
+      // Loop frequency control: 
+      // byte 0-1: inner_loop_period_us (uint16_t, little-endian)
+      // byte 2: outer_loop_divisor (uint8_t)
+      if (len >= 3) {
+        uint16_t new_inner_period = buf[0] | (buf[1] << 8);
+        uint8_t new_outer_div = buf[2];
+        
+        // Validate: inner period 500-10000µs (100Hz-2000Hz), divisor 1-20
+        if (new_inner_period >= 500 && new_inner_period <= 10000 && 
+            new_outer_div >= 1 && new_outer_div <= 20) {
+          inner_loop_period_us = new_inner_period;
+          outer_loop_divisor = new_outer_div;
+          
+          float inner_freq = 1000000.0f / new_inner_period;
+          float outer_freq = inner_freq / new_outer_div;
+          LOG_INFO("[CAN_HOST] Loop frequencies updated: inner=" + String(inner_freq, 1) + 
+                   "Hz, outer=" + String(outer_freq, 1) + "Hz");
+        } else {
+          LOG_WARN("[CAN_HOST] Invalid loop frequency: inner_period=" + String(new_inner_period) + 
+                   "µs, outer_div=" + String(new_outer_div));
+        }
+      }
+    } else if (rx_id == CAN_ID_PID_DIAG_FREQ) {
+      // PID diagnostics frequency control:
+      // byte 0: frequency in Hz (10-200 Hz)
+      if (len >= 1) {
+        uint8_t freq_hz = buf[0];
+        
+        // Validate: 10-200 Hz
+        if (freq_hz >= 10 && freq_hz <= 200) {
+          pid_diag_interval_us = 1000000 / freq_hz;
+          LOG_INFO("[CAN_HOST] PID diagnostics frequency set to: " + String(freq_hz) + 
+                   "Hz (" + String(pid_diag_interval_us / 1000) + "ms)");
+        } else {
+          LOG_WARN("[CAN_HOST] Invalid PID diag frequency: " + String(freq_hz) + 
+                   "Hz (valid: 10-200Hz)");
+        }
+      }
+    } else if (rx_id == CAN_ID_NOTCH_FILTER) {
+      // Notch filter configuration:
+      // byte 0: enabled (0=bypass, 1=enabled)
+      // byte 1-2: center frequency * 10 (uint16_t, e.g., 80 = 8.0 Hz)
+      // byte 3: quality * 100 (uint8_t, e.g., 90 = 0.90)
+      if (len >= 4) {
+        bool enabled = (buf[0] != 0);
+        uint16_t freq_x10 = buf[1] | (buf[2] << 8);
+        uint8_t quality_x100 = buf[3];
+        
+        float freq_hz = freq_x10 / 10.0f;
+        float quality = quality_x100 / 100.0f;
+        
+        // Validate: 1-50 Hz, Q 0.5-0.99
+        if (freq_hz >= 1.0f && freq_hz <= 50.0f && quality >= 0.5f && quality <= 0.99f) {
+          notch_filter_config.enabled = enabled;
+          notch_filter_config.center_freq_hz = freq_hz;
+          notch_filter_config.quality = quality;
+          notch_filter_config.config_changed = true;  // Signal reconfiguration needed
+          
+          LOG_INFO("[CAN_HOST] Notch filter: " + String(enabled ? "ENABLED" : "DISABLED") +
+                   " @ " + String(freq_hz, 1) + " Hz, Q=" + String(quality, 2));
+        } else {
+          LOG_WARN("[CAN_HOST] Invalid notch filter params: freq=" + String(freq_hz, 1) + 
+                   " Hz, Q=" + String(quality, 2) + " (valid: 1-50Hz, Q=0.5-0.99)");
+        }
+      } else if (len >= 1) {
+        // Short form: just enable/disable with current settings
+        bool enabled = (buf[0] != 0);
+        notch_filter_config.enabled = enabled;
+        notch_filter_config.config_changed = true;
+        LOG_INFO("[CAN_HOST] Notch filter " + String(enabled ? "ENABLED" : "DISABLED") +
+                 " @ " + String(notch_filter_config.center_freq_hz, 1) + " Hz");
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
@@ -616,8 +697,8 @@ void core1_loop() {
   
   MovementResult last_movement_result; // To track last movement result
 
-  // Timing for waypoint control @ 500 Hz (same as moveMultiDOF_cascade)
-  const uint64_t SAMPLING_PERIOD_US = 2000; // 2 ms = 500 Hz
+  // Timing for waypoint control (configurable via inner_loop_period_us)
+  // Default: 2000µs = 500Hz (same as moveMultiDOF_cascade)
   uint64_t next_time = 0; // Will be initialized on first waypoint
   bool timing_initialized = false;
 
@@ -655,18 +736,19 @@ void core1_loop() {
       waypoint_active = active_joint_controller->executeWaypointMovement();
     }
 
-    // === TIMING: Wait for next cycle @ 500 Hz ===
+    // === TIMING: Wait for next cycle (configurable frequency) ===
+    // Default: 500Hz (inner_loop_period_us = 2000µs)
     // Only wait if waypoint control is active (to maintain precise timing)
     // If no waypoints, loop runs as fast as possible for responsive command handling
     if (waypoint_active) {
       // Initialize timing on first active waypoint
       if (!timing_initialized) {
-        next_time = time_us_64() + SAMPLING_PERIOD_US;
+        next_time = time_us_64() + inner_loop_period_us;
         timing_initialized = true;
       }
       
       busy_wait_until(next_time);
-      next_time += SAMPLING_PERIOD_US;
+      next_time += inner_loop_period_us;
     } else {
       // Reset timing when waypoints stop (for next activation)
       timing_initialized = false;

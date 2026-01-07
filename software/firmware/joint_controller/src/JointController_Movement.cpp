@@ -243,9 +243,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   // Variables for outer loop (joint control)
   float q_curr[MAX_DOFS]           = {0}; // Measured joint angle
   float q_des[MAX_DOFS]            = {0}; // Desired joint angle (from trajectory)
-  float error_integral_q[MAX_DOFS] = {0}; // Outer PID integral error
-  float previous_error_q[MAX_DOFS] = {0}; // Previous error for derivative
-  float delta_theta[MAX_DOFS]      = {0}; // Outer PID output
+  float delta_theta[MAX_DOFS]      = {0}; // Outer PID output (computed by outer_pid_controllers)
 
   // References for motors (outer loop output)
   float theta_A_ref[MAX_DOFS] = {0};
@@ -493,17 +491,17 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
   // Reset PID only if NOT a smooth transition
   if (!smooth_transition) {
-    // Reset all motor PID controllers
+    // Reset all motor PID controllers (inner loop)
     for (int i = 0; i < active_dof_count; i++) {
       motor_pairs[i].pid_agonist->reset();
       motor_pairs[i].pid_antagonist->reset();
     }
 
-    // Reset outer PID variables
-    for (int i = 0; i < config.dof_count; i++) {
-      error_integral_q[i] = 0.0f;
-      previous_error_q[i] = 0.0f;
-      delta_theta[i]      = 0.0f;
+    // Reset outer loop PID controllers
+    for (int i = 0; i < active_dof_count; i++) {
+      int dof_idx = active_dof_indices[i];
+      resetOuterPID(dof_idx);
+      delta_theta[dof_idx] = 0.0f;
     }
 
     if (verbose) {
@@ -524,6 +522,9 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   float outer_loop_dt =
       OUTER_LOOP_DIV * sampling_period / 1000000.0f;  // Time in seconds for outer PID
   float inner_loop_dt = sampling_period / 1000000.0f; // Time in seconds for inner PID
+
+  // Update outer loop PID sampling period to match actual loop frequency
+  setOuterLoopSamplingPeriod(outer_loop_dt);
 
   if (verbose) {
     Serial.println("Starting cascade control");
@@ -573,9 +574,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           q_des[dof_idx] =
               degrees((q_des_agonist + q_des_antagonist) / 2.0f); // Average and convert to degrees
 
-          // Compute error
-          float error = q_des[dof_idx] - q_curr[dof_idx];
-
+          // Safety check
           String safety_message;
           if (!checkSafetyForDof(dof_idx, q_curr[dof_idx], safety_message, false)) {
             stopAllMotors();
@@ -583,26 +582,18 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
             return MovementResult(MOVEMENT_ERROR, "SAFETY ERROR: " + safety_message + "\n");
           }
 
-          // Outer PID to compute delta_theta
-          error_integral_q[dof_idx] += error * outer_loop_dt;
-          float error_derivative = (error - previous_error_q[dof_idx]) / outer_loop_dt;
+          // Compute delta_theta using outer loop PID controller
+          // The PID class handles:
+          // - Filtered derivative (reduces noise sensitivity)
+          // - Anti-windup (prevents integral saturation)
+          // - Output saturation (limits delta_theta to ±MAX_DELTA_THETA)
+          PID *outer_pid = getOuterPID(dof_idx);
+          if (outer_pid) {
+            delta_theta[dof_idx] = outer_pid->control(q_des[dof_idx], q_curr[dof_idx]);
+          }
 
-          // Limit integral to avoid windup. Windup is the phenomenon where the integral
-          // continues to grow without limits, causing overshoot and underdamping.
-          const float MAX_INTEGRAL = 10.0f; // Degrees
-          error_integral_q[dof_idx] =
-              constrain(error_integral_q[dof_idx], -MAX_INTEGRAL, MAX_INTEGRAL);
-
-          // Compute delta_theta
-          delta_theta[dof_idx] = outer_kp_per_dof[dof_idx] * error +
-                                 outer_ki_per_dof[dof_idx] * error_integral_q[dof_idx] +
-                                 outer_kd_per_dof[dof_idx] * error_derivative;
-
-          // Limit delta_theta for safety
-          const float MAX_DELTA_THETA = 30.0f; // Maximum correction degrees
-          delta_theta[dof_idx] = constrain(delta_theta[dof_idx], -MAX_DELTA_THETA, MAX_DELTA_THETA);
-
-          previous_error_q[dof_idx] = error;
+          // Compute error for logging
+          float error = q_des[dof_idx] - q_curr[dof_idx];
 
           if (verbose && cycle_count % 500 == 0) { // Log every ~1 second
             Serial.println("Outer loop DOF " + String(dof_idx) + ":");
@@ -756,22 +747,15 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
               }
             }
 
-            // The desired angle is now the final target
+            // Compute delta_theta using outer loop PID controller
+            // In holding phase, the setpoint is the final target angle
+            PID *outer_pid = getOuterPID(dof_idx);
+            if (outer_pid) {
+              delta_theta[dof_idx] = outer_pid->control(local_target_angles[dof_idx], q_curr[dof_idx]);
+            }
+
+            // Compute error for position threshold check
             float error = local_target_angles[dof_idx] - q_curr[dof_idx];
-
-            // Outer PID
-            error_integral_q[dof_idx] += error * outer_loop_dt;
-            float error_derivative = (error - previous_error_q[dof_idx]) / outer_loop_dt;
-
-            error_integral_q[dof_idx] = constrain(error_integral_q[dof_idx], -10.0f, 10.0f);
-
-            delta_theta[dof_idx] = outer_kp_per_dof[dof_idx] * error +
-                                   outer_ki_per_dof[dof_idx] * error_integral_q[dof_idx] +
-                                   outer_kd_per_dof[dof_idx] * error_derivative;
-
-            delta_theta[dof_idx] = constrain(delta_theta[dof_idx], -30.0f, 30.0f);
-
-            previous_error_q[dof_idx] = error;
 
             // Verify position error
             if (fabs(error) > config.dofs[dof_idx].motion.holding_position_error_threshold) {

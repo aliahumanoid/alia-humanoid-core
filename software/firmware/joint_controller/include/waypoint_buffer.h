@@ -16,13 +16,14 @@
 //   Buffer per DOF = DEPTH * 12 bytes
 //   
 // Examples:
-//   100 waypoints = 1.2 KB per DOF (supports ~12s trajectory @ 120ms intervals)
-//   500 waypoints = 6 KB per DOF   (supports ~60s trajectory @ 120ms intervals)
+//   500 waypoints  = 6 KB per DOF   (original, supports ~60s trajectory)
+//   2000 waypoints = 24 KB per DOF  (supports oscillation tests with many cycles)
 //
 // Pico 2 has 520 KB RAM, current usage ~30 KB (5.8%), plenty of headroom.
+// With 3 DOFs × 24 KB = 72 KB total for waypoint buffers (14% of RAM)
 // 
 #ifndef WAYPOINT_BUFFER_DEPTH
-#define WAYPOINT_BUFFER_DEPTH 500
+#define WAYPOINT_BUFFER_DEPTH 2000
 #endif
 
 enum class WaypointState : uint8_t {
@@ -40,7 +41,9 @@ struct WaypointEntry {
 
 struct WaypointBuffer {
   WaypointEntry buffer[WAYPOINT_BUFFER_DEPTH];
-  uint8_t count = 0;
+  uint16_t head = 0;           // Index of next element to read (pop)
+  uint16_t tail = 0;           // Index of next element to write (push)
+  uint16_t count = 0;          // Number of elements in buffer
   float prev_angle_deg = 0.0f;
   uint32_t prev_time_ms = 0;
   WaypointState state = WaypointState::IDLE;
@@ -56,7 +59,7 @@ bool waypoint_buffer_pop(uint8_t dof_index);
 void waypoint_buffer_clear(uint8_t dof_index);
 void waypoint_buffer_reset_all();
 
-uint8_t waypoint_buffer_count(uint8_t dof_index);
+uint16_t waypoint_buffer_count(uint8_t dof_index);
 WaypointState waypoint_buffer_state(uint8_t dof_index);
 void waypoint_buffer_set_state(uint8_t dof_index, WaypointState state);
 

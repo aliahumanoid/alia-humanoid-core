@@ -124,6 +124,22 @@ extern volatile bool encoder_stream_can_active;
 extern volatile uint32_t encoder_stream_last_send_us;
 
 // ============================================================================
+// CONTROL LOOP TIMING (configurable)
+// ============================================================================
+
+/**
+ * @brief Control loop timing parameters
+ * 
+ * Inner loop: Motor PID, runs at base frequency (500 Hz default)
+ * Outer loop: Joint PID, runs at reduced frequency (100 Hz default)
+ * 
+ * These can be adjusted via CAN for tuning experiments.
+ * Changes take effect immediately.
+ */
+extern volatile uint16_t inner_loop_period_us;  // Inner loop period in µs (default: 2000 = 500Hz)
+extern volatile uint8_t outer_loop_divisor;     // Outer loop runs every N inner cycles (default: 1 = 500Hz)
+
+// ============================================================================
 // PID DIAGNOSTICS DATA (for tuning/debugging)
 // ============================================================================
 
@@ -145,6 +161,50 @@ struct PIDDiagnostics {
 
 extern volatile PIDDiagnostics pid_diagnostics;
 extern volatile bool pid_diag_stream_active;  // Enable diagnostic streaming
+
+// ============================================================================
+// NOTCH FILTER CONFIGURATION (for resonance suppression)
+// ============================================================================
+
+/**
+ * @brief Notch filter configuration for torque output filtering
+ * 
+ * The notch filter can eliminate specific resonance frequencies from
+ * the torque control loop. By default it is bypassed (disabled).
+ * 
+ * Typical resonance frequencies: 5-15 Hz depending on joint geometry.
+ * Configure via CAN command or Serial for tuning experiments.
+ */
+struct NotchFilterConfig {
+    volatile bool enabled;           // Filter enabled (default: false = bypass)
+    volatile float center_freq_hz;   // Center frequency to eliminate (default: 8.0 Hz)
+    volatile float quality;          // Q factor: 0.8=wide, 0.99=narrow (default: 0.90)
+    volatile bool config_changed;    // Flag to signal reconfiguration needed
+};
+
+extern volatile NotchFilterConfig notch_filter_config;
+
+// ============================================================================
+// MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)
+// ============================================================================
+
+/**
+ * @brief Cached motor angles from the control loop
+ * 
+ * Updated by the waypoint controller during each control cycle.
+ * Used by checkMotorsInRange() to avoid redundant CAN reads which
+ * were causing ~2ms delays per motor during safety checks.
+ * 
+ * This reduces safety check overhead from 4000µs to ~50µs.
+ */
+struct CachedMotorAngles {
+    volatile float agonist[MAX_DOFS];      // Last read agonist angle per DOF (degrees)
+    volatile float antagonist[MAX_DOFS];   // Last read antagonist angle per DOF (degrees)
+    volatile bool valid[MAX_DOFS];          // True if angles have been read at least once
+    volatile uint32_t last_update_ms;       // Timestamp of last update
+};
+
+extern volatile CachedMotorAngles cached_motor_angles;
 
 // ============================================================================
 // MOVEMENT METRICS (for PID tuning evaluation)
@@ -188,7 +248,8 @@ struct MovementMetrics {
 struct MetricsTracker {
   // State
   bool tracking_active;           // Currently tracking a movement
-  uint32_t movement_start_ms;     // When movement started
+  uint32_t movement_start_ms;     // When movement actually starts (first waypoint t_arrival)
+  uint32_t tracking_init_ms;      // When tracking was initialized (for timeout detection)
   float start_angle_deg;          // Angle at movement start
   float target_angle_deg;         // Target angle to reach
   float movement_direction;       // +1 or -1 (sign of target - start)
@@ -218,9 +279,12 @@ struct MetricsTracker {
   uint32_t torque_integral;       // Accumulated |torque|
   
   // Reset for new movement
-  void reset(float start, float target) {
+  // t_arrival_ms: when the first waypoint will be executed (actual movement start)
+  void reset(float start, float target, uint32_t t_arrival_ms = 0) {
     tracking_active = true;
-    movement_start_ms = millis();
+    tracking_init_ms = millis();
+    // Use the first waypoint's arrival time as movement start, not when waypoint was received
+    movement_start_ms = (t_arrival_ms > 0) ? t_arrival_ms : millis();
     start_angle_deg = start;
     target_angle_deg = target;
     movement_direction = (target > start) ? 1.0f : -1.0f;

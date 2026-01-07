@@ -52,6 +52,9 @@ bool init_prg = true;
 volatile bool flash_operation_in_progress = false;
 // Movement in progress flag (Core1 sets during movement, Core0 pauses streaming)
 volatile bool movement_in_progress = false;
+// Control loop timing (configurable via CAN)
+volatile uint16_t inner_loop_period_us = 2000;  // 2000µs = 500Hz (default)
+volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, same as inner)
 // command array
 char command[100];
 // SERVO CANBUS (J4 CAN_Servo - Motor communication)
@@ -80,6 +83,24 @@ volatile uint32_t encoder_stream_last_send_us = 0;
 // PID diagnostics for tuning (updated by Core1 waypoint loop)
 volatile PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
+
+// Notch filter configuration (for resonance suppression)
+// Default: disabled (bypass mode), 8 Hz center, Q=0.90
+volatile NotchFilterConfig notch_filter_config = {
+    .enabled = false,
+    .center_freq_hz = 8.0f,
+    .quality = 0.90f,
+    .config_changed = false
+};
+
+// Cached motor angles (for safety checks without redundant CAN reads)
+// This eliminates the ~2ms delay per motor during periodic safety checks
+volatile CachedMotorAngles cached_motor_angles = {
+    .agonist = {0, 0, 0},
+    .antagonist = {0, 0, 0},
+    .valid = {false, false, false},
+    .last_update_ms = 0
+};
 
 // Movement metrics for PID tuning evaluation
 MetricsTracker metrics_tracker[3] = {};

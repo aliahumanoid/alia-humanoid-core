@@ -106,7 +106,8 @@ private:
   JointConfig config;             // Joint configuration
   LKM_Motor **motors;             // Array of motor pointers
   DirectEncoders *encoders;       // Direct encoder reader (MT6835 via SPI0)
-  PID **pid_controllers;          // PID controller per motor
+  PID **pid_controllers;          // PID controller per motor (inner loop)
+  PID **outer_pid_controllers;    // PID controller per DOF (outer loop) - handles filtering & anti-windup
   DofMovementData *dof_movement;  // Movement data per DOF
   DofMappingData_t *dof_mappings; // Mapping data per DOF (RAW from auto‑mapping)
   
@@ -138,6 +139,11 @@ private:
   static constexpr float DEFAULT_OUTER_LOOP_KD     = PID_DEFAULT_OUTER_KD;
   static constexpr float DEFAULT_STIFFNESS_REF_DEG = PID_DEFAULT_STIFFNESS_DEG;
   static constexpr float DEFAULT_CASCADE_INFLUENCE = PID_DEFAULT_CASCADE;
+
+  // Outer loop PID configuration constants
+  static constexpr float DEFAULT_OUTER_LOOP_TAU        = 0.02f;  // Derivative filter time constant (20ms)
+  static constexpr float DEFAULT_OUTER_LOOP_TS         = 0.01f;  // Default sampling period (10ms = 100Hz)
+  static constexpr float DEFAULT_MAX_DELTA_THETA       = 30.0f;  // Maximum correction in degrees
 
   // Encoder read tracking to detect SPI spikes
   float *last_valid_angles;       // Last valid readings per DOF
@@ -238,6 +244,50 @@ public:
   // Set outer loop (cascade) parameters for a specific DOF
   bool setOuterLoopParameters(uint8_t dof_index, float kp, float ki, float kd, float stiffness_deg,
                               float cascade_influence);
+
+  /**
+   * @brief Get outer loop PID controller for a DOF
+   * @param dof_index DOF index
+   * @return PID pointer or nullptr if index is invalid
+   *
+   * Use this to access the outer PID directly for control operations.
+   * The returned PID handles derivative filtering and anti-windup automatically.
+   */
+  PID *getOuterPID(uint8_t dof_index) {
+    if (dof_index >= config.dof_count || outer_pid_controllers == nullptr) return nullptr;
+    return outer_pid_controllers[dof_index];
+  }
+
+  /**
+   * @brief Reset outer loop PID state for a DOF
+   * @param dof_index DOF index
+   *
+   * Call this when starting a new movement sequence to clear accumulated
+   * integral and derivative state. Not needed for smooth transitions.
+   */
+  void resetOuterPID(uint8_t dof_index) {
+    if (dof_index < config.dof_count && outer_pid_controllers && outer_pid_controllers[dof_index]) {
+      outer_pid_controllers[dof_index]->reset();
+    }
+  }
+
+  /**
+   * @brief Reset outer loop PID state for all DOFs
+   */
+  void resetAllOuterPIDs() {
+    for (int i = 0; i < config.dof_count; i++) {
+      resetOuterPID(i);
+    }
+  }
+
+  /**
+   * @brief Update outer loop sampling period for all DOFs
+   * @param new_ts New sampling period in seconds
+   *
+   * Call this when the outer loop frequency changes (e.g., different OUTER_LOOP_DIV).
+   * This ensures the PID integral and derivative terms are scaled correctly.
+   */
+  void setOuterLoopSamplingPeriod(float new_ts);
 
   // ==========================================================================
   // PRETENSION & RELEASE

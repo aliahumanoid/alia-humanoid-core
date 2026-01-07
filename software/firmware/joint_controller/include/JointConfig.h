@@ -39,15 +39,17 @@ constexpr float PID_DEFAULT_INNER_KD = 0.25f;
 
 // Default outer loop PID values (position control)
 // These control the joint position using the cascade architecture
+// Tuned 2024-12-29: Ki increased for better steady-state tracking
 constexpr float PID_DEFAULT_OUTER_KP = 15.0f;
-constexpr float PID_DEFAULT_OUTER_KI = 0.01f;
-constexpr float PID_DEFAULT_OUTER_KD = 0.05f;
+constexpr float PID_DEFAULT_OUTER_KI = 1.0f;
+constexpr float PID_DEFAULT_OUTER_KD = 0.0f;
 
 // Default tendon control parameters
 // STIFFNESS: Separates motor references to keep both tendons in tension
 // Higher values = more co-contraction = less vibration but more energy consumption
 // Increase if you see vibrations from slack tendons (especially under gravitational load)
-constexpr float PID_DEFAULT_STIFFNESS_DEG = 5.0f;  // Tendon pretension reference (degrees)
+// Tuned 2024-12-29: Increased for better stability under load
+constexpr float PID_DEFAULT_STIFFNESS_DEG = 25.0f;  // Tendon pretension reference (degrees)
 constexpr float PID_DEFAULT_CASCADE       = 1.0f;  // Cascade influence factor (0.0-1.0)
 
 // ============================================================================

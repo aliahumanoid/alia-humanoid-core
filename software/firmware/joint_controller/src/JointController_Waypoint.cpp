@@ -24,7 +24,8 @@
 #include <waypoint_buffer.h>
 #include <Arduino.h>
 #include <debug.h>
-#include "main_common.h"  // For shared_dof_angles
+#include "main_common.h"  // For shared_dof_angles, notch_filter_config
+#include <NotchFilter.h>  // For torque resonance suppression
 #include <math.h>  // For cosf, M_PI
 
 // External time sync function (defined in core1.cpp)
@@ -38,14 +39,20 @@ extern volatile uint8_t waypoint_interpolation_mode;
 // Cycle counter for outer/inner loop division (wraps at 1000 to prevent overflow)
 static uint16_t cycle_count = 0;
 
-// Constants from moveMultiDOF_cascade
-#define SAMPLING_PERIOD_US 2000  // 2 ms = 500 Hz
-#define OUTER_LOOP_DIV 5         // 500 Hz / 100 Hz = 5
+// Control loop timing - use global configurable variables
+// Declared in main_common.h, defined in main.cpp
+extern volatile uint16_t inner_loop_period_us;  // Inner loop period in µs
+extern volatile uint8_t outer_loop_divisor;     // Outer loop divisor
 
 // Outer loop variables (persistent across calls)
-static float error_integral_q[MAX_DOFS] = {0}; // Outer PID integral error
-static float previous_error_q[MAX_DOFS] = {0}; // Previous error for derivative
-static float delta_theta[MAX_DOFS] = {0};      // Outer PID output
+// NOTE: error_integral and previous_error are now handled by outer_pid_controllers
+// which provides filtered derivative and proper anti-windup
+static float delta_theta[MAX_DOFS] = {0};      // Outer PID output (from outer_pid_controllers)
+
+// Notch filters for torque resonance suppression (one per motor)
+// Indexed as [dof * 2 + motor_idx] where motor_idx: 0=agonist, 1=antagonist
+static NotchFilter torque_notch_filters[MAX_DOFS * 2];
+static bool notch_filters_initialized = false;
 
 // Safety check counter (for periodic motor checks in HOLDING mode)
 static uint16_t safety_check_counter = 0;
@@ -56,9 +63,28 @@ static WaypointState prev_dof_state[MAX_DOFS] = {WaypointState::IDLE};
 // Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
 static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 
-// Timing constants
-static const float outer_loop_dt = OUTER_LOOP_DIV * SAMPLING_PERIOD_US / 1000000.0f; // ~10ms = 0.01s
-static const float inner_loop_dt = SAMPLING_PERIOD_US / 1000000.0f;                   // ~2ms = 0.002s
+// Timing is calculated dynamically based on configurable frequencies
+// inner_loop_period_us: base loop period (default 2000µs = 500Hz)
+// outer_loop_divisor: outer loop runs every N inner cycles (default 1 = 500Hz)
+
+// === CYCLE TIME PROFILING ===
+// Measures actual execution time of the control loop for performance analysis
+static uint32_t cycle_time_us_last = 0;       // Last cycle time in microseconds
+static uint32_t cycle_time_us_max = 0;        // Maximum cycle time (for diagnostics)
+static uint32_t cycle_time_us_avg = 0;        // Running average (exponential)
+static uint32_t profiling_start_us = 0;       // Start timestamp for current cycle
+
+/**
+ * @brief Get current profiling statistics
+ * @param last_us Output: last cycle time in µs
+ * @param avg_us Output: average cycle time in µs
+ * @param max_us Output: max cycle time since last reset in µs
+ */
+void getWaypointProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& max_us) {
+  last_us = cycle_time_us_last;
+  avg_us = cycle_time_us_avg;
+  max_us = cycle_time_us_max;
+}
 
 /**
  * @brief Execute waypoint-based movement for all DOFs
@@ -76,6 +102,9 @@ static const float inner_loop_dt = SAMPLING_PERIOD_US / 1000000.0f;             
  * @return true if any DOF is actively moving
  */
 bool JointController::executeWaypointMovement() {
+  // === PROFILING: Record cycle start time ===
+  profiling_start_us = time_us_32();
+  
   // Wrap cycle_count to prevent overflow (1000 cycles = 2 seconds at 500Hz)
   cycle_count = (cycle_count + 1) % 1000;
   safety_check_counter++; // Increment for periodic safety checks
@@ -100,11 +129,11 @@ bool JointController::executeWaypointMovement() {
     // Only reset when starting a NEW sequence (from IDLE), not when resuming from HOLDING
     // This prevents integral windup from previous sequences while preserving
     // the integral compensation during HOLDING (needed for gravity/friction)
-    bool just_started_from_idle = (prev_dof_state[dof] == WaypointState::IDLE) && 
+    bool just_started_from_idle = (prev_dof_state[dof] == WaypointState::IDLE) &&
                                    (dof_state == WaypointState::MOVING);
     if (pid_reset_needed[dof] && just_started_from_idle) {
-      error_integral_q[dof] = 0.0f;
-      previous_error_q[dof] = 0.0f;
+      // Reset outer loop PID controller (handles integral, derivative, and filter state)
+      resetOuterPID(dof);
       delta_theta[dof] = 0.0f;
       pid_reset_needed[dof] = false;
       LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID state reset (new sequence)");
@@ -123,9 +152,11 @@ bool JointController::executeWaypointMovement() {
       WaypointEntry first_wp;
       if (waypoint_buffer_peek(dof, first_wp)) {
         float start_angle = shared_dof_angles.valid[dof] ? shared_dof_angles.angles[dof] : 0.0f;
-        metrics_tracker[dof].reset(start_angle, first_wp.target_angle_deg);
+        // Pass the first waypoint's arrival time so duration is measured from actual movement start
+        metrics_tracker[dof].reset(start_angle, first_wp.target_angle_deg, first_wp.t_arrival_ms);
         LOG_DEBUG("[Metrics] DOF " + String(dof) + " tracking started: " + 
-                  String(start_angle, 2) + "° → " + String(first_wp.target_angle_deg, 2) + "°");
+                  String(start_angle, 2) + "° → " + String(first_wp.target_angle_deg, 2) + 
+                  "° (t_arrival=" + String(first_wp.t_arrival_ms) + ")");
       }
     }
     
@@ -162,9 +193,10 @@ bool JointController::executeWaypointMovement() {
       }
     }
     
-    // === OUTER LOOP @ 100 Hz (Joint PID) ===
-    // Execute outer loop every 5 cycles (500 Hz / 5 = 100 Hz)
-    if ((cycle_count - 1) % OUTER_LOOP_DIV == 0) {
+    // === OUTER LOOP (Joint PID) ===
+    // Execute outer loop every N inner cycles (configurable via outer_loop_divisor)
+    // Default: 500Hz / 1 = 500Hz (same as inner loop for reduced vibrations)
+    if ((cycle_count - 1) % outer_loop_divisor == 0) {
       
       float q_des = 0.0f;
       bool is_moving = false;
@@ -188,6 +220,32 @@ bool JointController::executeWaypointMovement() {
         if (time_total > 0) {
           progress = time_elapsed / time_total;
           progress = constrain(progress, 0.0f, 1.0f);
+        }
+        
+        // === TRAJECTORY DIAGNOSTIC: Log timing details ===
+        // Log every 50 outer loop cycles (~500ms) or when progress crosses thresholds
+        static uint16_t traj_diag_counter[MAX_DOFS] = {0};
+        static float last_logged_progress[MAX_DOFS] = {0};
+        traj_diag_counter[dof]++;
+        
+        bool should_log = (traj_diag_counter[dof] >= 50) || 
+                          (progress >= 0.99f && last_logged_progress[dof] < 0.99f) ||
+                          (progress < 0.01f && last_logged_progress[dof] > 0.1f);
+        
+        if (should_log && dof == 0) { // Only DOF 0 to reduce log spam
+          float q_curr_now = shared_dof_angles.angles[dof];
+          int32_t time_delta = (int32_t)t_now - (int32_t)current_target.t_arrival_ms;
+          
+          LOG_INFO("[TRAJ_DIAG] DOF" + String(dof) + 
+                   " t=" + String(t_now) + 
+                   " arr=" + String(current_target.t_arrival_ms) +
+                   " dt=" + String(time_delta) + "ms" +
+                   " prog=" + String(progress * 100, 1) + "%" +
+                   " tgt=" + String(target_angle, 2) +
+                   " cur=" + String(q_curr_now, 2) +
+                   " err=" + String(target_angle - q_curr_now, 2));
+          traj_diag_counter[dof] = 0;
+          last_logged_progress[dof] = progress;
         }
         
         // Apply interpolation based on mode
@@ -320,98 +378,93 @@ bool JointController::executeWaypointMovement() {
       
       // Update previous state for next cycle (use updated dof_state)
       prev_dof_state[dof] = is_holding ? WaypointState::HOLDING : WaypointState::MOVING;
-      
-      // Compute error
-      float error = q_des - q_curr;
-      
-      // Outer PID to compute delta_theta (same as moveMultiDOF_cascade)
-      // Get outer loop parameters
-      float outer_kp, outer_ki, outer_kd, stiffness_ref, cascade_influence;
-      if (!getOuterLoopParameters(dof, outer_kp, outer_ki, outer_kd, stiffness_ref, cascade_influence)) {
-        // Use defaults if not configured
-        outer_kp = DEFAULT_OUTER_LOOP_KP;
-        outer_ki = DEFAULT_OUTER_LOOP_KI;
-        outer_kd = DEFAULT_OUTER_LOOP_KD;
-        stiffness_ref = DEFAULT_STIFFNESS_REF_DEG;
-        cascade_influence = DEFAULT_CASCADE_INFLUENCE;
+
+      // === UPDATE OUTER LOOP SAMPLING PERIOD ===
+      // The PID controller needs the correct Ts for proper integral/derivative scaling
+      // Only update when it changes (avoid overhead on every cycle)
+      static float last_outer_loop_dt = 0.0f;
+      float outer_loop_dt = outer_loop_divisor * inner_loop_period_us / 1000000.0f;
+      if (outer_loop_dt != last_outer_loop_dt) {
+        setOuterLoopSamplingPeriod(outer_loop_dt);
+        last_outer_loop_dt = outer_loop_dt;
       }
-      
-      // Compute PID terms
-      error_integral_q[dof] += error * outer_loop_dt;
-      float error_derivative = (error - previous_error_q[dof]) / outer_loop_dt;
-      
-      // Limit integral to avoid windup
-      const float MAX_INTEGRAL = 10.0f; // Degrees
-      error_integral_q[dof] = constrain(error_integral_q[dof], -MAX_INTEGRAL, MAX_INTEGRAL);
-      
-      // Compute delta_theta
-      delta_theta[dof] = outer_kp * error + 
-                         outer_ki * error_integral_q[dof] + 
-                         outer_kd * error_derivative;
-      
-      // Limit delta_theta for safety
-      const float MAX_DELTA_THETA = 30.0f; // Maximum correction degrees
-      delta_theta[dof] = constrain(delta_theta[dof], -MAX_DELTA_THETA, MAX_DELTA_THETA);
-      
-      previous_error_q[dof] = error;
+
+      // Compute delta_theta using outer loop PID controller
+      // The PID class handles:
+      // - Filtered derivative (reduces noise sensitivity from encoder readings)
+      // - Anti-windup (prevents integral saturation during large errors)
+      // - Output saturation (limits delta_theta to ±MAX_DELTA_THETA)
+      PID *outer_pid = getOuterPID(dof);
+      if (outer_pid) {
+        delta_theta[dof] = outer_pid->control(q_des, q_curr);
+      }
+
+      // Compute error for metrics tracking
+      float error = q_des - q_curr;
       
       // === METRICS: Update tracking during movement ===
       if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
         MetricsTracker& mt = metrics_tracker[dof];
-        float abs_error = fabs(error);
-        uint32_t elapsed_ms = millis() - mt.movement_start_ms;
+        uint32_t now = millis();
         
-        // Track maximum error
-        if (abs_error > mt.max_error_deg) {
-          mt.max_error_deg = abs_error;
-        }
-        
-        // Rise time: detect when we first reach 90% of target
-        if (!mt.reached_90_percent) {
-          float range = fabs(mt.target_angle_deg - mt.start_angle_deg);
-          float progress_toward_target = fabs(q_curr - mt.start_angle_deg);
-          if (range > 0.1f && progress_toward_target >= range * 0.9f) {
-            mt.reached_90_percent = true;
-            mt.rise_time_ms = elapsed_ms;
+        // Only update metrics after movement has actually started
+        // (movement_start_ms is the first waypoint's t_arrival, which may be in the future)
+        if (now >= mt.movement_start_ms) {
+          float abs_error = fabs(error);
+          uint32_t elapsed_ms = now - mt.movement_start_ms;
+          
+          // Track maximum error
+          if (abs_error > mt.max_error_deg) {
+            mt.max_error_deg = abs_error;
           }
-        }
-        
-        // Overshoot: detect if we go past target
-        float overshoot_amount = (q_curr - mt.target_angle_deg) * mt.movement_direction;
-        if (overshoot_amount > 0 && overshoot_amount > mt.max_overshoot_deg) {
-          mt.max_overshoot_deg = overshoot_amount;
-          mt.overshoot_detected = true;
-        }
-        
-        // Settling: track when we enter and stay in ±0.5° band
-        const float SETTLING_BAND = 0.5f;
-        bool in_band = abs_error < SETTLING_BAND;
-        
-        if (in_band) {
-          if (!mt.in_settling_band) {
-            // Just entered the band
-            mt.in_settling_band = true;
-            mt.settling_enter_ms = elapsed_ms;
-            mt.settling_stable_count = 0;
-          } else {
-            // Still in band - increment stable count
-            mt.settling_stable_count++;
-            // After 10 consecutive cycles in band (~100ms), consider settled
-            if (mt.settling_stable_count >= 10 && mt.settling_time_ms == 0) {
-              mt.settling_time_ms = mt.settling_enter_ms;
+          
+          // Rise time: detect when we first reach 90% of target
+          if (!mt.reached_90_percent) {
+            float range = fabs(mt.target_angle_deg - mt.start_angle_deg);
+            float progress_toward_target = fabs(q_curr - mt.start_angle_deg);
+            if (range > 0.1f && progress_toward_target >= range * 0.9f) {
+              mt.reached_90_percent = true;
+              mt.rise_time_ms = elapsed_ms;
             }
           }
-        } else {
-          // Exited band - reset
-          mt.in_settling_band = false;
-          mt.settling_stable_count = 0;
-        }
-        
-        // SSE tracking: accumulate error samples during HOLDING
-        if (is_holding) {
-          mt.sse_accumulator += abs_error;
-          mt.sse_sample_count++;
-        }
+          
+          // Overshoot: detect if we go past target
+          float overshoot_amount = (q_curr - mt.target_angle_deg) * mt.movement_direction;
+          if (overshoot_amount > 0 && overshoot_amount > mt.max_overshoot_deg) {
+            mt.max_overshoot_deg = overshoot_amount;
+            mt.overshoot_detected = true;
+          }
+          
+          // Settling: track when we enter and stay in ±0.5° band
+          const float SETTLING_BAND = 0.5f;
+          bool in_band = abs_error < SETTLING_BAND;
+          
+          if (in_band) {
+            if (!mt.in_settling_band) {
+              // Just entered the band
+              mt.in_settling_band = true;
+              mt.settling_enter_ms = elapsed_ms;
+              mt.settling_stable_count = 0;
+            } else {
+              // Still in band - increment stable count
+              mt.settling_stable_count++;
+              // After 10 consecutive cycles in band (~100ms), consider settled
+              if (mt.settling_stable_count >= 10 && mt.settling_time_ms == 0) {
+                mt.settling_time_ms = mt.settling_enter_ms;
+              }
+            }
+          } else {
+            // Exited band - reset
+            mt.in_settling_band = false;
+            mt.settling_stable_count = 0;
+          }
+          
+          // SSE tracking: accumulate error samples during HOLDING
+          if (is_holding) {
+            mt.sse_accumulator += abs_error;
+            mt.sse_sample_count++;
+          }
+        }  // End of: if (now >= mt.movement_start_ms)
       }
     }
     
@@ -568,6 +621,14 @@ bool JointController::executeWaypointMovement() {
     last_theta_B[dof] = theta_B_curr;
     first_read[dof] = false;
     
+    // === UPDATE MOTOR ANGLE CACHE ===
+    // This cache is used by checkMotorsInRange() to avoid redundant CAN reads
+    // which were causing ~2ms delays per motor during safety checks
+    cached_motor_angles.agonist[dof] = theta_A_curr;
+    cached_motor_angles.antagonist[dof] = theta_B_curr;
+    cached_motor_angles.valid[dof] = true;
+    cached_motor_angles.last_update_ms = millis();
+    
     // Inner PID for motors (compute torque commands)
     float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_curr);
@@ -578,21 +639,38 @@ bool JointController::executeWaypointMovement() {
     // The stiffness_ref separates motor references, creating constant tension on both tendons.
     // Increase stiffness_ref (via UI) to reduce vibrations from slack tendons.
     
-    // === TORQUE LOW-PASS FILTER ===
-    // Attenuates high-frequency torque oscillations that cause vibrations
-    // Uses first-order IIR filter: output = alpha * input + (1-alpha) * prev_output
-    // Lower alpha = more filtering (smoother but slower response)
-    // Higher alpha = less filtering (faster response but may oscillate)
-    // At 500 Hz, alpha=0.15 gives cutoff frequency ~12 Hz (attenuates >12 Hz vibrations)
-    static float filtered_A[MAX_DOFS] = {0};
-    static float filtered_B[MAX_DOFS] = {0};
-    const float TORQUE_FILTER_ALPHA = 0.15f;  // Cutoff ~12 Hz at 500 Hz sampling
-    
-    filtered_A[dof] = TORQUE_FILTER_ALPHA * command_A + (1.0f - TORQUE_FILTER_ALPHA) * filtered_A[dof];
-    filtered_B[dof] = TORQUE_FILTER_ALPHA * command_B + (1.0f - TORQUE_FILTER_ALPHA) * filtered_B[dof];
-    
-    command_A = filtered_A[dof];
-    command_B = filtered_B[dof];
+    // === NOTCH FILTER: Apply resonance suppression if enabled ===
+    // Unlike general low-pass filtering, a notch filter only attenuates a narrow
+    // frequency band (the mechanical resonance) with minimal phase delay elsewhere.
+    // This avoids the instability issues seen with broad-spectrum filtering.
+    {
+      // Check if configuration changed
+      if (notch_filter_config.config_changed) {
+        // Reconfigure all filters with new parameters
+        float sample_rate = 1000000.0f / inner_loop_period_us;  // Actual inner loop Hz
+        for (int i = 0; i < MAX_DOFS * 2; i++) {
+          torque_notch_filters[i].configure(
+            notch_filter_config.center_freq_hz,
+            sample_rate,
+            notch_filter_config.quality
+          );
+          torque_notch_filters[i].setEnabled(notch_filter_config.enabled);
+        }
+        notch_filter_config.config_changed = false;
+        notch_filters_initialized = true;
+        LOG_INFO("[Notch] Configured: " + String(notch_filter_config.center_freq_hz, 1) + 
+                 " Hz, Q=" + String(notch_filter_config.quality, 2) + 
+                 ", enabled=" + String(notch_filter_config.enabled ? "YES" : "NO"));
+      }
+      
+      // Apply filters if initialized
+      if (notch_filters_initialized) {
+        int filter_idx_A = dof * 2;
+        int filter_idx_B = dof * 2 + 1;
+        command_A = torque_notch_filters[filter_idx_A].process(command_A);
+        command_B = torque_notch_filters[filter_idx_B].process(command_B);
+      }
+    }
     
     // Apply torque limits from motor configuration
     float max_torque_A = config.motors[agonist_idx].max_torque;
@@ -654,6 +732,40 @@ bool JointController::executeWaypointMovement() {
   // Using 20 cycles = ~200ms at 100Hz outer loop rate
   if (safety_check_counter >= 20) {
     safety_check_counter = 0;
+  }
+  
+  // === PROFILING: Calculate cycle time ===
+  {
+    uint32_t cycle_end_us = time_us_32();
+    cycle_time_us_last = cycle_end_us - profiling_start_us;
+    
+    // Update max (reset every ~10 seconds)
+    if (cycle_time_us_last > cycle_time_us_max) {
+      cycle_time_us_max = cycle_time_us_last;
+    }
+    
+    // Exponential moving average (α = 0.1 for smoothing)
+    cycle_time_us_avg = (cycle_time_us_avg * 9 + cycle_time_us_last) / 10;
+    
+    // Log periodically (every 5 seconds = 2500 cycles @ 500Hz)
+    static uint16_t profiling_log_counter = 0;
+    profiling_log_counter++;
+    if (profiling_log_counter >= 2500) {
+      profiling_log_counter = 0;
+      LOG_INFO("[PROFILING] Cycle time: last=" + String(cycle_time_us_last) + "µs, " +
+               "avg=" + String(cycle_time_us_avg) + "µs, " +
+               "max=" + String(cycle_time_us_max) + "µs " +
+               "(budget=" + String(inner_loop_period_us) + "µs)");
+      
+      // Check if we're over budget
+      if (cycle_time_us_max > inner_loop_period_us) {
+        LOG_WARN("[PROFILING] OVER BUDGET! Max " + String(cycle_time_us_max) + 
+                 "µs > " + String(inner_loop_period_us) + "µs budget");
+      }
+      
+      // Reset max for next period
+      cycle_time_us_max = 0;
+    }
   }
   
   return any_movement;

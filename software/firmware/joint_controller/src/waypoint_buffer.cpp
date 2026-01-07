@@ -42,6 +42,8 @@ void waypoint_buffers_init(uint8_t dof_count) {
   lock();
   g_dof_count = min<uint8_t>(dof_count, MAX_DOFS);
   for (uint8_t i = 0; i < g_dof_count; ++i) {
+    g_buffers[i].head           = 0;
+    g_buffers[i].tail           = 0;
     g_buffers[i].count          = 0;
     g_buffers[i].prev_angle_deg = 0.0f;
     g_buffers[i].prev_time_ms   = 0;
@@ -63,9 +65,14 @@ bool waypoint_buffer_push(uint8_t dof_index, const WaypointEntry &entry) {
   WaypointBuffer &buf = buffer_for(dof_index);
   if (buf.count >= WAYPOINT_BUFFER_DEPTH) {
     unlock();
-    return false;
+    return false;  // Buffer full
   }
-  buf.buffer[buf.count++] = entry;
+  
+  // Ring buffer push: write at tail, advance tail
+  buf.buffer[buf.tail] = entry;
+  buf.tail = (buf.tail + 1) % WAYPOINT_BUFFER_DEPTH;
+  buf.count++;
+  
   if (buf.state == WaypointState::IDLE) {
     buf.state = WaypointState::MOVING;
   }
@@ -84,7 +91,8 @@ bool waypoint_buffer_peek(uint8_t dof_index, WaypointEntry &entry) {
     unlock();
     return false;
   }
-  entry = buf.buffer[0];
+  // Ring buffer peek: read from head
+  entry = buf.buffer[buf.head];
   unlock();
   return true;
 }
@@ -100,10 +108,11 @@ bool waypoint_buffer_pop(uint8_t dof_index) {
     unlock();
     return false;
   }
-  for (uint8_t i = 1; i < buf.count; ++i) {
-    buf.buffer[i - 1] = buf.buffer[i];
-  }
+  
+  // Ring buffer pop: just advance head (O(1) instead of O(n) shift!)
+  buf.head = (buf.head + 1) % WAYPOINT_BUFFER_DEPTH;
   buf.count--;
+  
   if (buf.count == 0) {
     buf.state = WaypointState::HOLDING;
   }
@@ -117,6 +126,8 @@ void waypoint_buffer_clear(uint8_t dof_index) {
   }
   lock();
   WaypointBuffer &buf = buffer_for(dof_index);
+  buf.head           = 0;
+  buf.tail           = 0;
   buf.count          = 0;
   buf.prev_time_ms   = 0;
   buf.prev_angle_deg = 0.0f;
@@ -127,6 +138,8 @@ void waypoint_buffer_clear(uint8_t dof_index) {
 void waypoint_buffer_reset_all() {
   lock();
   for (uint8_t i = 0; i < g_dof_count; ++i) {
+    g_buffers[i].head           = 0;
+    g_buffers[i].tail           = 0;
     g_buffers[i].count          = 0;
     g_buffers[i].prev_time_ms   = 0;
     g_buffers[i].prev_angle_deg = 0.0f;
@@ -135,12 +148,12 @@ void waypoint_buffer_reset_all() {
   unlock();
 }
 
-uint8_t waypoint_buffer_count(uint8_t dof_index) {
+uint16_t waypoint_buffer_count(uint8_t dof_index) {
   if (!is_valid_dof(dof_index)) {
     return 0;
   }
   lock();
-  const uint8_t count = buffer_for(dof_index).count;
+  const uint16_t count = buffer_for(dof_index).count;
   unlock();
   return count;
 }

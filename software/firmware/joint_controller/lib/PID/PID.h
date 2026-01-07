@@ -141,6 +141,30 @@ public:
   }
 
   /**
+   * @brief Get sampling period
+   * @return Current Ts value (seconds)
+   */
+  float getTs() const {
+    return Ts;
+  }
+
+  /**
+   * @brief Update sampling period
+   *
+   * Call this when the control loop frequency changes dynamically.
+   * Does NOT reset internal state - the PID continues from its current state
+   * with the new timing. This allows frequency changes during operation
+   * without discontinuities.
+   *
+   * @param new_ts New sampling period in seconds
+   *
+   * @note If you also want to reset state, call reset() separately
+   */
+  void setSamplingPeriod(float new_ts) {
+    Ts = new_ts;
+  }
+
+  /**
    * @brief Update PID tuning parameters
    * 
    * Updates all PID gains and resets internal state for smooth transition.
