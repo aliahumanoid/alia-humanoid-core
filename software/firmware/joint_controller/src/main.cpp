@@ -55,6 +55,7 @@ volatile bool movement_in_progress = false;
 // Control loop timing (configurable via CAN)
 volatile uint16_t inner_loop_period_us = 2000;  // 2000µs = 500Hz (default)
 volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, same as inner)
+volatile uint16_t torque_ramp_time_ms = 100;    // Time for 0→max torque (default: 100ms, 0=disabled)
 // command array
 char command[100];
 // SERVO CANBUS (J4 CAN_Servo - Motor communication)

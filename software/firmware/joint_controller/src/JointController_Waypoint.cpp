@@ -672,9 +672,34 @@ bool JointController::executeWaypointMovement() {
       }
     }
     
-    // Apply torque limits from motor configuration
+    // Get torque limits from motor configuration
     float max_torque_A = config.motors[agonist_idx].max_torque;
     float max_torque_B = config.motors[antagonist_idx].max_torque;
+
+    // === TORQUE RATE LIMITING ===
+    // Limit how fast torque can change to reduce mechanical stress and vibrations
+    // Rate is calculated based on torque_ramp_time_ms (0 = disabled)
+    static float prev_command_A[MAX_DOFS] = {0};
+    static float prev_command_B[MAX_DOFS] = {0};
+
+    if (torque_ramp_time_ms > 0) {
+      // Calculate max torque change per cycle
+      // At 500 Hz with 100ms ramp time: 50 cycles to go 0→max
+      // max_rate = max_torque / (ramp_time_ms / inner_loop_period_ms)
+      //          = max_torque * inner_loop_period_us / (ramp_time_ms * 1000)
+      float rate_A = max_torque_A * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
+      float rate_B = max_torque_B * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
+
+      // Apply rate limiting
+      command_A = constrain(command_A, prev_command_A[dof] - rate_A, prev_command_A[dof] + rate_A);
+      command_B = constrain(command_B, prev_command_B[dof] - rate_B, prev_command_B[dof] + rate_B);
+    }
+
+    // Store for next cycle (after rate limiting, before saturation)
+    prev_command_A[dof] = command_A;
+    prev_command_B[dof] = command_B;
+
+    // Apply absolute torque limits
     command_A = constrain(command_A, -max_torque_A, max_torque_A);
     command_B = constrain(command_B, -max_torque_B, max_torque_B);
     
