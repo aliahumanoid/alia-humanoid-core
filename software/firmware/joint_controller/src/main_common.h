@@ -140,6 +140,7 @@ extern volatile uint16_t inner_loop_period_us;  // Inner loop period in µs (def
 extern volatile uint8_t outer_loop_divisor;     // Outer loop runs every N inner cycles (default: 1 = 500Hz)
 extern volatile uint16_t torque_ramp_time_ms;   // Time for torque to go 0→max (default: 100ms, 0=disabled)
 extern volatile uint16_t encoder_error_threshold_ms;  // Time before encoder error triggers emergency stop (default: 100ms)
+extern volatile uint16_t encoder_read_interval_us;    // SPI encoder read interval in µs (default: 2000 = 500Hz)
 
 // ============================================================================
 // PID DIAGNOSTICS DATA (for tuning/debugging)

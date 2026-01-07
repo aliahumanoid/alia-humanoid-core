@@ -63,6 +63,16 @@ static WaypointState prev_dof_state[MAX_DOFS] = {WaypointState::IDLE};
 // Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
 static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 
+// === MOTOR POINTER CACHE ===
+// Cache motor pointers to avoid searching every cycle (saves ~10µs per DOF per cycle)
+static LKM_Motor* cached_agonist[MAX_DOFS] = {nullptr};
+static LKM_Motor* cached_antagonist[MAX_DOFS] = {nullptr};
+static PID* cached_pid_agonist[MAX_DOFS] = {nullptr};
+static PID* cached_pid_antagonist[MAX_DOFS] = {nullptr};
+static int cached_agonist_idx[MAX_DOFS] = {-1};
+static int cached_antagonist_idx[MAX_DOFS] = {-1};
+static bool motor_cache_valid[MAX_DOFS] = {false};
+
 // Timing is calculated dynamically based on configurable frequencies
 // inner_loop_period_us: base loop period (default 2000µs = 500Hz)
 // outer_loop_divisor: outer loop runs every N inner cycles (default 1 = 500Hz)
@@ -472,29 +482,41 @@ bool JointController::executeWaypointMovement() {
     // Run at full 500 Hz in both MOVING and HOLDING modes for best accuracy.
     // The MCP2515 flush mechanism in LKM_Motor handles any CAN buffer issues.
     // See: LKM_Motor::getMultiAngleSync() for the flush and retry logic.
-    
-    // Find motors for this DOF
-    LKM_Motor *agonist = nullptr;
-    LKM_Motor *antagonist = nullptr;
-    PID *pid_agonist = nullptr;
-    PID *pid_antagonist = nullptr;
-    int agonist_idx = -1;
-    int antagonist_idx = -1;
-    
-    for (int i = 0; i < config.motor_count; i++) {
-      if (config.motors[i].dof_index == dof) {
-        if (config.motors[i].is_agonist) {
-          agonist = motors[i];
-          agonist_idx = i;
-          pid_agonist = pid_controllers[i];
-        } else {
-          antagonist = motors[i];
-          antagonist_idx = i;
-          pid_antagonist = pid_controllers[i];
+
+    // Use cached motor pointers (populated on first access per DOF)
+    if (!motor_cache_valid[dof]) {
+      // Populate cache for this DOF
+      cached_agonist[dof] = nullptr;
+      cached_antagonist[dof] = nullptr;
+      cached_pid_agonist[dof] = nullptr;
+      cached_pid_antagonist[dof] = nullptr;
+      cached_agonist_idx[dof] = -1;
+      cached_antagonist_idx[dof] = -1;
+
+      for (int i = 0; i < config.motor_count; i++) {
+        if (config.motors[i].dof_index == dof) {
+          if (config.motors[i].is_agonist) {
+            cached_agonist[dof] = motors[i];
+            cached_agonist_idx[dof] = i;
+            cached_pid_agonist[dof] = pid_controllers[i];
+          } else {
+            cached_antagonist[dof] = motors[i];
+            cached_antagonist_idx[dof] = i;
+            cached_pid_antagonist[dof] = pid_controllers[i];
+          }
         }
       }
+      motor_cache_valid[dof] = true;
     }
-    
+
+    // Use cached pointers
+    LKM_Motor *agonist = cached_agonist[dof];
+    LKM_Motor *antagonist = cached_antagonist[dof];
+    PID *pid_agonist = cached_pid_agonist[dof];
+    PID *pid_antagonist = cached_pid_antagonist[dof];
+    int agonist_idx = cached_agonist_idx[dof];
+    int antagonist_idx = cached_antagonist_idx[dof];
+
     if (agonist == nullptr || antagonist == nullptr) {
       // No motors for this DOF, skip
       continue;

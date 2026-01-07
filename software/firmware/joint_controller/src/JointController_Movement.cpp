@@ -525,6 +525,12 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   uint64_t next_time = tstart;
   int cycle_count    = 0;
 
+  // Static variables for CAN read validation (persist across cycles)
+  static float last_theta_A[MAX_DOFS] = {0};
+  static float last_theta_B[MAX_DOFS] = {0};
+  static bool first_motor_read[MAX_DOFS] = {true, true, true};
+  static uint8_t motor_consecutive_errors[MAX_DOFS] = {0};
+
   float outer_loop_dt =
       OUTER_LOOP_DIV * sampling_period / 1000000.0f;  // Time in seconds for outer PID
   float inner_loop_dt = sampling_period / 1000000.0f; // Time in seconds for inner PID
@@ -661,6 +667,48 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         // Read current motor angles
         float theta_A_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
         float theta_B_curr = motor_pairs[i].antagonist->getMultiAngleSync().angle;
+
+        // === CAN READ VALIDATION ===
+        // Check for obviously invalid readings (NaN, extreme values)
+        bool invalid_A = (theta_A_curr < -100000.0f || theta_A_curr > 100000.0f || isnan(theta_A_curr));
+        bool invalid_B = (theta_B_curr < -100000.0f || theta_B_curr > 100000.0f || isnan(theta_B_curr));
+
+        if (invalid_A || invalid_B) {
+          motor_consecutive_errors[dof_idx]++;
+          if (motor_consecutive_errors[dof_idx] >= 3) {
+            stopAllMotors();
+            return MovementResult(MOVEMENT_ERROR,
+                "CAN READ ERROR: DOF " + String(dof_idx) + " invalid readings (A=" +
+                String(theta_A_curr, 1) + ", B=" + String(theta_B_curr, 1) + ")\n");
+          }
+          continue;  // Skip this DOF, use last command
+        }
+
+        // Check for suspicious jumps (>30° in one cycle indicates CAN corruption)
+        if (!first_motor_read[dof_idx]) {
+          float jump_A = fabs(theta_A_curr - last_theta_A[dof_idx]);
+          float jump_B = fabs(theta_B_curr - last_theta_B[dof_idx]);
+
+          if (jump_A > 30.0f || jump_B > 30.0f) {
+            motor_consecutive_errors[dof_idx]++;
+            LOG_ERROR("[Movement] DOF " + String(dof_idx) + " MOTOR JUMP #" +
+                      String(motor_consecutive_errors[dof_idx]) + " (A=" + String(jump_A, 1) +
+                      "°, B=" + String(jump_B, 1) + "°)");
+
+            if (motor_consecutive_errors[dof_idx] >= 3) {
+              stopAllMotors();
+              return MovementResult(MOVEMENT_ERROR,
+                  "CAN ERROR: DOF " + String(dof_idx) + " - 3 consecutive motor angle jumps\n");
+            }
+            continue;  // Skip this cycle
+          }
+        }
+
+        // Good reading - reset error counter and update tracking
+        motor_consecutive_errors[dof_idx] = 0;
+        last_theta_A[dof_idx] = theta_A_curr;
+        last_theta_B[dof_idx] = theta_B_curr;
+        first_motor_read[dof_idx] = false;
 
         // Update motor angle cache for safety checks
         cached_motor_angles.agonist[dof_idx] = theta_A_curr;
@@ -829,6 +877,42 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
           float theta_A_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
           float theta_B_curr = motor_pairs[i].antagonist->getMultiAngleSync().angle;
+
+          // === CAN READ VALIDATION (holding phase) ===
+          bool invalid_A = (theta_A_curr < -100000.0f || theta_A_curr > 100000.0f || isnan(theta_A_curr));
+          bool invalid_B = (theta_B_curr < -100000.0f || theta_B_curr > 100000.0f || isnan(theta_B_curr));
+
+          if (invalid_A || invalid_B) {
+            motor_consecutive_errors[dof_idx]++;
+            if (motor_consecutive_errors[dof_idx] >= 3) {
+              stopAllMotors();
+              return MovementResult(MOVEMENT_ERROR,
+                  "CAN READ ERROR during hold: DOF " + String(dof_idx) + "\n");
+            }
+            continue;
+          }
+
+          // Check for suspicious jumps
+          if (!first_motor_read[dof_idx]) {
+            float jump_A = fabs(theta_A_curr - last_theta_A[dof_idx]);
+            float jump_B = fabs(theta_B_curr - last_theta_B[dof_idx]);
+
+            if (jump_A > 30.0f || jump_B > 30.0f) {
+              motor_consecutive_errors[dof_idx]++;
+              if (motor_consecutive_errors[dof_idx] >= 3) {
+                stopAllMotors();
+                return MovementResult(MOVEMENT_ERROR,
+                    "CAN ERROR during hold: DOF " + String(dof_idx) + " - motor angle jumps\n");
+              }
+              continue;
+            }
+          }
+
+          // Good reading
+          motor_consecutive_errors[dof_idx] = 0;
+          last_theta_A[dof_idx] = theta_A_curr;
+          last_theta_B[dof_idx] = theta_B_curr;
+          first_motor_read[dof_idx] = false;
 
           // Update motor angle cache for safety checks
           // Motor limit checks are now handled by checkSafetyForDof(..., true) in outer loop

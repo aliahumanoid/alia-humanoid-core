@@ -198,9 +198,11 @@ void updateSharedDofAngles() {
   static uint32_t last_update_us = 0;
   static uint32_t last_encoder_read_us = 0;
   
-  // Throttle encoder reads to ~500Hz (every 2000us = 2ms)
+  // Throttle encoder reads based on configurable interval (default 2000µs = 500Hz)
   // This reduces SPI bus stress and prevents sync errors
-  static const uint32_t ENCODER_READ_INTERVAL_US = 2000;
+  // Use configured value with minimum of 500µs (2kHz max) for safety
+  uint32_t read_interval = encoder_read_interval_us;
+  if (read_interval < 500) read_interval = 500;  // Minimum 500µs
   
   JointController *controller = active_joint_controller;
   if (controller == nullptr) {
@@ -210,15 +212,15 @@ void updateSharedDofAngles() {
   uint32_t now_us = time_us_32();
   
   // Skip encoder read if not enough time has passed
-  if (last_encoder_read_us > 0 && (now_us - last_encoder_read_us) < ENCODER_READ_INTERVAL_US) {
+  if (last_encoder_read_us > 0 && (now_us - last_encoder_read_us) < read_interval) {
     return;  // Keep previous values, they're still fresh enough
   }
-  
+
   // Consecutive error counters for emergency stop (one per DOF)
   static uint16_t consecutive_errors[MAX_DOFS] = {0};
   // Calculate threshold in cycles from configurable ms value
   // Example: 100ms with 2000µs read interval = 50 cycles
-  uint16_t error_threshold_cycles = (encoder_error_threshold_ms * 1000) / ENCODER_READ_INTERVAL_US;
+  uint16_t error_threshold_cycles = (encoder_error_threshold_ms * 1000) / read_interval;
   if (error_threshold_cycles < 5) error_threshold_cycles = 5;  // Minimum 5 cycles for safety
   
   // Update encoder data from hardware (direct SPI to MT6835)

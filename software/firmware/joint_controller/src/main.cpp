@@ -57,6 +57,7 @@ volatile uint16_t inner_loop_period_us = 2000;  // 2000µs = 500Hz (default)
 volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, same as inner)
 volatile uint16_t torque_ramp_time_ms = 100;    // Time for 0→max torque (default: 100ms, 0=disabled)
 volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold (default: 100ms)
+volatile uint16_t encoder_read_interval_us = 2000;   // SPI encoder read interval (default: 2000µs = 500Hz)
 // command array
 char command[100];
 // SERVO CANBUS (J4 CAN_Servo - Motor communication)
