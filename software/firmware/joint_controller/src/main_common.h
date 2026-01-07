@@ -148,6 +148,74 @@ extern volatile uint16_t can_error_window_ms;     // Time window for CAN error d
 extern volatile uint8_t can_error_threshold;       // Number of errors in window before emergency stop (default: 5)
 
 // ============================================================================
+// CAN ERROR TRACKER (shared utility for Movement and Waypoint loops)
+// ============================================================================
+
+/**
+ * @brief Time-window based CAN error tracker
+ *
+ * Tracks CAN read errors using a circular buffer of timestamps.
+ * More robust than consecutive error counting - tolerates brief EMI glitches.
+ * Emergency stop triggers only if threshold errors occur within time window.
+ *
+ * Usage:
+ *   CANErrorTracker tracker;
+ *   tracker.recordError(dof_idx);
+ *   if (tracker.shouldStop(dof_idx)) { ... emergency stop ... }
+ */
+#define CAN_ERROR_HISTORY_SIZE 8
+
+class CANErrorTracker {
+public:
+  // Record an error for a DOF (stores timestamp in circular buffer)
+  void recordError(uint8_t dof_idx) {
+    if (dof_idx >= MAX_DOFS) return;
+    uint32_t now = millis();
+    error_timestamps[dof_idx][error_head[dof_idx]] = now;
+    error_head[dof_idx] = (error_head[dof_idx] + 1) % CAN_ERROR_HISTORY_SIZE;
+  }
+
+  // Count errors within the configured time window
+  uint8_t countRecentErrors(uint8_t dof_idx) const {
+    if (dof_idx >= MAX_DOFS) return 0;
+    uint32_t now = millis();
+    uint32_t cutoff = (now > can_error_window_ms) ? (now - can_error_window_ms) : 0;
+    uint8_t count = 0;
+    for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
+      if (error_timestamps[dof_idx][i] > cutoff) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  // Check if error threshold exceeded (should trigger emergency stop)
+  bool shouldStop(uint8_t dof_idx) const {
+    return countRecentErrors(dof_idx) >= can_error_threshold;
+  }
+
+  // Clear error history for a DOF (call after emergency stop)
+  void clearErrors(uint8_t dof_idx) {
+    if (dof_idx >= MAX_DOFS) return;
+    for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
+      error_timestamps[dof_idx][i] = 0;
+    }
+    error_head[dof_idx] = 0;
+  }
+
+  // Clear all error history
+  void clearAll() {
+    for (uint8_t dof = 0; dof < MAX_DOFS; dof++) {
+      clearErrors(dof);
+    }
+  }
+
+private:
+  uint32_t error_timestamps[MAX_DOFS][CAN_ERROR_HISTORY_SIZE] = {{0}};
+  uint8_t error_head[MAX_DOFS] = {0};
+};
+
+// ============================================================================
 // PID DIAGNOSTICS DATA (for tuning/debugging)
 // ============================================================================
 

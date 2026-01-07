@@ -599,41 +599,20 @@ bool JointController::executeWaypointMovement() {
     
     // === DIAGNOSTIC: Detect suspicious motor readings ===
     // Check for sudden large jumps in motor angle (possible CAN corruption)
-    // Uses time-window based detection: N errors within M ms triggers emergency stop
-    // This is more robust than consecutive count - tolerates brief EMI glitches
+    // Uses time-window based detection via shared CANErrorTracker (main_common.h)
     static float last_theta_A[MAX_DOFS] = {0};
     static float last_theta_B[MAX_DOFS] = {0};
     static bool first_read[MAX_DOFS] = {true, true, true};
-
-    // Time-window error tracking: circular buffer of error timestamps per DOF
-    #define CAN_ERROR_HISTORY_SIZE 8
-    static uint32_t error_timestamps[MAX_DOFS][CAN_ERROR_HISTORY_SIZE] = {{0}};
-    static uint8_t error_head[MAX_DOFS] = {0};  // Next write position in circular buffer
-
-    // Helper lambda: count errors within time window
-    auto countRecentErrors = [](uint8_t dof_idx, uint32_t now_ms, uint32_t window_ms) -> uint8_t {
-      uint8_t count = 0;
-      uint32_t cutoff = (now_ms > window_ms) ? (now_ms - window_ms) : 0;
-      for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
-        if (error_timestamps[dof_idx][i] > cutoff) {
-          count++;
-        }
-      }
-      return count;
-    };
+    static CANErrorTracker canErrorTracker;  // Shared utility class
 
     if (!first_read[dof]) {
-      float jump_A = abs(theta_A_curr - last_theta_A[dof]);
-      float jump_B = abs(theta_B_curr - last_theta_B[dof]);
+      float jump_A = fabs(theta_A_curr - last_theta_A[dof]);
+      float jump_B = fabs(theta_B_curr - last_theta_B[dof]);
 
       // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
       if (jump_A > 30.0f || jump_B > 30.0f) {
-        // Record error timestamp in circular buffer
-        uint32_t now_ms = millis();
-        error_timestamps[dof][error_head[dof]] = now_ms;
-        error_head[dof] = (error_head[dof] + 1) % CAN_ERROR_HISTORY_SIZE;
-
-        uint8_t recent_errors = countRecentErrors(dof, now_ms, can_error_window_ms);
+        canErrorTracker.recordError(dof);
+        uint8_t recent_errors = canErrorTracker.countRecentErrors(dof);
 
         LOG_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
                   String(recent_errors) + " errors in " + String(can_error_window_ms) + "ms)!");
@@ -643,16 +622,13 @@ bool JointController::executeWaypointMovement() {
                   " (jump=" + String(jump_B, 2) + "°)");
 
         // Trigger emergency stop if too many errors within time window
-        if (recent_errors >= can_error_threshold) {
+        if (canErrorTracker.shouldStop(dof)) {
           LOG_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
                     " CAN errors in " + String(can_error_window_ms) + "ms, EMERGENCY STOP!");
           stopAllMotors();
           waypoint_buffer_clear(dof);
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
-          // Clear error history for this DOF
-          for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
-            error_timestamps[dof][i] = 0;
-          }
+          canErrorTracker.clearErrors(dof);
           first_read[dof] = true;
           continue;
         }
@@ -722,12 +698,18 @@ bool JointController::executeWaypointMovement() {
     float max_torque_A = config.motors[agonist_idx].max_torque;
     float max_torque_B = config.motors[antagonist_idx].max_torque;
 
-    // === TORQUE RATE LIMITING ===
-    // Limit how fast torque can change to reduce mechanical stress and vibrations
-    // Rate is calculated based on torque_ramp_time_ms (0 = disabled)
+    // === TORQUE SATURATION & RATE LIMITING ===
+    // IMPORTANT: Saturate FIRST, then rate-limit the saturated value
+    // This prevents prev_command from storing unsaturated values which would
+    // cause asymmetric rate limiting near the saturation boundary
     static float prev_command_A[MAX_DOFS] = {0};
     static float prev_command_B[MAX_DOFS] = {0};
 
+    // Step 1: Apply absolute torque limits FIRST
+    command_A = constrain(command_A, -max_torque_A, max_torque_A);
+    command_B = constrain(command_B, -max_torque_B, max_torque_B);
+
+    // Step 2: Apply rate limiting on saturated values
     if (torque_ramp_time_ms > 0) {
       // Calculate max torque change per cycle
       // At 500 Hz with 100ms ramp time: 50 cycles to go 0→max
@@ -736,21 +718,16 @@ bool JointController::executeWaypointMovement() {
       float rate_A = max_torque_A * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
       float rate_B = max_torque_B * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
 
-      // Apply rate limiting
       command_A = constrain(command_A, prev_command_A[dof] - rate_A, prev_command_A[dof] + rate_A);
       command_B = constrain(command_B, prev_command_B[dof] - rate_B, prev_command_B[dof] + rate_B);
     }
 
-    // Store for next cycle (after rate limiting, before saturation)
+    // Step 3: Store saturated+rate-limited value for next cycle
     prev_command_A[dof] = command_A;
     prev_command_B[dof] = command_B;
-
-    // Apply absolute torque limits
-    command_A = constrain(command_A, -max_torque_A, max_torque_A);
-    command_B = constrain(command_B, -max_torque_B, max_torque_B);
     
     // === DIAGNOSTIC: Log extreme torque commands ===
-    if (abs(command_A) >= max_torque_A * 0.95f || abs(command_B) >= max_torque_B * 0.95f) {
+    if (fabs(command_A) >= max_torque_A * 0.95f || fabs(command_B) >= max_torque_B * 0.95f) {
       static uint32_t last_torque_warn = 0;
       if (millis() - last_torque_warn > 500) { // Log max every 500ms
         LOG_WARN("[Waypoint DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
