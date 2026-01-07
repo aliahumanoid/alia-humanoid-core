@@ -26,6 +26,8 @@ PID::PID(float Ts, float kp, float ki, float kd, float umax, float umin, float t
   // Initialize state to zero
   eprev[0]   = 0;
   eprev[1]   = 0;
+  xprev[0]   = 0;
+  xprev[1]   = 0;
   uprev      = 0;
   udfiltprev = 0;
 }
@@ -68,9 +70,11 @@ float PID::control(float xsp, float x, float uff) {
   }
 
   // Step 4: Derivative term with low-pass filtering
-  // Raw derivative: Kd/Ts * [e(k) - 2*e(k-1) + e(k-2)]
-  // This is the discrete second derivative (acceleration of error)
-  float ud = kd / Ts * (e - 2 * eprev[0] + eprev[1]);
+  // Using DERIVATIVE ON MEASUREMENT (not error) to avoid setpoint kick
+  // Raw derivative: -Kd/Ts * [x(k) - 2*x(k-1) + x(k-2)]
+  // The negative sign is needed because we're differentiating x instead of e=(xsp-x)
+  // When tracking a constant setpoint: d(xsp-x)/dt = -dx/dt, hence the sign change
+  float ud = -kd / Ts * (x - 2 * xprev[0] + xprev[1]);
   
   // Apply first-order low-pass filter to reduce noise
   // Filter equation: y(k) = α*y(k-1) + (1-α)*x(k), where α = tau/(tau+Ts)
@@ -83,6 +87,8 @@ float PID::control(float xsp, float x, float uff) {
   // Step 6: Update state for next iteration
   eprev[1]   = eprev[0]; // Shift error history
   eprev[0]   = e;
+  xprev[1]   = xprev[0]; // Shift measurement history (for derivative on measurement)
+  xprev[0]   = x;
   uprev      = u - uff;  // Store output without feedforward
   udfiltprev = udfilt;   // Store filtered derivative
 
@@ -101,20 +107,23 @@ float PID::control(float xsp, float x, float uff) {
 
 /**
  * Reset all internal state variables to zero
- * 
+ *
  * Clears:
  * - Error history (eprev[])
+ * - Measurement history (xprev[])
  * - Previous output (uprev)
  * - Filtered derivative (udfiltprev)
- * 
+ *
  * This prevents:
  * - Transients from old state when starting new control
  * - Integral windup carryover
- * - Derivative spikes from stale error values
+ * - Derivative spikes from stale measurement values
  */
 void PID::reset() {
   eprev[0]   = 0;
   eprev[1]   = 0;
+  xprev[0]   = 0;
+  xprev[1]   = 0;
   uprev      = 0;
   udfiltprev = 0;
 }

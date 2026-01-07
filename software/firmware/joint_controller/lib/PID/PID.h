@@ -47,8 +47,9 @@ private:
   // ===================================================================
   // INTERNAL STATE
   // ===================================================================
-  
-  float eprev[2];   ///< Previous errors: [e(k-1), e(k-2)]
+
+  float eprev[2];   ///< Previous errors: [e(k-1), e(k-2)] (used for proportional increment)
+  float xprev[2];   ///< Previous measurements: [x(k-1), x(k-2)] (used for derivative on measurement)
   float uprev;      ///< Previous controller output (without feedforward)
   float udfiltprev; ///< Previous filtered derivative term
 
@@ -77,18 +78,23 @@ public:
   
   /**
    * @brief Compute PID control output
-   * 
+   *
    * Implements incremental PID with anti-windup and filtered derivative:
    * - Proportional: Kp * [e(k) - e(k-1)]
    * - Integral: Ki * Ts * e(k) (disabled when saturated)
-   * - Derivative: Filtered Kd/Ts * [e(k) - 2*e(k-1) + e(k-2)]
+   * - Derivative: Filtered -Kd/Ts * [x(k) - 2*x(k-1) + x(k-2)] (on measurement, not error)
    * - Feedforward: Direct pass-through for model-based control
-   * 
+   *
+   * Note: Derivative is computed on MEASUREMENT (not error) to avoid spikes
+   * when setpoint changes abruptly. This is the standard "derivative on measurement"
+   * technique that provides identical behavior during tracking while eliminating
+   * derivative kick on setpoint steps.
+   *
    * @param xsp Setpoint (desired value)
    * @param x Current process variable (measurement)
    * @param uff Feedforward control term (default: 0)
    * @return Saturated control output in range [umin, umax]
-   * 
+   *
    * @note Call this method at regular intervals matching the sampling period Ts
    */
   float control(float xsp, float x, float uff = 0);
