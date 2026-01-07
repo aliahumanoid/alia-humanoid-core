@@ -198,10 +198,10 @@ void updateSharedDofAngles() {
   static uint32_t last_update_us = 0;
   static uint32_t last_encoder_read_us = 0;
   
-  // Throttle encoder reads based on configurable interval (default 2000µs = 500Hz)
-  // This reduces SPI bus stress and prevents sync errors
-  // Use configured value with minimum of 500µs (2kHz max) for safety
-  uint32_t read_interval = encoder_read_interval_us;
+  // Synchronize encoder reads with inner loop period for consistent control timing
+  // This ensures encoder data is fresh for each control cycle
+  // Minimum 500µs (2kHz max) for SPI bus safety
+  uint32_t read_interval = inner_loop_period_us;
   if (read_interval < 500) read_interval = 500;  // Minimum 500µs
   
   JointController *controller = active_joint_controller;
