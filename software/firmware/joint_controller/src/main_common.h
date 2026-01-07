@@ -142,6 +142,11 @@ extern volatile uint16_t torque_ramp_time_ms;   // Time for torque to go 0→max
 extern volatile uint16_t encoder_error_threshold_ms;  // Time before encoder error triggers emergency stop (default: 100ms)
 // NOTE: SPI encoder read interval now uses inner_loop_period_us for automatic synchronization
 
+// CAN error detection: time-window based (more robust than consecutive count)
+// Emergency stop triggers if can_error_threshold errors occur within can_error_window_ms
+extern volatile uint16_t can_error_window_ms;     // Time window for CAN error detection (default: 50ms)
+extern volatile uint8_t can_error_threshold;       // Number of errors in window before emergency stop (default: 5)
+
 // ============================================================================
 // PID DIAGNOSTICS DATA (for tuning/debugging)
 // ============================================================================

@@ -599,44 +599,68 @@ bool JointController::executeWaypointMovement() {
     
     // === DIAGNOSTIC: Detect suspicious motor readings ===
     // Check for sudden large jumps in motor angle (possible CAN corruption)
+    // Uses time-window based detection: N errors within M ms triggers emergency stop
+    // This is more robust than consecutive count - tolerates brief EMI glitches
     static float last_theta_A[MAX_DOFS] = {0};
     static float last_theta_B[MAX_DOFS] = {0};
     static bool first_read[MAX_DOFS] = {true, true, true};
-    static uint8_t consecutive_errors[MAX_DOFS] = {0};
-    
+
+    // Time-window error tracking: circular buffer of error timestamps per DOF
+    #define CAN_ERROR_HISTORY_SIZE 8
+    static uint32_t error_timestamps[MAX_DOFS][CAN_ERROR_HISTORY_SIZE] = {{0}};
+    static uint8_t error_head[MAX_DOFS] = {0};  // Next write position in circular buffer
+
+    // Helper lambda: count errors within time window
+    auto countRecentErrors = [](uint8_t dof_idx, uint32_t now_ms, uint32_t window_ms) -> uint8_t {
+      uint8_t count = 0;
+      uint32_t cutoff = (now_ms > window_ms) ? (now_ms - window_ms) : 0;
+      for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
+        if (error_timestamps[dof_idx][i] > cutoff) {
+          count++;
+        }
+      }
+      return count;
+    };
+
     if (!first_read[dof]) {
       float jump_A = abs(theta_A_curr - last_theta_A[dof]);
       float jump_B = abs(theta_B_curr - last_theta_B[dof]);
-      
+
       // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
-      // Reduced from 50° to 30° for earlier detection
       if (jump_A > 30.0f || jump_B > 30.0f) {
-        consecutive_errors[dof]++;
-        
-        LOG_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP #" + 
-                  String(consecutive_errors[dof]) + "!");
-        LOG_ERROR("  Agonist: " + String(last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) + 
+        // Record error timestamp in circular buffer
+        uint32_t now_ms = millis();
+        error_timestamps[dof][error_head[dof]] = now_ms;
+        error_head[dof] = (error_head[dof] + 1) % CAN_ERROR_HISTORY_SIZE;
+
+        uint8_t recent_errors = countRecentErrors(dof, now_ms, can_error_window_ms);
+
+        LOG_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
+                  String(recent_errors) + " errors in " + String(can_error_window_ms) + "ms)!");
+        LOG_ERROR("  Agonist: " + String(last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) +
                   " (jump=" + String(jump_A, 2) + "°)");
-        LOG_ERROR("  Antagonist: " + String(last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) + 
+        LOG_ERROR("  Antagonist: " + String(last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) +
                   " (jump=" + String(jump_B, 2) + "°)");
-        
-        // After 3 consecutive errors, trigger emergency stop
-        if (consecutive_errors[dof] >= 3) {
-          LOG_ERROR("[Waypoint] DOF " + String(dof) + " - 3 consecutive CAN errors, EMERGENCY STOP!");
+
+        // Trigger emergency stop if too many errors within time window
+        if (recent_errors >= can_error_threshold) {
+          LOG_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
+                    " CAN errors in " + String(can_error_window_ms) + "ms, EMERGENCY STOP!");
           stopAllMotors();
           waypoint_buffer_clear(dof);
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
-          consecutive_errors[dof] = 0;
+          // Clear error history for this DOF
+          for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
+            error_timestamps[dof][i] = 0;
+          }
           first_read[dof] = true;
           continue;
         }
-        
+
         // Skip this cycle to avoid sending bad commands, use last known good values
         continue;
-      } else {
-        // Good reading - reset error counter
-        consecutive_errors[dof] = 0;
       }
+      // Good reading - no need to reset anything, old errors expire naturally
     }
     
     last_theta_A[dof] = theta_A_curr;
