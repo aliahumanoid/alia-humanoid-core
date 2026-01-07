@@ -215,8 +215,11 @@ void updateSharedDofAngles() {
   }
   
   // Consecutive error counters for emergency stop (one per DOF)
-  static uint8_t consecutive_errors[MAX_DOFS] = {0};
-  static const uint8_t ENCODER_ERROR_THRESHOLD = 25;  // 25 cycles @ 500Hz = 50ms
+  static uint16_t consecutive_errors[MAX_DOFS] = {0};
+  // Calculate threshold in cycles from configurable ms value
+  // Example: 100ms with 2000µs read interval = 50 cycles
+  uint16_t error_threshold_cycles = (encoder_error_threshold_ms * 1000) / ENCODER_READ_INTERVAL_US;
+  if (error_threshold_cycles < 5) error_threshold_cycles = 5;  // Minimum 5 cycles for safety
   
   // Update encoder data from hardware (direct SPI to MT6835)
   directEncoders.update();
@@ -257,10 +260,11 @@ void updateSharedDofAngles() {
       shared_dof_angles.velocities[dof] = 0.0f;
       
       // Check for emergency stop condition per DOF
-      if (consecutive_errors[dof] >= ENCODER_ERROR_THRESHOLD && !emergency_stop_requested) {
+      if (consecutive_errors[dof] >= error_threshold_cycles && !emergency_stop_requested) {
         emergency_stop_requested = true;
-        LOG_ERROR("[SAFETY] EMERGENCY STOP: Encoder DOF " + String(dof) + 
-                  " failed " + String(ENCODER_ERROR_THRESHOLD) + " consecutive reads");
+        LOG_ERROR("[SAFETY] EMERGENCY STOP: Encoder DOF " + String(dof) +
+                  " failed " + String(error_threshold_cycles) + " consecutive reads (" +
+                  String(encoder_error_threshold_ms) + "ms)");
       }
     }
   }
