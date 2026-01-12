@@ -841,63 +841,6 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": f"Unable to set PID diagnostics frequency: {exc}"
             }), 500
 
-    # ===============================================================
-    # CAN NOTCH FILTER CONFIGURATION ROUTE
-    # ===============================================================
-
-    @app.route('/can/notch_filter', methods=['POST'])
-    def set_notch_filter():
-        """
-        Configure the torque notch filter for resonance suppression.
-        
-        JSON body:
-            enabled: bool - True to enable, False to bypass
-            freq_hz: float - Center frequency in Hz (1-50, default 8.0)
-            quality: float - Q factor (0.5-0.99, default 0.90)
-        
-        Returns:
-            Configuration result including bandwidth
-        """
-        can_unavailable = can_unavailable_response()
-        if can_unavailable:
-            return can_unavailable
-        
-        try:
-            data = request.json or {}
-            enabled = data.get('enabled', False)
-            freq_hz = data.get('freq_hz', 8.0)
-            quality = data.get('quality', 0.90)
-            
-            # Validate parameters
-            if not isinstance(enabled, bool):
-                enabled = bool(enabled)
-            
-            if not (1.0 <= freq_hz <= 50.0):
-                return jsonify({
-                    "status": "error",
-                    "message": f"freq_hz must be between 1 and 50 (got {freq_hz})"
-                }), 400
-            
-            if not (0.5 <= quality <= 0.99):
-                return jsonify({
-                    "status": "error",
-                    "message": f"quality must be between 0.5 and 0.99 (got {quality})"
-                }), 400
-            
-            result = can_manager.set_notch_filter(enabled, freq_hz, quality)
-            status_str = "ENABLED" if enabled else "DISABLED"
-            return jsonify({
-                "status": "success",
-                "message": f"Notch filter {status_str}: {freq_hz:.1f}Hz, Q={quality:.2f} (BW={result['bandwidth_hz']:.1f}Hz)",
-                "result": result
-            })
-        except Exception as exc:
-            logger.exception("Failed to configure notch filter")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to configure notch filter: {exc}"
-            }), 500
-
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
         popped = serial_manager.pop_status_message()

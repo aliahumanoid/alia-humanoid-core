@@ -239,28 +239,6 @@ extern volatile PIDDiagnostics pid_diagnostics;
 extern volatile bool pid_diag_stream_active;  // Enable diagnostic streaming
 
 // ============================================================================
-// NOTCH FILTER CONFIGURATION (for resonance suppression)
-// ============================================================================
-
-/**
- * @brief Notch filter configuration for torque output filtering
- * 
- * The notch filter can eliminate specific resonance frequencies from
- * the torque control loop. By default it is bypassed (disabled).
- * 
- * Typical resonance frequencies: 5-15 Hz depending on joint geometry.
- * Configure via CAN command or Serial for tuning experiments.
- */
-struct NotchFilterConfig {
-    volatile bool enabled;           // Filter enabled (default: false = bypass)
-    volatile float center_freq_hz;   // Center frequency to eliminate (default: 10.0 Hz)
-    volatile float quality;          // Q factor: 2=wide, 10=narrow (default: 5.0)
-    volatile bool config_changed;    // Flag to signal reconfiguration needed
-};
-
-extern volatile NotchFilterConfig notch_filter_config;
-
-// ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)
 // ============================================================================
 

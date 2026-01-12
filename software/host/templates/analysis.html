@@ -1843,16 +1843,16 @@
                 </div>
             `).join('');
             
-            // Show suggestion for notch filter
+            // Show tuning suggestion
             if (peaks.length > 0) {
                 const dominantFreq = peaks[0].frequency;
                 list.innerHTML += `
                     <div style="margin-top: 0.75rem; padding: 0.75rem; background: rgba(6, 182, 212, 0.1); border: 1px solid var(--accent-cyan); border-radius: 8px;">
                         <div style="font-size: 0.7rem; color: var(--accent-cyan); font-weight: 600; margin-bottom: 0.25rem;">
-                            <i class="fas fa-lightbulb" style="margin-right: 0.25rem;"></i> Notch Filter Suggestion
+                            <i class="fas fa-lightbulb" style="margin-right: 0.25rem;"></i> Tuning Suggestion
                         </div>
                         <div style="font-size: 0.8rem; color: var(--text-secondary);">
-                            Configure notch at <strong style="color: var(--accent-cyan);">${dominantFreq.toFixed(1)} Hz</strong> to reduce oscillations
+                            Dominant oscillation at <strong style="color: var(--accent-cyan);">${dominantFreq.toFixed(1)} Hz</strong>. Increase Kd to reduce.
                         </div>
                     </div>
                 `;

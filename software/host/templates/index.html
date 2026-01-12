@@ -741,49 +741,6 @@
                             </p>
                         </div>
 
-                        <!-- Notch Filter Configuration -->
-                        <div class="bg-purple-50 p-4 rounded-lg border border-purple-200 mb-4">
-                            <h3 class="text-md font-semibold mb-3 text-purple-700">
-                                <i class="fas fa-wave-square mr-2"></i>Notch Filter (Resonance Suppression)
-                            </h3>
-                            <div class="grid grid-cols-4 gap-4 items-end">
-                                <div>
-                                    <label class="flex items-center cursor-pointer">
-                                        <input type="checkbox" id="notchFilterEnabled" 
-                                            class="form-checkbox h-5 w-5 text-purple-600 rounded focus:ring-purple-500">
-                                        <span class="ml-2 text-sm font-medium text-gray-700">Enable</span>
-                                    </label>
-                                    <span id="notchFilterStatus" class="text-xs text-gray-500 block mt-1">Bypassed</span>
-                                </div>
-                                <div>
-                                    <label for="notchFreqHz" class="block text-sm font-medium text-gray-700">
-                                        Center Frequency (Hz):
-                                    </label>
-                                    <input id="notchFreqHz" type="number" value="8.0" min="1" max="50" step="0.5"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
-                                </div>
-                                <div>
-                                    <label for="notchQuality" class="block text-sm font-medium text-gray-700">
-                                        Quality (Q):
-                                    </label>
-                                    <input id="notchQuality" type="number" value="0.90" min="0.5" max="0.99" step="0.01"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
-                                    <span id="notchBandwidthDisplay" class="text-xs text-gray-500">BW ≈ 1.5 Hz</span>
-                                </div>
-                                <div>
-                                    <button onclick="applyNotchFilter()"
-                                        class="w-full bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded">
-                                        <i class="fas fa-filter mr-2"></i>Apply
-                                    </button>
-                                </div>
-                            </div>
-                            <p class="text-xs text-gray-500 mt-2">
-                                <i class="fas fa-info-circle mr-1"></i>
-                                Attenuates torque oscillations at mechanical resonance frequency. Use FFT analysis to find resonance.
-                                Lower Q = wider notch. Default: 8.0 Hz, Q=0.90. Check "Enable" and click Apply.
-                            </p>
-                        </div>
-
                         <!-- DOF tab selectors -->
                         <div class="flex mb-4 space-x-2 pid-tab-selectors">
                             <button id="pidTabSelector0" onclick="showPidTab(0)"

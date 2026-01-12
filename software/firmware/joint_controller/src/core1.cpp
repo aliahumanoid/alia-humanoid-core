@@ -47,7 +47,6 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_INTERPOLATION_MODE 0x005   // Waypoint interpolation mode (linear/smooth)
 #define CAN_ID_LOOP_FREQUENCY 0x006       // Control loop frequencies (inner/outer)
 #define CAN_ID_PID_DIAG_FREQ 0x007        // PID diagnostics stream frequency
-#define CAN_ID_NOTCH_FILTER 0x008         // Notch filter configuration (enable/freq/Q)
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -620,40 +619,6 @@ void pollHostCan() {
           LOG_WARN("[CAN_HOST] Invalid PID diag frequency: " + String(freq_hz) + 
                    "Hz (valid: 10-200Hz)");
         }
-      }
-    } else if (rx_id == CAN_ID_NOTCH_FILTER) {
-      // Notch filter configuration:
-      // byte 0: enabled (0=bypass, 1=enabled)
-      // byte 1-2: center frequency * 10 (uint16_t, e.g., 80 = 8.0 Hz)
-      // byte 3: quality * 100 (uint8_t, e.g., 90 = 0.90)
-      if (len >= 4) {
-        bool enabled = (buf[0] != 0);
-        uint16_t freq_x10 = buf[1] | (buf[2] << 8);
-        uint8_t quality_x100 = buf[3];
-        
-        float freq_hz = freq_x10 / 10.0f;
-        float quality = quality_x100 / 100.0f;
-        
-        // Validate: 1-50 Hz, Q 0.5-0.99
-        if (freq_hz >= 1.0f && freq_hz <= 50.0f && quality >= 0.5f && quality <= 0.99f) {
-          notch_filter_config.enabled = enabled;
-          notch_filter_config.center_freq_hz = freq_hz;
-          notch_filter_config.quality = quality;
-          notch_filter_config.config_changed = true;  // Signal reconfiguration needed
-          
-          LOG_INFO("[CAN_HOST] Notch filter: " + String(enabled ? "ENABLED" : "DISABLED") +
-                   " @ " + String(freq_hz, 1) + " Hz, Q=" + String(quality, 2));
-        } else {
-          LOG_WARN("[CAN_HOST] Invalid notch filter params: freq=" + String(freq_hz, 1) + 
-                   " Hz, Q=" + String(quality, 2) + " (valid: 1-50Hz, Q=0.5-0.99)");
-        }
-      } else if (len >= 1) {
-        // Short form: just enable/disable with current settings
-        bool enabled = (buf[0] != 0);
-        notch_filter_config.enabled = enabled;
-        notch_filter_config.config_changed = true;
-        LOG_INFO("[CAN_HOST] Notch filter " + String(enabled ? "ENABLED" : "DISABLED") +
-                 " @ " + String(notch_filter_config.center_freq_hz, 1) + " Hz");
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame

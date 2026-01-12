@@ -3313,67 +3313,7 @@ $(document).ready(function() {
     $('#innerLoopPeriod, #outerLoopDivisor').on('input', updateLoopFrequencyDisplays);
     // Initialize displays
     updateLoopFrequencyDisplays();
-    
-    // Notch filter UI updates
-    $('#notchFreqHz, #notchQuality').on('input', updateNotchBandwidthDisplay);
-    updateNotchBandwidthDisplay();
 });
-
-/**
- * Update the notch filter bandwidth display based on current values
- */
-function updateNotchBandwidthDisplay() {
-    const freq = parseFloat($('#notchFreqHz').val()) || 8.0;
-    const q = parseFloat($('#notchQuality').val()) || 0.90;
-    
-    // Approximate bandwidth: BW ≈ f0 × (1 - r²) / r
-    const bandwidth = freq * (1 - q * q) / q;
-    $('#notchBandwidthDisplay').text(`BW ≈ ${bandwidth.toFixed(1)} Hz`);
-}
-
-/**
- * Apply notch filter configuration to the firmware via CAN
- */
-function applyNotchFilter() {
-    const enabled = $('#notchFilterEnabled').is(':checked');
-    const freqHz = parseFloat($('#notchFreqHz').val()) || 8.0;
-    const quality = parseFloat($('#notchQuality').val()) || 0.90;
-    
-    // Validate ranges
-    if (freqHz < 1 || freqHz > 50) {
-        appendStatusMessage('❌ Notch frequency must be between 1 and 50 Hz', 'error');
-        return;
-    }
-    
-    if (quality < 0.5 || quality > 0.99) {
-        appendStatusMessage('❌ Quality factor must be between 0.5 and 0.99', 'error');
-        return;
-    }
-    
-    appendStatusMessage(`🎚️ Applying notch filter: ${enabled ? 'ENABLED' : 'DISABLED'} @ ${freqHz.toFixed(1)}Hz, Q=${quality.toFixed(2)}...`);
-    
-    $.ajax({
-        url: '/can/notch_filter',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({
-            enabled: enabled,
-            freq_hz: freqHz,
-            quality: quality
-        }),
-        success: function(response) {
-            const status = enabled ? 'ENABLED' : 'BYPASSED';
-            appendStatusMessage(`✅ Notch filter ${status}: ${freqHz.toFixed(1)}Hz, Q=${quality.toFixed(2)} (BW=${response.result.bandwidth_hz.toFixed(1)}Hz)`);
-            $('#notchFilterStatus').text(enabled ? `Active @ ${freqHz.toFixed(1)}Hz` : 'Bypassed');
-            $('#notchFilterStatus').removeClass('text-gray-500 text-green-600 text-red-600')
-                                   .addClass(enabled ? 'text-green-600' : 'text-gray-500');
-        },
-        error: function(xhr) {
-            const errorMsg = xhr.responseJSON?.message || xhr.statusText;
-            appendStatusMessage(`❌ Error applying notch filter: ${errorMsg}`, 'error');
-        }
-    });
-}
 
 // --- Mapping chart management functions ---
 

@@ -312,46 +312,6 @@ class CanManager:
             "interval_ms": interval_ms
         }
 
-    def set_notch_filter(self, enabled: bool, freq_hz: float = 8.0, quality: float = 0.90) -> Dict[str, Any]:
-        """
-        Configure the torque notch filter for resonance suppression.
-        
-        Args:
-            enabled: True to enable filtering, False to bypass
-            freq_hz: Center frequency in Hz (1-50, default 8.0)
-            quality: Q factor (0.5-0.99, default 0.90)
-                    Lower Q = wider notch, higher Q = narrower notch
-        
-        Sends control command (0x008) to configure notch filter.
-        The filter is applied to torque commands to suppress mechanical resonances.
-        """
-        self._ensure_connection()
-        
-        # Pack: enabled (1 byte), freq*10 (2 bytes LE), quality*100 (1 byte)
-        freq_x10 = int(freq_hz * 10)
-        quality_x100 = int(quality * 100)
-        
-        payload = bytes([
-            1 if enabled else 0,
-            freq_x10 & 0xFF,
-            (freq_x10 >> 8) & 0xFF,
-            quality_x100
-        ]) + bytes(4)  # Pad to 8 bytes
-        
-        status = "ENABLED" if enabled else "DISABLED"
-        self._send_frame(0x008, payload, context=f"Notch filter: {status} @ {freq_hz:.1f}Hz, Q={quality:.2f}")
-        self._log_can_info(f"Notch filter {status}: {freq_hz:.1f}Hz, Q={quality:.2f}")
-        
-        # Calculate approximate bandwidth
-        bandwidth_hz = freq_hz * (1 - quality * quality) / quality
-        
-        return {
-            "enabled": enabled,
-            "center_freq_hz": freq_hz,
-            "quality": quality,
-            "bandwidth_hz": bandwidth_hz
-        }
-
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
         return self._encoder_stream_active

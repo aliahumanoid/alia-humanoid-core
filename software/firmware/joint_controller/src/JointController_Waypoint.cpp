@@ -24,8 +24,7 @@
 #include <waypoint_buffer.h>
 #include <Arduino.h>
 #include <debug.h>
-#include "main_common.h"  // For shared_dof_angles, notch_filter_config
-#include <NotchFilter.h>  // For torque resonance suppression
+#include "main_common.h"  // For shared_dof_angles
 #include <math.h>  // For cosf, M_PI
 
 // External time sync function (defined in core1.cpp)
@@ -53,11 +52,6 @@ static float delta_theta_prev[MAX_DOFS] = {0};      // Previous outer PID output
 // To smooth this, we interpolate between delta_theta_prev and delta_theta based on
 // where we are in the current outer loop period. This eliminates vibrations caused
 // by discontinuous reference changes while maintaining cascade control benefits.
-
-// Notch filters for torque resonance suppression (one per motor)
-// Indexed as [dof * 2 + motor_idx] where motor_idx: 0=agonist, 1=antagonist
-static NotchFilter torque_notch_filters[MAX_DOFS * 2];
-static bool notch_filters_initialized = false;
 
 // Safety check counter (for periodic motor checks in HOLDING mode)
 static uint16_t safety_check_counter = 0;
@@ -675,41 +669,6 @@ bool JointController::executeWaypointMovement() {
     // theta_B_ref = theta_0 + 0.5*delta_theta - 0.5*stiffness_ref
     // The stiffness_ref separates motor references, creating constant tension on both tendons.
     // Increase stiffness_ref (via UI) to reduce vibrations from slack tendons.
-    
-    // === NOTCH FILTER: Apply resonance suppression if enabled ===
-    // Unlike general low-pass filtering, a notch filter only attenuates a narrow
-    // frequency band (the mechanical resonance) with minimal phase delay elsewhere.
-    // This avoids the instability issues seen with broad-spectrum filtering.
-    {
-      // Check if configuration changed
-      if (notch_filter_config.config_changed) {
-        // Reconfigure all filters with new parameters
-        float sample_rate = 1000000.0f / inner_loop_period_us;  // Actual inner loop Hz
-        for (int i = 0; i < MAX_DOFS * 2; i++) {
-          torque_notch_filters[i].configure(
-            notch_filter_config.center_freq_hz,
-            sample_rate,
-            notch_filter_config.quality
-          );
-          torque_notch_filters[i].setEnabled(notch_filter_config.enabled);
-        }
-        notch_filter_config.config_changed = false;
-        notch_filters_initialized = true;
-        LOG_INFO("[Notch] Configured: " + String(notch_filter_config.center_freq_hz, 1) + 
-                 " Hz, Q=" + String(notch_filter_config.quality, 2) + 
-                 ", enabled=" + String(notch_filter_config.enabled ? "YES" : "NO"));
-      }
-      
-      // Apply filters ONLY if initialized AND explicitly enabled
-      // The process() function already checks isEnabled(), but we add an extra
-      // guard here to make it absolutely clear and avoid any edge cases
-      if (notch_filters_initialized && notch_filter_config.enabled) {
-        int filter_idx_A = dof * 2;
-        int filter_idx_B = dof * 2 + 1;
-        command_A = torque_notch_filters[filter_idx_A].process(command_A);
-        command_B = torque_notch_filters[filter_idx_B].process(command_B);
-      }
-    }
     
     // Get torque limits from motor configuration
     float max_torque_A = config.motors[agonist_idx].max_torque;

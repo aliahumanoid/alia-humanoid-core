@@ -89,15 +89,6 @@ volatile uint32_t encoder_stream_last_send_us = 0;
 volatile PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
 
-// Notch filter configuration (for resonance suppression)
-// Default: disabled (bypass mode), 8 Hz center, Q=0.90
-volatile NotchFilterConfig notch_filter_config = {
-    .enabled = false,
-    .center_freq_hz = 10.0f,  // Default: 10 Hz (typical mechanical resonance)
-    .quality = 5.0f,          // Q factor: 5 = moderate bandwidth (~2 Hz @ 10 Hz)
-    .config_changed = false
-};
-
 // Cached motor angles (for safety checks without redundant CAN reads)
 // This eliminates the ~2ms delay per motor during periodic safety checks
 volatile CachedMotorAngles cached_motor_angles = {
