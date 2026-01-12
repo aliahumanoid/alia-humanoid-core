@@ -47,7 +47,12 @@ extern volatile uint8_t outer_loop_divisor;     // Outer loop divisor
 // Outer loop variables (persistent across calls)
 // NOTE: error_integral and previous_error are now handled by outer_pid_controllers
 // which provides filtered derivative and proper anti-windup
-static float delta_theta[MAX_DOFS] = {0};      // Outer PID output (from outer_pid_controllers)
+static float delta_theta[MAX_DOFS] = {0};           // Current outer PID output (target)
+static float delta_theta_prev[MAX_DOFS] = {0};      // Previous outer PID output (for interpolation)
+// When outer_loop_divisor > 1, delta_theta changes every N cycles creating "steps".
+// To smooth this, we interpolate between delta_theta_prev and delta_theta based on
+// where we are in the current outer loop period. This eliminates vibrations caused
+// by discontinuous reference changes while maintaining cascade control benefits.
 
 // Notch filters for torque resonance suppression (one per motor)
 // Indexed as [dof * 2 + motor_idx] where motor_idx: 0=agonist, 1=antagonist
@@ -399,6 +404,8 @@ bool JointController::executeWaypointMovement() {
       // - Output saturation (limits delta_theta to ±MAX_DELTA_THETA)
       PID *outer_pid = getOuterPID(dof);
       if (outer_pid) {
+        // Save previous value for interpolation (smooth transitions when divisor > 1)
+        delta_theta_prev[dof] = delta_theta[dof];
         delta_theta[dof] = outer_pid->control(q_des, q_curr);
       }
 
@@ -562,11 +569,28 @@ bool JointController::executeWaypointMovement() {
       cascade_influence = DEFAULT_CASCADE_INFLUENCE;
     }
     
+    // === DELTA_THETA INTERPOLATION ===
+    // When outer_loop_divisor > 1, delta_theta updates every N cycles creating "steps".
+    // To avoid vibrations from discontinuous reference changes, we linearly interpolate
+    // between the previous and current delta_theta values based on where we are in the
+    // outer loop period. When divisor = 1, alpha = 1.0 so no interpolation occurs.
+    float delta_theta_smooth;
+    if (outer_loop_divisor <= 1) {
+      // No interpolation needed (outer and inner at same frequency)
+      delta_theta_smooth = delta_theta[dof];
+    } else {
+      // Interpolate: cycle_in_outer goes from 0 to (divisor-1)
+      // alpha goes from 1/divisor to 1.0 (we use new value immediately, blend out old)
+      int cycle_in_outer = (cycle_count - 1) % outer_loop_divisor;
+      float alpha = (float)(cycle_in_outer + 1) / (float)outer_loop_divisor;
+      delta_theta_smooth = delta_theta_prev[dof] + alpha * (delta_theta[dof] - delta_theta_prev[dof]);
+    }
+    
     // Compute motor references using cascade control formula (same as moveMultiDOF_cascade)
     float theta_A_ref = theta_0_agonist_motor + 
-                        cascade_influence * (0.5f * delta_theta[dof] + 0.5f * stiffness_ref);
+                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref);
     float theta_B_ref = theta_0_antagonist_motor + 
-                        cascade_influence * (0.5f * delta_theta[dof] - 0.5f * stiffness_ref);
+                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
     
     // Read current motor angles
     MultiAngleData data_A = agonist->getMultiAngleSync();

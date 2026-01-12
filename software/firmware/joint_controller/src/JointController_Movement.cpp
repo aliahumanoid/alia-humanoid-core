@@ -243,7 +243,8 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   // Variables for outer loop (joint control)
   float q_curr[MAX_DOFS]           = {0}; // Measured joint angle
   float q_des[MAX_DOFS]            = {0}; // Desired joint angle (from trajectory)
-  float delta_theta[MAX_DOFS]      = {0}; // Outer PID output (computed by outer_pid_controllers)
+  float delta_theta[MAX_DOFS]      = {0}; // Current outer PID output (target)
+  float delta_theta_prev[MAX_DOFS] = {0}; // Previous outer PID output (for interpolation)
 
   // References for motors (outer loop output)
   float theta_A_ref[MAX_DOFS] = {0};
@@ -617,6 +618,8 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           // - Output saturation (limits delta_theta to ±MAX_DELTA_THETA)
           PID *outer_pid = getOuterPID(dof_idx);
           if (outer_pid) {
+            // Save previous value for interpolation (smooth transitions when divisor > 1)
+            delta_theta_prev[dof_idx] = delta_theta[dof_idx];
             delta_theta[dof_idx] = outer_pid->control(q_des[dof_idx], q_curr[dof_idx]);
           }
 
@@ -673,12 +676,25 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         float cascade_value   = cascade_per_dof[dof_idx];
         float stiffness_value = stiffness_per_dof[dof_idx];
 
+        // === DELTA_THETA INTERPOLATION ===
+        // When OUTER_LOOP_DIV > 1, delta_theta updates every N cycles creating "steps".
+        // To avoid vibrations from discontinuous reference changes, we linearly interpolate
+        // between the previous and current delta_theta values.
+        float delta_theta_smooth;
+        if (OUTER_LOOP_DIV <= 1) {
+          delta_theta_smooth = delta_theta[dof_idx];
+        } else {
+          int cycle_in_outer = (cycle_count - 1) % OUTER_LOOP_DIV;
+          float alpha = (float)(cycle_in_outer + 1) / (float)OUTER_LOOP_DIV;
+          delta_theta_smooth = delta_theta_prev[dof_idx] + alpha * (delta_theta[dof_idx] - delta_theta_prev[dof_idx]);
+        }
+
         theta_A_ref[dof_idx] =
             theta_0_agonist_motor +
-            cascade_value * (0.5f * delta_theta[dof_idx] + 0.5f * stiffness_value);
+            cascade_value * (0.5f * delta_theta_smooth + 0.5f * stiffness_value);
         theta_B_ref[dof_idx] =
             theta_0_antagonist_motor +
-            cascade_value * (0.5f * delta_theta[dof_idx] - 0.5f * stiffness_value);
+            cascade_value * (0.5f * delta_theta_smooth - 0.5f * stiffness_value);
 
         // Read current motor angles
         float theta_A_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
