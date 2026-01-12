@@ -2202,7 +2202,12 @@ function sendMultiWaypointSmoothCurve() {
     const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
     const targetAngle = parseFloat($("#canWaypointAngle").val());
     const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
-    const numPoints = parseInt($("#multiWpPoints").val(), 10) || 20;
+    
+    // Slider now represents points per second (rate)
+    const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
+    // Calculate number of points from rate: numPoints = rate × (totalTime / 1000)
+    const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
+    const deltaT = Math.round(1000 / waypointRate);  // Δt = 1000ms / rate
 
     if (!joint) {
         appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
@@ -2230,7 +2235,7 @@ function sendMultiWaypointSmoothCurve() {
         }
     }
 
-    appendStatusMessage(`🔬 Multi-WP Test: ${startAngle.toFixed(1)}° → ${targetAngle}° using ${numPoints} points`);
+    appendStatusMessage(`🔬 Multi-WP: ${startAngle.toFixed(1)}° → ${targetAngle}° @ ${waypointRate} pts/s (${numPoints} pts, Δt=${deltaT}ms)`);
 
     // Force LINEAR interpolation (the COSINE curve is in the waypoints themselves)
     $.ajax({
@@ -2243,7 +2248,7 @@ function sendMultiWaypointSmoothCurve() {
 
     // Generate waypoints following COSINE S-curve
     const waypoints = [];
-    const deltaT = totalTimeMs / numPoints;
+    const actualDeltaT = totalTimeMs / numPoints;
     
     // Estimate batch send time for initial offset calculation
     // Backend will compensate for actual elapsed time, so this is just a buffer
@@ -2261,7 +2266,7 @@ function sendMultiWaypointSmoothCurve() {
         
         // Calculate desired arrival time from batch start
         // Backend compensates for actual elapsed time when sending each waypoint
-        const desiredArrivalFromStart = initialOffset + (i * deltaT);
+        const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
         
         // Build waypoint
         const angles = [null, null, null];
@@ -2274,7 +2279,7 @@ function sendMultiWaypointSmoothCurve() {
         });
     }
 
-    appendStatusMessage(`📊 Generated ${waypoints.length} waypoints (Δt=${deltaT.toFixed(0)}ms)`);
+    appendStatusMessage(`📊 Generated ${waypoints.length} waypoints`);
 
     // Send as batch
     $.ajax({
