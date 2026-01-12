@@ -118,8 +118,6 @@ COMMANDS = {
     'START_AUTO_MAPPING': 'START_AUTO_MAPPING',  # Start advanced automatic mapping
     'STOP_AUTO_MAPPING': 'STOP_AUTO_MAPPING',    # Stop advanced automatic mapping
     'RECALC_OFFSET': 'RECALC_OFFSET', # Recalculate motor offsets
-    'START_MEASURE': 'START_MEASURE',  # Enable real-time measurements
-    'STOP_MEASURE': 'STOP_MEASURE',    # Stop real-time measurements
     'START_TEST_ENCODER': 'START_TEST_ENCODER',  # Start encoder test
     'STOP_TEST_ENCODER': 'STOP_TEST_ENCODER',    # Stop encoder test
     'SYNC': 'SYNC',              # Synchronize times
@@ -130,6 +128,5 @@ COMMANDS = {
     'SAVE_PID': 'SAVE_PID',      # Save PID parameters to flash
     'LOAD_PID': 'LOAD_PID',      # Load PID parameters from flash
     'RECALC_SAFE_LIMITS': 'RECALC_SAFE_LIMITS',  # Recalculate safe limits from equations
-    'GET_MOVEMENT_DATA': 'GET_MOVEMENT_DATA',  # Request movement data from firmware
     'CAN_DIAG': 'CAN_DIAG'       # CAN bus diagnostic test
 }

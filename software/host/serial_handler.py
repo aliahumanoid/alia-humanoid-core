@@ -48,9 +48,6 @@ class SerialHandler:
         self.listening = threading.Event()
         self.listening.set()
         self.serial_lock = threading.Lock()
-        self.extensor: float = 0.0
-        self.flexor: float = 0.0
-        self.start_measure_motor_output_time: Optional[float] = None
         self.movement_web_data: Dict = {}
         self.joint_status: Dict[str, Any] = {"position": 0, "message": "Ready"}
         self.status_message: List[str] = []
@@ -249,17 +246,6 @@ class SerialHandler:
                 # MOVE_COMPLETE_HOLDING means movement is done and motors are in holding loop
                 logger.info(f"✅ Movement completed: {line}")
                 self.status_message.append(f"✅ {line}")
-                
-                # If sequence is active, automatically request movement data
-                if self.sequence_active and line.startswith("RSP:MOVE_COMPLETE_HOLDING"):
-                    logger.info(f"📊 Sequence active - requesting movement data for step {self.sequence_current_step}")
-                    try:
-                        # Send GET_MOVEMENT_DATA command (will be handled by firmware)
-                        ser.write(b"CMD:GET_MOVEMENT_DATA\n")
-                        ser.flush()
-                        self.sequence_current_step += 1
-                    except Exception as e:
-                        logger.error(f"Error requesting movement data during sequence: {e}")
                 
                 with self.movement_queue_lock:
                     self.movement_pending = False
@@ -1066,22 +1052,17 @@ class SerialHandler:
         # Update state
         self.joint_status[joint][dof]["measure"] = measure_data
 
-        # Update legacy variables for compatibility with existing code that uses them
-        if joint.startswith("KNEE") and dof == "0" and len(values) >= 2:
-            self.extensor = values[0]
-            self.flexor = values[1]
-
-            # Emit event for real-time visualization
-            self.socketio.emit(
-                "joint_measure",
-                {
-                    "joint": joint,
-                    "dof": dof,
-                    "data": measure_data,
-                    "timestamp": time.time(),
-                },
-                namespace="/movement",
-            )
+        # Emit event for real-time visualization
+        self.socketio.emit(
+            "joint_measure",
+            {
+                "joint": joint,
+                "dof": dof,
+                "data": measure_data,
+                "timestamp": time.time(),
+            },
+            namespace="/movement",
+        )
 
     def _map_measure_values_by_joint_type(
         self, joint: str, dof: str, values: List[float]
@@ -2355,19 +2336,6 @@ class SerialHandler:
             logger.error(f"Error enriching mapping data: {e}")
             return mapping_data
 
-    def get_output_data(self) -> Dict[str, float]:
-        elapsed_time = (
-            time.time() - self.start_measure_motor_output_time
-            if self.start_measure_motor_output_time
-            else 0
-        )
-        return {
-            "time": elapsed_time,
-            "extensor_output": self.extensor,
-            "flexor_output": self.flexor,
-        }
-
-
     def generate_command(self, joint, dof, command, params=None):
         """
         Generates command in new format JOINT:DOF:COMMAND:PARAMS
@@ -2450,8 +2418,8 @@ class SerialHandler:
             with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
                 self.send_command_with_prefix(cmd, ser)
 
-                # If we're stopping a measurement or mapping command, also send STOP command
-                if command in ["STOP_MEASURE", "STOP_TEST_ENCODER", "STOP_AUTO_MAPPING"]:
+                # If we're stopping a test or mapping command, also send STOP command
+                if command in ["STOP_TEST_ENCODER", "STOP_AUTO_MAPPING"]:
                     # Send STOP command to interrupt ongoing operations
                     stop_cmd = f"{joint}:{dof}:STOP"
                     self.send_command_with_prefix(stop_cmd, ser)

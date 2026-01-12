@@ -857,26 +857,6 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             "message": "No update available."
         })
 
-    @app.route('/get_output_data', methods=['GET'])
-    def get_output_data():
-        joint = request.args.get('joint')
-        if not joint:
-            return jsonify({
-                "status": "error",
-                "message": "Specify joint to get output data.",
-            }), 400
-
-        handler, error_response, status_code = handler_or_error(joint)
-        if handler is None:
-            return error_response, status_code
-
-        return jsonify({
-            "status": "success",
-            "joint": joint,
-            "port": serial_manager.get_port_for_joint(joint),
-            "data": handler.get_output_data(),
-        })
-
     @app.route('/joint_limits', methods=['GET'])
     def get_joint_limits():
         def normalize_limits(source, target_key):
@@ -976,85 +956,6 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "status": "error",
                 "message": f"Error retrieving encoder data: {str(e)}",
                 "data": None
-            })
-
-
-
-    @app.route('/get_movement_data_multi_dof', methods=['GET'])
-    def get_movement_data_multi_dof():
-        """
-        Endpoint for multi-DOF movement data with hierarchical structure
-        """
-        try:
-            joint_filter = request.args.get('joint', None)
-            dof = request.args.get('dof', None)
-
-            handlers = []
-            if joint_filter:
-                handler, error_response, status_code = handler_or_error(joint_filter)
-                if handler is None:
-                    return error_response, status_code
-                handlers = [handler]
-            else:
-                handlers = list(serial_manager.get_handler_snapshot().values())
-
-            for handler in handlers:
-                movement_data = getattr(handler, 'movement_web_data', None)
-                if not (
-                    isinstance(movement_data, dict)
-                    and 'metadata' in movement_data
-                    and 'joints' in movement_data
-                ):
-                    continue
-
-                response_data = movement_data
-                if joint_filter and dof:
-                    filtered = {
-                        "metadata": movement_data["metadata"],
-                        "joints": {},
-                    }
-                    if joint_filter in movement_data["joints"]:
-                        dof_key = f"dof_{dof}"
-                        joint_block = movement_data["joints"][joint_filter]
-                        if dof_key in joint_block:
-                            filtered["joints"][joint_filter] = {
-                                dof_key: joint_block[dof_key]
-                            }
-                    response_data = filtered
-
-                elif joint_filter:
-                    filtered = {
-                        "metadata": movement_data["metadata"],
-                        "joints": {},
-                    }
-                    if joint_filter in movement_data["joints"]:
-                        filtered["joints"][joint_filter] = movement_data["joints"][joint_filter]
-                    response_data = filtered
-
-                return jsonify({
-                    "status": "success",
-                    "data": response_data,
-                    "filter": (
-                        {"joint": joint_filter, "dof": dof}
-                        if joint_filter and dof
-                        else ({"joint": joint_filter} if joint_filter else None)
-                    ),
-                    "has_data": bool(response_data.get("joints")),
-                })
-
-            return jsonify({
-                "status": "success",
-                "data": None,
-                "message": "No multi-DOF movement data available",
-                "has_data": False,
-            })
-                
-        except Exception as e:
-            return jsonify({
-                "status": "error",
-                "message": f"Error retrieving movement data: {str(e)}",
-                "data": None,
-                "has_data": False
             })
 
     @app.route('/get_mapping_data', methods=['GET'])
@@ -1310,14 +1211,6 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                         handler.get_outer_pid_for_joint_dof(joint_id, dof_index)
 
                 message = f"Joint {joint_id} selected and PIDs requested"
-            elif cmd == "start-measure-output":
-                handler.send_new_command(joint, dof, COMMANDS['START_MEASURE'])
-            elif cmd == "stop-measure-output":
-                handler.send_new_command(joint, dof, COMMANDS['STOP_MEASURE'])
-            elif cmd == "GET_MOVEMENT_DATA":
-                # Request movement data from firmware (on-demand)
-                handler.send_new_command(joint, dof, COMMANDS['GET_MOVEMENT_DATA'])
-                message = f"Movement data request sent to {joint}"
             else:
                 status = "error"
                 message = f"Command {cmd} not recognized."
