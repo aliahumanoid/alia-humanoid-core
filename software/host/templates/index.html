@@ -1131,10 +1131,10 @@
                                 <select id="pidDiagFrequency" onchange="updatePidDiagFrequency()"
                                     class="rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
                                     <option value="20">20 Hz (Monitoring)</option>
-                                    <option value="50">50 Hz (Training)</option>
+                                    <option value="50" selected>50 Hz (Training)</option>
                                     <option value="100">100 Hz (High Detail)</option>
                                 </select>
-                                <span id="pidDiagFreqInfo" class="text-xs text-indigo-600">= 50ms interval</span>
+                                <span id="pidDiagFreqInfo" class="text-xs text-indigo-600">= 20ms interval</span>
                             </div>
                             
                             <!-- Controls -->
@@ -1222,14 +1222,14 @@
                                     <!-- Point A -->
                                     <div>
                                         <label class="block text-xs font-medium text-purple-700 mb-1">Point A (°)</label>
-                                        <input type="number" id="oscTestPointA" value="-10" step="1" 
+                                        <input type="number" id="oscTestPointA" value="20" step="1" 
                                             class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
                                     </div>
                                     
                                     <!-- Point B -->
                                     <div>
                                         <label class="block text-xs font-medium text-purple-700 mb-1">Point B (°)</label>
-                                        <input type="number" id="oscTestPointB" value="10" step="1" 
+                                        <input type="number" id="oscTestPointB" value="80" step="1" 
                                             class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
                                     </div>
                                     
@@ -1740,12 +1740,12 @@
                                     <div class="grid grid-cols-2 gap-2">
                                         <div>
                                             <label class="text-xs text-gray-500">Min (°)</label>
-                                            <input type="number" id="sinusoidDof0Min" value="-10" step="1"
+                                            <input type="number" id="sinusoidDof0Min" value="20" step="1"
                                                 class="w-full px-2 py-1 text-sm border rounded">
                                         </div>
                                         <div>
                                             <label class="text-xs text-gray-500">Max (°)</label>
-                                            <input type="number" id="sinusoidDof0Max" value="10" step="1"
+                                            <input type="number" id="sinusoidDof0Max" value="80" step="1"
                                                 class="w-full px-2 py-1 text-sm border rounded">
                                         </div>
                                     </div>

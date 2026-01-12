@@ -456,6 +456,9 @@ $(document).ready(function() {
         
         updateJointPanels();
         
+        // Update oscillation test and sinusoid defaults for the new joint
+        updateOscillationDefaults(joint);
+        
         // Automatically load mapping data for new joint
         setTimeout(() => {
             fetchMappingChartData();
@@ -624,6 +627,39 @@ function updateJointPanels() {
     
     // Update sinusoid parameters for the selected joint
     updateSinusoidParamsForJoint(joint);
+}
+
+/**
+ * Update oscillation test defaults based on selected joint
+ * Sets appropriate min/max angles for both Oscillation Test and Sinusoid Test sections
+ */
+function updateOscillationDefaults(jointName) {
+    if (!jointName) return;
+    
+    const jointType = jointName.split('_')[0].toUpperCase();
+    
+    // Define sensible defaults for each joint type (restricted range within safe limits)
+    const jointDefaults = {
+        'KNEE': { min: 20, max: 80 },      // Knee: 0-100° safe, use 20-80°
+        'ANKLE': { min: -15, max: 15 },    // Ankle: typically -30° to +30°, use -15 to +15°
+        'HIP': { min: -20, max: 20 }       // Hip: varies, use -20 to +20°
+    };
+    
+    const defaults = jointDefaults[jointType] || { min: 20, max: 80 };
+    
+    // Update Oscillation Test (PID Tuning) section
+    $('#oscTestPointA').val(defaults.min);
+    $('#oscTestPointB').val(defaults.max);
+    
+    // Update Sinusoidal Trajectory Test section (DOF 0)
+    $('#sinusoidDof0Min').val(defaults.min);
+    $('#sinusoidDof0Max').val(defaults.max);
+    
+    // Also update DOF 1 if present (for multi-DOF joints like ankle)
+    if ($('#sinusoidDof1Min').length) {
+        $('#sinusoidDof1Min').val(defaults.min);
+        $('#sinusoidDof1Max').val(defaults.max);
+    }
 }
 
 /**
