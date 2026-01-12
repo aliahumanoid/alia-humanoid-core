@@ -251,6 +251,107 @@ class CanManager:
         self._log_can_info(f"Interpolation mode set to: {mode}")
         return {"mode": mode}
 
+    def set_loop_frequencies(self, inner_period_us: int, outer_divisor: int) -> Dict[str, Any]:
+        """
+        Set control loop frequencies.
+        
+        Args:
+            inner_period_us: Inner loop period in microseconds (500-10000µs)
+                            Default 2000µs = 500Hz
+            outer_divisor: Outer loop runs every N inner cycles (1-20)
+                          Default 5 = 100Hz when inner is 500Hz
+        
+        Sends control command (0x006) to set loop frequencies.
+        """
+        self._ensure_connection()
+        
+        # Validate ranges
+        inner_period_us = max(500, min(10000, inner_period_us))
+        outer_divisor = max(1, min(20, outer_divisor))
+        
+        # Pack: inner_period_us (2 bytes little-endian) + outer_divisor (1 byte)
+        payload = struct.pack('<HB', inner_period_us, outer_divisor) + bytes(5)
+        
+        inner_freq = 1000000.0 / inner_period_us
+        outer_freq = inner_freq / outer_divisor
+        
+        self._send_frame(0x006, payload, context=f"Loop freq: inner={inner_freq:.1f}Hz, outer={outer_freq:.1f}Hz")
+        self._log_can_info(f"Loop frequencies set: inner={inner_freq:.1f}Hz ({inner_period_us}µs), outer={outer_freq:.1f}Hz (÷{outer_divisor})")
+        
+        return {
+            "inner_period_us": inner_period_us,
+            "outer_divisor": outer_divisor,
+            "inner_freq_hz": inner_freq,
+            "outer_freq_hz": outer_freq
+        }
+
+    def set_pid_diag_frequency(self, freq_hz: int) -> Dict[str, Any]:
+        """
+        Set PID diagnostics streaming frequency.
+        
+        Args:
+            freq_hz: Frequency in Hz (10-200)
+                    Default 20Hz for monitoring, 50-100Hz for NN training data
+        
+        Sends control command (0x007) to set PID diagnostics frequency.
+        """
+        self._ensure_connection()
+        
+        # Validate range
+        freq_hz = max(10, min(200, freq_hz))
+        
+        payload = bytes([freq_hz]) + bytes(7)
+        
+        interval_ms = 1000 / freq_hz
+        
+        self._send_frame(0x007, payload, context=f"PID diag freq: {freq_hz}Hz")
+        self._log_can_info(f"PID diagnostics frequency set to: {freq_hz}Hz ({interval_ms:.1f}ms)")
+        
+        return {
+            "freq_hz": freq_hz,
+            "interval_ms": interval_ms
+        }
+
+    def set_notch_filter(self, enabled: bool, freq_hz: float = 8.0, quality: float = 0.90) -> Dict[str, Any]:
+        """
+        Configure the torque notch filter for resonance suppression.
+        
+        Args:
+            enabled: True to enable filtering, False to bypass
+            freq_hz: Center frequency in Hz (1-50, default 8.0)
+            quality: Q factor (0.5-0.99, default 0.90)
+                    Lower Q = wider notch, higher Q = narrower notch
+        
+        Sends control command (0x008) to configure notch filter.
+        The filter is applied to torque commands to suppress mechanical resonances.
+        """
+        self._ensure_connection()
+        
+        # Pack: enabled (1 byte), freq*10 (2 bytes LE), quality*100 (1 byte)
+        freq_x10 = int(freq_hz * 10)
+        quality_x100 = int(quality * 100)
+        
+        payload = bytes([
+            1 if enabled else 0,
+            freq_x10 & 0xFF,
+            (freq_x10 >> 8) & 0xFF,
+            quality_x100
+        ]) + bytes(4)  # Pad to 8 bytes
+        
+        status = "ENABLED" if enabled else "DISABLED"
+        self._send_frame(0x008, payload, context=f"Notch filter: {status} @ {freq_hz:.1f}Hz, Q={quality:.2f}")
+        self._log_can_info(f"Notch filter {status}: {freq_hz:.1f}Hz, Q={quality:.2f}")
+        
+        # Calculate approximate bandwidth
+        bandwidth_hz = freq_hz * (1 - quality * quality) / quality
+        
+        return {
+            "enabled": enabled,
+            "center_freq_hz": freq_hz,
+            "quality": quality,
+            "bandwidth_hz": bandwidth_hz
+        }
+
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
         return self._encoder_stream_active
@@ -371,6 +472,15 @@ class CanManager:
         This ensures all waypoints arrive in order and none are lost.
         A small delay between waypoints prevents CAN buffer overflow.
         
+        TIMING COMPENSATION:
+        The t_offset_ms from JS represents "desired arrival time from batch start".
+        Since each waypoint takes time to send, we adjust t_offset based on
+        actual elapsed time since the first waypoint was sent:
+        
+            adjusted_t_offset = original_t_offset - elapsed_since_first_wp
+        
+        This ensures accurate timing regardless of CAN/system delays.
+        
         Args:
             joint_name: Joint name (e.g., 'ANKLE_RIGHT')
             waypoints: List of dicts with 'angles_deg' and 't_offset_ms'
@@ -386,11 +496,25 @@ class CanManager:
         error_count = 0
         delay_sec = inter_waypoint_delay_ms / 1000.0
         
+        # Track actual elapsed time for accurate timing compensation
+        batch_start_time = time.perf_counter()
+        
         for i, wp in enumerate(waypoints):
             try:
                 angles = wp.get('angles_deg', [None, None, None])
-                t_offset = wp.get('t_offset_ms', 0)
-                self.send_multi_dof_waypoint(joint_name, angles, t_offset)
+                original_t_offset = wp.get('t_offset_ms', 0)
+                
+                # Calculate actual elapsed time since batch start (in ms)
+                elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
+                
+                # Adjust t_offset: compensate for time already spent sending previous waypoints
+                # t_offset is relative to when THIS waypoint is received by the Pico
+                # We want the waypoint to arrive at (batch_start + original_t_offset)
+                # It will be received at (batch_start + elapsed_ms)
+                # So t_offset should be: original_t_offset - elapsed_ms
+                adjusted_t_offset = max(0, int(original_t_offset - elapsed_ms))
+                
+                self.send_multi_dof_waypoint(joint_name, angles, adjusted_t_offset)
                 success_count += 1
                 
                 # Small delay to prevent CAN buffer overflow
@@ -401,7 +525,8 @@ class CanManager:
                 self.logger.warning(f"Waypoint {i} failed: {exc}")
                 error_count += 1
         
-        self.logger.info(f"Waypoint batch complete: {success_count}/{len(waypoints)} sent")
+        total_elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
+        self.logger.info(f"Waypoint batch complete: {success_count}/{len(waypoints)} sent in {total_elapsed_ms:.1f}ms")
         
         return {
             "total": len(waypoints),

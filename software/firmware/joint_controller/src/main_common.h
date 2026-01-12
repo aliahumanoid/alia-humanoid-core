@@ -253,8 +253,8 @@ extern volatile bool pid_diag_stream_active;  // Enable diagnostic streaming
  */
 struct NotchFilterConfig {
     volatile bool enabled;           // Filter enabled (default: false = bypass)
-    volatile float center_freq_hz;   // Center frequency to eliminate (default: 8.0 Hz)
-    volatile float quality;          // Q factor: 0.8=wide, 0.99=narrow (default: 0.90)
+    volatile float center_freq_hz;   // Center frequency to eliminate (default: 10.0 Hz)
+    volatile float quality;          // Q factor: 2=wide, 10=narrow (default: 5.0)
     volatile bool config_changed;    // Flag to signal reconfiguration needed
 };
 

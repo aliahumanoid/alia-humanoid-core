@@ -9,6 +9,7 @@ let movementChartsMultiDof = {}; // Multi-DOF movement charts
 let outputChart;
 let pidErrorChart, pidTorqueChart;  // PID diagnostics charts
 let pidDiagStreamActive = false;    // PID diagnostics streaming state
+let pidDiagDataBuffer = [];         // Buffer for CSV export (all data, no limit)
 let measurementData = {
     timestamps: [],
     jointData: {}
@@ -393,6 +394,9 @@ $(document).ready(function() {
     });
 
     // Listener for PID diagnostics data (target/error)
+    // Temporary storage for combining pid_diag and pid_torque into single records
+    let pendingPidRecord = null;
+    
     socket.on('pid_diag', function(data) {
         if (!pidDiagStreamActive) return;
         
@@ -404,6 +408,22 @@ $(document).ready(function() {
         
         updatePidDiagDisplay(data);
         updatePidErrorChart(data);
+        
+        // Store for CSV export - create new record with target/error
+        const timeSeconds = (Date.now() - pidDiagStartTime) / 1000;
+        pendingPidRecord = {
+            time_s: timeSeconds.toFixed(3),
+            target_dof0: data.target_deg ? data.target_deg[0] : 0,
+            target_dof1: data.target_deg ? data.target_deg[1] : 0,
+            error_dof0: data.error_deg ? data.error_deg[0] : 0,
+            error_dof1: data.error_deg ? data.error_deg[1] : 0,
+            current_dof0: data.target_deg && data.error_deg ? (data.target_deg[0] - data.error_deg[0]) : 0,
+            current_dof1: data.target_deg && data.error_deg ? (data.target_deg[1] - data.error_deg[1]) : 0,
+            torque_a_dof0: 0,
+            torque_b_dof0: 0,
+            torque_a_dof1: 0,
+            torque_b_dof1: 0
+        };
     });
 
     // Listener for PID torque data
@@ -418,6 +438,22 @@ $(document).ready(function() {
         
         updatePidTorqueDisplay(data);
         updatePidTorqueChart(data);
+        
+        // Complete the pending record with torque data and add to buffer
+        if (pendingPidRecord) {
+            pendingPidRecord.torque_a_dof0 = data.torque_A ? data.torque_A[0] : 0;
+            pendingPidRecord.torque_b_dof0 = data.torque_B ? data.torque_B[0] : 0;
+            pendingPidRecord.torque_a_dof1 = data.torque_A ? data.torque_A[1] : 0;
+            pendingPidRecord.torque_b_dof1 = data.torque_B ? data.torque_B[1] : 0;
+            
+            pidDiagDataBuffer.push(pendingPidRecord);
+            pendingPidRecord = null;
+            
+            // Update buffer count display (throttled)
+            if (pidDiagDataBuffer.length % 10 === 0) {
+                $('#pidDiagBufferCount').text(pidDiagDataBuffer.length);
+            }
+        }
     });
 
     // Listener for movement metrics (received when DOF enters HOLDING)
@@ -437,7 +473,9 @@ $(document).ready(function() {
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
     $("#sendCanTimeSync").on('click', sendCanTimeSyncCommand);
     $("#sendCanWaypointBtn").on('click', sendCanWaypointCommand);
+    $("#sendMultiWaypointSmoothBtn").on('click', sendMultiWaypointSmoothCurve);
     $("#sendCanWaypointSequenceBtn").on('click', sendCanWaypointSequence);
+    $("#sendCosineOscillationBtn").on('click', sendCosineOscillation);
     $("#sendCanEmergency").on('click', sendCanEmergencyStop);
 
     // Initialize charts
@@ -2250,6 +2288,17 @@ function sendCanWaypointCommand() {
         return;
     }
 
+    // Set interpolation mode before sending waypoint
+    const interpolationMode = $('#singleWaypointInterpolation').val() || 'linear';
+    $.ajax({
+        url: '/can/interpolation_mode',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: interpolationMode }),
+        async: false  // Ensure mode is set before waypoint
+    });
+    const modeLabel = interpolationMode === 'cosine' ? 'SMOOTH' : 'LINEAR';
+
     // Build Multi-DOF format: set only the target DOF, null for others
     const angles = [null, null, null];
     angles[dofIndex] = angle;
@@ -2265,7 +2314,7 @@ function sendCanWaypointCommand() {
         })
     }).done(response => {
         if (response.status === 'success') {
-            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${dofIndex} @ ${angle}°`);
+            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${dofIndex} @ ${angle}° [${modeLabel}]`);
         } else {
             appendStatusMessage(`⚠️ ${response.message || 'Failed to send waypoint'}`);
         }
@@ -2276,24 +2325,132 @@ function sendCanWaypointCommand() {
 }
 
 /**
+ * Send multiple waypoints that describe a COSINE curve (for comparison with single SMOOTH waypoint)
+ * This generates N waypoints following the COSINE S-curve formula, then sends them with LINEAR interpolation.
+ * The result SHOULD be identical to a single waypoint with COSINE interpolation.
+ */
+function sendMultiWaypointSmoothCurve() {
+    const joint = $("#jointSelect").val();
+    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
+    const targetAngle = parseFloat($("#canWaypointAngle").val());
+    const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
+    const numPoints = parseInt($("#multiWpPoints").val(), 10) || 20;
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
+        return;
+    }
+    if (Number.isNaN(targetAngle)) {
+        appendStatusMessage("⚠️ Enter a valid angle in degrees.");
+        return;
+    }
+
+    // Get current angle from encoder display (if available)
+    // Extract joint type from joint name (e.g., "KNEE_RIGHT" -> "knee")
+    const jointType = joint.split('_')[0].toLowerCase();
+    let startAngle = 0;
+    
+    // Try joint-specific encoder display (e.g., #kneeEncoderDof0)
+    const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
+    if (jointEncoderText && jointEncoderText !== '-') {
+        startAngle = parseFloat(jointEncoderText.replace('°', '')) || 0;
+    } else {
+        // Fallback to generic encoder display
+        const encoderText = $(`#encoder${dofIndex}Value`).text();
+        if (encoderText && encoderText !== '-') {
+            startAngle = parseFloat(encoderText) || 0;
+        }
+    }
+
+    appendStatusMessage(`🔬 Multi-WP Test: ${startAngle.toFixed(1)}° → ${targetAngle}° using ${numPoints} points`);
+
+    // Force LINEAR interpolation (the COSINE curve is in the waypoints themselves)
+    $.ajax({
+        url: '/can/interpolation_mode',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: 'linear' }),
+        async: false
+    });
+
+    // Generate waypoints following COSINE S-curve
+    const waypoints = [];
+    const deltaT = totalTimeMs / numPoints;
+    
+    // Estimate batch send time for initial offset calculation
+    // Backend will compensate for actual elapsed time, so this is just a buffer
+    const estimatedBatchSendTime = numPoints * 3;  // ~3ms per waypoint
+    const initialOffset = estimatedBatchSendTime + 300; // Buffer before first waypoint arrives
+
+    for (let i = 0; i <= numPoints; i++) {
+        const t = i / numPoints; // 0.0 to 1.0
+        
+        // COSINE interpolation formula (same as firmware)
+        const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+        
+        // Calculate interpolated angle
+        const angle = startAngle + (targetAngle - startAngle) * smoothT;
+        
+        // Calculate desired arrival time from batch start
+        // Backend compensates for actual elapsed time when sending each waypoint
+        const desiredArrivalFromStart = initialOffset + (i * deltaT);
+        
+        // Build waypoint
+        const angles = [null, null, null];
+        angles[dofIndex] = angle;
+        
+        waypoints.push({
+            joint: joint,
+            angles_deg: angles,
+            t_offset_ms: Math.round(desiredArrivalFromStart)
+        });
+    }
+
+    appendStatusMessage(`📊 Generated ${waypoints.length} waypoints (Δt=${deltaT.toFixed(0)}ms)`);
+
+    // Send as batch
+    $.ajax({
+        url: '/can/waypoint_batch',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ joint: joint, waypoints: waypoints })
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage(`✅ Multi-WP batch sent: ${waypoints.length} waypoints [LINEAR interp]`);
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Batch error: ${message}`);
+    });
+}
+
+/**
  * Update sinusoid statistics display when parameters change
  * @param {number} points - Number of waypoints (optional, reads from UI if not provided)
  */
 function updateSinusoidStats(points) {
-    const numPoints = parseInt(points, 10) || parseInt($("#waypointDensity").val(), 10) || 50;
+    const pointsPerSegment = parseInt(points, 10) || parseInt($("#waypointDensity").val(), 10) || 50;
     const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
     const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
     const totalDurationSeconds = cycleDurationSeconds * numCycles;
-    const totalDurationMs = totalDurationSeconds * 1000;
     
-    // Calculate interval between points
-    const intervalMs = Math.round(totalDurationMs / (numPoints - 1));
+    // Each cycle has 2 half-cycles (segments): min→max and max→min
+    const totalHalfCycles = numCycles * 2;
+    const halfCycleDurationMs = (cycleDurationSeconds * 1000) / 2;
+    
+    // Calculate interval between points within a segment
+    const intervalMs = Math.round(halfCycleDurationMs / pointsPerSegment);
+    
+    // Total waypoints for entire oscillation
+    const totalWaypoints = pointsPerSegment * totalHalfCycles;
     
     // Calculate frequency in Hz (1 / cycle duration)
     const freqHz = (1 / cycleDurationSeconds).toFixed(2);
     
     // Calculate points per second
-    const pointsPerSecond = (numPoints / totalDurationSeconds).toFixed(1);
+    const pointsPerSecond = (totalWaypoints / totalDurationSeconds).toFixed(1);
     
     // Update UI elements
     const updateElement = (id, value) => {
@@ -2301,7 +2458,7 @@ function updateSinusoidStats(points) {
         if (el) el.textContent = value;
     };
     
-    updateElement('waypointDensityValue', numPoints);
+    updateElement('waypointDensityValue', pointsPerSegment);
     updateElement('waypointIntervalValue', intervalMs);
     updateElement('waypointFreqValue', (1000 / intervalMs).toFixed(1));
     updateElement('waypointRateValue', pointsPerSecond);
@@ -2310,6 +2467,17 @@ function updateSinusoidStats(points) {
     updateElement('sinusoidTotalDuration', totalDurationSeconds);
     updateElement('sinusoidTotalDurationDisplay', totalDurationSeconds);
     updateElement('sinusoidFreqDisplay', freqHz);
+    
+    // Warn if buffer might overflow (2000 max)
+    const bufferWarning = document.getElementById('bufferWarning');
+    if (bufferWarning) {
+        if (totalWaypoints > 2000) {
+            bufferWarning.textContent = `⚠️ ${totalWaypoints} pts > 2000 buffer!`;
+            bufferWarning.style.display = 'inline';
+        } else {
+            bufferWarning.style.display = 'none';
+        }
+    }
 }
 
 function sendCanWaypointSequence() {
@@ -2361,12 +2529,23 @@ function sendCanWaypointSequence() {
     btn.prop('disabled', true);
     btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
 
+    // Force LINEAR interpolation for sinusoidal trajectory
+    // Sinusoid uses many waypoints that form the curve - LINEAR connects them without stopping
+    $.ajax({
+        url: '/can/interpolation_mode',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: 'linear' }),
+        async: false
+    });
+    appendStatusMessage(`⚙️ Interpolation: LINEAR (sinusoid)`);
+
     // Calculate timing parameters for batch sending
-    // Server sends with 2ms delay between waypoints
-    const BATCH_DELAY_MS = 2;
-    const batchSendTime = waypointDensity * BATCH_DELAY_MS;
+    // Estimate batch send time for initial offset calculation (~3ms per waypoint)
+    // Backend compensates for actual elapsed time when sending each waypoint
+    const estimatedBatchSendTime = waypointDensity * 3;
     // Initial offset must be > batch send time + network latency + processing margin
-    const initialOffset = Math.max(500, batchSendTime + 300);
+    const initialOffset = Math.max(500, estimatedBatchSendTime + 300);
     
     // Generate waypoints for all active DOFs
     const testSequence = [];
@@ -2458,6 +2637,169 @@ function sendCanWaypointSequence() {
         appendStatusMessage(`❌ Batch error: ${message}`);
         btn.prop('disabled', false);
         btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
+    });
+}
+
+/**
+ * Send oscillation using COSINE S-curve waypoints with LINEAR interpolation.
+ * Like Multi-WP: waypoints themselves describe a smooth S-curve, firmware uses LINEAR between them.
+ * Oscillates directly between min and max (no center point).
+ */
+function sendCosineOscillation() {
+    const joint = $("#jointSelect").val();
+    
+    // Get parameters from UI (same slider as sinusoid)
+    const numPoints = parseInt($("#waypointDensity").val(), 10) || 50;
+    const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
+    const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
+    const totalDurationSeconds = cycleDurationSeconds * numCycles;
+    const totalDuration = totalDurationSeconds * 1000;  // Convert to ms
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
+        return;
+    }
+    
+    // Get active DOFs and their oscillation parameters
+    const activeDofs = [];
+    for (let dof = 0; dof < 3; dof++) {
+        const isActive = $(`#sinusoidDof${dof}Active`).is(':checked');
+        const container = $(`#sinusoidDof${dof}Container`);
+        
+        if (isActive && (dof === 0 || container.is(':visible'))) {
+            const minAngle = parseFloat($(`#sinusoidDof${dof}Min`).val()) || -10;
+            const maxAngle = parseFloat($(`#sinusoidDof${dof}Max`).val()) || 10;
+            
+            activeDofs.push({
+                index: dof,
+                minAngle: minAngle,
+                maxAngle: maxAngle
+            });
+        }
+    }
+    
+    if (activeDofs.length === 0) {
+        appendStatusMessage("⚠️ Select at least one DOF for the oscillation test.");
+        return;
+    }
+
+    // Disable button during sequence
+    const btn = $("#sendCosineOscillationBtn");
+    btn.prop('disabled', true);
+    btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
+
+    // Force LINEAR interpolation - the S-curve is in the waypoints themselves
+    $.ajax({
+        url: '/can/interpolation_mode',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: 'linear' }),
+        async: false
+    });
+    appendStatusMessage(`⚙️ Interpolation: LINEAR (S-curve in waypoints)`);
+
+    // Calculate timing parameters (same approach as Multi-WP)
+    // numPoints now represents points PER HALF-CYCLE (not total)
+    const halfCycleMs = (cycleDurationSeconds * 1000) / 2;
+    const totalHalfCycles = numCycles * 2;
+    const pointsPerHalfCycle = numPoints;  // Slider now means points per segment!
+    const deltaT = halfCycleMs / pointsPerHalfCycle;  // Time between points
+    
+    // Estimate total waypoints for batch timing
+    const estimatedTotalWaypoints = pointsPerHalfCycle * totalHalfCycles;
+    const estimatedBatchSendTime = estimatedTotalWaypoints * 3;  // ~3ms per waypoint
+    const initialOffset = Math.max(500, estimatedBatchSendTime + 300);
+    
+    // Warn if exceeding buffer (2000 waypoints max)
+    if (estimatedTotalWaypoints > 2000) {
+        appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds buffer (2000). Reduce points or cycles.`);
+    }
+    
+    // Generate waypoints using same approach as Multi-WP
+    // Each half-cycle (min→max or max→min) follows a COSINE S-curve
+    const testSequence = [];
+    
+    for (let halfCycle = 0; halfCycle < totalHalfCycles; halfCycle++) {
+        const isGoingToMax = (halfCycle % 2 === 0);
+        
+        // Generate points for this half-cycle (same as Multi-WP: 0 to pointsPerHalfCycle inclusive)
+        const startIndex = (halfCycle === 0) ? 0 : 1;  // Skip only first point of subsequent half-cycles
+        
+        for (let p = startIndex; p <= pointsPerHalfCycle; p++) {
+            // Progress within this half-cycle (0.0 to 1.0) - SAME AS MULTI-WP
+            const t = p / pointsPerHalfCycle;
+            
+            // Apply COSINE S-curve: smooth start and end (IDENTICAL TO MULTI-WP)
+            const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+            
+            // Calculate angles for each DOF
+            const angles = [null, null, null];
+            activeDofs.forEach(dof => {
+                const fromAngle = isGoingToMax ? dof.minAngle : dof.maxAngle;
+                const toAngle = isGoingToMax ? dof.maxAngle : dof.minAngle;
+                const angle = fromAngle + (toAngle - fromAngle) * smoothT;
+                angles[dof.index] = Math.round(angle * 100) / 100;
+            });
+            
+            // Calculate desired arrival time from batch start
+            // Backend compensates for actual elapsed time when sending each waypoint
+            const desiredArrivalFromStart = initialOffset + (halfCycle * halfCycleMs) + (p * deltaT);
+            
+            testSequence.push({
+                angles: angles,
+                arrival_offset_ms: Math.round(desiredArrivalFromStart)
+            });
+        }
+    }
+    
+    // Calculate final time based on last waypoint
+    const finalTime = testSequence.length > 0 
+        ? testSequence[testSequence.length - 1].arrival_offset_ms 
+        : initialOffset + totalDuration;
+    
+    // Log info (deltaT already declared above)
+    const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
+    appendStatusMessage(`🚀 Sending S-curve oscillation for ${joint}`);
+    appendStatusMessage(`   📊 ${testSequence.length} total waypoints (${pointsPerHalfCycle} pts/segment), Δt≈${Math.round(deltaT)}ms`);
+    appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total`);
+    appendStatusMessage(`   🎯 Active: ${dofInfo} (min↔max direct)`);
+
+    // Convert to batch format
+    const batchPayload = testSequence.map(wp => ({
+        angles_deg: wp.angles,
+        t_offset_ms: wp.arrival_offset_ms
+    }));
+    
+    $.ajax({
+        url: '/can/waypoint_batch',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            joint: joint,
+            waypoints: batchPayload
+        })
+    }).done(response => {
+        if (response.status === 'success') {
+            const result = response.result || {};
+            appendStatusMessage(`📤 Batch sent: ${result.success}/${result.total} waypoints queued`);
+            
+            // Wait for sequence to complete
+            const waitTime = finalTime + 500;
+            setTimeout(() => {
+                btn.prop('disabled', false);
+                btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
+                appendStatusMessage(`✅ S-curve oscillation complete`);
+            }, waitTime);
+        } else {
+            appendStatusMessage(`❌ Batch failed: ${response.message}`);
+            btn.prop('disabled', false);
+            btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Batch error: ${message}`);
+        btn.prop('disabled', false);
+        btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
     });
 }
 
@@ -2906,6 +3248,131 @@ function updateOuterPidForDof(dof) {
     });
 
     appendStatusMessage(`External PID sent for DOF ${dof}: Kp=${kp}, Ki=${ki}, Kd=${kd}, Stiffness=${stiffness}°, Cascade=${(cascade * 100).toFixed(1)}%`);
+}
+
+// --- Loop Frequency Control Functions ---
+
+/**
+ * Update the frequency display labels when input values change
+ */
+function updateLoopFrequencyDisplays() {
+    const innerPeriodUs = parseInt($('#innerLoopPeriod').val()) || 2000;
+    const outerDivisor = parseInt($('#outerLoopDivisor').val()) || 5;
+    
+    const innerFreqHz = 1000000.0 / innerPeriodUs;
+    const outerFreqHz = innerFreqHz / outerDivisor;
+    
+    $('#innerLoopFreqDisplay').text(`= ${innerFreqHz.toFixed(1)} Hz`);
+    $('#outerLoopFreqDisplay').text(`= ${outerFreqHz.toFixed(1)} Hz`);
+}
+
+/**
+ * Send loop frequency configuration to the firmware via CAN
+ */
+function updateLoopFrequencies() {
+    const innerPeriodUs = parseInt($('#innerLoopPeriod').val()) || 2000;
+    const outerDivisor = parseInt($('#outerLoopDivisor').val()) || 5;
+    
+    // Validate ranges
+    if (innerPeriodUs < 500 || innerPeriodUs > 10000) {
+        appendStatusMessage(`❌ Inner loop period must be between 500µs and 10000µs`, 'error');
+        return;
+    }
+    if (outerDivisor < 1 || outerDivisor > 20) {
+        appendStatusMessage(`❌ Outer loop divisor must be between 1 and 20`, 'error');
+        return;
+    }
+    
+    const innerFreqHz = 1000000.0 / innerPeriodUs;
+    const outerFreqHz = innerFreqHz / outerDivisor;
+    
+    $.ajax({
+        url: '/can/loop_frequencies',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            inner_period_us: innerPeriodUs,
+            outer_divisor: outerDivisor
+        }),
+        success: function(response) {
+            if (response.status === 'success') {
+                appendStatusMessage(`✅ Loop frequencies updated: Inner=${innerFreqHz.toFixed(1)}Hz (${innerPeriodUs}µs), Outer=${outerFreqHz.toFixed(1)}Hz (÷${outerDivisor})`);
+            } else {
+                appendStatusMessage(`❌ Failed to update loop frequencies: ${response.message}`, 'error');
+            }
+        },
+        error: function(xhr) {
+            const errorMsg = xhr.responseJSON?.message || xhr.statusText;
+            appendStatusMessage(`❌ Error updating loop frequencies: ${errorMsg}`, 'error');
+        }
+    });
+}
+
+// Attach event listeners for real-time frequency display updates
+$(document).ready(function() {
+    $('#innerLoopPeriod, #outerLoopDivisor').on('input', updateLoopFrequencyDisplays);
+    // Initialize displays
+    updateLoopFrequencyDisplays();
+    
+    // Notch filter UI updates
+    $('#notchFreqHz, #notchQuality').on('input', updateNotchBandwidthDisplay);
+    updateNotchBandwidthDisplay();
+});
+
+/**
+ * Update the notch filter bandwidth display based on current values
+ */
+function updateNotchBandwidthDisplay() {
+    const freq = parseFloat($('#notchFreqHz').val()) || 8.0;
+    const q = parseFloat($('#notchQuality').val()) || 0.90;
+    
+    // Approximate bandwidth: BW ≈ f0 × (1 - r²) / r
+    const bandwidth = freq * (1 - q * q) / q;
+    $('#notchBandwidthDisplay').text(`BW ≈ ${bandwidth.toFixed(1)} Hz`);
+}
+
+/**
+ * Apply notch filter configuration to the firmware via CAN
+ */
+function applyNotchFilter() {
+    const enabled = $('#notchFilterEnabled').is(':checked');
+    const freqHz = parseFloat($('#notchFreqHz').val()) || 8.0;
+    const quality = parseFloat($('#notchQuality').val()) || 0.90;
+    
+    // Validate ranges
+    if (freqHz < 1 || freqHz > 50) {
+        appendStatusMessage('❌ Notch frequency must be between 1 and 50 Hz', 'error');
+        return;
+    }
+    
+    if (quality < 0.5 || quality > 0.99) {
+        appendStatusMessage('❌ Quality factor must be between 0.5 and 0.99', 'error');
+        return;
+    }
+    
+    appendStatusMessage(`🎚️ Applying notch filter: ${enabled ? 'ENABLED' : 'DISABLED'} @ ${freqHz.toFixed(1)}Hz, Q=${quality.toFixed(2)}...`);
+    
+    $.ajax({
+        url: '/can/notch_filter',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            enabled: enabled,
+            freq_hz: freqHz,
+            quality: quality
+        }),
+        success: function(response) {
+            const status = enabled ? 'ENABLED' : 'BYPASSED';
+            appendStatusMessage(`✅ Notch filter ${status}: ${freqHz.toFixed(1)}Hz, Q=${quality.toFixed(2)} (BW=${response.result.bandwidth_hz.toFixed(1)}Hz)`);
+            $('#notchFilterStatus').text(enabled ? `Active @ ${freqHz.toFixed(1)}Hz` : 'Bypassed');
+            $('#notchFilterStatus').removeClass('text-gray-500 text-green-600 text-red-600')
+                                   .addClass(enabled ? 'text-green-600' : 'text-gray-500');
+        },
+        error: function(xhr) {
+            const errorMsg = xhr.responseJSON?.message || xhr.statusText;
+            appendStatusMessage(`❌ Error applying notch filter: ${errorMsg}`, 'error');
+        }
+    });
 }
 
 // --- Mapping chart management functions ---
@@ -4661,6 +5128,31 @@ function stopPidDiagStream() {
 }
 
 /**
+ * Update PID diagnostics streaming frequency
+ * Higher frequency = more data points for charts and CSV
+ */
+function updatePidDiagFrequency() {
+    const freqHz = parseInt($('#pidDiagFrequency').val()) || 20;
+    const intervalMs = 1000 / freqHz;
+    
+    $.ajax({
+        url: '/can/pid_diag_frequency',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ freq_hz: freqHz })
+    }).done(response => {
+        if (response.status === 'success') {
+            $('#pidDiagFreqInfo').text(`= ${intervalMs.toFixed(0)}ms interval`);
+            appendStatusMessage(`📊 PID diagnostics frequency set to ${freqHz}Hz`);
+        } else {
+            appendStatusMessage(`❌ Failed to set frequency: ${response.message}`, 'error');
+        }
+    }).fail(xhr => {
+        appendStatusMessage(`❌ Frequency update error: ${xhr.responseJSON?.message || 'Unknown error'}`, 'error');
+    });
+}
+
+/**
  * Clear PID diagnostics charts
  */
 function clearPidDiagCharts() {
@@ -4673,7 +5165,60 @@ function clearPidDiagCharts() {
         pidTorqueChart.update('none');
     }
     pidDiagStartTime = Date.now();
-    appendStatusMessage('📊 PID diagnostics charts cleared');
+    pidDiagDataBuffer = [];  // Clear export buffer too
+    $('#pidDiagBufferCount').text('0');
+    appendStatusMessage('📊 PID diagnostics charts and buffer cleared');
+}
+
+/**
+ * Export PID diagnostics data to CSV file
+ */
+function exportPidDiagToCSV() {
+    if (pidDiagDataBuffer.length === 0) {
+        appendStatusMessage('⚠️ No PID data to export. Start diagnostics and perform a movement first.');
+        return;
+    }
+    
+    // CSV header
+    const headers = [
+        'time_s',
+        'target_dof0', 'current_dof0', 'error_dof0', 'torque_a_dof0', 'torque_b_dof0',
+        'target_dof1', 'current_dof1', 'error_dof1', 'torque_a_dof1', 'torque_b_dof1'
+    ];
+    
+    // Build CSV content
+    let csvContent = headers.join(',') + '\n';
+    
+    pidDiagDataBuffer.forEach(row => {
+        const values = [
+            row.time_s,
+            row.target_dof0.toFixed(2), row.current_dof0.toFixed(2), row.error_dof0.toFixed(2),
+            row.torque_a_dof0.toFixed(1), row.torque_b_dof0.toFixed(1),
+            row.target_dof1.toFixed(2), row.current_dof1.toFixed(2), row.error_dof1.toFixed(2),
+            row.torque_a_dof1.toFixed(1), row.torque_b_dof1.toFixed(1)
+        ];
+        csvContent += values.join(',') + '\n';
+    });
+    
+    // Create download link
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    
+    // Generate filename with timestamp
+    const now = new Date();
+    const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const joint = $('#jointSelect').val() || 'JOINT';
+    const filename = `pid_diag_${joint}_${timestamp}.csv`;
+    
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    appendStatusMessage(`📥 Exported ${pidDiagDataBuffer.length} records to ${filename}`);
 }
 
 // ============================================================================

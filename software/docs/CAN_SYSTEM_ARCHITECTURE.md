@@ -1,9 +1,14 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 1.4  
-**Date:** 2024-12-03  
+**Document Version:** 1.5  
+**Date:** 2024-12-29  
 **Status:** Design Specification (Indicative)  
 **Authors:** Alia Robotics Team
+
+**Changelog v1.5:**
+- **Batch Timing Compensation**: Added Section 4.2.3 documentation for waypoint batch timing
+- Host compensates for sequential transmission delay when sending waypoint batches
+- Ensures trajectory duration matches specified time regardless of batch size
 
 **Changelog v1.4:**
 - **Encoder Pico eliminated**: Direct MT6835 reading via SPI0 on joint controller
@@ -779,6 +784,54 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
 - For joints with fewer than 3 DOFs (e.g., knee = 1 DOF), set unused angles to `0x7FFF` (sentinel)
 - Controller skips DOFs with sentinel value
 - Example: Knee joint sends `[angle, 0x7FFF, 0x7FFF, t_offset]`
+
+**Batch Timing Compensation (Prototype Implementation):**
+
+When sending a batch of waypoints from the host (e.g., 100 waypoints for a trajectory),
+each waypoint is transmitted sequentially with a small delay (~2-3ms per waypoint).
+Since `t_offset_ms` is relative to when each individual waypoint is **received** by the
+controller, the host must compensate for the transmission time to ensure correct arrival timing.
+
+**Problem without compensation:**
+```
+Waypoint 0:  sent at T=0ms,    t_offset=600ms  → arrives at T=0+600   = 600ms  ✅
+Waypoint 50: sent at T=150ms,  t_offset=1100ms → arrives at T=150+1100 = 1250ms ❌
+Waypoint 100: sent at T=300ms, t_offset=1600ms → arrives at T=300+1600 = 1900ms ❌
+
+Expected trajectory duration: 1000ms
+Actual trajectory duration:   1900-600 = 1300ms (30% slower!)
+```
+
+**Solution: Backend compensates for elapsed send time:**
+```python
+# In can_manager.py send_waypoint_batch()
+batch_start_time = time.perf_counter()
+
+for i, wp in enumerate(waypoints):
+    # Calculate actual elapsed time since batch start
+    elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
+    
+    # Adjust t_offset: compensate for time spent sending previous waypoints
+    # original_t_offset = "desired arrival time from batch start"
+    # adjusted_t_offset = original_t_offset - elapsed_ms
+    adjusted_t_offset = max(0, int(original_t_offset - elapsed_ms))
+    
+    send_multi_dof_waypoint(joint_name, angles, adjusted_t_offset)
+    time.sleep(0.002)  # 2ms inter-waypoint delay
+```
+
+**Result with compensation:**
+```
+Waypoint 0:  sent at T=0ms,   adj_offset=600ms  → arrives at T=0+600   = 600ms  ✅
+Waypoint 50: sent at T=150ms, adj_offset=950ms  → arrives at T=150+950 = 1100ms ✅
+Waypoint 100: sent at T=300ms, adj_offset=1300ms → arrives at T=300+1300 = 1600ms ✅
+
+Trajectory duration: 1600-600 = 1000ms ✅ (exactly as specified)
+```
+
+**Note:** This compensation is implemented in the prototype host software (`can_manager.py`).
+In production with the CAN Gateway, the gateway firmware will handle this compensation
+with even higher precision (bare-metal timing, no Python overhead).
 
 #### 4.2.4 Motor Commands (ID: 0x140-0x1FF)
 **Purpose**: Send torque/position commands to LKM servos

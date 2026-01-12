@@ -345,9 +345,17 @@
     </script>
 
     <nav class="bg-blue-600 p-4 text-white">
-        <div class="flex items-center px-4">
-            <img src="{{ url_for('static', filename='images/logo.png') }}" alt="Alia Logo" class="h-16 mr-4">
-            <h1 class="text-2xl font-bold">Joint Controller</h1>
+        <div class="flex items-center justify-between px-4">
+            <div class="flex items-center">
+                <img src="{{ url_for('static', filename='images/logo.png') }}" alt="Alia Logo" class="h-16 mr-4">
+                <h1 class="text-2xl font-bold">Joint Controller</h1>
+            </div>
+            <div class="flex items-center gap-4">
+                <a href="/analysis" class="flex items-center gap-2 px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors">
+                    <i class="fas fa-chart-line"></i>
+                    <span>Movement Analysis</span>
+                </a>
+            </div>
         </div>
     </nav>
 
@@ -696,6 +704,85 @@
                         </h2>
 
                         <div id="pidParamsContent" class="section-content">
+
+                        <!-- Loop Frequencies Section -->
+                        <div class="mb-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                            <h3 class="text-lg font-semibold mb-3">
+                                <i class="fas fa-tachometer-alt mr-2 text-indigo-600"></i>Control Loop Frequencies
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label for="innerLoopPeriod" class="block text-sm font-medium text-gray-700">
+                                        Inner Loop Period (µs):
+                                    </label>
+                                    <input id="innerLoopPeriod" type="number" value="2000" min="500" max="10000" step="100"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                    <span id="innerLoopFreqDisplay" class="text-xs text-gray-500">= 500 Hz</span>
+                                </div>
+                                <div>
+                                    <label for="outerLoopDivisor" class="block text-sm font-medium text-gray-700">
+                                        Outer Loop Divisor:
+                                    </label>
+                                    <input id="outerLoopDivisor" type="number" value="1" min="1" max="20" step="1"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                    <span id="outerLoopFreqDisplay" class="text-xs text-gray-500">= 500.0 Hz</span>
+                                </div>
+                                <div class="flex items-end">
+                                    <button onclick="updateLoopFrequencies()"
+                                        class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded">
+                                        <i class="fas fa-sync-alt mr-2"></i>Apply Frequencies
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-2">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Inner loop controls motor PID rate. Outer loop controls joint PID rate (inner ÷ divisor).
+                                Default: Inner=500Hz, Outer=500Hz (divisor=1 for reduced vibrations)
+                            </p>
+                        </div>
+
+                        <!-- Notch Filter Configuration -->
+                        <div class="bg-purple-50 p-4 rounded-lg border border-purple-200 mb-4">
+                            <h3 class="text-md font-semibold mb-3 text-purple-700">
+                                <i class="fas fa-wave-square mr-2"></i>Notch Filter (Resonance Suppression)
+                            </h3>
+                            <div class="grid grid-cols-4 gap-4 items-end">
+                                <div>
+                                    <label class="flex items-center cursor-pointer">
+                                        <input type="checkbox" id="notchFilterEnabled" 
+                                            class="form-checkbox h-5 w-5 text-purple-600 rounded focus:ring-purple-500">
+                                        <span class="ml-2 text-sm font-medium text-gray-700">Enable</span>
+                                    </label>
+                                    <span id="notchFilterStatus" class="text-xs text-gray-500 block mt-1">Bypassed</span>
+                                </div>
+                                <div>
+                                    <label for="notchFreqHz" class="block text-sm font-medium text-gray-700">
+                                        Center Frequency (Hz):
+                                    </label>
+                                    <input id="notchFreqHz" type="number" value="8.0" min="1" max="50" step="0.5"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
+                                </div>
+                                <div>
+                                    <label for="notchQuality" class="block text-sm font-medium text-gray-700">
+                                        Quality (Q):
+                                    </label>
+                                    <input id="notchQuality" type="number" value="0.90" min="0.5" max="0.99" step="0.01"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-purple-300 focus:ring focus:ring-purple-200 focus:ring-opacity-50">
+                                    <span id="notchBandwidthDisplay" class="text-xs text-gray-500">BW ≈ 1.5 Hz</span>
+                                </div>
+                                <div>
+                                    <button onclick="applyNotchFilter()"
+                                        class="w-full bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded">
+                                        <i class="fas fa-filter mr-2"></i>Apply
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-2">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Attenuates torque oscillations at mechanical resonance frequency. Use FFT analysis to find resonance.
+                                Lower Q = wider notch. Default: 8.0 Hz, Q=0.90. Check "Enable" and click Apply.
+                            </p>
+                        </div>
 
                         <!-- DOF tab selectors -->
                         <div class="flex mb-4 space-x-2 pid-tab-selectors">
@@ -1079,6 +1166,20 @@
                         </h2>
 
                         <div id="pidDiagContent" class="section-content">
+                            <!-- Frequency Control -->
+                            <div class="flex items-center gap-4 mb-4 p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+                                <label class="text-sm font-medium text-indigo-700">
+                                    <i class="fas fa-tachometer-alt mr-1"></i>Sampling Rate:
+                                </label>
+                                <select id="pidDiagFrequency" onchange="updatePidDiagFrequency()"
+                                    class="rounded-md border-indigo-300 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                                    <option value="20">20 Hz (Monitoring)</option>
+                                    <option value="50">50 Hz (Training)</option>
+                                    <option value="100">100 Hz (High Detail)</option>
+                                </select>
+                                <span id="pidDiagFreqInfo" class="text-xs text-indigo-600">= 50ms interval</span>
+                            </div>
+                            
                             <!-- Controls -->
                             <div class="flex flex-wrap gap-2 mb-4">
                                 <button id="startPidDiagBtn" onclick="startPidDiagStream()"
@@ -1091,9 +1192,16 @@
                                 </button>
                                 <button onclick="clearPidDiagCharts()"
                                     class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded">
-                                    <i class="fas fa-eraser mr-2"></i>Clear Charts
+                                    <i class="fas fa-eraser mr-2"></i>Clear
+                                </button>
+                                <button onclick="exportPidDiagToCSV()"
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-download mr-2"></i>Export CSV
                                 </button>
                             </div>
+                            <p class="text-xs text-gray-500 mt-1">
+                                <span id="pidDiagBufferCount">0</span> records in buffer
+                            </p>
 
                             <!-- Real-time values display -->
                             <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
@@ -1614,17 +1722,45 @@
                             </div>
                             <div>
                                 <label for="canWaypointArrival" class="block text-xs font-medium text-gray-600">Offset (ms)</label>
-                                <input type="number" id="canWaypointArrival" value="500"
+                                <input type="number" id="canWaypointArrival" value="1000"
                                     class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
                             </div>
                         </div>
 
                         <!-- Send Single Waypoint -->
-                        <div class="flex gap-2">
+                        <div class="flex gap-2 items-end mb-2">
+                            <div class="flex-shrink-0">
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Interpolation</label>
+                                <select id="singleWaypointInterpolation" class="px-2 py-2 text-sm border rounded-md focus:ring-2 focus:ring-indigo-300">
+                                    <option value="linear">Linear</option>
+                                    <option value="cosine">Smooth</option>
+                                </select>
+                            </div>
                             <button id="sendCanWaypointBtn" type="button"
                                 class="flex-1 px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600 font-medium">
-                                <i class="fas fa-crosshairs mr-1"></i>Send Waypoint
+                                <i class="fas fa-crosshairs mr-1"></i>Single Waypoint
                             </button>
+                        </div>
+                        
+                        <!-- Multi-Waypoint Smooth Curve Test -->
+                        <div class="bg-amber-50 p-2 rounded border border-amber-200">
+                            <div class="flex gap-2 items-end">
+                                <div class="flex-shrink-0">
+                                    <label class="block text-xs font-medium text-amber-700 mb-1">
+                                        Points: <span id="multiWpPointsValue">20</span>
+                                    </label>
+                                    <input type="range" id="multiWpPoints" min="5" max="100" value="20" step="1"
+                                        class="w-20 h-2 bg-amber-200 rounded-lg cursor-pointer"
+                                        oninput="$('#multiWpPointsValue').text(this.value)" />
+                                </div>
+                                <button id="sendMultiWaypointSmoothBtn" type="button"
+                                    class="flex-1 px-3 py-2 rounded-md bg-amber-500 text-white hover:bg-amber-600 font-medium text-sm">
+                                    <i class="fas fa-wave-square mr-1"></i>Multi-WP (Smooth Curve)
+                                </button>
+                            </div>
+                            <p class="text-xs text-amber-600 mt-1">
+                                Same target, N waypoints describing COSINE curve + LINEAR interp
+                            </p>
                         </div>
 
                         <!-- Sinusoid Test Section -->
@@ -1723,12 +1859,13 @@
                             <!-- Waypoint Density -->
                             <div class="mb-3">
                                 <label for="waypointDensity" class="block text-xs font-medium text-purple-600 mb-1">
-                                    Waypoint Density: <span id="waypointDensityValue" class="font-bold">50</span> points
+                                    Points per Segment: <span id="waypointDensityValue" class="font-bold">50</span>
                                     <span class="text-purple-400 font-normal ml-2">
-                                        (Δt = <span id="waypointIntervalValue">122</span>ms • <span id="waypointFreqValue">8.2</span> Hz)
+                                        (Δt = <span id="waypointIntervalValue">122</span>ms)
                                     </span>
+                                    <span class="text-gray-400 ml-2">• LINEAR interpolation</span>
                                 </label>
-                                <input type="range" id="waypointDensity" min="6" max="250" value="50" step="1"
+                                <input type="range" id="waypointDensity" min="10" max="200" value="50" step="5"
                                     class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
                                     oninput="updateSinusoidStats(this.value)" />
                                 <div class="flex justify-between text-xs text-purple-400 mt-1">
@@ -1738,11 +1875,18 @@
                                 </div>
                             </div>
                             
-                            <button id="sendCanWaypointSequenceBtn" type="button"
-                                class="w-full px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600 font-medium"
-                                title="Send sinusoidal test sequence with configured parameters">
-                                <i class="fas fa-play mr-1"></i>Execute Sinusoid Test
-                            </button>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button id="sendCanWaypointSequenceBtn" type="button"
+                                    class="px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600 font-medium"
+                                    title="Send sinusoidal test sequence with LINEAR interpolation between many waypoints">
+                                    <i class="fas fa-wave-square mr-1"></i>Sinusoid (LINEAR)
+                                </button>
+                                <button id="sendCosineOscillationBtn" type="button"
+                                    class="px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600 font-medium"
+                                    title="Oscillation with COSINE S-curve waypoints (min↔max, LINEAR interp)">
+                                    <i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)
+                                </button>
+                            </div>
                             <p class="text-xs text-purple-500 mt-2 text-center" id="sinusoidDescription">
                                 <span id="sinusoidCyclesDisplay">2</span> cycles × <span id="sinusoidCycleDurationDisplay">3</span>s = <span id="sinusoidTotalDurationDisplay">6</span>s • <span id="sinusoidFreqDisplay">0.33</span>Hz • <span id="waypointRateValue">8.3</span> pts/s
                             </p>

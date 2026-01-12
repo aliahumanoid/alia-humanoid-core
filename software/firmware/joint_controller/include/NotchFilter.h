@@ -17,14 +17,16 @@
  * @class NotchFilter
  * @brief Second-order IIR notch (band-stop) filter
  * 
- * Transfer function (z-domain):
- *         1 - 2·cos(ω₀)·z⁻¹ + z⁻²
- * H(z) = ────────────────────────────
- *         1 - 2·r·cos(ω₀)·z⁻¹ + r²·z⁻²
+ * Uses the Audio EQ Cookbook biquad notch filter formula.
  * 
- * where:
- *   ω₀ = 2π·f₀/fs (normalized center frequency)
- *   r  = quality factor (0.8-0.99, higher = narrower notch)
+ * Parameters:
+ *   f₀ = center frequency to eliminate (Hz)
+ *   Q  = quality factor (higher = narrower notch)
+ *        Q = f₀/BW where BW is the -3dB bandwidth
+ *        Typical values: 2-10 for mechanical resonances
+ *        Q=2 → wide notch, Q=10 → narrow notch
+ * 
+ * The filter has unity gain at DC and Nyquist, with a notch at f₀.
  */
 class NotchFilter {
 private:
@@ -52,9 +54,9 @@ public:
         a1(0.0f), a2(0.0f),
         x1(0.0f), x2(0.0f),
         y1(0.0f), y2(0.0f),
-        center_freq_hz(8.0f),
+        center_freq_hz(10.0f),
         sample_freq_hz(500.0f),
-        quality(0.90f),
+        quality(5.0f),  // Q factor: 5 = moderate bandwidth
         enabled(false),
         configured(false)
     {}
@@ -70,31 +72,47 @@ public:
     void configure(float notch_freq_hz, float sample_rate_hz, float q = 0.90f) {
         center_freq_hz = notch_freq_hz;
         sample_freq_hz = sample_rate_hz;
-        quality = constrain(q, 0.5f, 0.99f);
         
-        // Normalized angular frequency
-        float omega = 2.0f * M_PI * notch_freq_hz / sample_rate_hz;
-        float cos_omega = cosf(omega);
-        float r = quality;
+        // IMPORTANT: For notch filter, Q controls bandwidth
+        // Q = f0/BW, so higher Q = narrower notch
+        // Typical values: Q=2-10 for mechanical resonances
+        // The 'quality' parameter here is interpreted as Q factor (not pole radius)
+        // Constrain to reasonable range: Q=1 (very wide) to Q=20 (very narrow)
+        float Q = constrain(q, 1.0f, 20.0f);
+        quality = Q;
         
-        // Calculate filter coefficients
-        // Numerator: 1 - 2·cos(ω)·z⁻¹ + z⁻²
-        b0 = 1.0f;
-        b1 = -2.0f * cos_omega;
-        b2 = 1.0f;
+        // Normalized angular frequency (0 to π)
+        float omega0 = 2.0f * M_PI * notch_freq_hz / sample_rate_hz;
         
-        // Denominator: 1 - 2·r·cos(ω)·z⁻¹ + r²·z⁻²
-        a1 = -2.0f * r * cos_omega;
-        a2 = r * r;
-        
-        // Normalize for unity gain at DC and high frequencies
-        // This ensures the filter only affects the notch frequency
-        float gain_dc = (b0 + b1 + b2) / (1.0f + a1 + a2);
-        if (fabsf(gain_dc) > 0.001f) {
-            b0 /= gain_dc;
-            b1 /= gain_dc;
-            b2 /= gain_dc;
+        // Sanity check: notch frequency must be less than Nyquist
+        if (omega0 >= M_PI || omega0 <= 0.0f) {
+            configured = false;
+            return;
         }
+        
+        // Audio EQ Cookbook formula for notch (band-reject) filter
+        // Source: Robert Bristow-Johnson's Audio EQ Cookbook
+        float cos_omega = cosf(omega0);
+        float sin_omega = sinf(omega0);
+        float alpha = sin_omega / (2.0f * Q);  // Bandwidth parameter
+        
+        // Unnormalized coefficients
+        float b0_raw = 1.0f;
+        float b1_raw = -2.0f * cos_omega;
+        float b2_raw = 1.0f;
+        float a0_raw = 1.0f + alpha;
+        float a1_raw = -2.0f * cos_omega;
+        float a2_raw = 1.0f - alpha;
+        
+        // Normalize by a0 (standard biquad normalization)
+        b0 = b0_raw / a0_raw;
+        b1 = b1_raw / a0_raw;
+        b2 = b2_raw / a0_raw;
+        a1 = a1_raw / a0_raw;
+        a2 = a2_raw / a0_raw;
+        
+        // Reset state when reconfiguring to avoid transients
+        reset();
         
         configured = true;
     }

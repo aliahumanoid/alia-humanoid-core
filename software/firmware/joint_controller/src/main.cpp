@@ -93,8 +93,8 @@ volatile bool pid_diag_stream_active = false;
 // Default: disabled (bypass mode), 8 Hz center, Q=0.90
 volatile NotchFilterConfig notch_filter_config = {
     .enabled = false,
-    .center_freq_hz = 8.0f,
-    .quality = 0.90f,
+    .center_freq_hz = 10.0f,  // Default: 10 Hz (typical mechanical resonance)
+    .quality = 5.0f,          // Q factor: 5 = moderate bandwidth (~2 Hz @ 10 Hz)
     .config_changed = false
 };
 

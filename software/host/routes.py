@@ -80,6 +80,13 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
 
         return mapping_data
 
+    @app.route('/analysis')
+    def analysis_page():
+        """
+        Serves the movement analysis page for CSV visualization.
+        """
+        return render_template('analysis.html')
+
     @app.route('/serial_ports', methods=['GET'])
     def list_serial_ports():
         return jsonify({
@@ -518,10 +525,11 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             }), 400
 
         try:
-            # IMPORTANT: Force LINEAR interpolation for batch waypoints
-            # Batch waypoints form a trajectory - the trajectory itself provides smoothing.
-            # Applying cosine interpolation between closely-spaced waypoints would distort the curve.
-            can_manager.set_interpolation_mode('linear')
+            # NOTE: Interpolation mode is NOT forced here anymore.
+            # The current mode (set by oscillation test or other commands) is used.
+            # - LINEAR: For dense trajectories (many waypoints, small delta-t)
+            # - COSINE: For sparse trajectories (few waypoints, large delta-t) - smoother
+            # User should set mode via oscillation test or a dedicated control.
             
             result = can_manager.send_waypoint_batch(joint, waypoints)
             return jsonify({
@@ -736,6 +744,158 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             return jsonify({
                 "status": "error",
                 "message": f"Unable to set interpolation mode: {exc}"
+            }), 500
+
+    # ===============================================================
+    # CAN LOOP FREQUENCIES ROUTE
+    # ===============================================================
+
+    @app.route('/can/loop_frequencies', methods=['POST'])
+    def set_loop_frequencies():
+        """
+        Set control loop frequencies.
+        
+        POST body: { 
+            "inner_period_us": 2000,  // Inner loop period in µs (500-10000)
+            "outer_divisor": 5        // Outer loop divider (1-20)
+        }
+        
+        Default values: inner=2000µs (500Hz), outer_divisor=5 (100Hz)
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+        
+        try:
+            data = request.get_json() or {}
+            inner_period = int(data.get("inner_period_us", 2000))
+            outer_divisor = int(data.get("outer_divisor", 5))
+            
+            # Validate ranges
+            if inner_period < 500 or inner_period > 10000:
+                return jsonify({
+                    "status": "error",
+                    "message": f"inner_period_us must be between 500 and 10000 (got {inner_period})"
+                }), 400
+            
+            if outer_divisor < 1 or outer_divisor > 20:
+                return jsonify({
+                    "status": "error",
+                    "message": f"outer_divisor must be between 1 and 20 (got {outer_divisor})"
+                }), 400
+            
+            result = can_manager.set_loop_frequencies(inner_period, outer_divisor)
+            return jsonify({
+                "status": "success",
+                "message": f"Loop frequencies updated: inner={result['inner_freq_hz']:.1f}Hz, outer={result['outer_freq_hz']:.1f}Hz",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to set loop frequencies")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to set loop frequencies: {exc}"
+            }), 500
+
+    # ===============================================================
+    # CAN PID DIAGNOSTICS FREQUENCY ROUTE
+    # ===============================================================
+
+    @app.route('/can/pid_diag_frequency', methods=['POST'])
+    def set_pid_diag_frequency():
+        """
+        Set PID diagnostics streaming frequency.
+        
+        POST body: { 
+            "freq_hz": 50  // Frequency in Hz (10-200)
+        }
+        
+        Default: 20Hz for monitoring, 50-100Hz for NN training data.
+        Higher frequency = more data points in charts and CSV exports.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+        
+        try:
+            data = request.get_json() or {}
+            freq_hz = int(data.get("freq_hz", 20))
+            
+            # Validate range
+            if freq_hz < 10 or freq_hz > 200:
+                return jsonify({
+                    "status": "error",
+                    "message": f"freq_hz must be between 10 and 200 (got {freq_hz})"
+                }), 400
+            
+            result = can_manager.set_pid_diag_frequency(freq_hz)
+            return jsonify({
+                "status": "success",
+                "message": f"PID diagnostics frequency set to: {freq_hz}Hz ({result['interval_ms']:.1f}ms)",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to set PID diagnostics frequency")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to set PID diagnostics frequency: {exc}"
+            }), 500
+
+    # ===============================================================
+    # CAN NOTCH FILTER CONFIGURATION ROUTE
+    # ===============================================================
+
+    @app.route('/can/notch_filter', methods=['POST'])
+    def set_notch_filter():
+        """
+        Configure the torque notch filter for resonance suppression.
+        
+        JSON body:
+            enabled: bool - True to enable, False to bypass
+            freq_hz: float - Center frequency in Hz (1-50, default 8.0)
+            quality: float - Q factor (0.5-0.99, default 0.90)
+        
+        Returns:
+            Configuration result including bandwidth
+        """
+        can_unavailable = can_unavailable_response()
+        if can_unavailable:
+            return can_unavailable
+        
+        try:
+            data = request.json or {}
+            enabled = data.get('enabled', False)
+            freq_hz = data.get('freq_hz', 8.0)
+            quality = data.get('quality', 0.90)
+            
+            # Validate parameters
+            if not isinstance(enabled, bool):
+                enabled = bool(enabled)
+            
+            if not (1.0 <= freq_hz <= 50.0):
+                return jsonify({
+                    "status": "error",
+                    "message": f"freq_hz must be between 1 and 50 (got {freq_hz})"
+                }), 400
+            
+            if not (0.5 <= quality <= 0.99):
+                return jsonify({
+                    "status": "error",
+                    "message": f"quality must be between 0.5 and 0.99 (got {quality})"
+                }), 400
+            
+            result = can_manager.set_notch_filter(enabled, freq_hz, quality)
+            status_str = "ENABLED" if enabled else "DISABLED"
+            return jsonify({
+                "status": "success",
+                "message": f"Notch filter {status_str}: {freq_hz:.1f}Hz, Q={quality:.2f} (BW={result['bandwidth_hz']:.1f}Hz)",
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to configure notch filter")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to configure notch filter: {exc}"
             }), 500
 
     @app.route('/status_message', methods=['GET'])

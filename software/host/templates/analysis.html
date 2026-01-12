@@ -1,0 +1,2103 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alia Movement Analysis</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-tertiary: #1a2332;
+            --accent-cyan: #06b6d4;
+            --accent-emerald: #10b981;
+            --accent-amber: #f59e0b;
+            --accent-rose: #f43f5e;
+            --accent-violet: #8b5cf6;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --border-color: #2d3748;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Subtle grid background */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image: 
+                linear-gradient(rgba(6, 182, 212, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(6, 182, 212, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            max-width: 100%;
+            padding: 1rem;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.5rem;
+            background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
+            border-bottom: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 1rem;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logo-container {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald));
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 20px rgba(6, 182, 212, 0.3);
+        }
+
+        .logo-container i {
+            font-size: 1.5rem;
+            color: white;
+        }
+
+        .header-title h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header-title p {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .back-link {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            transition: all 0.2s ease;
+        }
+
+        .back-link:hover {
+            color: var(--accent-cyan);
+            border-color: var(--accent-cyan);
+            background: rgba(6, 182, 212, 0.1);
+        }
+
+        /* Main Layout */
+        .main-layout {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 1rem;
+            height: calc(100vh - 120px);
+        }
+
+        /* Sidebar */
+        .sidebar {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            overflow-y: auto;
+        }
+
+        .section-title {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.75rem;
+        }
+
+        /* File Upload Zone */
+        .upload-zone {
+            border: 2px dashed var(--border-color);
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: rgba(6, 182, 212, 0.02);
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--accent-cyan);
+            background: rgba(6, 182, 212, 0.08);
+        }
+
+        .upload-zone i {
+            font-size: 2.5rem;
+            color: var(--accent-cyan);
+            margin-bottom: 1rem;
+            opacity: 0.8;
+        }
+
+        .upload-zone p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+
+        .upload-zone .hint {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        /* File List */
+        .file-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+
+        .file-item:hover {
+            border-color: var(--accent-cyan);
+        }
+
+        .file-item.active {
+            border-color: var(--accent-emerald);
+            background: rgba(16, 185, 129, 0.1);
+        }
+
+        .file-item i {
+            color: var(--accent-cyan);
+        }
+
+        .file-item .file-name {
+            flex: 1;
+            font-size: 0.875rem;
+            color: var(--text-primary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-item .file-size {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .file-item .remove-btn {
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 0.25rem;
+            transition: color 0.2s;
+        }
+
+        .file-item .remove-btn:hover {
+            color: var(--accent-rose);
+        }
+
+        /* Data Series Toggle */
+        .series-toggle {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .series-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .series-item:hover {
+            background: rgba(139, 92, 246, 0.1);
+        }
+
+        .series-checkbox {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent-violet);
+        }
+
+        .series-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+
+        .series-label {
+            flex: 1;
+            font-size: 0.8125rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-secondary);
+        }
+
+        /* Analysis Section */
+        .analysis-section {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        .selection-info {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .selection-info span {
+            color: var(--accent-cyan);
+        }
+
+        .btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-emerald));
+            color: white;
+        }
+
+        .btn-primary:hover {
+            filter: brightness(1.1);
+            box-shadow: 0 4px 20px rgba(6, 182, 212, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            filter: none;
+            box-shadow: none;
+        }
+
+        .btn-secondary {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--accent-cyan);
+            color: var(--text-primary);
+        }
+
+        /* Metrics Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .metric-card {
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            padding: 0.75rem;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 1.25rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-cyan);
+        }
+
+        .metric-label {
+            font-size: 0.6875rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        /* Chart Area */
+        .chart-area {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chart-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+
+        .chart-toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .chart-info {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .chart-info strong {
+            color: var(--text-primary);
+        }
+
+        .toolbar-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .toolbar-btn {
+            padding: 0.5rem 0.75rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 0.8125rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .toolbar-btn:hover {
+            border-color: var(--accent-cyan);
+            color: var(--text-primary);
+        }
+
+        .toolbar-btn.active {
+            background: rgba(6, 182, 212, 0.15);
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+
+        #chartContainer {
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* Empty State */
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            gap: 1rem;
+        }
+
+        .empty-state i {
+            font-size: 4rem;
+            opacity: 0.3;
+        }
+
+        .empty-state p {
+            font-size: 1rem;
+        }
+
+        /* Analysis Results Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            width: 90%;
+            max-width: 600px;
+            max-height: 80vh;
+            overflow: hidden;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+
+        .modal-header h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            border: none;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            color: var(--accent-rose);
+            background: rgba(244, 63, 94, 0.1);
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+            overflow-y: auto;
+            max-height: calc(80vh - 80px);
+        }
+
+        .result-section {
+            margin-bottom: 1.5rem;
+        }
+
+        .result-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .result-section h3 {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--accent-cyan);
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.75rem;
+        }
+
+        .result-item {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 8px;
+        }
+
+        .result-item .label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .result-item .value {
+            font-size: 1.25rem;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .result-item .value.good {
+            color: var(--accent-emerald);
+        }
+
+        .result-item .value.warning {
+            color: var(--accent-amber);
+        }
+
+        .result-item .value.bad {
+            color: var(--accent-rose);
+        }
+
+        .score-display {
+            text-align: center;
+            padding: 1.5rem;
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+        }
+
+        .score-value {
+            font-size: 3rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .score-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-top: 0.5rem;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+                height: auto;
+            }
+
+            .sidebar {
+                order: 1;
+            }
+
+            .chart-area {
+                order: 2;
+                height: 60vh;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo-container">
+                    <i class="fas fa-chart-line"></i>
+                </div>
+                <div class="header-title">
+                    <h1>Movement Analysis</h1>
+                    <p>Analyze CSV diagnostic data</p>
+                </div>
+            </div>
+            <a href="/" class="back-link">
+                <i class="fas fa-arrow-left"></i>
+                Back to Controller
+            </a>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-layout">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <!-- File Upload Section -->
+                <div class="upload-section">
+                    <div class="section-title">Load CSV File</div>
+                    <div class="upload-zone" id="uploadZone">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                        <p>Drop CSV file here</p>
+                        <p class="hint">or click to browse</p>
+                    </div>
+                    <input type="file" id="fileInput" accept=".csv" multiple>
+                </div>
+
+                <!-- Loaded Files -->
+                <div class="files-section" id="filesSection" style="display: none;">
+                    <div class="section-title">Loaded Files</div>
+                    <div class="file-list" id="fileList"></div>
+                </div>
+
+                <!-- Data Series Toggle -->
+                <div class="series-section" id="seriesSection" style="display: none;">
+                    <div class="section-title">Data Series</div>
+                    <div class="series-toggle" id="seriesToggles"></div>
+                </div>
+
+                <!-- Analysis Section -->
+                <div class="analysis-section" id="analysisSection" style="display: none;">
+                    <div class="section-title">Movement Analysis</div>
+                    <div class="selection-info" id="selectionInfo">
+                        Select a range on the chart using the mouse
+                    </div>
+                    <button class="btn btn-primary" id="analyzeBtn" disabled>
+                        <i class="fas fa-flask"></i>
+                        Analyze Selection
+                    </button>
+                    <button class="btn btn-secondary" id="clearSelectionBtn" style="margin-top: 0.5rem;">
+                        <i class="fas fa-times"></i>
+                        Clear Selection
+                    </button>
+
+                    <!-- Quick Metrics -->
+                    <div class="metrics-grid" id="quickMetrics" style="display: none;">
+                        <div class="metric-card">
+                            <div class="metric-value" id="metricDuration">--</div>
+                            <div class="metric-label">Duration (ms)</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value" id="metricSamples">--</div>
+                            <div class="metric-label">Samples</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value" id="metricRange">--</div>
+                            <div class="metric-label">Angle Range (°)</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value" id="metricMaxError">--</div>
+                            <div class="metric-label">Max Error (°)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- FFT Analysis Section -->
+                <div class="analysis-section" id="fftSection" style="display: none;">
+                    <div class="section-title">
+                        <i class="fas fa-wave-square" style="margin-right: 0.5rem; color: var(--accent-violet);"></i>
+                        Frequency Analysis
+                    </div>
+                    
+                    <div class="fft-signal-select" style="margin-bottom: 1rem;">
+                        <label style="font-size: 0.75rem; color: var(--text-muted); display: block; margin-bottom: 0.5rem;">Signal to analyze:</label>
+                        <select id="fftSignalSelect" style="width: 100%; padding: 0.5rem; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); font-size: 0.875rem;">
+                            <option value="torque_a">Torque A (Agonist)</option>
+                            <option value="torque_b">Torque B (Antagonist)</option>
+                            <option value="current">Current Angle</option>
+                            <option value="error">Error</option>
+                        </select>
+                    </div>
+
+                    <button class="btn btn-primary" id="runFftBtn">
+                        <i class="fas fa-chart-bar"></i>
+                        Run FFT Analysis
+                    </button>
+
+                    <!-- FFT Results -->
+                    <div id="fftResults" style="display: none; margin-top: 1rem;">
+                        <div class="section-title" style="font-size: 0.7rem;">Dominant Frequencies</div>
+                        <div id="fftPeaksList" style="max-height: 150px; overflow-y: auto;"></div>
+                    </div>
+                </div>
+
+                <!-- Timing Analysis Section -->
+                <div class="analysis-section" id="timingSection" style="display: none;">
+                    <div class="section-title">
+                        <i class="fas fa-clock" style="margin-right: 0.5rem; color: var(--accent-amber);"></i>
+                        Sample Timing Analysis
+                    </div>
+                    
+                    <button class="btn btn-primary" id="runTimingBtn" style="margin-bottom: 1rem;">
+                        <i class="fas fa-stopwatch"></i>
+                        Analyze Timing
+                    </button>
+
+                    <!-- Timing Statistics -->
+                    <div id="timingStats" style="display: none;">
+                        <div class="metrics-grid" style="grid-template-columns: repeat(2, 1fr); gap: 0.5rem;">
+                            <div class="metric-card" style="background: var(--bg-secondary); padding: 0.5rem;">
+                                <div class="metric-value" id="timingAvg" style="font-size: 1rem; color: var(--accent-cyan);">--</div>
+                                <div class="metric-label" style="font-size: 0.6rem;">Avg Δt (ms)</div>
+                            </div>
+                            <div class="metric-card" style="background: var(--bg-secondary); padding: 0.5rem;">
+                                <div class="metric-value" id="timingSampleRate" style="font-size: 1rem; color: var(--accent-emerald);">--</div>
+                                <div class="metric-label" style="font-size: 0.6rem;">Sample Rate (Hz)</div>
+                            </div>
+                            <div class="metric-card" style="background: var(--bg-secondary); padding: 0.5rem;">
+                                <div class="metric-value" id="timingMin" style="font-size: 1rem; color: var(--accent-emerald);">--</div>
+                                <div class="metric-label" style="font-size: 0.6rem;">Min Δt (ms)</div>
+                            </div>
+                            <div class="metric-card" style="background: var(--bg-secondary); padding: 0.5rem;">
+                                <div class="metric-value" id="timingMax" style="font-size: 1rem; color: var(--accent-rose);">--</div>
+                                <div class="metric-label" style="font-size: 0.6rem;">Max Δt (ms)</div>
+                            </div>
+                            <div class="metric-card" style="background: var(--bg-secondary); padding: 0.5rem;">
+                                <div class="metric-value" id="timingStd" style="font-size: 1rem; color: var(--accent-amber);">--</div>
+                                <div class="metric-label" style="font-size: 0.6rem;">Std Dev (ms)</div>
+                            </div>
+                            <div class="metric-card" style="background: var(--bg-secondary); padding: 0.5rem;">
+                                <div class="metric-value" id="timingJitter" style="font-size: 1rem; color: var(--accent-violet);">--</div>
+                                <div class="metric-label" style="font-size: 0.6rem;">Jitter (%)</div>
+                            </div>
+                        </div>
+                        
+                        <!-- Timing Health Indicator -->
+                        <div id="timingHealth" style="margin-top: 0.75rem; padding: 0.75rem; border-radius: 8px; text-align: center;"></div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Chart Area -->
+            <main class="chart-area">
+                <div class="chart-toolbar">
+                    <div class="chart-toolbar-left">
+                        <div class="chart-info">
+                            <strong id="chartFileName">No file loaded</strong>
+                            <span id="chartDataInfo"></span>
+                        </div>
+                    </div>
+                    <div class="toolbar-actions">
+                        <button class="toolbar-btn" id="toggleDof0" title="Toggle DOF 0">
+                            DOF 0
+                        </button>
+                        <button class="toolbar-btn" id="toggleDof1" title="Toggle DOF 1">
+                            DOF 1
+                        </button>
+                        <button class="toolbar-btn" id="resetZoomBtn" title="Reset Zoom">
+                            <i class="fas fa-expand"></i>
+                            Reset Zoom
+                        </button>
+                        <button class="toolbar-btn" id="selectModeBtn" title="Selection Mode">
+                            <i class="fas fa-object-group"></i>
+                            Select Range
+                        </button>
+                        <button class="toolbar-btn" id="fftBtn" title="Frequency Analysis (FFT)">
+                            <i class="fas fa-wave-square"></i>
+                            FFT
+                        </button>
+                        <button class="toolbar-btn" id="timingBtn" title="Sample Timing Analysis">
+                            <i class="fas fa-clock"></i>
+                            Timing
+                        </button>
+                    </div>
+                </div>
+
+                <div id="chartContainer">
+                    <div class="empty-state" id="emptyState">
+                        <i class="fas fa-chart-area"></i>
+                        <p>Load a CSV file to visualize movement data</p>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Analysis Results Modal -->
+    <div class="modal-overlay" id="resultsModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2><i class="fas fa-chart-pie" style="margin-right: 0.5rem;"></i> Movement Analysis Results</h2>
+                <button class="modal-close" id="closeModal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <!-- Score -->
+                <div class="result-section">
+                    <div class="score-display">
+                        <div class="score-value" id="resultScore">--/100</div>
+                        <div class="score-label">Overall Movement Quality Score</div>
+                    </div>
+                </div>
+
+                <!-- Timing Metrics -->
+                <div class="result-section">
+                    <h3><i class="fas fa-stopwatch"></i> Timing</h3>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <div class="label">Duration</div>
+                            <div class="value" id="resultDuration">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Rise Time (10% → 90%)</div>
+                            <div class="value" id="resultRiseTime">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Settling Time (±0.5°)</div>
+                            <div class="value" id="resultSettleTime">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Sample Rate</div>
+                            <div class="value" id="resultSampleRate">--</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Accuracy Metrics -->
+                <div class="result-section">
+                    <h3><i class="fas fa-bullseye"></i> Accuracy</h3>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <div class="label">Max Error</div>
+                            <div class="value" id="resultMaxError">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Mean Absolute Error</div>
+                            <div class="value" id="resultMeanError">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Overshoot</div>
+                            <div class="value" id="resultOvershoot">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Steady-State Error</div>
+                            <div class="value" id="resultSSE">--</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Movement Info -->
+                <div class="result-section">
+                    <h3><i class="fas fa-route"></i> Movement</h3>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <div class="label">Start Angle</div>
+                            <div class="value" id="resultStartAngle">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">End Angle</div>
+                            <div class="value" id="resultEndAngle">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Total Range</div>
+                            <div class="value" id="resultRange">--</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="label">Max Torque</div>
+                            <div class="value" id="resultMaxTorque">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================================
+        // STATE
+        // ============================================================================
+        let loadedFiles = [];
+        let activeFileIndex = -1;
+        let parsedData = null;
+        let selectedRange = null;
+        let isSelectMode = false;
+        let visibleSeries = {
+            target_dof0: true,
+            current_dof0: true,
+            error_dof0: false,
+            torque_a_dof0: false,
+            torque_b_dof0: false,
+            target_dof1: false,
+            current_dof1: false,
+            error_dof1: false,
+            torque_a_dof1: false,
+            torque_b_dof1: false
+        };
+        let activeDof = 0; // 0 = DOF0, 1 = DOF1
+
+        const seriesColors = {
+            target_dof0: '#06b6d4',      // cyan
+            current_dof0: '#10b981',     // emerald
+            error_dof0: '#f43f5e',       // rose
+            torque_a_dof0: '#f59e0b',    // amber
+            torque_b_dof0: '#8b5cf6',    // violet
+            target_dof1: '#0ea5e9',      // sky
+            current_dof1: '#22c55e',     // green
+            error_dof1: '#ec4899',       // pink
+            torque_a_dof1: '#eab308',    // yellow
+            torque_b_dof1: '#a855f7'     // purple
+        };
+
+        const seriesLabels = {
+            target_dof0: 'Target DOF0',
+            current_dof0: 'Current DOF0',
+            error_dof0: 'Error DOF0',
+            torque_a_dof0: 'Torque A DOF0',
+            torque_b_dof0: 'Torque B DOF0',
+            target_dof1: 'Target DOF1',
+            current_dof1: 'Current DOF1',
+            error_dof1: 'Error DOF1',
+            torque_a_dof1: 'Torque A DOF1',
+            torque_b_dof1: 'Torque B DOF1'
+        };
+
+        // ============================================================================
+        // FILE HANDLING
+        // ============================================================================
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadZone.addEventListener('click', () => fileInput.click());
+
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+            handleFiles(files);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            handleFiles(files);
+        });
+
+        function handleFiles(files) {
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const content = e.target.result;
+                    loadedFiles.push({
+                        name: file.name,
+                        size: file.size,
+                        content: content
+                    });
+                    updateFileList();
+                    
+                    // Auto-select first file
+                    if (loadedFiles.length === 1) {
+                        selectFile(0);
+                    }
+                };
+                reader.readAsText(file);
+            });
+        }
+
+        function updateFileList() {
+            const fileList = document.getElementById('fileList');
+            const filesSection = document.getElementById('filesSection');
+            
+            if (loadedFiles.length === 0) {
+                filesSection.style.display = 'none';
+                return;
+            }
+            
+            filesSection.style.display = 'block';
+            fileList.innerHTML = loadedFiles.map((file, idx) => `
+                <div class="file-item ${idx === activeFileIndex ? 'active' : ''}" onclick="selectFile(${idx})">
+                    <i class="fas fa-file-csv"></i>
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-size">${formatFileSize(file.size)}</span>
+                    <span class="remove-btn" onclick="event.stopPropagation(); removeFile(${idx})">
+                        <i class="fas fa-times"></i>
+                    </span>
+                </div>
+            `).join('');
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function removeFile(idx) {
+            loadedFiles.splice(idx, 1);
+            if (activeFileIndex === idx) {
+                activeFileIndex = -1;
+                parsedData = null;
+                clearChart();
+            } else if (activeFileIndex > idx) {
+                activeFileIndex--;
+            }
+            updateFileList();
+        }
+
+        function selectFile(idx) {
+            activeFileIndex = idx;
+            updateFileList();
+            parseCSV(loadedFiles[idx].content);
+            updateChart();
+        }
+
+        // ============================================================================
+        // CSV PARSING
+        // ============================================================================
+        function parseCSV(content) {
+            const lines = content.trim().split('\n');
+            const headers = lines[0].split(',').map(h => h.trim());
+            
+            parsedData = {
+                headers: headers,
+                time: [],
+                target_dof0: [],
+                current_dof0: [],
+                error_dof0: [],
+                torque_a_dof0: [],
+                torque_b_dof0: [],
+                target_dof1: [],
+                current_dof1: [],
+                error_dof1: [],
+                torque_a_dof1: [],
+                torque_b_dof1: []
+            };
+
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => parseFloat(v.trim()));
+                if (values.length >= headers.length) {
+                    parsedData.time.push(values[0]);
+                    parsedData.target_dof0.push(values[1] || 0);
+                    parsedData.current_dof0.push(values[2] || 0);
+                    parsedData.error_dof0.push(values[3] || 0);
+                    parsedData.torque_a_dof0.push(values[4] || 0);
+                    parsedData.torque_b_dof0.push(values[5] || 0);
+                    parsedData.target_dof1.push(values[6] || 0);
+                    parsedData.current_dof1.push(values[7] || 0);
+                    parsedData.error_dof1.push(values[8] || 0);
+                    parsedData.torque_a_dof1.push(values[9] || 0);
+                    parsedData.torque_b_dof1.push(values[10] || 0);
+                }
+            }
+
+            // Update chart info
+            document.getElementById('chartFileName').textContent = loadedFiles[activeFileIndex].name;
+            document.getElementById('chartDataInfo').textContent = ` • ${parsedData.time.length} samples`;
+            
+            // Show series toggles and analysis section
+            document.getElementById('seriesSection').style.display = 'block';
+            document.getElementById('analysisSection').style.display = 'block';
+            
+            updateSeriesToggle();
+        }
+
+        function updateSeriesToggle() {
+            const container = document.getElementById('seriesToggles');
+            const suffixes = ['target', 'current', 'error', 'torque_a', 'torque_b'];
+            const dof = activeDof;
+            
+            container.innerHTML = suffixes.map(suffix => {
+                const key = `${suffix}_dof${dof}`;
+                return `
+                    <label class="series-item">
+                        <input type="checkbox" class="series-checkbox" 
+                               ${visibleSeries[key] ? 'checked' : ''} 
+                               onchange="toggleSeries('${key}')">
+                        <span class="series-color" style="background: ${seriesColors[key]}"></span>
+                        <span class="series-label">${seriesLabels[key]}</span>
+                    </label>
+                `;
+            }).join('');
+        }
+
+        function toggleSeries(key) {
+            visibleSeries[key] = !visibleSeries[key];
+            updateChart();
+        }
+
+        // ============================================================================
+        // CHART
+        // ============================================================================
+        function updateChart() {
+            if (!parsedData) return;
+            
+            document.getElementById('emptyState').style.display = 'none';
+            
+            const traces = [];
+            const dof = activeDof;
+            const suffixes = ['target', 'current', 'error', 'torque_a', 'torque_b'];
+            
+            suffixes.forEach(suffix => {
+                const key = `${suffix}_dof${dof}`;
+                if (visibleSeries[key]) {
+                    const yaxis = suffix.startsWith('torque') ? 'y2' : 'y';
+                    traces.push({
+                        x: parsedData.time,
+                        y: parsedData[key],
+                        name: seriesLabels[key],
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { 
+                            color: seriesColors[key], 
+                            width: suffix === 'error' ? 1.5 : 2 
+                        },
+                        yaxis: yaxis
+                    });
+                }
+            });
+
+            const layout = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(17, 24, 39, 0.5)',
+                font: { 
+                    family: 'Outfit, sans-serif', 
+                    color: '#94a3b8' 
+                },
+                margin: { l: 60, r: 60, t: 20, b: 50 },
+                xaxis: {
+                    title: 'Time (s)',
+                    gridcolor: 'rgba(45, 55, 72, 0.5)',
+                    zerolinecolor: 'rgba(45, 55, 72, 0.8)'
+                },
+                yaxis: {
+                    title: 'Angle (°)',
+                    gridcolor: 'rgba(45, 55, 72, 0.5)',
+                    zerolinecolor: 'rgba(45, 55, 72, 0.8)'
+                },
+                yaxis2: {
+                    title: 'Torque (A)',
+                    overlaying: 'y',
+                    side: 'right',
+                    gridcolor: 'rgba(45, 55, 72, 0.3)'
+                },
+                legend: {
+                    x: 0,
+                    y: 1.1,
+                    orientation: 'h',
+                    bgcolor: 'rgba(0,0,0,0)'
+                },
+                dragmode: isSelectMode ? 'select' : 'zoom',
+                selectdirection: 'h'
+            };
+
+            // Add selection shape if exists
+            if (selectedRange) {
+                layout.shapes = [{
+                    type: 'rect',
+                    xref: 'x',
+                    yref: 'paper',
+                    x0: selectedRange.x0,
+                    x1: selectedRange.x1,
+                    y0: 0,
+                    y1: 1,
+                    fillcolor: 'rgba(6, 182, 212, 0.2)',
+                    line: { color: '#06b6d4', width: 2 }
+                }];
+            }
+
+            const config = {
+                responsive: true,
+                displaylogo: false,
+                modeBarButtonsToRemove: ['lasso2d', 'autoScale2d']
+            };
+
+            Plotly.newPlot('chartContainer', traces, layout, config);
+            
+            // Handle selection events
+            document.getElementById('chartContainer').on('plotly_selected', handleSelection);
+        }
+
+        function clearChart() {
+            document.getElementById('emptyState').style.display = 'flex';
+            document.getElementById('chartFileName').textContent = 'No file loaded';
+            document.getElementById('chartDataInfo').textContent = '';
+            document.getElementById('seriesSection').style.display = 'none';
+            document.getElementById('analysisSection').style.display = 'none';
+            Plotly.purge('chartContainer');
+        }
+
+        function handleSelection(eventData) {
+            if (!eventData || !eventData.range) return;
+            
+            selectedRange = {
+                x0: eventData.range.x[0],
+                x1: eventData.range.x[1]
+            };
+            
+            updateSelectionInfo();
+            updateChart();
+        }
+
+        function updateSelectionInfo() {
+            const info = document.getElementById('selectionInfo');
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            const quickMetrics = document.getElementById('quickMetrics');
+            
+            if (selectedRange) {
+                const duration = ((selectedRange.x1 - selectedRange.x0) * 1000).toFixed(0);
+                info.innerHTML = `Selected: <span>${selectedRange.x0.toFixed(3)}s</span> → <span>${selectedRange.x1.toFixed(3)}s</span>`;
+                analyzeBtn.disabled = false;
+                
+                // Calculate quick metrics
+                calculateQuickMetrics();
+                quickMetrics.style.display = 'grid';
+            } else {
+                info.textContent = 'Select a range on the chart using the mouse';
+                analyzeBtn.disabled = true;
+                quickMetrics.style.display = 'none';
+            }
+        }
+
+        function calculateQuickMetrics() {
+            if (!parsedData || !selectedRange) return;
+            
+            const dof = activeDof;
+            const rangeData = getDataInRange(selectedRange.x0, selectedRange.x1);
+            
+            if (rangeData.time.length === 0) return;
+            
+            const duration = (rangeData.time[rangeData.time.length - 1] - rangeData.time[0]) * 1000;
+            const samples = rangeData.time.length;
+            const current = rangeData[`current_dof${dof}`];
+            const error = rangeData[`error_dof${dof}`];
+            
+            const minAngle = Math.min(...current);
+            const maxAngle = Math.max(...current);
+            const range = (maxAngle - minAngle).toFixed(1);
+            const maxError = Math.max(...error.map(Math.abs)).toFixed(2);
+            
+            document.getElementById('metricDuration').textContent = duration.toFixed(0);
+            document.getElementById('metricSamples').textContent = samples;
+            document.getElementById('metricRange').textContent = range;
+            document.getElementById('metricMaxError').textContent = maxError;
+        }
+
+        function getDataInRange(x0, x1) {
+            const result = {
+                time: [],
+                target_dof0: [], current_dof0: [], error_dof0: [], torque_a_dof0: [], torque_b_dof0: [],
+                target_dof1: [], current_dof1: [], error_dof1: [], torque_a_dof1: [], torque_b_dof1: []
+            };
+            
+            for (let i = 0; i < parsedData.time.length; i++) {
+                if (parsedData.time[i] >= x0 && parsedData.time[i] <= x1) {
+                    result.time.push(parsedData.time[i]);
+                    Object.keys(result).forEach(key => {
+                        if (key !== 'time') {
+                            result[key].push(parsedData[key][i]);
+                        }
+                    });
+                }
+            }
+            
+            return result;
+        }
+
+        // ============================================================================
+        // ANALYSIS
+        // ============================================================================
+        document.getElementById('analyzeBtn').addEventListener('click', performAnalysis);
+        document.getElementById('clearSelectionBtn').addEventListener('click', clearSelection);
+        document.getElementById('closeModal').addEventListener('click', () => {
+            document.getElementById('resultsModal').classList.remove('active');
+        });
+
+        function clearSelection() {
+            selectedRange = null;
+            updateSelectionInfo();
+            updateChart();
+        }
+
+        function performAnalysis() {
+            if (!parsedData || !selectedRange) return;
+            
+            const dof = activeDof;
+            const rangeData = getDataInRange(selectedRange.x0, selectedRange.x1);
+            
+            if (rangeData.time.length < 2) {
+                alert('Not enough data in selected range');
+                return;
+            }
+            
+            const target = rangeData[`target_dof${dof}`];
+            const current = rangeData[`current_dof${dof}`];
+            const error = rangeData[`error_dof${dof}`];
+            const torqueA = rangeData[`torque_a_dof${dof}`];
+            const torqueB = rangeData[`torque_b_dof${dof}`];
+            const time = rangeData.time;
+            
+            // Calculate metrics
+            const results = analyzeMovement(time, target, current, error, torqueA, torqueB);
+            
+            // Display results
+            displayResults(results);
+        }
+
+        function analyzeMovement(time, target, current, error, torqueA, torqueB) {
+            const n = time.length;
+            const duration = (time[n - 1] - time[0]) * 1000; // ms
+            const sampleRate = n / (duration / 1000);
+            
+            // Start and end angles
+            const startAngle = current[0];
+            const endAngle = current[n - 1];
+            const targetAngle = target[n - 1];
+            const totalRange = Math.abs(endAngle - startAngle);
+            const direction = endAngle > startAngle ? 1 : -1;
+            
+            // Max error
+            const absErrors = error.map(Math.abs);
+            const maxError = Math.max(...absErrors);
+            const meanError = absErrors.reduce((a, b) => a + b, 0) / n;
+            
+            // Rise time (10% to 90%)
+            let riseTime = null;
+            const threshold10 = startAngle + (endAngle - startAngle) * 0.1;
+            const threshold90 = startAngle + (endAngle - startAngle) * 0.9;
+            let time10 = null, time90 = null;
+            
+            for (let i = 0; i < n; i++) {
+                const progress = (current[i] - startAngle) * direction;
+                if (time10 === null && progress >= Math.abs(endAngle - startAngle) * 0.1) {
+                    time10 = time[i];
+                }
+                if (time90 === null && progress >= Math.abs(endAngle - startAngle) * 0.9) {
+                    time90 = time[i];
+                    break;
+                }
+            }
+            
+            if (time10 !== null && time90 !== null) {
+                riseTime = (time90 - time10) * 1000;
+            }
+            
+            // Settling time (within ±0.5° of target)
+            const settlingBand = 0.5;
+            let settleTime = null;
+            let settleStart = null;
+            let stableCount = 0;
+            const requiredStable = 10;
+            
+            for (let i = 0; i < n; i++) {
+                if (Math.abs(error[i]) < settlingBand) {
+                    if (settleStart === null) settleStart = time[i];
+                    stableCount++;
+                    if (stableCount >= requiredStable && settleTime === null) {
+                        settleTime = (settleStart - time[0]) * 1000;
+                    }
+                } else {
+                    settleStart = null;
+                    stableCount = 0;
+                }
+            }
+            
+            // Overshoot
+            let overshoot = 0;
+            for (let i = 0; i < n; i++) {
+                const overshootAmount = (current[i] - targetAngle) * direction;
+                if (overshootAmount > overshoot) {
+                    overshoot = overshootAmount;
+                }
+            }
+            const overshootPercent = totalRange > 0 ? (overshoot / totalRange) * 100 : 0;
+            
+            // Steady-state error (last 10% of samples)
+            const sseStartIdx = Math.floor(n * 0.9);
+            const sseErrors = absErrors.slice(sseStartIdx);
+            const sse = sseErrors.reduce((a, b) => a + b, 0) / sseErrors.length;
+            
+            // Max torque
+            const maxTorque = Math.max(
+                Math.max(...torqueA.map(Math.abs)),
+                Math.max(...torqueB.map(Math.abs))
+            );
+            
+            // Calculate score
+            let score = 100;
+            
+            // Penalize rise time > 500ms
+            if (riseTime && riseTime > 500) score -= Math.min(20, (riseTime - 500) / 50);
+            
+            // Penalize settle time > 1000ms
+            if (settleTime && settleTime > 1000) score -= Math.min(20, (settleTime - 1000) / 100);
+            
+            // Penalize overshoot > 5%
+            if (overshootPercent > 5) score -= Math.min(20, (overshootPercent - 5) * 2);
+            
+            // Penalize SSE > 0.5°
+            if (sse > 0.5) score -= Math.min(20, (sse - 0.5) * 20);
+            
+            // Penalize max error > 5°
+            if (maxError > 5) score -= Math.min(20, (maxError - 5) * 2);
+            
+            score = Math.max(0, Math.round(score));
+            
+            return {
+                duration,
+                sampleRate,
+                startAngle,
+                endAngle,
+                targetAngle,
+                totalRange,
+                riseTime,
+                settleTime,
+                maxError,
+                meanError,
+                overshoot,
+                overshootPercent,
+                sse,
+                maxTorque,
+                score
+            };
+        }
+
+        function displayResults(results) {
+            // Score
+            const scoreEl = document.getElementById('resultScore');
+            scoreEl.textContent = `${results.score}/100`;
+            scoreEl.className = 'score-value';
+            if (results.score >= 80) scoreEl.classList.add('good');
+            else if (results.score >= 50) scoreEl.classList.add('warning');
+            else scoreEl.classList.add('bad');
+            
+            // Timing
+            document.getElementById('resultDuration').textContent = `${results.duration.toFixed(0)} ms`;
+            document.getElementById('resultRiseTime').textContent = results.riseTime ? `${results.riseTime.toFixed(0)} ms` : 'N/A';
+            document.getElementById('resultSettleTime').textContent = results.settleTime ? `${results.settleTime.toFixed(0)} ms` : 'N/A';
+            document.getElementById('resultSampleRate').textContent = `${results.sampleRate.toFixed(1)} Hz`;
+            
+            // Accuracy
+            setResultValue('resultMaxError', `${results.maxError.toFixed(2)}°`, results.maxError < 3 ? 'good' : results.maxError < 10 ? 'warning' : 'bad');
+            setResultValue('resultMeanError', `${results.meanError.toFixed(2)}°`, results.meanError < 1 ? 'good' : results.meanError < 3 ? 'warning' : 'bad');
+            setResultValue('resultOvershoot', `${results.overshootPercent.toFixed(1)}%`, results.overshootPercent < 5 ? 'good' : results.overshootPercent < 15 ? 'warning' : 'bad');
+            setResultValue('resultSSE', `${results.sse.toFixed(2)}°`, results.sse < 0.5 ? 'good' : results.sse < 1 ? 'warning' : 'bad');
+            
+            // Movement
+            document.getElementById('resultStartAngle').textContent = `${results.startAngle.toFixed(2)}°`;
+            document.getElementById('resultEndAngle').textContent = `${results.endAngle.toFixed(2)}°`;
+            document.getElementById('resultRange').textContent = `${results.totalRange.toFixed(2)}°`;
+            document.getElementById('resultMaxTorque').textContent = `${results.maxTorque.toFixed(0)} A`;
+            
+            // Show modal
+            document.getElementById('resultsModal').classList.add('active');
+        }
+
+        function setResultValue(elementId, value, quality) {
+            const el = document.getElementById(elementId);
+            el.textContent = value;
+            el.className = 'value ' + quality;
+        }
+
+        // ============================================================================
+        // TOOLBAR
+        // ============================================================================
+        document.getElementById('toggleDof0').addEventListener('click', function() {
+            activeDof = 0;
+            this.classList.add('active');
+            document.getElementById('toggleDof1').classList.remove('active');
+            updateSeriesToggle();
+            updateChart();
+        });
+
+        document.getElementById('toggleDof1').addEventListener('click', function() {
+            activeDof = 1;
+            this.classList.add('active');
+            document.getElementById('toggleDof0').classList.remove('active');
+            updateSeriesToggle();
+            updateChart();
+        });
+
+        document.getElementById('resetZoomBtn').addEventListener('click', function() {
+            if (parsedData) {
+                Plotly.relayout('chartContainer', {
+                    'xaxis.autorange': true,
+                    'yaxis.autorange': true
+                });
+            }
+        });
+
+        document.getElementById('selectModeBtn').addEventListener('click', function() {
+            isSelectMode = !isSelectMode;
+            this.classList.toggle('active', isSelectMode);
+            updateChart();
+        });
+
+        // Initialize DOF0 as active
+        document.getElementById('toggleDof0').classList.add('active');
+
+        // Close modal on overlay click
+        document.getElementById('resultsModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                this.classList.remove('active');
+            }
+        });
+
+        // ============================================================================
+        // FFT ANALYSIS
+        // ============================================================================
+        let fftMode = false;
+
+        document.getElementById('fftBtn').addEventListener('click', function() {
+            fftMode = !fftMode;
+            this.classList.toggle('active', fftMode);
+            document.getElementById('fftSection').style.display = fftMode ? 'block' : 'none';
+            
+            if (!fftMode) {
+                // Return to time domain view
+                updateChart();
+            }
+        });
+
+        document.getElementById('runFftBtn').addEventListener('click', runFFTAnalysis);
+
+        function runFFTAnalysis() {
+            if (!parsedData) return;
+            
+            const signalType = document.getElementById('fftSignalSelect').value;
+            const dof = activeDof;
+            
+            // Get the signal data
+            let signal;
+            let signalName;
+            switch(signalType) {
+                case 'torque_a':
+                    signal = selectedRange ? 
+                        getDataInRange(selectedRange.x0, selectedRange.x1)[`torque_a_dof${dof}`] :
+                        parsedData[`torque_a_dof${dof}`];
+                    signalName = `Torque A DOF${dof}`;
+                    break;
+                case 'torque_b':
+                    signal = selectedRange ? 
+                        getDataInRange(selectedRange.x0, selectedRange.x1)[`torque_b_dof${dof}`] :
+                        parsedData[`torque_b_dof${dof}`];
+                    signalName = `Torque B DOF${dof}`;
+                    break;
+                case 'current':
+                    signal = selectedRange ? 
+                        getDataInRange(selectedRange.x0, selectedRange.x1)[`current_dof${dof}`] :
+                        parsedData[`current_dof${dof}`];
+                    signalName = `Current Angle DOF${dof}`;
+                    break;
+                case 'error':
+                    signal = selectedRange ? 
+                        getDataInRange(selectedRange.x0, selectedRange.x1)[`error_dof${dof}`] :
+                        parsedData[`error_dof${dof}`];
+                    signalName = `Error DOF${dof}`;
+                    break;
+            }
+            
+            const timeData = selectedRange ? 
+                getDataInRange(selectedRange.x0, selectedRange.x1).time :
+                parsedData.time;
+            
+            if (signal.length < 8) {
+                alert('Not enough data for FFT analysis. Need at least 8 samples.');
+                return;
+            }
+            
+            // Calculate sample rate
+            const dt = (timeData[timeData.length - 1] - timeData[0]) / (timeData.length - 1);
+            const sampleRate = 1 / dt;
+            
+            // Perform FFT
+            const fftResult = performFFT(signal);
+            const frequencies = [];
+            const magnitudes = [];
+            
+            // Only use first half (positive frequencies)
+            const n = fftResult.length;
+            for (let i = 0; i < n / 2; i++) {
+                frequencies.push(i * sampleRate / n);
+                magnitudes.push(fftResult[i]);
+            }
+            
+            // Find peaks
+            const peaks = findFFTPeaks(frequencies, magnitudes, 5);
+            
+            // Display FFT chart
+            displayFFTChart(frequencies, magnitudes, signalName, peaks);
+            
+            // Display peaks list
+            displayFFTPeaks(peaks);
+        }
+
+        // Cooley-Tukey FFT implementation
+        function performFFT(signal) {
+            // Pad to next power of 2
+            let n = 1;
+            while (n < signal.length) n *= 2;
+            
+            // Zero-pad the signal
+            const padded = new Array(n).fill(0);
+            for (let i = 0; i < signal.length; i++) {
+                padded[i] = signal[i];
+            }
+            
+            // Remove DC component (mean)
+            const mean = padded.reduce((a, b) => a + b, 0) / signal.length;
+            for (let i = 0; i < signal.length; i++) {
+                padded[i] -= mean;
+            }
+            
+            // Apply Hanning window
+            for (let i = 0; i < signal.length; i++) {
+                padded[i] *= 0.5 * (1 - Math.cos(2 * Math.PI * i / (signal.length - 1)));
+            }
+            
+            // Perform FFT using recursive Cooley-Tukey
+            const fftComplex = fftRecursive(padded.map(x => ({ re: x, im: 0 })));
+            
+            // Return magnitudes
+            return fftComplex.map(c => Math.sqrt(c.re * c.re + c.im * c.im) * 2 / n);
+        }
+
+        function fftRecursive(x) {
+            const n = x.length;
+            if (n <= 1) return x;
+            
+            // Split into even and odd
+            const even = fftRecursive(x.filter((_, i) => i % 2 === 0));
+            const odd = fftRecursive(x.filter((_, i) => i % 2 === 1));
+            
+            const result = new Array(n);
+            for (let k = 0; k < n / 2; k++) {
+                const angle = -2 * Math.PI * k / n;
+                const t = {
+                    re: Math.cos(angle) * odd[k].re - Math.sin(angle) * odd[k].im,
+                    im: Math.cos(angle) * odd[k].im + Math.sin(angle) * odd[k].re
+                };
+                result[k] = {
+                    re: even[k].re + t.re,
+                    im: even[k].im + t.im
+                };
+                result[k + n / 2] = {
+                    re: even[k].re - t.re,
+                    im: even[k].im - t.im
+                };
+            }
+            return result;
+        }
+
+        function findFFTPeaks(frequencies, magnitudes, numPeaks) {
+            // Find local maxima
+            const peaks = [];
+            for (let i = 2; i < magnitudes.length - 2; i++) {
+                if (magnitudes[i] > magnitudes[i-1] && 
+                    magnitudes[i] > magnitudes[i+1] &&
+                    magnitudes[i] > magnitudes[i-2] && 
+                    magnitudes[i] > magnitudes[i+2] &&
+                    frequencies[i] > 0.5) { // Ignore DC and very low freq
+                    peaks.push({
+                        frequency: frequencies[i],
+                        magnitude: magnitudes[i],
+                        index: i
+                    });
+                }
+            }
+            
+            // Sort by magnitude and return top N
+            peaks.sort((a, b) => b.magnitude - a.magnitude);
+            return peaks.slice(0, numPeaks);
+        }
+
+        function displayFFTChart(frequencies, magnitudes, signalName, peaks) {
+            document.getElementById('emptyState').style.display = 'none';
+            
+            // Main FFT trace
+            const traces = [{
+                x: frequencies,
+                y: magnitudes,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'FFT Magnitude',
+                line: { color: '#8b5cf6', width: 2 },
+                fill: 'tozeroy',
+                fillcolor: 'rgba(139, 92, 246, 0.2)'
+            }];
+            
+            // Add peak markers
+            if (peaks.length > 0) {
+                traces.push({
+                    x: peaks.map(p => p.frequency),
+                    y: peaks.map(p => p.magnitude),
+                    type: 'scatter',
+                    mode: 'markers+text',
+                    name: 'Peaks',
+                    marker: { 
+                        color: '#f43f5e', 
+                        size: 12,
+                        symbol: 'diamond'
+                    },
+                    text: peaks.map(p => `${p.frequency.toFixed(1)} Hz`),
+                    textposition: 'top center',
+                    textfont: { color: '#f43f5e', size: 11 }
+                });
+            }
+
+            const layout = {
+                title: {
+                    text: `Frequency Spectrum: ${signalName}`,
+                    font: { color: '#f1f5f9', size: 16 }
+                },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(17, 24, 39, 0.5)',
+                font: { 
+                    family: 'Outfit, sans-serif', 
+                    color: '#94a3b8' 
+                },
+                margin: { l: 60, r: 40, t: 60, b: 50 },
+                xaxis: {
+                    title: 'Frequency (Hz)',
+                    gridcolor: 'rgba(45, 55, 72, 0.5)',
+                    zerolinecolor: 'rgba(45, 55, 72, 0.8)',
+                    range: [0, Math.min(100, frequencies[frequencies.length - 1])]
+                },
+                yaxis: {
+                    title: 'Magnitude',
+                    gridcolor: 'rgba(45, 55, 72, 0.5)',
+                    zerolinecolor: 'rgba(45, 55, 72, 0.8)'
+                },
+                showlegend: false
+            };
+
+            const config = {
+                responsive: true,
+                displaylogo: false
+            };
+
+            Plotly.newPlot('chartContainer', traces, layout, config);
+        }
+
+        function displayFFTPeaks(peaks) {
+            const container = document.getElementById('fftResults');
+            const list = document.getElementById('fftPeaksList');
+            
+            container.style.display = 'block';
+            
+            if (peaks.length === 0) {
+                list.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; padding: 0.5rem;">No significant peaks found</div>';
+                return;
+            }
+            
+            list.innerHTML = peaks.map((peak, i) => `
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem; background: var(--bg-secondary); border-radius: 6px; margin-bottom: 0.5rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="background: ${i === 0 ? 'var(--accent-rose)' : 'var(--accent-violet)'}; color: white; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600;">#${i + 1}</span>
+                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: var(--text-primary);">${peak.frequency.toFixed(1)} Hz</span>
+                    </div>
+                    <span style="font-size: 0.75rem; color: var(--text-muted);">mag: ${peak.magnitude.toFixed(2)}</span>
+                </div>
+            `).join('');
+            
+            // Show suggestion for notch filter
+            if (peaks.length > 0) {
+                const dominantFreq = peaks[0].frequency;
+                list.innerHTML += `
+                    <div style="margin-top: 0.75rem; padding: 0.75rem; background: rgba(6, 182, 212, 0.1); border: 1px solid var(--accent-cyan); border-radius: 8px;">
+                        <div style="font-size: 0.7rem; color: var(--accent-cyan); font-weight: 600; margin-bottom: 0.25rem;">
+                            <i class="fas fa-lightbulb" style="margin-right: 0.25rem;"></i> Notch Filter Suggestion
+                        </div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                            Configure notch at <strong style="color: var(--accent-cyan);">${dominantFreq.toFixed(1)} Hz</strong> to reduce oscillations
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // ============================================================================
+        // TIMING ANALYSIS
+        // ============================================================================
+        let timingMode = false;
+
+        document.getElementById('timingBtn').addEventListener('click', function() {
+            timingMode = !timingMode;
+            this.classList.toggle('active', timingMode);
+            document.getElementById('timingSection').style.display = timingMode ? 'block' : 'none';
+            
+            if (!timingMode) {
+                updateChart();
+            }
+        });
+
+        document.getElementById('runTimingBtn').addEventListener('click', runTimingAnalysis);
+
+        function runTimingAnalysis() {
+            if (!parsedData || parsedData.time.length < 2) {
+                alert('Not enough data for timing analysis. Need at least 2 samples.');
+                return;
+            }
+            
+            // Get time data (use selection if available)
+            const timeData = selectedRange ? 
+                getDataInRange(selectedRange.x0, selectedRange.x1).time :
+                parsedData.time;
+            
+            if (timeData.length < 2) {
+                alert('Not enough data in selected range.');
+                return;
+            }
+            
+            // Calculate delta times (in milliseconds)
+            const deltaTimes = [];
+            for (let i = 1; i < timeData.length; i++) {
+                deltaTimes.push((timeData[i] - timeData[i-1]) * 1000);
+            }
+            
+            // Calculate statistics
+            const stats = calculateTimingStats(deltaTimes);
+            
+            // Display statistics
+            displayTimingStats(stats);
+            
+            // Display timing chart
+            displayTimingChart(timeData, deltaTimes, stats);
+        }
+
+        function calculateTimingStats(deltaTimes) {
+            const n = deltaTimes.length;
+            
+            // Mean
+            const sum = deltaTimes.reduce((a, b) => a + b, 0);
+            const mean = sum / n;
+            
+            // Min and Max
+            const min = Math.min(...deltaTimes);
+            const max = Math.max(...deltaTimes);
+            
+            // Standard deviation
+            const squaredDiffs = deltaTimes.map(dt => Math.pow(dt - mean, 2));
+            const avgSquaredDiff = squaredDiffs.reduce((a, b) => a + b, 0) / n;
+            const std = Math.sqrt(avgSquaredDiff);
+            
+            // Jitter as percentage of mean
+            const jitter = (std / mean) * 100;
+            
+            // Sample rate
+            const sampleRate = 1000 / mean;
+            
+            // Percentiles (for detecting outliers)
+            const sorted = [...deltaTimes].sort((a, b) => a - b);
+            const p5 = sorted[Math.floor(n * 0.05)];
+            const p95 = sorted[Math.floor(n * 0.95)];
+            const p99 = sorted[Math.floor(n * 0.99)];
+            
+            // Count outliers (more than 2x mean)
+            const outliers = deltaTimes.filter(dt => dt > mean * 2).length;
+            
+            return {
+                mean,
+                min,
+                max,
+                std,
+                jitter,
+                sampleRate,
+                p5,
+                p95,
+                p99,
+                outliers,
+                count: n
+            };
+        }
+
+        function displayTimingStats(stats) {
+            document.getElementById('timingStats').style.display = 'block';
+            
+            document.getElementById('timingAvg').textContent = stats.mean.toFixed(2);
+            document.getElementById('timingSampleRate').textContent = stats.sampleRate.toFixed(1);
+            document.getElementById('timingMin').textContent = stats.min.toFixed(2);
+            document.getElementById('timingMax').textContent = stats.max.toFixed(2);
+            document.getElementById('timingStd').textContent = stats.std.toFixed(3);
+            document.getElementById('timingJitter').textContent = stats.jitter.toFixed(1);
+            
+            // Health indicator
+            const healthEl = document.getElementById('timingHealth');
+            let healthClass, healthIcon, healthText;
+            
+            if (stats.jitter < 5 && stats.outliers === 0) {
+                healthClass = 'background: rgba(16, 185, 129, 0.2); border: 1px solid var(--accent-emerald);';
+                healthIcon = 'fa-check-circle';
+                healthText = `<span style="color: var(--accent-emerald); font-weight: 600;">Excellent Timing</span><br>
+                              <span style="font-size: 0.75rem; color: var(--text-secondary);">Low jitter (${stats.jitter.toFixed(1)}%), no outliers</span>`;
+            } else if (stats.jitter < 15 && stats.outliers < stats.count * 0.01) {
+                healthClass = 'background: rgba(245, 158, 11, 0.2); border: 1px solid var(--accent-amber);';
+                healthIcon = 'fa-exclamation-triangle';
+                healthText = `<span style="color: var(--accent-amber); font-weight: 600;">Moderate Jitter</span><br>
+                              <span style="font-size: 0.75rem; color: var(--text-secondary);">Jitter ${stats.jitter.toFixed(1)}%, ${stats.outliers} outliers</span>`;
+            } else {
+                healthClass = 'background: rgba(244, 63, 94, 0.2); border: 1px solid var(--accent-rose);';
+                healthIcon = 'fa-times-circle';
+                healthText = `<span style="color: var(--accent-rose); font-weight: 600;">Timing Issues</span><br>
+                              <span style="font-size: 0.75rem; color: var(--text-secondary);">High jitter (${stats.jitter.toFixed(1)}%) or many outliers (${stats.outliers})</span>`;
+            }
+            
+            healthEl.style.cssText = healthClass;
+            healthEl.innerHTML = `<i class="fas ${healthIcon}" style="margin-right: 0.5rem;"></i>${healthText}`;
+        }
+
+        function displayTimingChart(timeData, deltaTimes, stats) {
+            document.getElementById('emptyState').style.display = 'none';
+            
+            // X axis: sample index or time
+            const xAxis = timeData.slice(1);  // Skip first (no delta for it)
+            
+            // Main trace: delta times
+            const traces = [{
+                x: xAxis,
+                y: deltaTimes,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Δt (ms)',
+                line: { color: '#f59e0b', width: 1.5 }
+            }];
+            
+            // Mean line
+            traces.push({
+                x: [xAxis[0], xAxis[xAxis.length - 1]],
+                y: [stats.mean, stats.mean],
+                type: 'scatter',
+                mode: 'lines',
+                name: `Mean (${stats.mean.toFixed(2)} ms)`,
+                line: { color: '#06b6d4', width: 2, dash: 'dash' }
+            });
+            
+            // Expected period line (if we can infer it)
+            // Common rates: 50Hz = 20ms, 100Hz = 10ms, 500Hz = 2ms
+            let expectedPeriod = null;
+            if (stats.mean > 15 && stats.mean < 25) expectedPeriod = 20;  // ~50Hz
+            else if (stats.mean > 8 && stats.mean < 12) expectedPeriod = 10;  // ~100Hz
+            else if (stats.mean > 1.5 && stats.mean < 2.5) expectedPeriod = 2;  // ~500Hz
+            
+            if (expectedPeriod) {
+                traces.push({
+                    x: [xAxis[0], xAxis[xAxis.length - 1]],
+                    y: [expectedPeriod, expectedPeriod],
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: `Expected (${expectedPeriod} ms)`,
+                    line: { color: '#10b981', width: 2, dash: 'dot' }
+                });
+            }
+            
+            // ±1 std band
+            const upperBand = stats.mean + stats.std;
+            const lowerBand = Math.max(0, stats.mean - stats.std);
+            
+            traces.push({
+                x: [...xAxis, ...xAxis.slice().reverse()],
+                y: [...Array(xAxis.length).fill(upperBand), ...Array(xAxis.length).fill(lowerBand)],
+                type: 'scatter',
+                fill: 'toself',
+                fillcolor: 'rgba(6, 182, 212, 0.1)',
+                line: { color: 'transparent' },
+                name: '±1σ band',
+                showlegend: true
+            });
+
+            const layout = {
+                title: {
+                    text: `Sample Timing Analysis (${stats.count} intervals)`,
+                    font: { color: '#f1f5f9', size: 16 }
+                },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(17, 24, 39, 0.5)',
+                font: { 
+                    family: 'Outfit, sans-serif', 
+                    color: '#94a3b8' 
+                },
+                margin: { l: 60, r: 40, t: 60, b: 50 },
+                xaxis: {
+                    title: 'Time (s)',
+                    gridcolor: 'rgba(45, 55, 72, 0.5)',
+                    zerolinecolor: 'rgba(45, 55, 72, 0.8)'
+                },
+                yaxis: {
+                    title: 'Δt (ms)',
+                    gridcolor: 'rgba(45, 55, 72, 0.5)',
+                    zerolinecolor: 'rgba(45, 55, 72, 0.8)',
+                    rangemode: 'tozero'
+                },
+                legend: {
+                    x: 0,
+                    y: 1.15,
+                    orientation: 'h',
+                    bgcolor: 'rgba(0,0,0,0)'
+                },
+                annotations: [
+                    {
+                        x: xAxis[Math.floor(xAxis.length / 2)],
+                        y: stats.max,
+                        text: `Max: ${stats.max.toFixed(2)} ms`,
+                        showarrow: false,
+                        font: { color: '#f43f5e', size: 11 },
+                        yshift: 10
+                    }
+                ]
+            };
+
+            const config = {
+                responsive: true,
+                displaylogo: false
+            };
+
+            Plotly.newPlot('chartContainer', traces, layout, config);
+        }
+    </script>
+</body>
+
+</html>
+

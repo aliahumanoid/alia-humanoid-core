@@ -192,15 +192,8 @@ bool JointController::executeWaypointMovement() {
         waypoint_buffer_pop(dof);
         waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms);
         
-        // Reduce logging overhead: only log every 50th waypoint to avoid serial bottleneck
-        // at high waypoint densities (e.g., 500 waypoints @ 12ms = 6000 waypoints/min)
-        static uint16_t waypoint_log_counter[MAX_DOFS] = {0};
-        waypoint_log_counter[dof]++;
-        if (waypoint_log_counter[dof] >= 50) {
-          LOG_INFO("[Waypoint] DOF " + String(dof) + " progress: " + 
-                    String(next_waypoint.target_angle_deg, 2) + "° at t=" + String(t_now));
-          waypoint_log_counter[dof] = 0;
-        }
+        // NOTE: Periodic waypoint progress logging removed to reduce serial overhead
+        // Only log significant events (LAST waypoint, errors)
         
         // Check if more waypoints available
         WaypointEntry peek_next;
@@ -211,7 +204,6 @@ bool JointController::executeWaypointMovement() {
           LOG_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " + 
                     String(next_waypoint.target_angle_deg, 2) + "° → prev_angle=" + 
                     String(final_target, 2) + "°");
-          waypoint_log_counter[dof] = 0; // Reset for next sequence
         }
       }
     }
@@ -245,30 +237,20 @@ bool JointController::executeWaypointMovement() {
           progress = constrain(progress, 0.0f, 1.0f);
         }
         
-        // === TRAJECTORY DIAGNOSTIC: Log timing details ===
-        // Log every 50 outer loop cycles (~500ms) or when progress crosses thresholds
-        static uint16_t traj_diag_counter[MAX_DOFS] = {0};
-        static float last_logged_progress[MAX_DOFS] = {0};
-        traj_diag_counter[dof]++;
+        // NOTE: Trajectory diagnostic logging removed to reduce serial overhead
+        // Only errors > 5° are logged (see below)
         
-        bool should_log = (traj_diag_counter[dof] >= 50) || 
-                          (progress >= 0.99f && last_logged_progress[dof] < 0.99f) ||
-                          (progress < 0.01f && last_logged_progress[dof] > 0.1f);
-        
-        if (should_log && dof == 0) { // Only DOF 0 to reduce log spam
-          float q_curr_now = shared_dof_angles.angles[dof];
-          int32_t time_delta = (int32_t)t_now - (int32_t)current_target.t_arrival_ms;
-          
-          LOG_INFO("[TRAJ_DIAG] DOF" + String(dof) + 
-                   " t=" + String(t_now) + 
-                   " arr=" + String(current_target.t_arrival_ms) +
-                   " dt=" + String(time_delta) + "ms" +
-                   " prog=" + String(progress * 100, 1) + "%" +
-                   " tgt=" + String(target_angle, 2) +
-                   " cur=" + String(q_curr_now, 2) +
-                   " err=" + String(target_angle - q_curr_now, 2));
-          traj_diag_counter[dof] = 0;
-          last_logged_progress[dof] = progress;
+        // === ERROR DETECTION: Log only significant tracking errors ===
+        float q_curr_now = shared_dof_angles.angles[dof];
+        float tracking_error = fabs(target_angle - q_curr_now);
+        if (tracking_error > 5.0f && dof == 0) {
+          static uint32_t last_error_log = 0;
+          if (millis() - last_error_log > 500) { // Max 1 log per 500ms
+            LOG_WARN("[TRAJ] DOF" + String(dof) + " LARGE ERROR: " + 
+                     String(tracking_error, 1) + "° (tgt=" + String(target_angle, 1) + 
+                     " cur=" + String(q_curr_now, 1) + ")");
+            last_error_log = millis();
+          }
         }
         
         // Apply interpolation based on mode
@@ -375,11 +357,9 @@ bool JointController::executeWaypointMovement() {
         // NOT immediately when entering HOLDING - motors need time to settle
         bool check_motors = is_holding && (safety_check_counter >= 20);
         
-        // Log when we're doing a periodic motor check in HOLDING mode
-        if (check_motors) {
-          LOG_DEBUG("[Waypoint] DOF " + String(dof) + " periodic motor safety check (counter=" + 
-                    String(safety_check_counter) + ")");
-        }
+        // NOTE: Debug log for periodic safety check was removed here because
+        // String concatenation + Serial.print was causing ~2ms overhead per call,
+        // which exceeded the 2ms cycle budget and caused control loop jitter.
         
         if (!checkSafetyForDof(dof, q_curr, safety_message, check_motors)) {
           // Safety violation detected - stop all motors immediately
@@ -696,8 +676,10 @@ bool JointController::executeWaypointMovement() {
                  ", enabled=" + String(notch_filter_config.enabled ? "YES" : "NO"));
       }
       
-      // Apply filters if initialized
-      if (notch_filters_initialized) {
+      // Apply filters ONLY if initialized AND explicitly enabled
+      // The process() function already checks isEnabled(), but we add an extra
+      // guard here to make it absolutely clear and avoid any edge cases
+      if (notch_filters_initialized && notch_filter_config.enabled) {
         int filter_idx_A = dof * 2;
         int filter_idx_B = dof * 2 + 1;
         command_A = torque_notch_filters[filter_idx_A].process(command_A);
@@ -806,20 +788,19 @@ bool JointController::executeWaypointMovement() {
     // Exponential moving average (α = 0.1 for smoothing)
     cycle_time_us_avg = (cycle_time_us_avg * 9 + cycle_time_us_last) / 10;
     
-    // Log periodically (every 5 seconds = 2500 cycles @ 500Hz)
+    // Log only when over budget (every 5 seconds = 2500 cycles @ 500Hz)
+    // This avoids logging overhead during normal operation
     static uint16_t profiling_log_counter = 0;
     profiling_log_counter++;
     if (profiling_log_counter >= 2500) {
       profiling_log_counter = 0;
-      LOG_INFO("[PROFILING] Cycle time: last=" + String(cycle_time_us_last) + "µs, " +
-               "avg=" + String(cycle_time_us_avg) + "µs, " +
-               "max=" + String(cycle_time_us_max) + "µs " +
-               "(budget=" + String(inner_loop_period_us) + "µs)");
       
-      // Check if we're over budget
+      // Only log if we exceeded the budget during this period
       if (cycle_time_us_max > inner_loop_period_us) {
-        LOG_WARN("[PROFILING] OVER BUDGET! Max " + String(cycle_time_us_max) + 
-                 "µs > " + String(inner_loop_period_us) + "µs budget");
+        LOG_WARN("[PROFILING] OVER BUDGET! last=" + String(cycle_time_us_last) + "µs, " +
+                 "avg=" + String(cycle_time_us_avg) + "µs, " +
+                 "max=" + String(cycle_time_us_max) + "µs " +
+                 "(budget=" + String(inner_loop_period_us) + "µs)");
       }
       
       // Reset max for next period

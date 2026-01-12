@@ -357,10 +357,8 @@ void sendEncoderStreamData() {
   if (result != CAN_OK) error_count++;
   
   if (millis() - last_debug_log > 10000) {
-    if (error_count == 0) {
-      LOG_DEBUG("[CAN] Encoder stream: " + String(frame_count) + " frames/10s, DOF0=" + 
-               String(frame.dof0_angle / 100.0f, 2) + "°");
-    } else {
+    // Only log if there were errors - silence is golden for normal operation
+    if (error_count > 0) {
       LOG_WARN("[CAN] Encoder stream: " + String(error_count) + "/" + String(frame_count) + " errors");
     }
     frame_count = 0;
