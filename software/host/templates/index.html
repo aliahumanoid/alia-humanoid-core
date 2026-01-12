@@ -1813,22 +1813,22 @@
                                 ⏱️ Total Duration: <span id="sinusoidTotalDuration" class="font-bold">6</span>s
                             </div>
                             
-                            <!-- Waypoint Density -->
+                            <!-- Waypoint Rate (points per second) -->
                             <div class="mb-3">
                                 <label for="waypointDensity" class="block text-xs font-medium text-purple-600 mb-1">
-                                    Points per Segment: <span id="waypointDensityValue" class="font-bold">50</span>
+                                    Rate: <span id="waypointDensityValue" class="font-bold">100</span> pts/s
                                     <span class="text-purple-400 font-normal ml-2">
-                                        (Δt = <span id="waypointIntervalValue">122</span>ms)
+                                        (Δt = <span id="waypointIntervalValue">10</span>ms)
                                     </span>
                                     <span class="text-gray-400 ml-2">• LINEAR interpolation</span>
                                 </label>
-                                <input type="range" id="waypointDensity" min="10" max="200" value="50" step="5"
+                                <input type="range" id="waypointDensity" min="10" max="250" value="100" step="10"
                                     class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
                                     oninput="updateSinusoidStats(this.value)" />
                                 <div class="flex justify-between text-xs text-purple-400 mt-1">
-                                    <span>6 pts</span>
-                                    <span>100 pts</span>
-                                    <span>250 pts</span>
+                                    <span>10 pts/s</span>
+                                    <span>100 pts/s</span>
+                                    <span>250 pts/s</span>
                                 </div>
                             </div>
                             
@@ -1845,7 +1845,7 @@
                                 </button>
                             </div>
                             <p class="text-xs text-purple-500 mt-2 text-center" id="sinusoidDescription">
-                                <span id="sinusoidCyclesDisplay">2</span> cycles × <span id="sinusoidCycleDurationDisplay">3</span>s = <span id="sinusoidTotalDurationDisplay">6</span>s • <span id="sinusoidFreqDisplay">0.33</span>Hz • <span id="waypointRateValue">8.3</span> pts/s
+                                <span id="sinusoidCyclesDisplay">2</span> cycles × <span id="sinusoidCycleDurationDisplay">3</span>s = <span id="sinusoidTotalDurationDisplay">6</span>s • <span id="sinusoidFreqDisplay">0.33</span>Hz • <span id="totalWaypointsValue">600</span> total pts
                             </p>
                         </div>
 

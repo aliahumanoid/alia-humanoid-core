@@ -2296,29 +2296,23 @@ function sendMultiWaypointSmoothCurve() {
 
 /**
  * Update sinusoid statistics display when parameters change
- * @param {number} points - Number of waypoints (optional, reads from UI if not provided)
+ * @param {number} rate - Points per second (optional, reads from UI if not provided)
  */
-function updateSinusoidStats(points) {
-    const pointsPerSegment = parseInt(points, 10) || parseInt($("#waypointDensity").val(), 10) || 50;
+function updateSinusoidStats(rate) {
+    // Input is now points per second (rate)
+    const pointsPerSecond = parseInt(rate, 10) || parseInt($("#waypointDensity").val(), 10) || 100;
     const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
     const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
     const totalDurationSeconds = cycleDurationSeconds * numCycles;
     
-    // Each cycle has 2 half-cycles (segments): min→max and max→min
-    const totalHalfCycles = numCycles * 2;
-    const halfCycleDurationMs = (cycleDurationSeconds * 1000) / 2;
-    
-    // Calculate interval between points within a segment
-    const intervalMs = Math.round(halfCycleDurationMs / pointsPerSegment);
+    // Calculate interval between points: Δt = 1000ms / rate
+    const intervalMs = Math.round(1000 / pointsPerSecond);
     
     // Total waypoints for entire oscillation
-    const totalWaypoints = pointsPerSegment * totalHalfCycles;
+    const totalWaypoints = Math.round(pointsPerSecond * totalDurationSeconds);
     
     // Calculate frequency in Hz (1 / cycle duration)
     const freqHz = (1 / cycleDurationSeconds).toFixed(2);
-    
-    // Calculate points per second
-    const pointsPerSecond = (totalWaypoints / totalDurationSeconds).toFixed(1);
     
     // Update UI elements
     const updateElement = (id, value) => {
@@ -2326,10 +2320,9 @@ function updateSinusoidStats(points) {
         if (el) el.textContent = value;
     };
     
-    updateElement('waypointDensityValue', pointsPerSegment);
-    updateElement('waypointIntervalValue', intervalMs);
-    updateElement('waypointFreqValue', (1000 / intervalMs).toFixed(1));
-    updateElement('waypointRateValue', pointsPerSecond);
+    updateElement('waypointDensityValue', pointsPerSecond);  // Now shows pts/s
+    updateElement('waypointIntervalValue', intervalMs);      // Δt in ms
+    updateElement('totalWaypointsValue', totalWaypoints);    // Total waypoints
     updateElement('sinusoidCycleDurationDisplay', cycleDurationSeconds);
     updateElement('sinusoidCyclesDisplay', numCycles);
     updateElement('sinusoidTotalDuration', totalDurationSeconds);
@@ -2353,12 +2346,16 @@ function sendCanWaypointSequence() {
     const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
     
     // Get parameters from UI
-    const waypointDensity = parseInt($("#waypointDensity").val(), 10) || 50;
+    // Slider now represents points per second (rate)
+    const waypointRate = parseInt($("#waypointDensity").val(), 10) || 100;
     const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
     const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
     const totalDurationSeconds = cycleDurationSeconds * numCycles;
     const totalDuration = totalDurationSeconds * 1000;  // Convert to ms
     const frequency = 1 / cycleDurationSeconds;  // Hz (frequency of a single cycle)
+    
+    // Calculate total waypoints from rate: pts/s × duration
+    const totalWaypoints = Math.round(waypointRate * totalDurationSeconds);
 
     if (!joint) {
         appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
@@ -2411,14 +2408,14 @@ function sendCanWaypointSequence() {
     // Calculate timing parameters for batch sending
     // Estimate batch send time for initial offset calculation (~3ms per waypoint)
     // Backend compensates for actual elapsed time when sending each waypoint
-    const estimatedBatchSendTime = waypointDensity * 3;
+    const estimatedBatchSendTime = totalWaypoints * 3;
     // Initial offset must be > batch send time + network latency + processing margin
     const initialOffset = Math.max(500, estimatedBatchSendTime + 300);
     
     // Generate waypoints for all active DOFs
     const testSequence = [];
-    for (let i = 0; i < waypointDensity; i++) {
-        const t = (i / (waypointDensity - 1)) * totalDuration;  // Time in ms
+    for (let i = 0; i < totalWaypoints; i++) {
+        const t = (i / (totalWaypoints - 1)) * totalDuration;  // Time in ms
         const tSeconds = t / 1000;
         
         // Calculate angles for each active DOF
@@ -2447,14 +2444,14 @@ function sendCanWaypointSequence() {
         arrival_offset_ms: totalDuration + initialOffset + 200  // 200ms after last sinusoid point
     });
     
-    // Calculate delta-t between points for logging
-    const deltaT = Math.round(totalDuration / (waypointDensity - 1));
+    // Calculate delta-t between points for logging (Δt = 1000 / rate)
+    const deltaT = Math.round(1000 / waypointRate);
     
     // Log active DOFs info
     const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
     const centerInfo = activeDofs.map(d => `${d.centerAngle}°`).join(', ');
     appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint}`);
-    appendStatusMessage(`   📊 ${testSequence.length} waypoints (${waypointDensity} sinusoid + 1 final), Δt=${deltaT}ms`);
+    appendStatusMessage(`   📊 ${testSequence.length} waypoints @ ${waypointRate} pts/s (Δt=${deltaT}ms)`);
     appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total @ ${frequency.toFixed(2)}Hz`);
     appendStatusMessage(`   🎯 Active: ${dofInfo}`);
     appendStatusMessage(`   🏁 Final target: ${centerInfo}`);
@@ -2517,7 +2514,8 @@ function sendCosineOscillation() {
     const joint = $("#jointSelect").val();
     
     // Get parameters from UI (same slider as sinusoid)
-    const numPoints = parseInt($("#waypointDensity").val(), 10) || 50;
+    // Slider now represents points per second (rate)
+    const waypointRate = parseInt($("#waypointDensity").val(), 10) || 100;
     const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
     const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
     const totalDurationSeconds = cycleDurationSeconds * numCycles;
@@ -2567,20 +2565,21 @@ function sendCosineOscillation() {
     appendStatusMessage(`⚙️ Interpolation: LINEAR (S-curve in waypoints)`);
 
     // Calculate timing parameters (same approach as Multi-WP)
-    // numPoints now represents points PER HALF-CYCLE (not total)
-    const halfCycleMs = (cycleDurationSeconds * 1000) / 2;
+    // waypointRate is points per second, convert to points per half-cycle
+    const halfCycleSeconds = cycleDurationSeconds / 2;
+    const halfCycleMs = halfCycleSeconds * 1000;
     const totalHalfCycles = numCycles * 2;
-    const pointsPerHalfCycle = numPoints;  // Slider now means points per segment!
-    const deltaT = halfCycleMs / pointsPerHalfCycle;  // Time between points
+    const pointsPerHalfCycle = Math.round(waypointRate * halfCycleSeconds);
+    const deltaT = 1000 / waypointRate;  // Time between points = 1000ms / rate
     
     // Estimate total waypoints for batch timing
-    const estimatedTotalWaypoints = pointsPerHalfCycle * totalHalfCycles;
+    const estimatedTotalWaypoints = Math.round(waypointRate * totalDurationSeconds);
     const estimatedBatchSendTime = estimatedTotalWaypoints * 3;  // ~3ms per waypoint
     const initialOffset = Math.max(500, estimatedBatchSendTime + 300);
     
     // Warn if exceeding buffer (2000 waypoints max)
     if (estimatedTotalWaypoints > 2000) {
-        appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds buffer (2000). Reduce points or cycles.`);
+        appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds buffer (2000). Reduce rate or cycles.`);
     }
     
     // Generate waypoints using same approach as Multi-WP
@@ -2628,7 +2627,7 @@ function sendCosineOscillation() {
     // Log info (deltaT already declared above)
     const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
     appendStatusMessage(`🚀 Sending S-curve oscillation for ${joint}`);
-    appendStatusMessage(`   📊 ${testSequence.length} total waypoints (${pointsPerHalfCycle} pts/segment), Δt≈${Math.round(deltaT)}ms`);
+    appendStatusMessage(`   📊 ${testSequence.length} waypoints @ ${waypointRate} pts/s (Δt=${Math.round(deltaT)}ms)`);
     appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total`);
     appendStatusMessage(`   🎯 Active: ${dofInfo} (min↔max direct)`);
 
@@ -5905,8 +5904,8 @@ function fetchJointConfig() {
                 const initialJoint = $("#jointSelect").val();
                 updateSinusoidParamsForJoint(initialJoint);
                 
-                // Initialize sinusoid stats with default slider value
-                updateSinusoidStats($("#waypointDensity").val() || 50);
+                // Initialize sinusoid stats with default slider value (100 pts/s)
+                updateSinusoidStats($("#waypointDensity").val() || 100);
                 
                 // Show expected mapping grid for initially selected joint
                 showExpectedMappingGrid(initialJoint);
