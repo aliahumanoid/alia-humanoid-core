@@ -123,10 +123,15 @@ struct MotionParams {
  * @brief DOF angle limits for safety
  * 
  * Defines the safe operating range for the joint.
+ * - min/max_angle: Physical/mechanical limits (absolute boundaries)
+ * - operating_min/max: Desired operational range (command targets allowed here)
+ *   When operating_* are 0, they default to physical limits
  */
 struct AngleLimits {
-  float min_angle; // Minimum allowed angle (degrees)
-  float max_angle; // Maximum allowed angle (degrees)
+  float min_angle;      // Minimum physical/mechanical angle (degrees)
+  float max_angle;      // Maximum physical/mechanical angle (degrees)
+  float operating_min;  // Minimum operational angle (degrees), 0 = use min_angle
+  float operating_max;  // Maximum operational angle (degrees), 0 = use max_angle
 };
 
 /**

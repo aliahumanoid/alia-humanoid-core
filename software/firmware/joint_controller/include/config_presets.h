@@ -53,7 +53,7 @@ const JointConfig KNEE_LEFT_CONFIG = {
                   .holding_position_error_threshold =
                       2.0f // Holding position error threshold (degrees)
               },
-          .limits = {.min_angle = 0.0f, .max_angle = 100.0f},
+          .limits = {.min_angle = -2.0f, .max_angle = 112.0f, .operating_min = 0.0f, .operating_max = 110.0f}, // physical [-2,112] allows overshoot, operating [0,110] for commands
           .zero_mapping =
               {
                   .recalc_offset_torque           = 50,
@@ -112,13 +112,13 @@ const JointConfig KNEE_RIGHT_CONFIG = {
           .motion =
               {
                   .path_steps      = 1000,
-                  .max_speed       = 5.0f * PI,
+                  .max_speed       = 1.75f,  // ~100°/s - realistic knee velocity limit
                   .accel_time      = 0.25f,
                   .sampling_period = 3000,
                   .holding_position_error_threshold =
                       10.0f // Holding position error threshold (degrees)
               },
-          .limits = {.min_angle = 0.0f, .max_angle = 100.0f},
+          .limits = {.min_angle = -2.0f, .max_angle = 112.0f, .operating_min = 0.0f, .operating_max = 110.0f}, // physical [-2,112] allows overshoot, operating [0,110] for commands
           .zero_mapping =
               {
                   .recalc_offset_torque           = 50,
@@ -183,7 +183,7 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                   .holding_position_error_threshold =
                       10.0f // Holding position error threshold (degrees)
               },
-          .limits = {.min_angle = -50.0f, .max_angle = 25.0f},
+          .limits = {.min_angle = -50.0f, .max_angle = 25.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
           .zero_mapping =
               {
                   .recalc_offset_torque           = 50,
@@ -217,7 +217,7 @@ const JointConfig ANKLE_LEFT_CONFIG = {
               },
           .limits =
               {
-                  .min_angle = -25.0f, .max_angle = 25.0f // Limiti generali del giunto
+                  .min_angle = -25.0f, .max_angle = 25.0f, .operating_min = 0.0f, .operating_max = 0.0f // operating=0 means use physical limits
               },
           .zero_mapping =
               {
@@ -308,7 +308,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                   .holding_position_error_threshold =
                       10.0f // Holding position error threshold (degrees)
               },
-          .limits = {.min_angle = -50.0f, .max_angle = 25.0f},
+          .limits = {.min_angle = -50.0f, .max_angle = 25.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
           .zero_mapping =
               {
                   .recalc_offset_torque           = 50,
@@ -342,7 +342,7 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
               },
           .limits =
               {
-                  .min_angle = -25.0f, .max_angle = 25.0f // Limiti generali del giunto
+                  .min_angle = -25.0f, .max_angle = 25.0f, .operating_min = 0.0f, .operating_max = 0.0f // operating=0 means use physical limits
               },
           .zero_mapping =
               {
@@ -433,7 +433,7 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .holding_position_error_threshold =
                        2.0f // Holding position error threshold (degrees)
                },
-           .limits = {.min_angle = -30.0f, .max_angle = 120.0f},
+           .limits = {.min_angle = -30.0f, .max_angle = 120.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
                    .recalc_offset_torque           = 55,
@@ -466,7 +466,7 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .holding_position_error_threshold =
                        2.0f // Holding position error threshold (degrees)
                },
-           .limits = {.min_angle = -45.0f, .max_angle = 45.0f},
+           .limits = {.min_angle = -45.0f, .max_angle = 45.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
                    .recalc_offset_torque           = 50,
@@ -500,7 +500,7 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .holding_position_error_threshold =
                        2.0f // Holding position error threshold (degrees)
                },
-           .limits = {.min_angle = -40.0f, .max_angle = 40.0f},
+           .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
                    .recalc_offset_torque           = 45,
@@ -617,7 +617,7 @@ const JointConfig HIP_RIGHT_CONFIG = {
                    .holding_position_error_threshold =
                        2.0f // Holding position error threshold (degrees)
                },
-           .limits = {.min_angle = -30.0f, .max_angle = 120.0f},
+           .limits = {.min_angle = -30.0f, .max_angle = 120.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
                    .recalc_offset_torque           = 55,
@@ -651,7 +651,7 @@ const JointConfig HIP_RIGHT_CONFIG = {
                    .holding_position_error_threshold =
                        2.0f // Holding position error threshold (degrees)
                },
-           .limits = {.min_angle = -45.0f, .max_angle = 45.0f},
+           .limits = {.min_angle = -45.0f, .max_angle = 45.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
                    .recalc_offset_torque           = 50,
@@ -685,7 +685,7 @@ const JointConfig HIP_RIGHT_CONFIG = {
                    .holding_position_error_threshold =
                        2.0f // Holding position error threshold (degrees)
                },
-           .limits = {.min_angle = -40.0f, .max_angle = 40.0f},
+           .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
                    .recalc_offset_torque           = 45,

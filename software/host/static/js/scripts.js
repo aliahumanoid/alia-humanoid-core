@@ -1173,7 +1173,7 @@ function createMappingChartsForDof(dof, containerElement) {
             plugins: {
                 title: {
                     display: true,
-                    text: `DOF ${dof} - Interpolation + Extrapolation (+10%)`,
+                    text: `DOF ${dof} - Interpolation + Extrapolation (Operating Range)`,
                     font: { size: 12 }
                 },
                 legend: {
@@ -1269,16 +1269,16 @@ function generateInterpolatedPoints(regression, minX, maxX, stepSize = 1) {
     return points;
 }
 
-function generateInterpolatedAndExtrapolatedPoints(regression, minX, maxX, stepSize = 1, extrapolationPercent = 10) {
+function generateInterpolatedAndExtrapolatedPoints(regression, minX, maxX, stepSize = 1, operatingLimits = null) {
     /**
      * Generates interpolated and extrapolated points using regression equation
-     * Includes extrapolation beyond measured data limits
+     * Uses operating limits from config if available, otherwise falls back to 10% extrapolation
      * 
      * @param {object} regression - Linear regression result
      * @param {number} minX - Minimum X-axis value from measured data
      * @param {number} maxX - Maximum X-axis value from measured data
      * @param {number} stepSize - Interval between points (default 1 degree)
-     * @param {number} extrapolationPercent - Extrapolation percentage beyond limits (default 10%)
+     * @param {object|null} operatingLimits - {min, max} from config, or null for 10% extrapolation
      * @returns {object} - {interpolated: Array, extrapolated: Array, full: Array, extendedRange: {min, max}}
      */
     
@@ -1289,12 +1289,27 @@ function generateInterpolatedAndExtrapolatedPoints(regression, minX, maxX, stepS
         extendedRange: { min: minX, max: maxX }
     };
     
-    // Calculate extrapolation range
-    const range = maxX - minX;
-    const extension = range * (extrapolationPercent / 100);
+    // Determine extended range based on operating limits or fallback to 10% extrapolation
+    let extendedMinX, extendedMaxX;
+    let usedOperatingLimits = false;
     
-    const extendedMinX = minX - extension;
-    const extendedMaxX = maxX + extension;
+    if (operatingLimits && (operatingLimits.min !== 0 || operatingLimits.max !== 0)) {
+        // Use operating limits from config
+        extendedMinX = operatingLimits.min;
+        extendedMaxX = operatingLimits.max;
+        usedOperatingLimits = true;
+    } else if (operatingLimits && operatingLimits.physicalMin !== undefined) {
+        // Use physical limits if operating are 0 (meaning "use physical")
+        extendedMinX = operatingLimits.physicalMin;
+        extendedMaxX = operatingLimits.physicalMax;
+        usedOperatingLimits = true;
+    } else {
+        // Fallback to 10% extrapolation
+        const range = maxX - minX;
+        const extension = range * 0.10;
+        extendedMinX = minX - extension;
+        extendedMaxX = maxX + extension;
+    }
     
     // Round to nearest integer degrees for clean values
     const roundedExtendedMinX = Math.floor(extendedMinX);
@@ -1347,7 +1362,7 @@ function generateInterpolatedAndExtrapolatedPoints(regression, minX, maxX, stepS
             max: roundedExtendedMaxX,
             originalMin: minX,
             originalMax: maxX,
-            extension: extension
+            usedOperatingLimits: usedOperatingLimits
         }
     };
 }
@@ -1421,12 +1436,27 @@ function enrichMappingDataWithInterpolation(mappingData) {
                 console.log(`DOF ${dof}: Smart step size JS = ${smartStepSize}° (original median: ${medianStep.toFixed(2)}°)`);
             }
             
+            // Get operating limits from jointConfigData if available
+            let operatingLimits = null;
+            if (typeof jointConfigData !== 'undefined' && jointConfigData && jointConfigData.dofs) {
+                const dofConfig = jointConfigData.dofs.find(d => d.index === dof);
+                if (dofConfig) {
+                    operatingLimits = {
+                        min: dofConfig.operating_min || 0,
+                        max: dofConfig.operating_max || 0,
+                        physicalMin: dofConfig.min_angle,
+                        physicalMax: dofConfig.max_angle
+                    };
+                    console.log(`DOF ${dof}: Using operating limits [${operatingLimits.min}, ${operatingLimits.max}] (physical: [${operatingLimits.physicalMin}, ${operatingLimits.physicalMax}])`);
+                }
+            }
+            
             // Generate interpolated and extrapolated points with smart step
             const agonistExtended = generateInterpolatedAndExtrapolatedPoints(
-                agonistRegression, minJointAngle, maxJointAngle, smartStepSize, 10
+                agonistRegression, minJointAngle, maxJointAngle, smartStepSize, operatingLimits
             );
             const antagonistExtended = generateInterpolatedAndExtrapolatedPoints(
-                antagonistRegression, minJointAngle, maxJointAngle, smartStepSize, 10
+                antagonistRegression, minJointAngle, maxJointAngle, smartStepSize, operatingLimits
             );
             
             // Add enriched data
@@ -1450,7 +1480,8 @@ function enrichMappingDataWithInterpolation(mappingData) {
                     interpolated_points_count: agonistExtended.interpolated.length,
                     extrapolated_points_count: agonistExtended.extrapolated.length,
                     total_points_count: agonistExtended.full.length,
-                    extrapolation_percent: 10,
+                    used_operating_limits: agonistExtended.extendedRange.usedOperatingLimits,
+                    operating_range: operatingLimits ? `[${operatingLimits.min || operatingLimits.physicalMin}, ${operatingLimits.max || operatingLimits.physicalMax}]` : 'N/A (10% extrapolation)',
                     step_size: smartStepSize,
                     original_median_step: originalSteps.length > 0 ? originalSteps[Math.floor(originalSteps.length / 2)] : "N/A"
                 }
@@ -1487,7 +1518,7 @@ function exportInterpolationEquations(jointName) {
             total_original_points: 0,
             total_interpolated_points: 0,
             total_extrapolated_points: 0,
-            extrapolation_percent: 10
+            uses_operating_limits: true // Uses operating_min/max from config if available
         }
     };
     
@@ -1542,7 +1573,7 @@ function exportInterpolationEquations(jointName) {
     URL.revokeObjectURL(url);
     
     const summary = exportData.interpolation_summary;
-    appendStatusMessage(`Exported complete file for ${jointName}: ${summary.total_dofs} DOF, ${summary.total_original_points} original points, ${summary.total_interpolated_points} interpolated, ${summary.total_extrapolated_points} extrapolated (+10%)`);
+    appendStatusMessage(`Exported complete file for ${jointName}: ${summary.total_dofs} DOF, ${summary.total_original_points} original points, ${summary.total_interpolated_points} interpolated, ${summary.total_extrapolated_points} extrapolated (operating range)`);
 }
 
 /**

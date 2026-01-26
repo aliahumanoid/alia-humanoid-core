@@ -119,37 +119,38 @@ bool JointController::calculateLinearEquationsFromMappingData() {
       linear_equations[dof].calculated = true;
 
       // Compute and store safe limits for joint and motors
-      // NOTE: No margin on joint physical limits - use config limits directly
-      // The config limits already represent safe mechanical boundaries
-      // Overshoot beyond physical limits is prevented by the mechanical structure
-      const float MAPPING_EXTENSION_RATIO = 0.10f; // Dynamic extension based on data
-      const float MOTOR_SAFETY_MARGIN     = 20.0f; // Margin for motors (they can extend beyond joint range)
+      // 
+      // JOINT LIMITS LOGIC:
+      // - operating_min/max define the desired operational range
+      // - If operating_* == 0, use physical limits (min_angle/max_angle)
+      // - Physical limits are absolute mechanical boundaries
+      // 
+      // MOTOR LIMITS LOGIC:
+      // - Extrapolate from mapping data + margin to allow motors to reach joint extremes
+      // - Even if mapping doesn't cover full range, motors need to go there
+      const float MAPPING_EXTENSION_RATIO = 0.15f; // Increased from 0.10 to better cover extremes
+      const float MOTOR_SAFETY_MARGIN     = 50.0f; // Margin for motors (increased from 30 to cover extended joint range 0-110°)
 
-      float joint_mapping_min = mapping_data.joint_data[0];
-      float joint_mapping_max = mapping_data.joint_data[0];
-      for (int i = 1; i < mapping_data.size; i++) {
-        joint_mapping_min = min(joint_mapping_min, mapping_data.joint_data[i]);
-        joint_mapping_max = max(joint_mapping_max, mapping_data.joint_data[i]);
-      }
-
-      float joint_range        = joint_mapping_max - joint_mapping_min;
-      float joint_extension    = joint_range * MAPPING_EXTENSION_RATIO;
-      float extended_joint_min = joint_mapping_min - joint_extension;
-      float extended_joint_max = joint_mapping_max + joint_extension;
-
-      // Use physical limits directly from config (no margin needed)
+      // Determine joint safe limits from config
       float physical_min = config.dofs[dof].limits.min_angle;
       float physical_max = config.dofs[dof].limits.max_angle;
-
-      // Safe range = intersection of extended mapping and physical limits
-      linear_equations[dof].joint_safe_min = max(extended_joint_min, physical_min);
-      linear_equations[dof].joint_safe_max = min(extended_joint_max, physical_max);
-
-      if (linear_equations[dof].joint_safe_min > linear_equations[dof].joint_safe_max) {
-        // If the resulting interval is inverted, fall back to physical limits
+      float operating_min = config.dofs[dof].limits.operating_min;
+      float operating_max = config.dofs[dof].limits.operating_max;
+      
+      // Use operating limits if specified, otherwise use physical limits
+      // operating_min/max == 0 means "use physical limits"
+      if (operating_min == 0.0f && operating_max == 0.0f) {
         linear_equations[dof].joint_safe_min = physical_min;
         linear_equations[dof].joint_safe_max = physical_max;
+      } else {
+        // Clamp operating limits to physical limits (safety)
+        linear_equations[dof].joint_safe_min = max(operating_min, physical_min);
+        linear_equations[dof].joint_safe_max = min(operating_max, physical_max);
       }
+      
+      // Note: MAPPING_EXTENSION_RATIO defined above but not currently used for joint limits
+      // (retained for potential future motor limit extrapolation based on joint range)
+      (void)MAPPING_EXTENSION_RATIO; // Suppress unused variable warning
 
       // Compute limits for motors with margin
       float agonist_min    = mapping_data.agonist_data[0];

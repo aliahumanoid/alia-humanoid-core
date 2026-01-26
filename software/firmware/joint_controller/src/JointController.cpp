@@ -700,14 +700,26 @@ bool JointController::checkWaypointSafety(uint8_t dof_index, float current_angle
     float requested_velocity_deg_s = angle_delta / time_delta_s;
     float requested_velocity_rad_s = requested_velocity_deg_s * DEG_TO_RAD;
     
+    // HARD CAP: Absolute maximum velocity regardless of configuration (150°/s)
+    // This is a safety net to prevent misconfigured max_speed from causing damage
+    const float ABSOLUTE_MAX_VELOCITY_DEG_S = 150.0f;
+    const float ABSOLUTE_MAX_VELOCITY_RAD_S = ABSOLUTE_MAX_VELOCITY_DEG_S * DEG_TO_RAD;
+    
+    if (requested_velocity_deg_s > ABSOLUTE_MAX_VELOCITY_DEG_S) {
+      violation_message = "WAYPOINT REJECTED (HARD LIMIT): DOF " + String(dof_index) + 
+                          " requested velocity " + String(requested_velocity_deg_s, 1) + " °/s " +
+                          "exceeds absolute safety limit of " + String(ABSOLUTE_MAX_VELOCITY_DEG_S, 0) + " °/s";
+      return false;
+    }
+    
     float max_speed_rad_s = config.dofs[dof_index].motion.max_speed;
     float max_speed_deg_s = max_speed_rad_s * RAD_TO_DEG;
     
-    // Emergency margin: 2x max_speed is considered critically dangerous
-    const float EMERGENCY_MARGIN = 2.0f;
+    // Emergency margin: 1.5x max_speed is considered critically dangerous
+    const float EMERGENCY_MARGIN = 1.5f;
     
     if (requested_velocity_rad_s > max_speed_rad_s * EMERGENCY_MARGIN) {
-      // CRITICAL: Velocity exceeds safe limits by 2x
+      // CRITICAL: Velocity exceeds safe limits by 1.5x
       violation_message = "WAYPOINT REJECTED (EMERGENCY): DOF " + String(dof_index) + 
                           " requested velocity " + String(requested_velocity_deg_s, 1) + " °/s (" +
                           String(requested_velocity_rad_s, 2) + " rad/s) exceeds " +

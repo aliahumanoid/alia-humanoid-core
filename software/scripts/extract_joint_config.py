@@ -111,9 +111,13 @@ def parse_config_presets(file_path):
                 # Extract angle limits
                 min_angle_match = re.search(r'\.limits\s*=\s*\{[^}]*\.min_angle\s*=\s*([-\d.]+)f?', dof_block)
                 max_angle_match = re.search(r'\.limits\s*=\s*\{[^}]*\.max_angle\s*=\s*([-\d.]+)f?', dof_block)
+                operating_min_match = re.search(r'\.limits\s*=\s*\{[^}]*\.operating_min\s*=\s*([-\d.]+)f?', dof_block)
+                operating_max_match = re.search(r'\.limits\s*=\s*\{[^}]*\.operating_max\s*=\s*([-\d.]+)f?', dof_block)
                 
                 min_angle = float(min_angle_match.group(1)) if min_angle_match else 0.0
                 max_angle = float(max_angle_match.group(1)) if max_angle_match else 0.0
+                operating_min = float(operating_min_match.group(1)) if operating_min_match else 0.0
+                operating_max = float(operating_max_match.group(1)) if operating_max_match else 0.0
                 
                 # Extract encoder channel
                 encoder_ch_match = re.search(r'\.encoder_channel\s*=\s*(\d+)', dof_block)
@@ -138,6 +142,8 @@ def parse_config_presets(file_path):
                     'name': dof_name,
                     'min_angle': min_angle,
                     'max_angle': max_angle,
+                    'operating_min': operating_min,  # 0 = use min_angle
+                    'operating_max': operating_max,  # 0 = use max_angle
                     'encoder_channel': encoder_channel,
                     'zero_angle_offset': zero_angle_offset,
                     'auto_mapping_min_angle': auto_mapping_min_angle,
@@ -198,7 +204,12 @@ def main():
     for joint_name, joint_data in sorted(config['joints'].items(), key=lambda x: x[1]['id']):
         print(f"  [{joint_data['id']}] {joint_name}: {joint_data['dof_count']} DOF, {joint_data['motor_count']} motors")
         for dof in joint_data['dofs']:
-            print(f"      DOF {dof['index']}: {dof['name']} (limits: {dof['min_angle']:.1f}° to {dof['max_angle']:.1f}°)")
+            op_min = dof.get('operating_min', 0.0)
+            op_max = dof.get('operating_max', 0.0)
+            limits_str = f"physical: {dof['min_angle']:.1f}° to {dof['max_angle']:.1f}°"
+            if op_min != 0.0 or op_max != 0.0:
+                limits_str += f", operating: {op_min:.1f}° to {op_max:.1f}°"
+            print(f"      DOF {dof['index']}: {dof['name']} ({limits_str})")
             print(f"         Auto-mapping: {dof['auto_mapping_min_angle']:.1f}° to {dof['auto_mapping_max_angle']:.1f}° (step {dof['auto_mapping_step']:.1f}°)")
 
 

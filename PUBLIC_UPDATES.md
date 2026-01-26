@@ -4,6 +4,27 @@ Structured log of outward-facing progress notes. Updates published as milestones
 
 ---
 
+## 2026-01-26 — Joint Design Log #002 published
+
+**Video documentation:** Second technical deep-dive published on YouTube — Joint Design Log #002 documenting the knee joint mechanics.
+
+**Content covered:**
+- Tendon-driven 1-DOF knee joint (flexion/extension, 100° range of motion)
+- 2 motors in antagonistic configuration mounted on thigh
+- Large pulley at knee axis for mechanical advantage
+- Magnetic encoder (MT6835) measuring joint angle directly
+- Real-time trajectory control: host sends waypoints at 50-100 Hz, controller buffers and interpolates
+- Flash-stored calibration for zero position persistence across power cycles
+- CANBUS communication between controller and host
+
+**Watch:** [Joint Design Log #002 on YouTube](https://youtu.be/4jU5Na2z-s8)
+
+**Announcement:** [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
+
+Next joint: hip (3 DOF). Phase 1 (full CAD release under CC BY-SA) still targeted ~6 months from project start.
+
+---
+
 ## 2025-11-13 — Joint Design Log #001 published
 
 **Video documentation:** First technical deep-dive published on YouTube — Joint Design Log #001 documenting the lower leg assembly with focus on ankle joint mechanics.
