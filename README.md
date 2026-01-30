@@ -21,6 +21,14 @@
 </tr>
 </table>
 
+<p align="center">
+  <a href="https://youtu.be/4jU5Na2z-s8">
+    <img src="https://aliahumanoid.com/assets/knee-human-scale-overlay-annotated.png" alt="Knee joint overlay (Joint Design Log #002)" width="100%">
+  </a>
+  <br />
+  <i>Knee joint overlay — Joint Design Log #002</i>
+</p>
+
 ---
 
 ## What We're Building
@@ -31,7 +39,12 @@ Most humanoid projects scale UP for easier engineering — more space for motors
 
 The result? A robot that can fit human environments, wear human clothing, and interact at human scale — using tendon-driven actuation, custom motor placement, and tight mechanical integration.
 
-**Current Phase 0 Focus:** Lower leg assembly (ankle + foot) with tendon-driven actuation.
+**Current Phase 0 Focus:** Lower leg assembly (knee + ankle + foot) with tendon-driven actuation.
+
+### Latest Updates
+- 2026-01-26: Joint Design Log #002 (Knee) published — [YouTube](https://youtu.be/4jU5Na2z-s8) · [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
+- 2025-11-13: Joint Design Log #001 (Ankle) published — [YouTube](https://youtu.be/1Z9GlTnYEFs)
+- 2025-10-31: Phase 0 public release — [PUBLIC_UPDATES.md](PUBLIC_UPDATES.md)
 
 ### Key Features
 
@@ -69,7 +82,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 
 ---
 
-## Current Status (Phase 0 — November 2025)
+## Current Status (Phase 0 — January 2026)
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
@@ -77,7 +90,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | Assembly guides, BOM, design specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
 | **Electronics** | ✅ Public | CC BY-NC-ND | Dual RP2040/RP2350 controller board (Gerber files + KiCad source) |
-| **CAD Source** | 📅 Phase 2 (2026+) | CC BY-SA | Full parametric Fusion 360 timeline |
+| **CAD Source** | 📅 Phase 2+ (TBD) | CC BY-SA | Full parametric Fusion 360 timeline |
 
 See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-source transition.
 
@@ -110,12 +123,13 @@ We document **both successes and failures** transparently.
 - Peak torque matches biomechanics requirements
 - Auto joint mapping with linear equations
 - Simultaneous control of both DOF (coupled plantarflexion/dorsiflexion + inversion/eversion)
+- Waypoint streaming at 50-100 Hz with buffer/interpolation (documented in Joint Design Log #002)
 
 ### ⚠️ Still Iterating
 
 - Intelligent adaptive joint mapping and calibration adjustment in progress
 - Real-time trajectory control refinement ongoing
-- CAN bus command protocol (host to firmware) under development
+- Multi-joint coordination (knee + ankle + foot) in progress
 
 
 ---
@@ -123,19 +137,19 @@ We document **both successes and failures** transparently.
 ## Project Roadmap
 
 ### Phase 0 (Current) — Prove the Concept
-- **Focus:** Ankle/lower leg prototype validation
+- **Focus:** Lower leg (knee + ankle + foot) validation
 - **Release:** Software (MIT), Hardware docs (CC BY-NC-ND)
-- **Timeline:** September 2025 – March 2026
+- **Timeline:** In progress
 
 ### Phase 1 — Expand Hardware
 - **Focus:** Full leg (hip, knee, ankle), upper body planning
 - **Release:** STL → STEP files (CC BY-NC-SA)
-- **Timeline:** Q2-Q3 2026
+- **Timeline:** Planned
 
 ### Phase 2 — Full Collaboration
 - **Focus:** Complete humanoid system integration
 - **Release:** CAD source files (CC BY-SA), governance formalized
-- **Timeline:** 2027+
+- **Timeline:** TBD
 
 ### Phase 3 — Open-Core Model
 - **Focus:** Distinguish core (fully open) from premium components
@@ -213,7 +227,7 @@ This asserts compliance with the [Developer Certificate of Origin](https://devel
 
 ---
 
-**Project Status:** Phase 0 active development | Last updated: November 2025
+**Project Status:** Phase 0 active development | Last updated: January 2026
 
 ---
 
