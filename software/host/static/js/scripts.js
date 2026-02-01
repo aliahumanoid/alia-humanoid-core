@@ -104,6 +104,62 @@ const DEFAULT_PARAMS = {
     // Parameters are now managed internally by Pico
 };
 
+// Safety limit for waypoint velocity (must match firmware ABSOLUTE_MAX_VELOCITY_DEG_S)
+const MAX_SAFE_VELOCITY_DEG_S = 150;
+
+/**
+ * Get current encoder angle from UI display
+ * Returns null if encoder streaming is not active or data is invalid
+ * @param {string} joint - Joint name (e.g., "KNEE_RIGHT")
+ * @param {number} dofIndex - DOF index (0, 1, or 2)
+ * @returns {number|null} Current angle in degrees, or null if not available
+ */
+function getCurrentEncoderAngle(joint, dofIndex) {
+    const jointType = joint.split('_')[0].toLowerCase();
+    
+    // Try joint-specific encoder display (e.g., #kneeEncoderDof0)
+    const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
+    if (jointEncoderText && jointEncoderText !== '-' && jointEncoderText.trim() !== '') {
+        const parsed = parseFloat(jointEncoderText.replace('°', ''));
+        if (!isNaN(parsed)) {
+            return parsed;
+        }
+    }
+    
+    // Fallback: try generic encoder display
+    const genericEncoderText = $(`#encoderDof${dofIndex}`).text();
+    if (genericEncoderText && genericEncoderText !== '-' && genericEncoderText.trim() !== '') {
+        const parsed = parseFloat(genericEncoderText.replace('°', ''));
+        if (!isNaN(parsed)) {
+            return parsed;
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Validate encoder readings for multiple DOFs
+ * @param {string} joint - Joint name
+ * @param {number[]} dofIndices - Array of DOF indices to validate
+ * @returns {Object} {valid: boolean, angles: {dof: angle}, missing: [dof indices]}
+ */
+function validateEncoderForWaypoints(joint, dofIndices) {
+    const result = { valid: true, angles: {}, missing: [] };
+    
+    for (const dof of dofIndices) {
+        const angle = getCurrentEncoderAngle(joint, dof);
+        if (angle === null) {
+            result.valid = false;
+            result.missing.push(dof);
+        } else {
+            result.angles[dof] = angle;
+        }
+    }
+    
+    return result;
+}
+
     // Main function executed when DOM is ready
 $(document).ready(function() {
     // Socket.IO initialization
@@ -344,12 +400,15 @@ $(document).ready(function() {
     });
 
     // Listener for stall abort events (trajectory aborted due to obstacle/stall)
+    // NOTE: The firmware already transitioned to HOLDING mode, so we should NOT send
+    // an emergency stop. Just clean up the host-side UI state.
     socket.on('stall_abort', function(data) {
         console.warn('Stall abort received:', data);
-        appendStatusMessage(`⚠️ STALL ABORT: DOF ${data.dof} at ${data.angle.toFixed(2)}° - trajectory aborted`);
+        appendStatusMessage(`⚠️ STALL ABORT: DOF ${data.dof} at ${data.angle.toFixed(2)}° - firmware holding at position`);
         
-        // Abort all active trajectories/tests on the host side
-        abortAllTrajectories('Stall detected on DOF ' + data.dof);
+        // Clean up host-side state WITHOUT sending emergency stop
+        // The firmware is already in HOLDING mode - don't override it!
+        cleanupHostTrajectoryState('Stall detected on DOF ' + data.dof);
     });
 
     // Listener for PID diagnostics data (target/error)
@@ -2294,21 +2353,24 @@ function sendMultiWaypointSmoothCurve() {
         return;
     }
 
-    // Get current angle from encoder display (if available)
-    // Extract joint type from joint name (e.g., "KNEE_RIGHT" -> "knee")
-    const jointType = joint.split('_')[0].toLowerCase();
-    let startAngle = 0;
+    // SAFETY: Get current angle from encoder display (REQUIRED - prevents dangerous waypoints)
+    const startAngle = getCurrentEncoderAngle(joint, dofIndex);
     
-    // Try joint-specific encoder display (e.g., #kneeEncoderDof0)
-    const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
-    if (jointEncoderText && jointEncoderText !== '-') {
-        startAngle = parseFloat(jointEncoderText.replace('°', '')) || 0;
-    } else {
-        // Fallback to generic encoder display
-        const encoderText = $(`#encoder${dofIndex}Value`).text();
-        if (encoderText && encoderText !== '-') {
-            startAngle = parseFloat(encoderText) || 0;
-        }
+    // SAFETY: Require valid encoder reading before generating waypoints
+    if (startAngle === null) {
+        appendStatusMessage("❌ SAFETY: Cannot generate waypoints without valid encoder reading!");
+        appendStatusMessage("⚠️ Please start 'Encoder Test' (CAN streaming) first to get current joint position.");
+        return;
+    }
+    
+    // Calculate required initial velocity to check for dangerous jumps
+    const angleDelta = Math.abs(targetAngle - startAngle);
+    const firstSegmentTimeMs = deltaT; // Time for first waypoint
+    const initialVelocity = (angleDelta / firstSegmentTimeMs) * 1000; // deg/s
+    
+    if (initialVelocity > MAX_SAFE_VELOCITY_DEG_S * 0.8) {
+        appendStatusMessage(`⚠️ WARNING: Initial velocity ${initialVelocity.toFixed(1)}°/s is high (limit: ${MAX_SAFE_VELOCITY_DEG_S}°/s)`);
+        appendStatusMessage(`💡 Consider: increase time, reduce angle delta, or move joint closer to target first`);
     }
 
     appendStatusMessage(`🔬 Multi-WP: ${startAngle.toFixed(1)}° → ${targetAngle}° @ ${waypointRate} pts/s (${numPoints} pts, Δt=${deltaT}ms)`);
@@ -2465,6 +2527,15 @@ function sendCanWaypointSequence() {
     
     if (activeDofs.length === 0) {
         appendStatusMessage("⚠️ Select at least one DOF for the sinusoid test.");
+        return;
+    }
+    
+    // SAFETY: Validate encoder data is available for all active DOFs
+    const dofIndices = activeDofs.map(d => d.index);
+    const encoderValidation = validateEncoderForWaypoints(joint, dofIndices);
+    if (!encoderValidation.valid) {
+        appendStatusMessage(`❌ SAFETY: Cannot generate waypoints without valid encoder readings for DOF(s): ${encoderValidation.missing.join(', ')}`);
+        appendStatusMessage(`⚠️ Please start 'Encoder Test' (CAN streaming) first to get current joint position.`);
         return;
     }
 
@@ -2628,6 +2699,31 @@ function sendCosineOscillation() {
     if (activeDofs.length === 0) {
         appendStatusMessage("⚠️ Select at least one DOF for the oscillation test.");
         return;
+    }
+    
+    // SAFETY: Validate encoder data is available for all active DOFs
+    const dofIndices = activeDofs.map(d => d.index);
+    const encoderValidation = validateEncoderForWaypoints(joint, dofIndices);
+    if (!encoderValidation.valid) {
+        appendStatusMessage(`❌ SAFETY: Cannot generate waypoints without valid encoder readings for DOF(s): ${encoderValidation.missing.join(', ')}`);
+        appendStatusMessage(`⚠️ Please start 'Encoder Test' (CAN streaming) first to get current joint position.`);
+        return;
+    }
+    
+    // SAFETY: Check if current position is near oscillation start (minAngle)
+    // Warn if joint needs to jump more than 10° to reach minAngle
+    for (const dof of activeDofs) {
+        const currentAngle = encoderValidation.angles[dof.index];
+        if (currentAngle !== undefined) {
+            const jumpToMin = Math.abs(currentAngle - dof.minAngle);
+            const jumpToMax = Math.abs(currentAngle - dof.maxAngle);
+            const minJump = Math.min(jumpToMin, jumpToMax);
+            
+            if (minJump > 10) {
+                appendStatusMessage(`⚠️ DOF ${dof.index}: Current pos ${currentAngle.toFixed(1)}° is ${minJump.toFixed(1)}° from oscillation range [${dof.minAngle}, ${dof.maxAngle}]`);
+                appendStatusMessage(`💡 Consider moving joint closer to oscillation range first`);
+            }
+        }
     }
 
     // Disable button during sequence
@@ -4894,12 +4990,12 @@ function resetOscillationTest() {
 }
 
 /**
- * Global function to abort all active trajectory tests
- * Called when firmware reports stall or other critical events
- * @param {string} reason - Reason for abort (shown in UI)
+ * Clean up host-side trajectory state WITHOUT sending emergency stop
+ * Use this when firmware has already handled the situation (e.g., stall -> HOLDING)
+ * @param {string} reason - Reason for cleanup (shown in UI)
  */
-function abortAllTrajectories(reason = 'Unknown') {
-    console.warn('Aborting all trajectories:', reason);
+function cleanupHostTrajectoryState(reason = 'Unknown') {
+    console.log('Cleaning up host trajectory state:', reason);
     
     // Stop oscillation test if active
     if (oscTestActive) {
@@ -4930,6 +5026,18 @@ function abortAllTrajectories(reason = 'Unknown') {
         $('#pidOscStartBtn').prop('disabled', false);
         $('#pidOscStopBtn').prop('disabled', true);
     }
+}
+
+/**
+ * Abort all active trajectories WITH emergency stop
+ * Use for user-initiated stops or when firmware state is unknown
+ * @param {string} reason - Reason for abort (shown in UI)
+ */
+function abortAllTrajectories(reason = 'Unknown') {
+    console.warn('Aborting all trajectories:', reason);
+    
+    // First clean up host-side state
+    cleanupHostTrajectoryState(reason);
     
     // CAN-first emergency stop (future CAN-only runtime)
     sendCanEmergencyStop();

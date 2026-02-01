@@ -67,6 +67,26 @@ static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 // === CAN ERROR TRACKING (file scope for reset on new movement) ===
 static float wp_last_theta_A[MAX_DOFS] = {0};
 static float wp_last_theta_B[MAX_DOFS] = {0};
+
+// === OSCILLATION DETECTION (safety feature) ===
+// Detects dangerous oscillations (e.g., from too-high stiffness) and triggers emergency stop
+struct OscillationDetector {
+  float prev_error = 0.0f;           // Previous error value
+  int8_t prev_error_sign = 0;        // Sign of previous error (+1, -1, 0)
+  uint8_t sign_change_count = 0;     // Number of error sign changes
+  uint32_t window_start_ms = 0;      // Start of detection window
+  float max_error_in_window = 0.0f;  // Maximum absolute error in window
+  float min_error_in_window = 0.0f;  // Minimum error (for amplitude calculation)
+  bool oscillation_detected = false; // Flag to prevent repeated triggers
+};
+static OscillationDetector osc_detector[MAX_DOFS];
+
+// Oscillation detection parameters (tunable)
+static const uint32_t OSC_WINDOW_MS = 500;           // Time window to count sign changes
+static const uint8_t OSC_MIN_SIGN_CHANGES = 4;       // Min sign changes to trigger (4 = 2 full oscillations)
+static const float OSC_MIN_AMPLITUDE_DEG = 3.0f;     // Min oscillation amplitude to be considered dangerous
+static const float OSC_MIN_ERROR_TO_CHECK = 1.0f;    // Don't check if error is very small
+
 static bool wp_first_read[MAX_DOFS] = {true, true, true};
 static CANErrorTracker wp_canErrorTracker;
 
@@ -152,14 +172,12 @@ bool JointController::executeWaypointMovement() {
     }
     
     // === RESET PID STATE when transitioning to MOVING ===
-    // Reset on IDLE → MOVING (new sequence) and HOLDING → MOVING (resuming after hold)
-    // This ensures clean state for new movements and prevents accumulated integral
-    // or stale CAN errors from affecting the new trajectory
+    // Reset ONLY on IDLE → MOVING (new sequence starting from stopped state)
+    // DO NOT reset on HOLDING → MOVING - preserve integral compensation for gravity/friction
+    // This prevents the "spike" movement when resuming from HOLDING
     bool just_started_from_idle = (prev_dof_state[dof] == WaypointState::IDLE) &&
                                    (dof_state == WaypointState::MOVING);
-    bool just_started_from_holding = (prev_dof_state[dof] == WaypointState::HOLDING) &&
-                                      (dof_state == WaypointState::MOVING);
-    bool should_reset = pid_reset_needed[dof] && (just_started_from_idle || just_started_from_holding);
+    bool should_reset = pid_reset_needed[dof] && just_started_from_idle;
     
     if (should_reset) {
       // Reset outer loop PID controller (handles integral, derivative, and filter state)
@@ -171,8 +189,7 @@ bool JointController::executeWaypointMovement() {
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
 
-      const char* from_state = just_started_from_idle ? "IDLE" : "HOLDING";
-      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (" + from_state + " → MOVING)");
+      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (IDLE → MOVING)");
     }
     
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
@@ -460,6 +477,79 @@ bool JointController::executeWaypointMovement() {
         }
       }
 
+      // === OSCILLATION DETECTION (safety feature) ===
+      // Detects dangerous oscillations (e.g., from too-high stiffness) and triggers emergency stop
+      // An oscillation is detected when:
+      // 1. Error changes sign frequently (multiple times in short window)
+      // 2. Oscillation amplitude exceeds threshold
+      if (is_moving && abs_error > OSC_MIN_ERROR_TO_CHECK) {
+        OscillationDetector &od = osc_detector[dof];
+        uint32_t now_ms = millis();
+        
+        // Determine error sign
+        int8_t error_sign = (error > 0.1f) ? 1 : ((error < -0.1f) ? -1 : 0);
+        
+        // Reset window if expired
+        if (now_ms - od.window_start_ms > OSC_WINDOW_MS) {
+          od.window_start_ms = now_ms;
+          od.sign_change_count = 0;
+          od.max_error_in_window = abs_error;
+          od.min_error_in_window = abs_error;
+        }
+        
+        // Track amplitude in window
+        if (abs_error > od.max_error_in_window) od.max_error_in_window = abs_error;
+        if (abs_error < od.min_error_in_window) od.min_error_in_window = abs_error;
+        
+        // Detect sign change
+        if (error_sign != 0 && od.prev_error_sign != 0 && error_sign != od.prev_error_sign) {
+          od.sign_change_count++;
+        }
+        od.prev_error_sign = error_sign;
+        od.prev_error = error;
+        
+        // Calculate oscillation amplitude (peak-to-peak / 2)
+        float osc_amplitude = (od.max_error_in_window - od.min_error_in_window) / 2.0f;
+        
+        // Check if oscillation is dangerous
+        if (!od.oscillation_detected && 
+            od.sign_change_count >= OSC_MIN_SIGN_CHANGES && 
+            osc_amplitude >= OSC_MIN_AMPLITUDE_DEG) {
+          
+          LOG_ERROR("[OSCILLATION SAFETY] DOF " + String(dof) + 
+                    " DANGEROUS OSCILLATION DETECTED!");
+          LOG_ERROR("  Sign changes: " + String(od.sign_change_count) + 
+                    " in " + String(now_ms - od.window_start_ms) + "ms");
+          LOG_ERROR("  Amplitude: " + String(osc_amplitude, 1) + 
+                    "° (threshold: " + String(OSC_MIN_AMPLITUDE_DEG, 1) + "°)");
+          
+          // Trigger emergency stop
+          od.oscillation_detected = true;
+          stopAllMotors();
+          
+          // Reset waypoint state
+          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+          waypoint_buffer_clear(dof);
+          prev_dof_state[dof] = WaypointState::IDLE;
+          pid_reset_needed[dof] = true;
+          
+          // Notify host via serial
+          Serial.println("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
+                        ":AMPLITUDE=" + String(osc_amplitude, 1) +
+                        ":SIGN_CHANGES=" + String(od.sign_change_count));
+          
+          continue; // Skip to next DOF
+        }
+      } else {
+        // Reset oscillation detector when not in danger zone
+        OscillationDetector &od = osc_detector[dof];
+        if (od.oscillation_detected && abs_error < OSC_MIN_ERROR_TO_CHECK * 0.5f) {
+          od.oscillation_detected = false; // Allow re-detection after recovery
+        }
+        od.sign_change_count = 0;
+        od.window_start_ms = millis();
+      }
+
       // === RUNTIME SAFETY CHECK (same as moveMultiDOF_cascade) ===
       // Check joint limits, mapping limits, and optionally motor limits (tendon breakage)
       // - MOVING mode: check every cycle (100 Hz) for immediate detection
@@ -586,6 +676,8 @@ bool JointController::executeWaypointMovement() {
       if (outer_pid) {
         // Save previous value for interpolation (smooth transitions when divisor > 1)
         delta_theta_prev[dof] = delta_theta[dof];
+        
+        // Normal PID control - compute delta_theta
         delta_theta[dof] = outer_pid->control(q_des, q_curr);
       }
 
