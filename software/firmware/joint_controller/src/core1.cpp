@@ -310,6 +310,9 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
 void sendEncoderStreamData() {
   if (!encoder_stream_can_active) return;
   
+  // Skip if Host CAN is suspended (SPI1 bus conflict avoidance)
+  if (suspend_host_can_polling) return;
+  
   // Check timing - only send every ENCODER_STREAM_INTERVAL_US (5ms = 200Hz)
   uint32_t now_us = time_us_32();
   if ((now_us - encoder_stream_last_send_us) < ENCODER_STREAM_INTERVAL_US) {
@@ -516,6 +519,12 @@ void checkAndSendMetrics() {
  */
 void pollHostCan() {
   extern MCP_CAN CAN_HOST;  // Host CAN bus (separate from motor CAN)
+
+  // Check if Host CAN polling is suspended (e.g., during startup sequence)
+  // This prevents SPI1 bus conflicts with Motor CAN operations on Core0
+  if (suspend_host_can_polling) {
+    return;
+  }
 
   // Check if messages are available on Host CAN
   if (CAN_HOST.checkReceive() != CAN_MSGAVAIL) {

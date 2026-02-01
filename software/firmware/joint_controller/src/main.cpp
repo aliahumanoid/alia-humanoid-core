@@ -52,6 +52,8 @@ bool init_prg = true;
 volatile bool flash_operation_in_progress = false;
 // Movement in progress flag (Core1 sets during movement, Core0 pauses streaming)
 volatile bool movement_in_progress = false;
+// Host CAN polling suspend (Core0 sets during startup sequence to avoid SPI conflicts)
+volatile bool suspend_host_can_polling = false;
 // System settings (loaded from flash at boot)
 SystemSettingsData system_settings = {};
 bool system_settings_loaded = false;

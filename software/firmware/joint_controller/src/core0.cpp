@@ -699,9 +699,39 @@ void core0_main_loop() {
                       }
                       LOG_INFO("Encoder readings valid after " + String(encoder_wait_ms) + "ms");
                       
-                      // SAFETY CHECK 3: Verify motors are accessible
-                      LOG_INFO("Verifying motor access...");
+                      // CRITICAL: Suspend Host CAN polling during startup to avoid SPI1 bus conflicts
+                      // Motor CAN and Host CAN share SPI1 with different CS pins
+                      LOG_INFO("Suspending Host CAN polling during startup...");
+                      suspend_host_can_polling = true;
+                      delay(10);  // Give Core1 time to exit any current CAN operation
+                      
+                      // SAFETY: Flush any stale messages from Host CAN before motor access
+                      // This prevents old EMERGENCY_STOP frames from triggering during startup
+                      {
+                        int flushed = 0;
+                        unsigned long flush_start = millis();
+                        while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && (millis() - flush_start) < 50) {
+                          unsigned long rx_id;
+                          unsigned char len;
+                          unsigned char buf[8];
+                          CAN_HOST.readMsgBuf(&rx_id, &len, buf);
+                          if (rx_id == 0x000) {
+                            LOG_WARN("Flushed stale EMERGENCY_STOP from CAN_HOST buffer");
+                          }
+                          flushed++;
+                        }
+                        if (flushed > 0) {
+                          LOG_INFO("Flushed " + String(flushed) + " stale CAN_HOST messages before motor check");
+                        }
+                        // Clear any emergency stop flag that might have been set by stale messages
+                        emergency_stop_requested = false;
+                      }
+                      
+                      // SAFETY CHECK 3: Verify motors are accessible and responding
+                      LOG_INFO("Verifying motor access and CAN communication...");
                       bool motors_ok = true;
+                      int can_errors = 0;
+                      
                       for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
                         int motors_found = 0;
                         
@@ -716,12 +746,20 @@ void core0_main_loop() {
                             }
                             motors_found++;
                             
-                            // Try to read angle - this exercises CAN communication
-                            // Note: This is a quick check, actual CAN errors will be caught during recalc
+                            // Try to read angle - verify CAN communication actually works
                             MultiAngleData angle_data = motor->getMultiAngleSync(false);
-                            LOG_DEBUG("DOF " + String(dof) + " motor " + String(m) + 
-                                     " (ID=" + String(active_joint_controller->getConfig().motors[m].id) + 
-                                     "): angle=" + String(angle_data.angle, 1) + "°");
+                            
+                            // Check if we got a valid response (not NaN)
+                            if (isnan(angle_data.angle)) {
+                              LOG_WARN("DOF " + String(dof) + " motor " + String(m) + 
+                                      " (ID=" + String(active_joint_controller->getConfig().motors[m].id) + 
+                                      "): CAN timeout - motor not responding");
+                              can_errors++;
+                            } else {
+                              LOG_DEBUG("DOF " + String(dof) + " motor " + String(m) + 
+                                       " (ID=" + String(active_joint_controller->getConfig().motors[m].id) + 
+                                       "): angle=" + String(angle_data.angle, 1) + "° (OK)");
+                            }
                           }
                         }
                         
@@ -734,13 +772,76 @@ void core0_main_loop() {
                         }
                       }
                       
+                      // If CAN errors occurred, fail the startup
+                      if (can_errors > 0) {
+                        LOG_ERROR("Motor CAN communication failed: " + String(can_errors) + " motor(s) not responding");
+                        LOG_ERROR("Check: 1) Motors powered on? 2) CAN bus connected? 3) Motor IDs correct?");
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=CAN_TIMEOUT:ERRORS=" + String(can_errors));
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      
                       if (!motors_ok) {
                         Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=MOTOR_ERROR");
                         LOG_ERROR("Startup sequence failed: motor access error");
                         handled_on_core0 = true;
                         break;
                       }
-                      LOG_INFO("Motor access verified");
+                      LOG_INFO("Motor access verified - all motors responding");
+                      
+                      // SAFETY CHECK 4: Verify joint positions are within physical limits
+                      // This prevents starting recalc when the joint is in an unsafe position
+                      LOG_INFO("Checking joint position limits...");
+                      bool positions_ok = true;
+                      const float POSITION_MARGIN = 5.0f;  // Allow 5° outside physical limits (warning)
+                      const float POSITION_HARD_MARGIN = 15.0f;  // Beyond 15° is hard error
+                      
+                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                        float current_angle = shared_dof_angles.angles[dof];
+                        float phys_min = active_joint_controller->getConfig().dofs[dof].limits.min_angle;
+                        float phys_max = active_joint_controller->getConfig().dofs[dof].limits.max_angle;
+                        
+                        // Check if position is way outside limits (hard error)
+                        if (current_angle < (phys_min - POSITION_HARD_MARGIN) || 
+                            current_angle > (phys_max + POSITION_HARD_MARGIN)) {
+                          LOG_ERROR("DOF " + String(dof) + " position " + String(current_angle, 1) + 
+                                   "° is FAR outside physical limits [" + String(phys_min, 1) + 
+                                   ", " + String(phys_max, 1) + "]");
+                          positions_ok = false;
+                          break;
+                        }
+                        
+                        // Check if position is slightly outside limits (warning, but continue)
+                        if (current_angle < (phys_min - POSITION_MARGIN) || 
+                            current_angle > (phys_max + POSITION_MARGIN)) {
+                          LOG_WARN("DOF " + String(dof) + " position " + String(current_angle, 1) + 
+                                  "° is outside physical limits [" + String(phys_min, 1) + 
+                                  ", " + String(phys_max, 1) + "] - proceeding with caution");
+                        } else if (current_angle < phys_min || current_angle > phys_max) {
+                          LOG_INFO("DOF " + String(dof) + " at " + String(current_angle, 1) + 
+                                  "° (slightly outside limits, acceptable)");
+                        } else {
+                          LOG_INFO("DOF " + String(dof) + " at " + String(current_angle, 1) + 
+                                  "° (within limits [" + String(phys_min, 1) + ", " + String(phys_max, 1) + "])");
+                        }
+                      }
+                      
+                      if (!positions_ok) {
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
+                        LOG_ERROR("Startup sequence failed: joint position too far outside limits");
+                        LOG_ERROR("Manually move joint to safe position before retrying");
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      LOG_INFO("Position limits verified");
+                      Serial.println("EVT:STARTUP_POSITIONS_OK(" + String(ACTIVE_JOINT) + ")");
+                      
+                      // NOTE: Tendon tension will be checked inside recalculateMotorOffsets
+                      // If tendons are slack, it will log a warning but continue
+                      // The tension check applies pretension torque and verifies:
+                      // - Displacement 0.1°-10° indicates proper tension
+                      // - <0.1° means too stiff (possibly mechanical binding)
+                      // - >10° means too loose (tendons may be slack)
                       
                       // Check global timeout before starting main sequence
                       if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
@@ -802,6 +903,10 @@ void core0_main_loop() {
                         Serial.println("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
                         LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — system ready for waypoints");
                       }
+                      
+                      // Re-enable Host CAN polling now that startup sequence is complete
+                      suspend_host_can_polling = false;
+                      LOG_INFO("Host CAN polling resumed");
                       
                       handled_on_core0 = true;
                       break;

@@ -110,6 +110,11 @@ extern volatile bool flash_operation_in_progress;
 // Core1 sets this during movement execution to pause Serial streaming on Core0
 extern volatile bool movement_in_progress;
 
+// Host CAN polling suspend flag
+// Set by Core0 during critical SPI operations (motor access, recalc) to prevent
+// SPI bus conflicts with Host CAN on the shared SPI1 bus
+extern volatile bool suspend_host_can_polling;
+
 // System settings (loaded from flash at boot)
 extern SystemSettingsData system_settings;
 extern bool system_settings_loaded;

@@ -879,65 +879,136 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   LOG_INFO("Linear equations available for DOF " + String(dof_index) + " - offset recalculation enabled");
 
   // Apply pretension to eliminate tendon slack
+  // Uses progressive tensioning: if tendons are slack, gradually increase torque
   LOG_INFO("Applying pretension for DOF " + String(dof_index));
 
-  // First read current angles without torque
-  float initial_agonist_angle    = agonist_motor->getMultiAngleSync(false).angle;
-  float initial_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
-
-  // Apply opposite torque to tension the system
-  // NEW: Check if inversion logic is requested
+  // Check if inversion logic is requested
   bool invert_logic = config.dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
-  float effective_agonist_torque = invert_logic ? pretension_torque : -pretension_torque;
-  float effective_antagonist_torque = invert_logic ? -pretension_torque : pretension_torque;
-  
-  agonist_motor->setTorque(effective_agonist_torque);
-  antagonist_motor->setTorque(effective_antagonist_torque);
-
   if (invert_logic) {
       LOG_INFO("Using INVERTED pretension logic for DOF " + String(dof_index));
   }
 
-  // Brief wait to allow system to react
-  sleep_ms(100);
+  const float MIN_TENSION_DISPLACEMENT = 0.1f;  // Minimum displacement indicating tension (degrees)
+  const float MAX_TENSION_DISPLACEMENT = 10.0f; // Maximum displacement indicating tendons too loose (degrees)
+  const int MAX_TENSION_ATTEMPTS = 3;           // Maximum attempts to achieve proper tension
+  const float TORQUE_INCREMENT_FACTOR = 1.5f;   // Multiply torque by this factor each attempt
+  const float MAX_TORQUE_MULTIPLIER = 3.0f;     // Maximum torque = initial * this (safety limit)
+  
+  float current_torque = pretension_torque;
+  float max_allowed_torque = pretension_torque * MAX_TORQUE_MULTIPLIER;
+  bool tension_ok = false;
+  int tension_attempt = 0;
+  
+  float agonist_displacement = 0.0f;
+  float antagonist_displacement = 0.0f;
+  
+  // Progressive tensioning loop
+  while (!tension_ok && tension_attempt < MAX_TENSION_ATTEMPTS) {
+    tension_attempt++;
+    
+    LOG_INFO("Tension attempt " + String(tension_attempt) + "/" + String(MAX_TENSION_ATTEMPTS) + 
+             " with torque=" + String((int)current_torque));
+    
+    // First read current angles without torque (or with previous torque on retry)
+    float initial_agonist_angle    = agonist_motor->getMultiAngleSync(false).angle;
+    float initial_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
 
-  // Read angles under tension
-  float tensioned_agonist_angle    = agonist_motor->getMultiAngleSync(false).angle;
-  float tensioned_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
+    // Apply opposite torque to tension the system
+    float effective_agonist_torque = invert_logic ? current_torque : -current_torque;
+    float effective_antagonist_torque = invert_logic ? -current_torque : current_torque;
+    
+    agonist_motor->setTorque(effective_agonist_torque);
+    antagonist_motor->setTorque(effective_antagonist_torque);
 
-  // Calculate displacement under tension
-  float agonist_displacement    = fabs(tensioned_agonist_angle - initial_agonist_angle);
-  float antagonist_displacement = fabs(tensioned_antagonist_angle - initial_antagonist_angle);
+    // Wait for system to react (longer on retries to allow slack to be taken up)
+    sleep_ms(100 + (tension_attempt - 1) * 50);
 
-  const float MIN_TENSION_DISPLACEMENT = 0.1f; // Minimum displacement indicating tension (degrees)
-  const float MAX_TENSION_DISPLACEMENT =
-      10.0f; // Maximum displacement indicating tendons too loose (degrees)
+    // Read angles under tension
+    float tensioned_agonist_angle    = agonist_motor->getMultiAngleSync(false).angle;
+    float tensioned_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
 
-  // Verify that there is correct tension
-  bool tension_ok = (agonist_displacement >= MIN_TENSION_DISPLACEMENT &&
-                     agonist_displacement <= MAX_TENSION_DISPLACEMENT &&
-                     antagonist_displacement >= MIN_TENSION_DISPLACEMENT &&
-                     antagonist_displacement <= MAX_TENSION_DISPLACEMENT);
+    // Calculate displacement under tension
+    agonist_displacement    = fabs(tensioned_agonist_angle - initial_agonist_angle);
+    antagonist_displacement = fabs(tensioned_antagonist_angle - initial_antagonist_angle);
 
-  if (!tension_ok) {
-    LOG_WARN("Tendon tension not optimal for DOF " + String(dof_index));
-    LOG_DEBUG(String("Agonist displacement: ") + String(agonist_displacement) +
-              (agonist_displacement < MIN_TENSION_DISPLACEMENT
-                   ? " (too stiff)"
-                   : (agonist_displacement > MAX_TENSION_DISPLACEMENT ? " (too loose)" :
-                                                                      " (ok)")));
-    LOG_DEBUG(String("Antagonist displacement: ") + String(antagonist_displacement) +
-              (antagonist_displacement < MIN_TENSION_DISPLACEMENT
-                   ? " (too stiff)"
-                   : (antagonist_displacement > MAX_TENSION_DISPLACEMENT ? " (too loose)" :
-                                                                         " (ok)")));
-    LOG_WARN("Continuing calibration; results may be suboptimal.");
-  } else {
-    LOG_INFO("Tendon tension optimal.");
+    // Check if both motors show proper tension
+    bool agonist_tensioned = (agonist_displacement >= MIN_TENSION_DISPLACEMENT &&
+                              agonist_displacement <= MAX_TENSION_DISPLACEMENT);
+    bool antagonist_tensioned = (antagonist_displacement >= MIN_TENSION_DISPLACEMENT &&
+                                 antagonist_displacement <= MAX_TENSION_DISPLACEMENT);
+    
+    tension_ok = agonist_tensioned && antagonist_tensioned;
+    
+    // Log detailed status
+    LOG_DEBUG(String("Agonist displacement: ") + String(agonist_displacement, 2) + "°" +
+              (agonist_displacement < MIN_TENSION_DISPLACEMENT ? " (too stiff)" :
+               (agonist_displacement > MAX_TENSION_DISPLACEMENT ? " (too loose)" : " (OK)")));
+    LOG_DEBUG(String("Antagonist displacement: ") + String(antagonist_displacement, 2) + "°" +
+              (antagonist_displacement < MIN_TENSION_DISPLACEMENT ? " (too stiff)" :
+               (antagonist_displacement > MAX_TENSION_DISPLACEMENT ? " (too loose)" : " (OK)")));
+    
+    if (!tension_ok && tension_attempt < MAX_TENSION_ATTEMPTS) {
+      // Check if tendons are too loose (not too stiff - can't fix stiff)
+      bool agonist_loose = agonist_displacement > MAX_TENSION_DISPLACEMENT;
+      bool antagonist_loose = antagonist_displacement > MAX_TENSION_DISPLACEMENT;
+      
+      if (agonist_loose || antagonist_loose) {
+        // Increase torque for next attempt
+        float new_torque = current_torque * TORQUE_INCREMENT_FACTOR;
+        if (new_torque > max_allowed_torque) {
+          new_torque = max_allowed_torque;
+          LOG_WARN("Torque limited to max allowed: " + String((int)max_allowed_torque));
+        }
+        
+        if (new_torque > current_torque) {
+          current_torque = new_torque;
+          LOG_INFO("Tendons loose - increasing torque to " + String((int)current_torque) + " for next attempt");
+        } else {
+          LOG_WARN("Already at max torque, cannot increase further");
+          break;  // No point in retrying at same torque
+        }
+      } else {
+        // Both too stiff - increasing torque won't help
+        LOG_WARN("Tendons appear too stiff - cannot improve with more torque");
+        break;
+      }
+    }
   }
+  
+  // Final verdict on tension
+  if (!tension_ok) {
+    bool is_too_loose = (agonist_displacement > MAX_TENSION_DISPLACEMENT || 
+                         antagonist_displacement > MAX_TENSION_DISPLACEMENT);
+    
+    if (is_too_loose) {
+      LOG_ERROR("Tendon tension FAILED for DOF " + String(dof_index) + 
+               " after " + String(tension_attempt) + " attempts");
+      LOG_ERROR("Tendons may be disconnected or severely slack");
+      LOG_ERROR("Check tendon connections before retrying");
+      stopDofMotors(dof_index);
+      return false;  // FAIL - tendons too loose even with max torque
+    } else {
+      // Too stiff - this is unusual but not necessarily fatal
+      LOG_WARN("Tendon tension suboptimal for DOF " + String(dof_index) + " (too stiff)");
+      LOG_WARN("Continuing calibration; results may be suboptimal");
+      // Don't fail - stiff tendons might just mean the system is already tensioned
+    }
+  } else {
+    LOG_INFO("Tendon tension achieved after " + String(tension_attempt) + " attempt(s)");
+  }
+  
+  // Store the effective torque for the rest of the calibration
+  float effective_agonist_torque = invert_logic ? current_torque : -current_torque;
+  float effective_antagonist_torque = invert_logic ? -current_torque : current_torque;
 
-  // Continue with full pretension
-  sleep_ms(pretension_duration_ms - 100); // Subtract the 100 ms already elapsed
+  // Continue with full pretension for the remaining duration
+  // Tensioning loop may have taken: ~100-200ms per attempt
+  // Ensure we hold pretension for at least the specified duration
+  int elapsed_tension_ms = tension_attempt * 150;  // Approximate time spent in tension loop
+  int remaining_pretension_ms = pretension_duration_ms - elapsed_tension_ms;
+  if (remaining_pretension_ms > 0) {
+    sleep_ms(remaining_pretension_ms);
+  }
 
   // FIX: Maintain FULL pretension torque during measurement.
   // Previously we reduced to (pretension_torque / 2), but this caused heavy joints 
@@ -945,30 +1016,80 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   agonist_motor->setTorque(effective_agonist_torque);
   antagonist_motor->setTorque(effective_antagonist_torque);
   
-  sleep_ms(300); // Increased pause to ensure absolute stability before reading
-
-  // Verify that position is stable (no continuous movement)
-  float stability_check_agonist    = agonist_motor->getMultiAngleSync(false).angle;
-  float stability_check_antagonist = antagonist_motor->getMultiAngleSync(false).angle;
-
-  sleep_ms(100); // Wait a brief moment
-
-  float stability_check_agonist2    = agonist_motor->getMultiAngleSync(false).angle;
-  float stability_check_antagonist2 = antagonist_motor->getMultiAngleSync(false).angle;
-
-  float stability_agonist    = fabs(stability_check_agonist2 - stability_check_agonist);
-  float stability_antagonist = fabs(stability_check_antagonist2 - stability_check_antagonist);
-
-  const float STABILITY_THRESHOLD = 2.0f; // Threshold to consider stable (degrees)
-
-  bool is_stable =
-      (stability_agonist < STABILITY_THRESHOLD && stability_antagonist < STABILITY_THRESHOLD);
+  // === CONVERGENCE-BASED STABILITY CHECK ===
+  // Instead of fixed delay, wait until motors STOP MOVING (or timeout).
+  // This handles slack tendon recovery where motors need time to "wind up" slack.
+  // 
+  // Algorithm:
+  // 1. Poll motor positions every POLL_INTERVAL_MS
+  // 2. If movement < STABILITY_THRESHOLD for STABLE_READINGS_REQUIRED consecutive readings → stable
+  // 3. If MAX_CONVERGENCE_TIME_MS exceeded → fail
+  
+  const float STABILITY_THRESHOLD = 2.0f;      // Max degrees of movement to consider "stable"
+  const int POLL_INTERVAL_MS = 100;            // How often to check position
+  const int STABLE_READINGS_REQUIRED = 3;      // Need N consecutive stable readings
+  const int MAX_CONVERGENCE_TIME_MS = 5000;    // Maximum wait time (5 seconds for slack recovery)
+  const int MIN_INITIAL_WAIT_MS = 200;         // Minimum initial wait before first check
+  
+  sleep_ms(MIN_INITIAL_WAIT_MS);
+  
+  float prev_agonist = agonist_motor->getMultiAngleSync(false).angle;
+  float prev_antagonist = antagonist_motor->getMultiAngleSync(false).angle;
+  
+  int stable_count = 0;
+  int total_wait_ms = MIN_INITIAL_WAIT_MS;
+  float stability_agonist = 0;
+  float stability_antagonist = 0;
+  bool is_stable = false;
+  
+  LOG_INFO("Waiting for system convergence (max " + String(MAX_CONVERGENCE_TIME_MS) + "ms)...");
+  
+  while (total_wait_ms < MAX_CONVERGENCE_TIME_MS) {
+    sleep_ms(POLL_INTERVAL_MS);
+    total_wait_ms += POLL_INTERVAL_MS;
+    
+    float curr_agonist = agonist_motor->getMultiAngleSync(false).angle;
+    float curr_antagonist = antagonist_motor->getMultiAngleSync(false).angle;
+    
+    stability_agonist = fabs(curr_agonist - prev_agonist);
+    stability_antagonist = fabs(curr_antagonist - prev_antagonist);
+    
+    if (stability_agonist < STABILITY_THRESHOLD && stability_antagonist < STABILITY_THRESHOLD) {
+      stable_count++;
+      if (stable_count >= STABLE_READINGS_REQUIRED) {
+        is_stable = true;
+        LOG_INFO("System converged after " + String(total_wait_ms) + "ms (" + 
+                 String(stable_count) + " stable readings)");
+        break;
+      }
+    } else {
+      // Reset counter - system still moving
+      if (stable_count > 0) {
+        LOG_DEBUG("Convergence reset: agon=" + String(stability_agonist, 1) + 
+                  "° antag=" + String(stability_antagonist, 1) + "°");
+      }
+      stable_count = 0;
+    }
+    
+    prev_agonist = curr_agonist;
+    prev_antagonist = curr_antagonist;
+    
+    // Log progress every second for slack recovery visibility
+    if (total_wait_ms % 1000 == 0 && total_wait_ms > 0) {
+      LOG_INFO("Still converging at " + String(total_wait_ms) + "ms: agon_move=" + 
+               String(stability_agonist, 1) + "° antag_move=" + String(stability_antagonist, 1) + "°");
+    }
+  }
 
   if (!is_stable) {
-    LOG_WARN("System not stable under tension for DOF " + String(dof_index));
-    LOG_DEBUG(String("Agonist movement: ") + String(stability_agonist));
-    LOG_DEBUG(String("Antagonist movement: ") + String(stability_antagonist));
-    LOG_ERROR("Calibration failed.");
+    LOG_WARN("System not stable under tension for DOF " + String(dof_index) + 
+             " after " + String(total_wait_ms) + "ms");
+    LOG_DEBUG(String("Final agonist movement: ") + String(stability_agonist));
+    LOG_DEBUG(String("Final antagonist movement: ") + String(stability_antagonist));
+    LOG_ERROR("Calibration failed - system did not converge. Possible causes:");
+    LOG_ERROR("  - Tendons extremely slack (try again)");
+    LOG_ERROR("  - Mechanical obstruction");
+    LOG_ERROR("  - Motor communication issues");
     stopDofMotors(dof_index);
     return false;
   } else {
