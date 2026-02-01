@@ -270,6 +270,23 @@ class SerialHandler:
                     }, namespace="/movement")
             except (IndexError, ValueError) as e:
                 logger.warning(f"Failed to parse HOLDING_TARGET message: {line}, error: {e}")
+        elif line.startswith("STALL_ABORT:"):
+            # Parse stall abort message: STALL_ABORT:DOF=X:ANGLE=Y
+            # This is sent when trajectory is aborted due to detected stall during MOVING
+            self.status_message.append(f"⚠️ {line}")
+            try:
+                parts = line.split(":")
+                dof = int(parts[1].split("=")[1])
+                angle = float(parts[2].split("=")[1])
+                logger.warning(f"⚠️ DOF {dof} STALL ABORT at {angle:.2f}° - trajectory aborted")
+                # Emit SocketIO event for UI to stop active tests
+                if self.socketio:
+                    self.socketio.emit("stall_abort", {
+                        "dof": dof,
+                        "angle": angle
+                    }, namespace="/movement")
+            except (IndexError, ValueError) as e:
+                logger.warning(f"Failed to parse STALL_ABORT message: {line}, error: {e}")
         elif line.strip():  # Messages without EVT: prefix are only logged
             logger.info(f"Received non-EVT message (logged only): {line}")
             # Add to status messages for UI anyway, but with distinctive prefix

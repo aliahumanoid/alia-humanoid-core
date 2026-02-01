@@ -175,8 +175,8 @@ volatile int active_buffer                = 0;
 volatile bool buffer_ready[2]             = {false, false};
 volatile uint8_t pending_command_type     = 0;
 
-// Separate emergency flag for extra safety
-volatile bool emergency_stop_requested = false;
+// Separate emergency flag for extra safety (atomic for cross-core access)
+std::atomic<bool> emergency_stop_requested{false};
 
 // Smooth transition flag
 volatile bool smooth_transition_active = false;

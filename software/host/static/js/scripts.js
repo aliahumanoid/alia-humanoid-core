@@ -343,6 +343,15 @@ $(document).ready(function() {
         }
     });
 
+    // Listener for stall abort events (trajectory aborted due to obstacle/stall)
+    socket.on('stall_abort', function(data) {
+        console.warn('Stall abort received:', data);
+        appendStatusMessage(`⚠️ STALL ABORT: DOF ${data.dof} at ${data.angle.toFixed(2)}° - trajectory aborted`);
+        
+        // Abort all active trajectories/tests on the host side
+        abortAllTrajectories('Stall detected on DOF ' + data.dof);
+    });
+
     // Listener for PID diagnostics data (target/error)
     // Temporary storage for combining pid_diag and pid_torque into single records
     let pendingPidRecord = null;
@@ -4874,6 +4883,59 @@ function resetOscillationTest() {
     
     sendOscTestWaypoint(dof, center, 500);
     appendStatusMessage(`🔄 Reset to center: ${center}°`);
+}
+
+/**
+ * Global function to abort all active trajectory tests
+ * Called when firmware reports stall or other critical events
+ * @param {string} reason - Reason for abort (shown in UI)
+ */
+function abortAllTrajectories(reason = 'Unknown') {
+    console.warn('Aborting all trajectories:', reason);
+    
+    // Stop oscillation test if active
+    if (oscTestActive) {
+        oscTestActive = false;
+        if (oscTestTimer) {
+            clearTimeout(oscTestTimer);
+            oscTestTimer = null;
+        }
+        $('#oscTestStartBtn').prop('disabled', false);
+        $('#oscTestStopBtn').prop('disabled', true);
+        updateOscTestStatus(`⚠️ Aborted: ${reason}`);
+    }
+    
+    // Stop sinusoidal trajectory test if running
+    if (typeof sinusoidalTestRunning !== 'undefined' && sinusoidalTestRunning) {
+        sinusoidalTestRunning = false;
+        $('#startSinusoidalTest').prop('disabled', false);
+        $('#stopSinusoidalTest').prop('disabled', true);
+    }
+    
+    // Stop PID diagnostic oscillation if active
+    if (typeof pidDiagOscActive !== 'undefined' && pidDiagOscActive) {
+        pidDiagOscActive = false;
+        if (typeof pidDiagOscTimer !== 'undefined' && pidDiagOscTimer) {
+            clearTimeout(pidDiagOscTimer);
+            pidDiagOscTimer = null;
+        }
+        $('#pidOscStartBtn').prop('disabled', false);
+        $('#pidOscStopBtn').prop('disabled', true);
+    }
+    
+    // Send STOP command to firmware for safety
+    $.ajax({
+        url: '/commands/stop',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({})
+    }).done(function() {
+        console.log('Stop command sent after abort');
+    }).fail(function(xhr) {
+        console.error('Failed to send stop command:', xhr.responseJSON);
+    });
+    
+    appendStatusMessage(`⚠️ All trajectories aborted: ${reason}`);
 }
 
 /**

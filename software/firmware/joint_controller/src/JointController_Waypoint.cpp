@@ -146,13 +146,17 @@ bool JointController::executeWaypointMovement() {
       continue; // Skip this DOF entirely
     }
     
-    // === RESET PID STATE when transitioning from IDLE to MOVING ===
-    // Only reset when starting a NEW sequence (from IDLE), not when resuming from HOLDING
-    // This prevents integral windup from previous sequences while preserving
-    // the integral compensation during HOLDING (needed for gravity/friction)
+    // === RESET PID STATE when transitioning to MOVING ===
+    // Reset on IDLE → MOVING (new sequence) and HOLDING → MOVING (resuming after hold)
+    // This ensures clean state for new movements and prevents accumulated integral
+    // or stale CAN errors from affecting the new trajectory
     bool just_started_from_idle = (prev_dof_state[dof] == WaypointState::IDLE) &&
                                    (dof_state == WaypointState::MOVING);
-    if (pid_reset_needed[dof] && just_started_from_idle) {
+    bool just_started_from_holding = (prev_dof_state[dof] == WaypointState::HOLDING) &&
+                                      (dof_state == WaypointState::MOVING);
+    bool should_reset = pid_reset_needed[dof] && (just_started_from_idle || just_started_from_holding);
+    
+    if (should_reset) {
       // Reset outer loop PID controller (handles integral, derivative, and filter state)
       resetOuterPID(dof);
       delta_theta[dof] = 0.0f;
@@ -162,7 +166,8 @@ bool JointController::executeWaypointMovement() {
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
 
-      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (new sequence)");
+      const char* from_state = just_started_from_idle ? "IDLE" : "HOLDING";
+      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (" + from_state + " → MOVING)");
     }
     
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
@@ -295,12 +300,16 @@ bool JointController::executeWaypointMovement() {
       float error = q_des - q_curr;
       float abs_error = fabs(error);
 
-      // Filter actual velocity (deg/s)
-      float actual_velocity = shared_dof_angles.velocities[dof];
-      uint8_t samples = velocity_filter_samples;
-      if (samples < 1) samples = 1;
-      float alpha = 1.0f / (float)samples;
-      velocity_filtered[dof] = (1.0f - alpha) * velocity_filtered[dof] + alpha * actual_velocity;
+      // Filter actual velocity (deg/s) - only update if encoder reading is valid
+      // If invalid, keep previous filtered value (graceful degradation)
+      if (shared_dof_angles.valid[dof]) {
+        float actual_velocity = shared_dof_angles.velocities[dof];
+        uint8_t samples = velocity_filter_samples;
+        if (samples < 1) samples = 1;
+        float alpha = 1.0f / (float)samples;
+        velocity_filtered[dof] = (1.0f - alpha) * velocity_filtered[dof] + alpha * actual_velocity;
+      }
+      // Note: if invalid, velocity_filtered[dof] retains its previous value
 
       bool expected_holding = fabs(expected_velocity_deg_s) <= expected_velocity_deadband_deg_s;
       bool compliance_should_activate = false;
@@ -367,6 +376,10 @@ bool JointController::executeWaypointMovement() {
 
             LOG_INFO("[Compliance] DOF " + String(dof) + 
                      " STALL->HOLDING: trajectory aborted, holding at " + String(q_curr, 2) + "deg");
+            
+            // Notify host that trajectory was aborted due to stall
+            // Host should stop sending waypoints and handle the situation
+            Serial.println("STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
           }
         }
       } else {
@@ -503,15 +516,16 @@ bool JointController::executeWaypointMovement() {
       
       // Determine if we should check safety:
       // - Always check joint limits in MOVING mode (every outer loop cycle = 100 Hz)
-      // - Check periodically in HOLDING mode (every 20 cycles = ~200ms at 100Hz)
+      // - Check periodically in HOLDING mode (every 10 cycles = ~100ms at 100Hz)
       // NOTE: We do NOT check immediately when entering HOLDING because motors may still be settling
-      bool should_check_safety = has_waypoints || (is_holding && safety_check_counter >= 20);
+      // Reduced from 20 cycles (200ms) to 10 cycles (100ms) for faster detection during manual push
+      bool should_check_safety = has_waypoints || (is_holding && safety_check_counter >= 10);
       
       if (should_check_safety) {
         String safety_message;
         // Check motors (tendon breakage) only in HOLDING mode periodically
         // NOT immediately when entering HOLDING - motors need time to settle
-        bool check_motors = is_holding && (safety_check_counter >= 20);
+        bool check_motors = is_holding && (safety_check_counter >= 10);
         
         // NOTE: Debug log for periodic safety check was removed here because
         // String concatenation + Serial.print was causing ~2ms overhead per call,

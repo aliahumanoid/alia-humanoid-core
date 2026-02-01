@@ -22,10 +22,8 @@
 #include "main_common.h"  // For shared_dof_angles
 
 // External variables for inter-core communication
-extern volatile bool emergency_stop_requested;
-extern volatile bool buffer_ready[2];
-extern volatile int active_buffer;
-extern volatile uint8_t pending_command_type;
+// Note: emergency_stop_requested, buffer_ready, active_buffer, pending_command_type
+// are declared in main_common.h (included above)
 
 // ============================================================================
 // AUTOMATIC CALIBRATION (AUTO-MAPPING)

@@ -28,6 +28,7 @@
 #include "pico/multicore.h"
 #include "version.h"
 #include <Arduino.h>
+#include <atomic>
 #include <SPI.h>
 #include <mcp_can.h>
 
@@ -576,8 +577,8 @@ extern volatile int active_buffer;
 extern volatile bool buffer_ready[2];
 extern volatile uint8_t pending_command_type;
 
-// Separate emergency flag for extra safety
-extern volatile bool emergency_stop_requested;
+// Separate emergency flag for extra safety (atomic for cross-core access)
+extern std::atomic<bool> emergency_stop_requested;
 
 // Smooth transition flag
 extern volatile bool smooth_transition_active;

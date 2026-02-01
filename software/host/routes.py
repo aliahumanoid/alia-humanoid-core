@@ -524,6 +524,14 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": "Missing or invalid 'waypoints' array"
             }), 400
 
+        # Enforce hard limit on batch size to prevent buffer overflow
+        # Firmware buffer is 256 waypoints, we limit to 250 with warning
+        MAX_BATCH_SIZE = 250
+        original_count = len(waypoints)
+        if original_count > MAX_BATCH_SIZE:
+            logger.warning(f"Waypoint batch size {original_count} exceeds limit {MAX_BATCH_SIZE}, truncating")
+            waypoints = waypoints[:MAX_BATCH_SIZE]
+
         try:
             # NOTE: Interpolation mode is NOT forced here anymore.
             # The current mode (set by oscillation test or other commands) is used.
@@ -532,10 +540,14 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             # User should set mode via oscillation test or a dedicated control.
             
             result = can_manager.send_waypoint_batch(joint, waypoints)
+            msg = f"Batch of {result['success']}/{result['total']} waypoints sent to {joint}"
+            if original_count > MAX_BATCH_SIZE:
+                msg += f" (truncated from {original_count})"
             return jsonify({
                 "status": "success",
-                "message": f"Batch of {result['success']}/{result['total']} waypoints sent to {joint}",
-                "result": result
+                "message": msg,
+                "result": result,
+                "truncated": original_count > MAX_BATCH_SIZE
             })
         except ValueError as exc:
             return jsonify({

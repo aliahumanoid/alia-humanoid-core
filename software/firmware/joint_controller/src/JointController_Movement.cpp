@@ -27,11 +27,8 @@
 #include "main_common.h"  // For shared_dof_angles
 
 // External variables for inter-core communication
-extern volatile bool emergency_stop_requested;
-extern volatile bool buffer_ready[2];
-extern volatile int active_buffer;
-extern volatile uint8_t pending_command_type;
-extern volatile bool movement_in_progress;
+// Note: emergency_stop_requested, buffer_ready, active_buffer, pending_command_type,
+// movement_in_progress are declared in main_common.h (included above)
 
 // External variables for movement sample logging
 extern queue_t movement_sample_queue;

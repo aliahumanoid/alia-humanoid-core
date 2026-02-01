@@ -24,10 +24,8 @@
 // movement sample logging for debugging and telemetry.
 
 // === EXTERNAL VARIABLES FOR THE NEW COMMUNICATION SYSTEM ===
-extern volatile bool emergency_stop_requested;
-extern volatile bool buffer_ready[2];
-extern volatile int active_buffer;
-extern volatile uint8_t pending_command_type;
+// Note: emergency_stop_requested, buffer_ready, active_buffer, pending_command_type
+// are declared in main_common.h (included above)
 extern queue_t movement_sample_queue;
 extern volatile bool movement_sample_stream_active;
 extern volatile bool movement_sample_stream_done;
