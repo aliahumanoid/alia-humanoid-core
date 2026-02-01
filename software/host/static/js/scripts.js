@@ -2326,10 +2326,8 @@ function sendMultiWaypointSmoothCurve() {
     const waypoints = [];
     const actualDeltaT = totalTimeMs / numPoints;
     
-    // Estimate batch send time for initial offset calculation
-    // Backend will compensate for actual elapsed time, so this is just a buffer
-    const estimatedBatchSendTime = numPoints * 3;  // ~3ms per waypoint
-    const initialOffset = estimatedBatchSendTime + 300; // Buffer before first waypoint arrives
+    // Small fixed lead-in; backend compensates for actual elapsed time
+    const initialOffset = 50;
 
     for (let i = 0; i <= numPoints; i++) {
         const t = i / numPoints; // 0.0 to 1.0
@@ -2410,11 +2408,11 @@ function updateSinusoidStats(rate) {
     updateElement('sinusoidTotalDurationDisplay', totalDurationSeconds);
     updateElement('sinusoidFreqDisplay', freqHz);
     
-    // Warn if buffer might overflow (2000 max)
+    // Warn if buffer might overflow (250 max)
     const bufferWarning = document.getElementById('bufferWarning');
     if (bufferWarning) {
-        if (totalWaypoints > 2000) {
-            bufferWarning.textContent = `⚠️ ${totalWaypoints} pts > 2000 buffer!`;
+        if (totalWaypoints > 250) {
+            bufferWarning.textContent = `⚠️ ${totalWaypoints} pts > 250 buffer!`;
             bufferWarning.style.display = 'inline';
         } else {
             bufferWarning.style.display = 'none';
@@ -2487,11 +2485,8 @@ function sendCanWaypointSequence() {
     appendStatusMessage(`⚙️ Interpolation: LINEAR (sinusoid)`);
 
     // Calculate timing parameters for batch sending
-    // Estimate batch send time for initial offset calculation (~3ms per waypoint)
-    // Backend compensates for actual elapsed time when sending each waypoint
-    const estimatedBatchSendTime = totalWaypoints * 3;
-    // Initial offset must be > batch send time + network latency + processing margin
-    const initialOffset = Math.max(500, estimatedBatchSendTime + 300);
+    // Small fixed lead-in; backend compensates for actual elapsed time
+    const initialOffset = 50;
     
     // Generate waypoints for all active DOFs
     const testSequence = [];
@@ -2527,6 +2522,11 @@ function sendCanWaypointSequence() {
     
     // Calculate delta-t between points for logging (Δt = 1000 / rate)
     const deltaT = Math.round(1000 / waypointRate);
+    
+    // Warn if exceeding firmware buffer (2000 waypoints max per DOF)
+    if (testSequence.length > 2000) {
+        appendStatusMessage(`⚠️ Warning: ${testSequence.length} waypoints exceeds buffer (2000). Reduce rate or cycles.`);
+    }
     
     // Log active DOFs info
     const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
@@ -2655,10 +2655,10 @@ function sendCosineOscillation() {
     
     // Estimate total waypoints for batch timing
     const estimatedTotalWaypoints = Math.round(waypointRate * totalDurationSeconds);
-    const estimatedBatchSendTime = estimatedTotalWaypoints * 3;  // ~3ms per waypoint
-    const initialOffset = Math.max(500, estimatedBatchSendTime + 300);
+    // Small fixed lead-in; backend compensates for actual elapsed time
+    const initialOffset = 50;
     
-    // Warn if exceeding buffer (2000 waypoints max)
+    // Warn if exceeding firmware buffer (2000 waypoints max per DOF)
     if (estimatedTotalWaypoints > 2000) {
         appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds buffer (2000). Reduce rate or cycles.`);
     }
@@ -4848,6 +4848,14 @@ function sendOscTestWaypoint(dof, angle, moveTimeMs) {
  * Stop oscillation test
  */
 function stopOscillationTest(completed = false) {
+    if (!completed) {
+        if (oscTestActive) {
+            // Use centralized abort logic to ensure CAN stop is issued
+            abortAllTrajectories('Oscillation test stopped');
+            return;
+        }
+    }
+
     oscTestActive = false;
     
     if (oscTestTimer) {
@@ -4923,16 +4931,19 @@ function abortAllTrajectories(reason = 'Unknown') {
         $('#pidOscStopBtn').prop('disabled', true);
     }
     
-    // Send STOP command to firmware for safety
+    // CAN-first emergency stop (future CAN-only runtime)
+    sendCanEmergencyStop();
+
+    // Serial stop fallback for debug (ignore errors if serial is not active)
     $.ajax({
         url: '/commands/stop',
         type: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({})
     }).done(function() {
-        console.log('Stop command sent after abort');
+        console.log('Serial stop command sent after abort');
     }).fail(function(xhr) {
-        console.error('Failed to send stop command:', xhr.responseJSON);
+        console.warn('Serial stop fallback failed:', xhr.responseJSON);
     });
     
     appendStatusMessage(`⚠️ All trajectories aborted: ${reason}`);
@@ -6579,6 +6590,46 @@ async function exportSequenceData() {
         console.error("Error exporting sequence data:", error);
         appendStatusMessage(`❌ Error exporting sequence data: ${error.message || error}`);
         alert("Failed to export sequence data. Check console for details.");
+    }
+}
+
+// ============================================================================
+// Auto-Start Functions
+// ============================================================================
+
+/**
+ * Enable or disable auto-start on boot for the current joint
+ * @param {boolean} enabled - True to enable, false to disable
+ */
+function setAutoStart(enabled) {
+    sendCommand('set-auto-start', { enabled: enabled ? 1 : 0 });
+    appendStatusMessage(`⚙️ Auto-start ${enabled ? 'enabled' : 'disabled'} for ${$("#jointSelect").val()}`);
+}
+
+/**
+ * Query current auto-start setting from firmware
+ * The response will be handled by the serial message parser
+ */
+function getAutoStart() {
+    sendCommand('get-auto-start');
+    appendStatusMessage(`🔍 Querying auto-start status...`);
+}
+
+/**
+ * Handle auto-start response from firmware
+ * Called when RSP:AUTO_START message is received
+ * @param {string} message - Response message from firmware
+ */
+function handleAutoStartResponse(message) {
+    // Parse: RSP:AUTO_START(JOINT):ENABLED=0:TORQUE=0.0:DURATION=0
+    const enabledMatch = message.match(/ENABLED=(\d+)/);
+    if (enabledMatch) {
+        const enabled = parseInt(enabledMatch[1]) !== 0;
+        const checkbox = document.getElementById('autoStartToggle');
+        if (checkbox) {
+            checkbox.checked = enabled;
+        }
+        appendStatusMessage(`⚙️ Auto-start: ${enabled ? 'ENABLED' : 'DISABLED'}`);
     }
 }
 

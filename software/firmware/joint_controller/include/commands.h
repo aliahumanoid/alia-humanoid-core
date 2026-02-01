@@ -33,7 +33,19 @@
 #define CMD_STATUS 2
 #endif
 
-// Reserved: 3-9 for future system commands
+#ifndef CMD_STARTUP_SEQUENCE
+#define CMD_STARTUP_SEQUENCE 3  // Manual startup: recalc_offset all DOFs + enter HOLDING
+#endif
+
+#ifndef CMD_SET_AUTO_START
+#define CMD_SET_AUTO_START 4    // Enable/disable auto-start on boot (persistent)
+#endif
+
+#ifndef CMD_GET_AUTO_START
+#define CMD_GET_AUTO_START 5    // Query current auto-start setting
+#endif
+
+// Reserved: 6-9 for future system commands
 
 // --- Motor Control Commands (10-19) ---
 #ifndef CMD_PRETENSION
@@ -216,6 +228,9 @@
 #define SERIAL_CMD_STOP "STOP"
 #define SERIAL_CMD_STATUS "STATUS"
 #define SERIAL_CMD_CONFIG "CONFIG"
+#define SERIAL_CMD_STARTUP_SEQUENCE "STARTUP_SEQUENCE"
+#define SERIAL_CMD_SET_AUTO_START "SET_AUTO_START"
+#define SERIAL_CMD_GET_AUTO_START "GET_AUTO_START"
 
 // --- Command Strings (Motor Control) ---
 #define SERIAL_CMD_PRETENSION "PRETENSION"
@@ -317,6 +332,12 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_STOP;
   } else if (strcmp(cmd_name, SERIAL_CMD_STATUS) == 0) {
     return CMD_STATUS;
+  } else if (strcmp(cmd_name, SERIAL_CMD_STARTUP_SEQUENCE) == 0) {
+    return CMD_STARTUP_SEQUENCE;
+  } else if (strcmp(cmd_name, SERIAL_CMD_SET_AUTO_START) == 0) {
+    return CMD_SET_AUTO_START;
+  } else if (strcmp(cmd_name, SERIAL_CMD_GET_AUTO_START) == 0) {
+    return CMD_GET_AUTO_START;
   }
   // Motor Control
   else if (strcmp(cmd_name, SERIAL_CMD_PRETENSION) == 0) {

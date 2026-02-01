@@ -13,6 +13,7 @@
  * - Version 2: Legacy DeviceData (deprecated, TX only)
  * - Version 4: PIDOnlyDeviceData (motor PID + outer loop parameters)
  * - Version 5: LinearEquationsDeviceData (calibration equations + limits)
+ * - Version 6: SystemSettingsData (auto-start flag, system preferences)
  * 
  * MULTI-DOF SUPPORT:
  * - MAX_DOFS = 3 (knee=1, ankle=2, hip=3)
@@ -260,6 +261,34 @@ struct LinearEquationsDeviceData {
     uint8_t reserved_bytes[3];            // Padding for alignment
   } dof_equations[MAX_DOFS];              // Equations for each DOF
   uint32_t timestamp;                     // Unix timestamp of last save
+};
+
+/**
+ * @brief Flash structure for system settings (Version 6)
+ * 
+ * Stores persistent system preferences including:
+ * - Auto-start flag: if true, automatically runs recalc_offset and enters HOLDING on boot
+ * - Future expansion: additional system-wide settings
+ * 
+ * When auto_start_enabled is true, the boot sequence:
+ * 1. Loads PID parameters from flash
+ * 2. Loads linear equations from flash
+ * 3. Waits for encoder data to stabilize (safety check)
+ * 4. Runs recalc_offset for all DOFs (pretensions tendons)
+ * 5. Transitions to HOLDING state on current position
+ * 6. System is ready for waypoint commands immediately
+ */
+struct SystemSettingsData {
+  uint32_t magic_number;          // Magic number (0xABCD1234) for validation
+  uint16_t version;               // Structure version (6)
+  uint16_t checksum;              // Data integrity checksum
+  uint8_t joint_type;             // Joint type: JOINT_KNEE, JOINT_ANKLE, JOINT_HIP
+  uint8_t auto_start_enabled;     // Auto-start flag: 0 = disabled, 1 = enabled
+  uint8_t reserved[2];            // Padding for alignment and future use
+  float auto_start_pretension;    // Pretension torque for auto-start (0 = use default)
+  uint16_t auto_start_duration;   // Pretension duration ms for auto-start (0 = use default)
+  uint16_t reserved2;             // Padding
+  uint32_t timestamp;             // Unix timestamp of last save
 };
 
 #endif // GLOBAL_H

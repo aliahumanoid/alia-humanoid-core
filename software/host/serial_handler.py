@@ -206,6 +206,25 @@ class SerialHandler:
                     )
                     return
 
+            # Handle structured EVT messages
+            event_match = re.match(
+                r"^(HOLDING_TARGET|STALL_ABORT):DOF=(\d+):ANGLE=([-+]?\d*\.?\d+)$",
+                actual_message,
+            )
+            if event_match:
+                event_type, dof_str, angle_str = event_match.groups()
+                try:
+                    dof = int(dof_str)
+                    angle = float(angle_str)
+                except ValueError:
+                    logger.warning(f"Failed to parse EVT payload: {actual_message}")
+                    return
+                if event_type == "HOLDING_TARGET":
+                    self._emit_holding_target(dof, angle)
+                else:
+                    self._emit_stall_abort(dof, angle)
+                return
+
             # Proceed with normal message handling (using actual_message without prefix)
             if actual_message.startswith("ACK"):
                 self.status_message.append(actual_message)
@@ -255,43 +274,52 @@ class SerialHandler:
                 logger.info(f"Received RSP message: {line}")
                 self.status_message.append(f"{line}")
         elif line.startswith("HOLDING_TARGET:"):
-            # Parse holding target message: HOLDING_TARGET:DOF=X:ANGLE=Y
-            self.status_message.append(f"🎯 {line}")
-            try:
-                parts = line.split(":")
-                dof = int(parts[1].split("=")[1])
-                angle = float(parts[2].split("=")[1])
-                logger.info(f"🎯 DOF {dof} holding at {angle:.2f}°")
-                # Emit SocketIO event for UI
-                if self.socketio:
-                    self.socketio.emit("holding_target", {
-                        "dof": dof,
-                        "angle": angle
-                    }, namespace="/movement")
-            except (IndexError, ValueError) as e:
-                logger.warning(f"Failed to parse HOLDING_TARGET message: {line}, error: {e}")
+            # Legacy format (no EVT prefix) - keep for backward compatibility
+            match = re.match(r"^HOLDING_TARGET:DOF=(\d+):ANGLE=([-+]?\d*\.?\d+)$", line)
+            if match:
+                dof_str, angle_str = match.groups()
+                try:
+                    self._emit_holding_target(int(dof_str), float(angle_str))
+                except ValueError as e:
+                    logger.warning(f"Failed to parse HOLDING_TARGET message: {line}, error: {e}")
+            else:
+                logger.warning(f"Failed to parse HOLDING_TARGET message: {line}")
         elif line.startswith("STALL_ABORT:"):
-            # Parse stall abort message: STALL_ABORT:DOF=X:ANGLE=Y
-            # This is sent when trajectory is aborted due to detected stall during MOVING
-            self.status_message.append(f"⚠️ {line}")
-            try:
-                parts = line.split(":")
-                dof = int(parts[1].split("=")[1])
-                angle = float(parts[2].split("=")[1])
-                logger.warning(f"⚠️ DOF {dof} STALL ABORT at {angle:.2f}° - trajectory aborted")
-                # Emit SocketIO event for UI to stop active tests
-                if self.socketio:
-                    self.socketio.emit("stall_abort", {
-                        "dof": dof,
-                        "angle": angle
-                    }, namespace="/movement")
-            except (IndexError, ValueError) as e:
-                logger.warning(f"Failed to parse STALL_ABORT message: {line}, error: {e}")
+            # Legacy format (no EVT prefix) - keep for backward compatibility
+            match = re.match(r"^STALL_ABORT:DOF=(\d+):ANGLE=([-+]?\d*\.?\d+)$", line)
+            if match:
+                dof_str, angle_str = match.groups()
+                try:
+                    self._emit_stall_abort(int(dof_str), float(angle_str))
+                except ValueError as e:
+                    logger.warning(f"Failed to parse STALL_ABORT message: {line}, error: {e}")
+            else:
+                logger.warning(f"Failed to parse STALL_ABORT message: {line}")
         elif line.strip():  # Messages without EVT: prefix are only logged
             logger.info(f"Received non-EVT message (logged only): {line}")
             # Add to status messages for UI anyway, but with distinctive prefix
             self.status_message.append(f"{line}")
         # Empty lines are silently ignored
+
+    def _emit_holding_target(self, dof: int, angle: float) -> None:
+        message = f"HOLDING_TARGET:DOF={dof}:ANGLE={angle:.2f}"
+        self.status_message.append(f"🎯 {message}")
+        logger.info(f"🎯 DOF {dof} holding at {angle:.2f}°")
+        if self.socketio:
+            self.socketio.emit("holding_target", {
+                "dof": dof,
+                "angle": angle
+            }, namespace="/movement")
+
+    def _emit_stall_abort(self, dof: int, angle: float) -> None:
+        message = f"STALL_ABORT:DOF={dof}:ANGLE={angle:.2f}"
+        self.status_message.append(f"⚠️ {message}")
+        logger.warning(f"⚠️ DOF {dof} STALL ABORT at {angle:.2f}° - trajectory aborted")
+        if self.socketio:
+            self.socketio.emit("stall_abort", {
+                "dof": dof,
+                "angle": angle
+            }, namespace="/movement")
 
     def handle_mapping_data(self, line: str, ser: serial.Serial) -> None:
         # MAPPING_DATA(total_points,dof_count) protocol

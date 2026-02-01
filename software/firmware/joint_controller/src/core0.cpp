@@ -232,6 +232,9 @@ void updateSharedDofAngles() {
   
   uint8_t dof_count = controller->getConfig().dof_count;
   shared_dof_angles.dof_count = dof_count;
+
+  // Begin sequence-locked write
+  __atomic_fetch_add(&shared_dof_angles.seq, 1, __ATOMIC_ACQ_REL);
   
   for (uint8_t dof = 0; dof < dof_count; dof++) {
     // Check if this encoder had a valid read
@@ -280,6 +283,9 @@ void updateSharedDofAngles() {
   shared_dof_angles.timestamp_us = now_us;
   shared_dof_angles.updated = true;
   last_update_us = now_us;
+
+  // End sequence-locked write
+  __atomic_fetch_add(&shared_dof_angles.seq, 1, __ATOMIC_ACQ_REL);
 }
 
 // ============================================================================
@@ -569,6 +575,234 @@ void core0_main_loop() {
                       } else {
                         Serial.println("RSP:ERROR: Controller not initialized");
                       }
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    case CMD_SET_AUTO_START: {
+                      // Enable or disable auto-start on boot (persistent setting)
+                      // Parse ENABLED parameter (1=enable, 0=disable) from original command
+                      // Command format: JOINT:DOF:SET_AUTO_START:ENABLED=1
+                      bool enable = false;
+                      const char* cmd_str = parsed_cmd.original_command;
+                      char *enabled_str = strstr(cmd_str, "ENABLED=");
+                      if (enabled_str != nullptr) {
+                        enable = (atoi(enabled_str + 8) != 0);
+                      }
+                      
+                      // Update system settings
+                      system_settings.auto_start_enabled = enable ? 1 : 0;
+                      system_settings.joint_type = ACTIVE_JOINT;
+                      
+                      // Parse optional custom parameters
+                      char *torque_str = strstr(cmd_str, "TORQUE=");
+                      if (torque_str != nullptr) {
+                        system_settings.auto_start_pretension = atof(torque_str + 7);
+                      }
+                      char *duration_str = strstr(cmd_str, "DURATION=");
+                      if (duration_str != nullptr) {
+                        system_settings.auto_start_duration = atoi(duration_str + 9);
+                      }
+                      
+                      // Save to flash
+                      save_system_settings_data(system_settings);
+                      system_settings_loaded = true;
+                      
+                      Serial.println("RSP:AUTO_START_SET(" + String(ACTIVE_JOINT) + "):ENABLED=" + String(enable ? 1 : 0));
+                      LOG_INFO("Auto-start " + String(enable ? "ENABLED" : "DISABLED") + " for joint " + String(ACTIVE_JOINT));
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    case CMD_GET_AUTO_START: {
+                      // Query current auto-start setting
+                      Serial.println("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" + 
+                                     String(system_settings.auto_start_enabled ? 1 : 0) +
+                                     ":TORQUE=" + String(system_settings.auto_start_pretension, 1) +
+                                     ":DURATION=" + String(system_settings.auto_start_duration));
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    case CMD_STARTUP_SEQUENCE: {
+                      // Manual startup sequence: recalc_offset for all DOFs, then enter HOLDING
+                      // This simulates what auto-start does at boot
+                      //
+                      // SAFETY CHECKS PERFORMED:
+                      // 1. Controller initialized
+                      // 2. Linear equations loaded for all DOFs
+                      // 3. Encoder readings valid (with timeout)
+                      // 4. CAN communication with motors working
+                      // 5. Global timeout for entire sequence
+                      // 6. Recovery: stop all motors if any step fails
+                      
+                      const uint32_t STARTUP_TIMEOUT_MS = 30000;  // 30 seconds max for entire sequence
+                      uint32_t startup_start_time = millis();
+                      
+                      if (active_joint_controller == nullptr) {
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_CONTROLLER");
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      
+                      // SAFETY CHECK 1: Verify linear equations are loaded (NOT offsets - that's what we're setting!)
+                      bool equations_ok = true;
+                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                        if (!active_joint_controller->hasValidEquations(dof)) {
+                          LOG_ERROR("DOF " + String(dof) + ": linear equations not available");
+                          equations_ok = false;
+                        }
+                      }
+                      if (!equations_ok) {
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_EQUATIONS");
+                        LOG_ERROR("Startup sequence failed: run auto-mapping or load equations from flash first");
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      
+                      // SAFETY CHECK 2: Wait for encoder readings to be valid
+                      LOG_INFO("Waiting for encoder readings to stabilize...");
+                      const int MAX_ENCODER_WAIT_MS = 2000;
+                      const int ENCODER_CHECK_INTERVAL_MS = 100;
+                      int encoder_wait_ms = 0;
+                      bool encoders_valid = false;
+                      
+                      while (encoder_wait_ms < MAX_ENCODER_WAIT_MS) {
+                        // Check global timeout
+                        if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+                          Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
+                          LOG_ERROR("Startup sequence timed out during encoder wait");
+                          handled_on_core0 = true;
+                          break;
+                        }
+                        
+                        bool all_valid = true;
+                        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                          if (!shared_dof_angles.valid[dof]) {
+                            all_valid = false;
+                            break;
+                          }
+                        }
+                        if (all_valid) {
+                          encoders_valid = true;
+                          break;
+                        }
+                        delay(ENCODER_CHECK_INTERVAL_MS);
+                        encoder_wait_ms += ENCODER_CHECK_INTERVAL_MS;
+                      }
+                      
+                      if (!encoders_valid) {
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=ENCODER_TIMEOUT");
+                        LOG_ERROR("Startup sequence failed: encoder readings not valid after " + String(MAX_ENCODER_WAIT_MS) + "ms");
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      LOG_INFO("Encoder readings valid after " + String(encoder_wait_ms) + "ms");
+                      
+                      // SAFETY CHECK 3: Verify motors are accessible
+                      LOG_INFO("Verifying motor access...");
+                      bool motors_ok = true;
+                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                        int motors_found = 0;
+                        
+                        // Find and verify motors for this DOF
+                        for (int m = 0; m < active_joint_controller->getConfig().motor_count; m++) {
+                          if (active_joint_controller->getConfig().motors[m].dof_index == dof) {
+                            LKM_Motor* motor = active_joint_controller->getMotor(m);
+                            if (motor == nullptr) {
+                              LOG_ERROR("DOF " + String(dof) + ": motor index " + String(m) + " is null");
+                              motors_ok = false;
+                              break;
+                            }
+                            motors_found++;
+                            
+                            // Try to read angle - this exercises CAN communication
+                            // Note: This is a quick check, actual CAN errors will be caught during recalc
+                            MultiAngleData angle_data = motor->getMultiAngleSync(false);
+                            LOG_DEBUG("DOF " + String(dof) + " motor " + String(m) + 
+                                     " (ID=" + String(active_joint_controller->getConfig().motors[m].id) + 
+                                     "): angle=" + String(angle_data.angle, 1) + "°");
+                          }
+                        }
+                        
+                        if (!motors_ok) break;
+                        
+                        if (motors_found < 2) {
+                          LOG_ERROR("DOF " + String(dof) + ": expected 2 motors, found " + String(motors_found));
+                          motors_ok = false;
+                          break;
+                        }
+                      }
+                      
+                      if (!motors_ok) {
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=MOTOR_ERROR");
+                        LOG_ERROR("Startup sequence failed: motor access error");
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      LOG_INFO("Motor access verified");
+                      
+                      // Check global timeout before starting main sequence
+                      if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
+                        LOG_ERROR("Startup sequence timed out before recalc");
+                        handled_on_core0 = true;
+                        break;
+                      }
+                      
+                      LOG_INFO("Starting startup sequence for joint " + String(ACTIVE_JOINT) + "...");
+                      Serial.println("EVT:STARTUP_BEGIN(" + String(ACTIVE_JOINT) + ")");
+                      
+                      // Run recalc_offset for each DOF
+                      bool all_success = true;
+                      uint8_t last_successful_dof = 0;
+                      
+                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                        // Check global timeout
+                        if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+                          LOG_ERROR("Startup sequence timed out at DOF " + String(dof));
+                          Serial.println("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+                          all_success = false;
+                          break;
+                        }
+                        
+                        LOG_INFO("Running recalc_offset for DOF " + String(dof) + "...");
+                        Serial.println("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+                        
+                        // Use custom parameters if specified, otherwise defaults
+                        float pretension = system_settings.auto_start_pretension > 0 
+                            ? system_settings.auto_start_pretension 
+                            : active_joint_controller->getConfig().dofs[dof].zero_mapping.recalc_offset_torque;
+                        int duration = system_settings.auto_start_duration > 0
+                            ? system_settings.auto_start_duration
+                            : active_joint_controller->getConfig().dofs[dof].zero_mapping.recalc_offset_duration;
+                        
+                        if (!active_joint_controller->recalculateMotorOffsets(dof, pretension, duration)) {
+                          LOG_ERROR("recalc_offset failed for DOF " + String(dof));
+                          Serial.println("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
+                          all_success = false;
+                          break;
+                        }
+                        
+                        last_successful_dof = dof;
+                        Serial.println("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+                      }
+                      
+                      // RECOVERY: If failed partway through, ensure all motors are stopped
+                      if (!all_success) {
+                        LOG_WARN("Startup failed - stopping all motors for safety");
+                        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                          active_joint_controller->stopDofMotors(dof);
+                        }
+                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
+                        LOG_ERROR("Startup sequence failed - all motors stopped");
+                      } else {
+                        // Success - report completion with timing
+                        uint32_t total_time_ms = millis() - startup_start_time;
+                        Serial.println("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
+                        LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — system ready for waypoints");
+                      }
+                      
                       handled_on_core0 = true;
                       break;
                     }

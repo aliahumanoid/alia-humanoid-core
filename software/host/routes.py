@@ -39,7 +39,8 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
     def handler_or_error(joint: str):
         handler = serial_manager.get_handler_for_joint(joint)
         if handler is None:
-            return None, (
+            return (
+                None,
                 jsonify({
                     "status": "error",
                     "message": f"No serial port associated with joint {joint}.",
@@ -525,8 +526,9 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             }), 400
 
         # Enforce hard limit on batch size to prevent buffer overflow
-        # Firmware buffer is 256 waypoints, we limit to 250 with warning
-        MAX_BATCH_SIZE = 250
+        # Firmware waypoint buffer is 2000 waypoints per DOF (see waypoint_buffer.h)
+        # We use the same limit here; for longer sequences, implement streaming
+        MAX_BATCH_SIZE = 2000
         original_count = len(waypoints)
         if original_count > MAX_BATCH_SIZE:
             logger.warning(f"Waypoint batch size {original_count} exceeds limit {MAX_BATCH_SIZE}, truncating")
@@ -1189,6 +1191,20 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             elif cmd == "recalc-safe-limits":
                 handler.send_new_command(joint, 'ALL', COMMANDS['RECALC_SAFE_LIMITS'])
                 message = "Safe limits recalculation requested"
+            elif cmd == "startup-sequence":
+                # Manual startup sequence: recalc_offset all DOFs + enter HOLDING
+                handler.send_new_command(joint, 'ALL', COMMANDS['STARTUP_SEQUENCE'])
+                message = "Startup sequence initiated (recalc + hold)"
+            elif cmd == "set-auto-start":
+                # Enable or disable auto-start on boot
+                enabled = int(data.get('enabled', 0))
+                # Send command with ENABLED parameter
+                handler.send_new_command(joint, 'ALL', f"{COMMANDS['SET_AUTO_START']}:ENABLED={enabled}")
+                message = f"Auto-start {'enabled' if enabled else 'disabled'}"
+            elif cmd == "get-auto-start":
+                # Query current auto-start setting
+                handler.send_new_command(joint, 'ALL', COMMANDS['GET_AUTO_START'])
+                message = "Auto-start status requested"
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')

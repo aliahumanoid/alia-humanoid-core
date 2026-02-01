@@ -335,16 +335,19 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   float antagonist_start_angles[MAX_DOFS];
   float max_movement_time = 0.0f;
 
+  SharedDofAngles dof_snapshot;
+  readSharedDofAnglesSnapshot(dof_snapshot);
+
   for (int i = 0; i < active_dof_count; i++) {
     int dof_idx = active_dof_indices[i];
     // Use shared_dof_angles (updated by Core0)
-    if (!shared_dof_angles.valid[dof_idx]) {
+    if (!dof_snapshot.valid[dof_idx]) {
       LOG_ERROR("Invalid joint encoder reading for DOF " + String(dof_idx));
       return MovementResult(MOVEMENT_ERROR,
                             "Error: Invalid joint encoder reading for DOF " + String(dof_idx) +
                                 "\n");
     }
-    start_angles[dof_idx] = shared_dof_angles.angles[dof_idx];
+    start_angles[dof_idx] = dof_snapshot.angles[dof_idx];
 
     // Read current motor angles
     float gamma_curr = motor_pairs[i].agonist->getMultiAngleSync().angle;
@@ -576,18 +579,21 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
       // === OUTER LOOP (100 Hz) - JOINT CONTROL ===
       if ((cycle_count - 1) % OUTER_LOOP_DIV == 0) {
 
+        SharedDofAngles dof_snapshot_loop;
+        readSharedDofAnglesSnapshot(dof_snapshot_loop);
+
         for (int i = 0; i < active_dof_count; i++) {
           int dof_idx = active_dof_indices[i];
 
           // Read current joint angle from shared state (updated by Core0)
-          if (!shared_dof_angles.valid[dof_idx]) {
+          if (!dof_snapshot_loop.valid[dof_idx]) {
             stopAllMotors();
             Serial.println("ERROR: Invalid joint encoder reading for DOF " + String(dof_idx));
             return MovementResult(MOVEMENT_ERROR,
                                   "Error: Invalid joint encoder reading for DOF " +
                                       String(dof_idx) + "\n");
           }
-          q_curr[dof_idx] = shared_dof_angles.angles[dof_idx];
+          q_curr[dof_idx] = dof_snapshot_loop.angles[dof_idx];
 
           // Interpolate desired angle as AVERAGE of agonist and antagonist trajectories
           // (joint angle - alpha_path). Both converge to the same target, so
@@ -818,16 +824,19 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         // Outer loop to update delta_theta
         if ((cycle_count - 1) % OUTER_LOOP_DIV == 0) {
 
+          SharedDofAngles dof_snapshot_hold;
+          readSharedDofAnglesSnapshot(dof_snapshot_hold);
+
           for (int i = 0; i < active_dof_count; i++) {
             int dof_idx = active_dof_indices[i];
 
             // Use shared_dof_angles (updated by Core0)
-            if (!shared_dof_angles.valid[dof_idx]) {
+            if (!dof_snapshot_hold.valid[dof_idx]) {
               stopAllMotors();
               Serial.println("ERROR: Encoder issue during hold");
               return MovementResult(MOVEMENT_ERROR, "Error: Encoder issue during hold\n");
             }
-            q_curr[dof_idx] = shared_dof_angles.angles[dof_idx];
+            q_curr[dof_idx] = dof_snapshot_hold.angles[dof_idx];
 
             // PERIODIC SAFETY CHECKS: run every 100 cycles to reduce overhead
             // check_motors=true enables motor range check via cache (includes tendon breakage warning)
@@ -1069,11 +1078,14 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   if (verbose) {
     LOG_INFO("\n=== CASCADE CONTROL RESULTS ===");
 
+    SharedDofAngles dof_snapshot_final;
+    readSharedDofAnglesSnapshot(dof_snapshot_final);
+
     for (int i = 0; i < active_dof_count; i++) {
       int dof_idx = active_dof_indices[i];
       // Use shared_dof_angles (updated by Core0)
-      if (shared_dof_angles.valid[dof_idx]) {
-        float final_angle = shared_dof_angles.angles[dof_idx];
+      if (dof_snapshot_final.valid[dof_idx]) {
+        float final_angle = dof_snapshot_final.angles[dof_idx];
         float error = fabs(final_angle - local_target_angles[dof_idx]);
         LOG_INFO("DOF " + String(dof_idx) + ": target=" + String(local_target_angles[dof_idx], 2) +
                  " deg, final=" + String(final_angle, 2) + " deg, error=" + String(error, 3) +

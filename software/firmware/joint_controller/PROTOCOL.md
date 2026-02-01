@@ -44,6 +44,8 @@ Only `EVT:` lines are intended for host parsing. Common events include:
 - `EVT:ENCODER_DATA:DOF=<d>:ANGLE=<deg>:COUNT=<ticks>` (or `EVT:ENCODER_DATA:ERROR=...`)
 - `EVT:ANGLE(<JOINT_NAME>,<DOF>,<angle_deg>)` (during measurements)
 - `EVT:MAPPING_DATA(<size>,<dof_count>)` (followed by data points)
+- `EVT:HOLDING_TARGET:DOF=<dof>:ANGLE=<deg>` (controller entered HOLDING and target angle is fixed)
+- `EVT:STALL_ABORT:DOF=<dof>:ANGLE=<deg>` (trajectory aborted due to stall during MOVING)
 - `EVT:FW:VERSION <version>`, `EVT:PROTO <version>`, `EVT:BUILD <sha> <date>`, `EVT:READY` (on startup)
 
 Notes

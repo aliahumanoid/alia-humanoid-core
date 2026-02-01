@@ -120,6 +120,32 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data);
 bool load_linear_equations_data(struct LinearEquationsDeviceData *data);
 
 // ===================================================================
+// FLASH STORAGE - SYSTEM SETTINGS
+// ===================================================================
+
+/**
+ * @brief Save system settings to flash memory
+ * 
+ * Stores persistent system preferences including:
+ * - Auto-start flag for boot-time initialization
+ * - Pretension parameters for auto-start sequence
+ * 
+ * @param data System settings structure to save
+ */
+void save_system_settings_data(struct SystemSettingsData data);
+
+/**
+ * @brief Load system settings from flash memory
+ * 
+ * Reads and validates system settings. Returns false if no settings found
+ * or data is corrupted (system will use default settings).
+ * 
+ * @param[out] data Pointer to structure where loaded settings will be stored
+ * @return true if settings loaded successfully, false if not found or invalid
+ */
+bool load_system_settings_data(struct SystemSettingsData *data);
+
+// ===================================================================
 // TIME MANAGEMENT
 // ===================================================================
 

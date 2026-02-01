@@ -237,7 +237,13 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     WaypointEntry entry{};
     entry.dof_index = dof;
     entry.target_angle_deg = static_cast<float>(angles[dof]) / 100.0f;
-    entry.t_arrival_ms = t_arrival_local;
+    // Enforce monotonic arrival times per DOF to avoid interpolation glitches
+    uint32_t prev_time = waypoint_buffer_prev_time(dof);
+    uint32_t arrival_ms = t_arrival_local;
+    if (prev_time > 0 && arrival_ms <= prev_time) {
+      arrival_ms = prev_time + 1;
+    }
+    entry.t_arrival_ms = arrival_ms;
     entry.mode = 0;  // LINEAR interpolation
     
     // Check current state for this DOF

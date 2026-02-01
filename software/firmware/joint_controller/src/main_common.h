@@ -110,6 +110,10 @@ extern volatile bool flash_operation_in_progress;
 // Core1 sets this during movement execution to pause Serial streaming on Core0
 extern volatile bool movement_in_progress;
 
+// System settings (loaded from flash at boot)
+extern SystemSettingsData system_settings;
+extern bool system_settings_loaded;
+
 // Time offset for synchronization
 extern float time_offset;
 
@@ -384,7 +388,7 @@ struct MovementMetrics {
   
   // Status
   uint8_t dof_index;              // Which DOF this is for
-  uint8_t flags;                  // Bit flags: 0=valid, 1=overshoot_detected, 2=timeout
+  uint8_t flags;                  // Bit flags: 0=valid, 1=overshoot_detected, 2=timeout, 3=stall_aborted
 };
 
 /**
@@ -398,6 +402,8 @@ struct MetricsTracker {
   float start_angle_deg;          // Angle at movement start
   float target_angle_deg;         // Target angle to reach
   float movement_direction;       // +1 or -1 (sign of target - start)
+  bool aborted_by_stall;          // True if movement aborted due to stall
+  float abort_target_deg;         // Desired target at stall abort
   
   // Rise time tracking
   bool reached_90_percent;        // Flag for rise time detection
@@ -433,6 +439,8 @@ struct MetricsTracker {
     start_angle_deg = start;
     target_angle_deg = target;
     movement_direction = (target > start) ? 1.0f : -1.0f;
+    aborted_by_stall = false;
+    abort_target_deg = 0.0f;
     
     reached_90_percent = false;
     rise_time_ms = 0;
@@ -482,6 +490,7 @@ struct MetricsTracker {
     m.flags = 0;
     if (tracking_active) m.flags |= 0x01; // Valid
     if (overshoot_detected) m.flags |= 0x02;
+    if (aborted_by_stall) m.flags |= 0x08;
     
     return m;
   }
@@ -554,6 +563,7 @@ void flushMovementSamples();
  * - Deterministic timing for control loops
  */
 struct SharedDofAngles {
+  volatile uint32_t seq;           // Sequence lock for cross-core consistency
   float angles[MAX_DOFS];           // Validated angles in degrees
   float velocities[MAX_DOFS];       // Calculated velocities in deg/s
   uint32_t timestamp_us;            // Microsecond timestamp of last update
@@ -566,6 +576,20 @@ extern SharedDofAngles shared_dof_angles;
 
 // Function to update shared DOF angles (called by Core0)
 void updateSharedDofAngles();
+
+// Read a consistent snapshot of shared DOF angles (sequence lock)
+inline void readSharedDofAnglesSnapshot(SharedDofAngles &out) {
+  uint32_t seq_start = 0;
+  uint32_t seq_end = 0;
+  do {
+    seq_start = __atomic_load_n(&shared_dof_angles.seq, __ATOMIC_ACQUIRE);
+    if (seq_start & 1U) {
+      continue;  // Writer in progress
+    }
+    out = shared_dof_angles;
+    seq_end = __atomic_load_n(&shared_dof_angles.seq, __ATOMIC_ACQUIRE);
+  } while (seq_start != seq_end || (seq_end & 1U));
+}
 
 // ============================================================================
 // INTER-CORE COMMUNICATION (CORE0 <-> CORE1)

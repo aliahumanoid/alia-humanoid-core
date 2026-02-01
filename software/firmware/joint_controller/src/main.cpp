@@ -52,6 +52,9 @@ bool init_prg = true;
 volatile bool flash_operation_in_progress = false;
 // Movement in progress flag (Core1 sets during movement, Core0 pauses streaming)
 volatile bool movement_in_progress = false;
+// System settings (loaded from flash at boot)
+SystemSettingsData system_settings = {};
+bool system_settings_loaded = false;
 // Control loop timing (configurable via CAN)
 volatile uint16_t inner_loop_period_us = 2000;  // 2000µs = 500Hz (default)
 volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, same as inner)
@@ -160,6 +163,7 @@ uint16_t movement_sample_counters[MAX_DOFS] = {0};
 
 // === SHARED DOF ANGLES (Updated by Core0, read by Core1) ===
 SharedDofAngles shared_dof_angles = {
+  .seq = 0,
   .angles = {0},
   .velocities = {0},
   .timestamp_us = 0,
@@ -546,6 +550,21 @@ void setup() {
   // SAFETY: Movement is controlled by isSystemReadyForMovement()
   LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
   LOG_INFO("Mapping data will be sent to the client for visualization/diagnostics only");
+
+  // Load system settings from flash
+  LOG_INFO("------------------------------------");
+  LOG_INFO("Loading system settings from flash...");
+  if (load_system_settings_data(&system_settings)) {
+    system_settings_loaded = true;
+    LOG_INFO("System settings loaded: auto_start=" + String(system_settings.auto_start_enabled ? "ENABLED" : "DISABLED"));
+  } else {
+    // Initialize with defaults
+    system_settings.auto_start_enabled = false;
+    system_settings.auto_start_pretension = 0;
+    system_settings.auto_start_duration = 0;
+    system_settings.joint_type = ACTIVE_JOINT;
+    LOG_INFO("No system settings found — auto-start DISABLED by default");
+  }
 
   // Blink LED to signal test mode (different pattern)
   for (int i = 0; i < 3; i++) {

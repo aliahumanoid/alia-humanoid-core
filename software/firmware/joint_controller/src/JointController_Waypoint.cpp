@@ -130,6 +130,11 @@ bool JointController::executeWaypointMovement() {
   bool any_movement = false;
   
   uint32_t t_now = getAbsoluteTimeMs();
+
+  // Read a consistent snapshot of shared DOF angles for this cycle
+  SharedDofAngles dof_snapshot;
+  readSharedDofAnglesSnapshot(dof_snapshot);
+  const SharedDofAngles &dof_data = dof_snapshot;
   
   // Process each DOF independently
   for (uint8_t dof = 0; dof < config.dof_count; dof++) {
@@ -187,7 +192,7 @@ bool JointController::executeWaypointMovement() {
         !metrics_tracker[dof].tracking_active) {
       WaypointEntry first_wp;
       if (waypoint_buffer_peek(dof, first_wp)) {
-        float start_angle = shared_dof_angles.valid[dof] ? shared_dof_angles.angles[dof] : 0.0f;
+        float start_angle = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
         // Pass the first waypoint's arrival time so duration is measured from actual movement start
         metrics_tracker[dof].reset(start_angle, first_wp.target_angle_deg, first_wp.t_arrival_ms);
         LOG_DEBUG("[Metrics] DOF " + String(dof) + " tracking started: " + 
@@ -258,15 +263,17 @@ bool JointController::executeWaypointMovement() {
         // Only errors > 5° are logged (see below)
         
         // === ERROR DETECTION: Log only significant tracking errors ===
-        float q_curr_now = shared_dof_angles.angles[dof];
-        float tracking_error = fabs(target_angle - q_curr_now);
-        if (tracking_error > 5.0f && dof == 0) {
-          static uint32_t last_error_log = 0;
-          if (millis() - last_error_log > 500) { // Max 1 log per 500ms
-            LOG_WARN("[TRAJ] DOF" + String(dof) + " LARGE ERROR: " + 
-                     String(tracking_error, 1) + "° (tgt=" + String(target_angle, 1) + 
-                     " cur=" + String(q_curr_now, 1) + ")");
-            last_error_log = millis();
+        if (dof_data.valid[dof]) {
+          float q_curr_now = dof_data.angles[dof];
+          float tracking_error = fabs(target_angle - q_curr_now);
+          if (tracking_error > 5.0f && dof == 0) {
+            static uint32_t last_error_log = 0;
+            if (millis() - last_error_log > 500) { // Max 1 log per 500ms
+              LOG_WARN("[TRAJ] DOF" + String(dof) + " LARGE ERROR: " + 
+                       String(tracking_error, 1) + "° (tgt=" + String(target_angle, 1) + 
+                       " cur=" + String(q_curr_now, 1) + ")");
+              last_error_log = millis();
+            }
           }
         }
         
@@ -289,11 +296,11 @@ bool JointController::executeWaypointMovement() {
       }
       
       // Read current angle from shared state (updated by Core0)
-      if (!shared_dof_angles.valid[dof]) {
+      if (!dof_data.valid[dof]) {
         LOG_WARN("[Waypoint] Invalid encoder reading for DOF " + String(dof));
         continue;
       }
-      float q_curr = shared_dof_angles.angles[dof];
+      float q_curr = dof_data.angles[dof];
       
       // === COMPLIANCE DETECTION (Deflection / Stall) ===
       ComplianceState &cs = compliance_state[dof];
@@ -302,8 +309,8 @@ bool JointController::executeWaypointMovement() {
 
       // Filter actual velocity (deg/s) - only update if encoder reading is valid
       // If invalid, keep previous filtered value (graceful degradation)
-      if (shared_dof_angles.valid[dof]) {
-        float actual_velocity = shared_dof_angles.velocities[dof];
+      if (dof_data.valid[dof]) {
+        float actual_velocity = dof_data.velocities[dof];
         uint8_t samples = velocity_filter_samples;
         if (samples < 1) samples = 1;
         float alpha = 1.0f / (float)samples;
@@ -365,6 +372,10 @@ bool JointController::executeWaypointMovement() {
           // If stall detected during MOVING, abort trajectory and switch to HOLDING
           // The host will decide what to do next (new trajectory, give up, etc.)
           if (!expected_holding) {
+            if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
+              metrics_tracker[dof].aborted_by_stall = true;
+              metrics_tracker[dof].abort_target_deg = cs.original_target_deg;
+            }
             waypoint_buffer_clear(dof);
             waypoint_buffer_set_prev(dof, q_curr, t_now);
             waypoint_buffer_set_state(dof, WaypointState::HOLDING);
@@ -379,7 +390,7 @@ bool JointController::executeWaypointMovement() {
             
             // Notify host that trajectory was aborted due to stall
             // Host should stop sending waypoints and handle the situation
-            Serial.println("STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
+            Serial.println("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
           }
         }
       } else {
@@ -472,7 +483,7 @@ bool JointController::executeWaypointMovement() {
           LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
           
           // Send structured message for UI display
-          Serial.println("HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
+          Serial.println("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
           
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
@@ -485,7 +496,11 @@ bool JointController::executeWaypointMovement() {
             
             // Update final target (in case it changed during movement)
             float original_target = mt.target_angle_deg;
-            mt.target_angle_deg = holding_target;
+            float metrics_target = holding_target;
+            if (mt.aborted_by_stall) {
+              metrics_target = mt.abort_target_deg;
+            }
+            mt.target_angle_deg = metrics_target;
             
             // Finalize and store metrics
             MovementMetrics m = mt.finalize();
@@ -499,7 +514,7 @@ bool JointController::executeWaypointMovement() {
             // Detailed logging for debugging
             LOG_INFO("[Metrics] DOF " + String(dof) + " FINAL:");
             LOG_INFO("  start=" + String(mt.start_angle_deg, 2) + 
-                     "° → target=" + String(holding_target, 2) + 
+                     "° → target=" + String(metrics_target, 2) + 
                      "° (orig=" + String(original_target, 2) + "°)");
             LOG_INFO("  rise=" + String(m.rise_time_ms) + "ms (90%=" + 
                      String(mt.reached_90_percent ? "yes" : "no") + ")");
@@ -762,7 +777,7 @@ bool JointController::executeWaypointMovement() {
       float theta_B_ref_before = theta_B_ref;
       float expected_A = 0.0f;
       float expected_B = 0.0f;
-      float q_curr_inner = shared_dof_angles.angles[dof];
+      float q_curr_inner = dof_data.angles[dof];
       if (calculateMotorAnglesWithEquations(dof, q_curr_inner, q_curr_inner, expected_A, expected_B)) {
         const float DELTA_THETA_EPS = 0.01f;
         if (delta_theta_smooth > DELTA_THETA_EPS) {
@@ -987,9 +1002,9 @@ bool JointController::executeWaypointMovement() {
     
     // === UPDATE PID DIAGNOSTICS for CAN streaming ===
     // Store values for diagnostic stream (read by sendPIDDiagStreamData in core1.cpp)
-    // Use theta_0_joint (target from interpolation) and shared_dof_angles (current reading)
+    // Use theta_0_joint (target from interpolation) and snapshot angle (current reading)
     if (dof < 3) {
-      float q_curr_diag = shared_dof_angles.angles[dof];
+      float q_curr_diag = dof_data.angles[dof];
       pid_diagnostics.target_deg_x100[dof] = (int16_t)(theta_0_joint * 100.0f);
       pid_diagnostics.error_deg_x100[dof] = (int16_t)((theta_0_joint - q_curr_diag) * 100.0f);
       pid_diagnostics.torque_A[dof] = (int16_t)command_A;
@@ -1020,8 +1035,8 @@ bool JointController::executeWaypointMovement() {
   
   // Reset safety check counter after processing all DOFs
   // This ensures all DOFs in HOLDING mode are checked in the same cycle
-  // Using 20 cycles = ~200ms at 100Hz outer loop rate
-  if (safety_check_counter >= 20) {
+  // Using 10 cycles = ~100ms at 100Hz outer loop rate
+  if (safety_check_counter >= 10) {
     safety_check_counter = 0;
   }
   

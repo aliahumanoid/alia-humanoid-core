@@ -128,5 +128,8 @@ COMMANDS = {
     'SAVE_PID': 'SAVE_PID',      # Save PID parameters to flash
     'LOAD_PID': 'LOAD_PID',      # Load PID parameters from flash
     'RECALC_SAFE_LIMITS': 'RECALC_SAFE_LIMITS',  # Recalculate safe limits from equations
-    'CAN_DIAG': 'CAN_DIAG'       # CAN bus diagnostic test
+    'CAN_DIAG': 'CAN_DIAG',       # CAN bus diagnostic test
+    'STARTUP_SEQUENCE': 'STARTUP_SEQUENCE',  # Manual startup sequence (recalc all DOFs + enter HOLDING)
+    'SET_AUTO_START': 'SET_AUTO_START',      # Enable/disable auto-start on boot
+    'GET_AUTO_START': 'GET_AUTO_START'       # Query auto-start setting
 }

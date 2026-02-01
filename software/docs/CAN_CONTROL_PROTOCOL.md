@@ -971,6 +971,17 @@ build_flags =
 
 ---
 
+### 11.4 Serial Debug Events (EVT)
+
+When running with serial debug enabled, the controller emits structured `EVT:` lines that the host can parse. Key events include:
+
+- `EVT:HOLDING_TARGET:DOF=<dof>:ANGLE=<deg>` (controller entered HOLDING and target angle is fixed)
+- `EVT:STALL_ABORT:DOF=<dof>:ANGLE=<deg>` (trajectory aborted due to stall during MOVING)
+
+See `software/firmware/joint_controller/PROTOCOL.md` for the full serial protocol.
+
+---
+
 ## 12. References
 
 - MCP2515 Datasheet: [Microchip MCP2515](https://www.microchip.com/en-us/product/MCP2515)

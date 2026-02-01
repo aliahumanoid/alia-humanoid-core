@@ -496,6 +496,37 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Joint Initialization -->
+                        <div class="pt-3 border-t border-gray-200">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                <i class="fas fa-play-circle mr-1 text-green-600"></i>Joint Initialization
+                            </label>
+                            <div class="flex flex-wrap items-center gap-3">
+                                <button onclick="sendCommand('startup-sequence')"
+                                    class="px-4 py-2 rounded-md bg-green-500 text-white font-medium hover:bg-green-600 transition-colors"
+                                    title="Run startup sequence: recalc_offset all DOFs + enter HOLDING mode">
+                                    <i class="fas fa-power-off mr-2"></i>Startup Sequence
+                                </button>
+                                <div class="flex items-center gap-2">
+                                    <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+                                        <input type="checkbox" id="autoStartToggle" 
+                                               onchange="setAutoStart(this.checked)"
+                                               class="w-4 h-4 text-green-600 rounded focus:ring-green-500 border-gray-300">
+                                        <span>Auto-start on boot</span>
+                                    </label>
+                                    <button onclick="getAutoStart()" 
+                                            class="p-1 text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded"
+                                            title="Query current auto-start setting from firmware">
+                                        <i class="fas fa-sync-alt text-xs"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-2">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Startup runs recalc_offset for all DOFs and enters HOLDING mode. Enable auto-start to run automatically on power-up.
+                            </p>
+                        </div>
                     </div>
                 </div>
 
