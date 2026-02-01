@@ -108,16 +108,20 @@ const DEFAULT_PARAMS = {
 const MAX_SAFE_VELOCITY_DEG_S = 150;
 
 /**
- * Get current encoder angle from UI display
- * Returns null if encoder streaming is not active or data is invalid
+ * Get current encoder angle from LIVE streaming data only.
+ * If streaming is not active, attempts to start it automatically.
+ * Returns null if streaming cannot be established (blocks unsafe operations).
+ * 
  * @param {string} joint - Joint name (e.g., "KNEE_RIGHT")
  * @param {number} dofIndex - DOF index (0, 1, or 2)
- * @returns {number|null} Current angle in degrees, or null if not available
+ * @returns {number|null} Current angle in degrees, or null if unavailable
  */
 function getCurrentEncoderAngle(joint, dofIndex) {
     const jointType = joint.split('_')[0].toLowerCase();
     
-    // Try joint-specific encoder display (e.g., #kneeEncoderDof0)
+    // === SAFETY: Only use LIVE encoder data, never cached/stale values ===
+    
+    // Check UI display for live data (streaming must be active)
     const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
     if (jointEncoderText && jointEncoderText !== '-' && jointEncoderText.trim() !== '') {
         const parsed = parseFloat(jointEncoderText.replace('°', ''));
@@ -126,7 +130,7 @@ function getCurrentEncoderAngle(joint, dofIndex) {
         }
     }
     
-    // Fallback: try generic encoder display
+    // Fallback: check generic encoder display
     const genericEncoderText = $(`#encoderDof${dofIndex}`).text();
     if (genericEncoderText && genericEncoderText !== '-' && genericEncoderText.trim() !== '') {
         const parsed = parseFloat(genericEncoderText.replace('°', ''));
@@ -135,7 +139,56 @@ function getCurrentEncoderAngle(joint, dofIndex) {
         }
     }
     
-    return null;
+    // No live data available - try to auto-start encoder streaming
+    console.log(`[Encoder] No live data for ${joint} DOF${dofIndex}, attempting auto-start...`);
+    
+    let streamingStarted = false;
+    $.ajax({
+        url: '/can/encoder_stream/start',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ joint: joint }),
+        async: false,
+        success: function(response) {
+            if (response.status === 'success') {
+                streamingStarted = true;
+                appendStatusMessage(`🔄 Encoder streaming auto-started for ${joint}`);
+            }
+        },
+        error: function() {
+            appendStatusMessage(`❌ Failed to auto-start encoder streaming`);
+        }
+    });
+    
+    if (!streamingStarted) {
+        return null;
+    }
+    
+    // Wait for live data to appear in UI (max 500ms)
+    let liveAngle = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        // Small delay
+        const start = Date.now();
+        while (Date.now() - start < 50) { /* busy wait */ }
+        
+        // Re-check UI for fresh data
+        const freshText = $(`#${jointType}EncoderDof${dofIndex}`).text();
+        if (freshText && freshText !== '-' && freshText.trim() !== '') {
+            const parsed = parseFloat(freshText.replace('°', ''));
+            if (!isNaN(parsed)) {
+                liveAngle = parsed;
+                break;
+            }
+        }
+    }
+    
+    if (liveAngle !== null) {
+        console.log(`[Encoder] Live data acquired: DOF${dofIndex} = ${liveAngle.toFixed(2)}°`);
+    } else {
+        appendStatusMessage(`❌ Encoder streaming started but no data received - check CAN connection`);
+    }
+    
+    return liveAngle;
 }
 
 /**

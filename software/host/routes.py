@@ -666,6 +666,38 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             "data": data  # List of {timestamp, t_ms, angles_deg}
         })
 
+    @app.route('/can/encoder_angles', methods=['GET'])
+    def get_last_encoder_angles():
+        """
+        Get the last known encoder angles (persists even when streaming is stopped).
+        
+        This is useful for on-demand position queries before sending waypoints,
+        without requiring continuous encoder streaming.
+        
+        Query params:
+            joint: Optional joint name (e.g., KNEE_RIGHT). If omitted, returns all joints.
+        
+        Returns:
+            {
+                "status": "success",
+                "joint": "KNEE_RIGHT",
+                "angles_deg": [45.2, null, null],  // DOF0, DOF1, DOF2
+                "age_ms": 150.5,  // How old the reading is
+                "valid": true
+            }
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+        
+        joint = request.args.get('joint')
+        data = can_manager.get_last_encoder_angles(joint)
+        
+        return jsonify({
+            "status": "success",
+            **data
+        })
+
     # ===============================================================
     # CAN PID DIAGNOSTICS STREAMING ROUTES
     # ===============================================================

@@ -68,6 +68,10 @@ class CanManager:
         self._encoder_stream_active = False
         self._encoder_stream_callback = None
         self._encoder_stream_data: deque = deque(maxlen=500)  # Buffer for streaming data
+        
+        # Last known encoder angles per joint (persists even when streaming stops)
+        # Format: {joint_id: {"angles_deg": [...], "timestamp_ms": int, "timestamp": float}}
+        self._last_encoder_angles: Dict[int, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -330,6 +334,47 @@ class CanManager:
         Callback signature: callback(angles_deg: list, timestamp_ms: int)
         """
         self._encoder_stream_callback = callback
+
+    def get_last_encoder_angles(self, joint_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get the last known encoder angles (persists even after streaming stops).
+        
+        This is useful for on-demand position queries without requiring active streaming.
+        
+        Args:
+            joint_name: Optional joint name filter. If None, returns all joints.
+        
+        Returns:
+            If joint_name specified: {angles_deg: [...], timestamp_ms: int, age_ms: float}
+            If joint_name is None: {joint_name: {angles_deg: [...], ...}, ...}
+        """
+        current_time = time.time()
+        
+        with self._lock:
+            if joint_name:
+                # Find joint ID from name
+                joint_id = None
+                for jid, jname in self._joint_id_lookup.items():
+                    if jname == joint_name:
+                        joint_id = jid
+                        break
+                
+                if joint_id is None or joint_id not in self._last_encoder_angles:
+                    return {"valid": False, "message": f"No encoder data for {joint_name}"}
+                
+                data = self._last_encoder_angles[joint_id].copy()
+                data["age_ms"] = (current_time - data["timestamp"]) * 1000
+                data["valid"] = True
+                return data
+            else:
+                # Return all joints
+                result = {}
+                for joint_id, data in self._last_encoder_angles.items():
+                    joint_name = data.get("joint_name", f"JOINT_{joint_id}")
+                    result[joint_name] = data.copy()
+                    result[joint_name]["age_ms"] = (current_time - data["timestamp"]) * 1000
+                    result[joint_name]["valid"] = True
+                return result
 
     def send_multi_dof_waypoint(
         self,
@@ -833,10 +878,17 @@ class CanManager:
             "joint_name": joint_name,
         }
         
-        # Buffer data
+        # Buffer data and store last known angles
         with self._lock:
             self._encoder_stream_data.append(data_point)
             buffer_size = len(self._encoder_stream_data)
+            # Store last known angles for on-demand access (persists after streaming stops)
+            self._last_encoder_angles[joint_id] = {
+                "angles_deg": angles_deg,
+                "timestamp_ms": t_ms,
+                "timestamp": timestamp,
+                "joint_name": joint_name,
+            }
         
         # Debug log (throttled to 1Hz per joint)
         self._stats["rx_frames"] += 1
