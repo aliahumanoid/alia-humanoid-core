@@ -60,6 +60,28 @@ volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold 
 // CAN error detection: time-window based (more robust to EMI glitches)
 volatile uint16_t can_error_window_ms = 50;      // 50ms window (default)
 volatile uint8_t can_error_threshold = 5;         // 5 errors in window = emergency stop
+// Compliance control (deflection/stall, anti-slack, soft hold)
+volatile float expected_velocity_deadband_deg_s = 1.0f;
+volatile float hold_error_threshold_deg = 6.0f;
+volatile uint16_t hold_time_threshold_ms = 120;
+volatile float hold_release_threshold_deg = 2.0f;
+volatile float hold_release_velocity_deg_s = 1.0f;
+volatile float hold_release_max_velocity_deg_s = 30.0f;  // Max velocity for error-based release
+volatile uint16_t hold_release_time_ms = 150;
+volatile float move_error_threshold_deg = 8.0f;
+volatile float move_velocity_ratio = 0.2f;
+volatile uint16_t move_time_threshold_ms = 300;
+volatile uint8_t velocity_filter_samples = 5;
+volatile float anti_slack_margin_deg = 5.0f;
+volatile bool anti_slack_enabled = true;
+volatile float soft_hold_torque_ratio = 0.3f;   // 30% torque during compliance
+volatile float min_tension_torque = 20.0f;
+volatile uint16_t soft_hold_ramp_down_ms = 600;   // Torque release ramp (ms)
+volatile uint16_t soft_hold_ramp_up_ms = 800;     // Torque recovery ramp (ms)
+volatile bool soft_hold_enabled = true;
+volatile ComplianceRecoveryPolicy recovery_policy = RECOVERY_STAY_AT_CURRENT;
+volatile uint16_t recovery_ramp_back_ms = 1000;
+ComplianceState compliance_state[MAX_DOFS] = {};
 // command array
 char command[100];
 // SERVO CANBUS (J4 CAN_Servo - Motor communication)

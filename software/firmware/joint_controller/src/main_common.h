@@ -148,6 +148,96 @@ extern volatile uint16_t can_error_window_ms;     // Time window for CAN error d
 extern volatile uint8_t can_error_threshold;       // Number of errors in window before emergency stop (default: 5)
 
 // ============================================================================
+// COMPLIANCE CONTROL (Deflection/Stall, Anti-Slack, Soft Hold)
+// ============================================================================
+
+/**
+ * @brief Recovery policy when compliance ends
+ */
+enum ComplianceRecoveryPolicy : uint8_t {
+  RECOVERY_RETURN_TO_TARGET = 0,  // Return to original target
+  RECOVERY_STAY_AT_CURRENT = 1,   // Teach mode: stay at current position
+  RECOVERY_RAMP_BACK = 2          // Slowly return to target
+};
+
+// Expected velocity from current waypoint segment (deg/s)
+extern volatile float expected_velocity_deadband_deg_s;  // <= this => treat as holding
+
+// HOLDING deflection detection (expected velocity ~ 0)
+extern volatile float hold_error_threshold_deg;          // |error| > this
+extern volatile uint16_t hold_time_threshold_ms;         // Duration to confirm
+extern volatile float hold_release_threshold_deg;        // Hysteresis for release
+extern volatile float hold_release_velocity_deg_s;       // |velocity| < this for release (settling)
+extern volatile float hold_release_max_velocity_deg_s;   // Max |velocity| for error-based release
+extern volatile uint16_t hold_release_time_ms;           // Duration to confirm release
+
+// MOVING stall detection (expected velocity > deadband)
+extern volatile float move_error_threshold_deg;          // |error| > this
+extern volatile float move_velocity_ratio;               // |v_actual| < ratio * |v_expected|
+extern volatile uint16_t move_time_threshold_ms;         // Duration to confirm
+
+// Actual velocity filtering (from encoder)
+extern volatile uint8_t velocity_filter_samples;         // Moving average window
+
+// Anti-slack clamp
+extern volatile float anti_slack_margin_deg;             // Motor angle margin
+extern volatile bool anti_slack_enabled;                 // Enable anti-slack
+
+// Soft hold (compliance) torque reduction
+extern volatile float soft_hold_torque_ratio;            // Reduce max torque to this ratio
+extern volatile float min_tension_torque;                // Absolute minimum torque
+extern volatile uint16_t soft_hold_ramp_down_ms;         // Ramp time entering compliance
+extern volatile uint16_t soft_hold_ramp_up_ms;           // Ramp time leaving compliance
+extern volatile bool soft_hold_enabled;                  // Enable soft hold
+
+// Recovery parameters
+extern volatile ComplianceRecoveryPolicy recovery_policy;
+extern volatile uint16_t recovery_ramp_back_ms;          // For RECOVERY_RAMP_BACK
+
+/**
+ * @brief Per-DOF compliance state tracking
+ */
+struct ComplianceState {
+  // Detection state
+  bool compliance_active;
+  uint32_t hold_candidate_start_ms;
+  uint32_t move_candidate_start_ms;
+  uint32_t release_candidate_start_ms;
+  float stall_entry_angle_deg;
+  float original_target_deg;
+
+  // Torque ramp state
+  float torque_ratio_current;
+  float torque_ratio_start;
+  float torque_ratio_target;
+  uint32_t torque_ramp_start_ms;
+  uint16_t torque_ramp_duration_ms;
+  bool torque_ramp_active;
+
+  // Statistics
+  uint32_t stall_count;
+  uint32_t last_stall_ms;
+
+  void reset() {
+    compliance_active = false;
+    hold_candidate_start_ms = 0;
+    move_candidate_start_ms = 0;
+    release_candidate_start_ms = 0;
+    stall_entry_angle_deg = 0.0f;
+    original_target_deg = 0.0f;
+    torque_ratio_current = 1.0f;
+    torque_ratio_start = 1.0f;
+    torque_ratio_target = 1.0f;
+    torque_ramp_start_ms = 0;
+    torque_ramp_duration_ms = 0;
+    torque_ramp_active = false;
+    // Do not reset statistics
+  }
+};
+
+extern ComplianceState compliance_state[MAX_DOFS];
+
+// ============================================================================
 // CAN ERROR TRACKER (shared utility for Movement and Waypoint loops)
 // ============================================================================
 

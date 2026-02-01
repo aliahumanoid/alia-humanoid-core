@@ -30,7 +30,7 @@
 #define DIRECT_ENCODER_COUNT 3
 
 // Read validation parameters (same as joint_encoders)
-#define ENCODER_MAX_RPM 60.0f          // Max speed in RPM
+#define ENCODER_MAX_RPM 120.0f         // Max speed in RPM (allows ~1080°/s with margin)
 #define ENCODER_VALIDATION_MARGIN 1.5f // Safety margin 50%
 #define ENCODER_MAX_READ_ATTEMPTS 2    // Max read retry attempts
 #define ENCODER_RETRY_DELAY_US 50      // Delay between retry attempts (µs)

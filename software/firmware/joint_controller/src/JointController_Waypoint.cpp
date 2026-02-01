@@ -48,6 +48,8 @@ extern volatile uint8_t outer_loop_divisor;     // Outer loop divisor
 // which provides filtered derivative and proper anti-windup
 static float delta_theta[MAX_DOFS] = {0};           // Current outer PID output (target)
 static float delta_theta_prev[MAX_DOFS] = {0};      // Previous outer PID output (for interpolation)
+static float velocity_filtered[MAX_DOFS] = {0};     // Filtered joint velocity (deg/s)
+static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 // When outer_loop_divisor > 1, delta_theta changes every N cycles creating "steps".
 // To smooth this, we interpolate between delta_theta_prev and delta_theta based on
 // where we are in the current outer loop period. This eliminates vibrations caused
@@ -139,6 +141,8 @@ bool JointController::executeWaypointMovement() {
       // Mark PID reset needed for when this DOF becomes active
       pid_reset_needed[dof] = true;
       prev_dof_state[dof] = WaypointState::IDLE;
+      compliance_state[dof].reset();
+      velocity_filtered[dof] = 0.0f;
       continue; // Skip this DOF entirely
     }
     
@@ -168,6 +172,11 @@ bool JointController::executeWaypointMovement() {
     // Use !tracking_active as additional guard to prevent multiple initializations
     bool new_movement_started = (prev_dof_state[dof] != WaypointState::MOVING) && 
                                  (dof_state == WaypointState::MOVING);
+
+    if (new_movement_started) {
+      compliance_state[dof].reset();
+      velocity_filtered[dof] = 0.0f;
+    }
     
     if (metrics_tracking_enabled && new_movement_started && dof < 3 && 
         !metrics_tracker[dof].tracking_active) {
@@ -213,17 +222,20 @@ bool JointController::executeWaypointMovement() {
     if ((cycle_count - 1) % outer_loop_divisor == 0) {
       
       float q_des = 0.0f;
+      float expected_velocity_deg_s = 0.0f;
       bool is_moving = false;
+      
+      // Use last known waypoint as reference
+      float prev_angle = waypoint_buffer_prev_angle(dof);
+      uint32_t prev_time = waypoint_buffer_prev_time(dof);
       
       // Check if we have waypoints to process
       WaypointEntry current_target;
-      if (waypoint_buffer_peek(dof, current_target)) {
+      bool has_waypoints = waypoint_buffer_peek(dof, current_target);
+      if (has_waypoints) {
         // MOVING state - linear interpolation
         is_moving = true;
         any_movement = true;
-        
-        float prev_angle = waypoint_buffer_prev_angle(dof);
-        uint32_t prev_time = waypoint_buffer_prev_time(dof);
         
         float target_angle = current_target.target_angle_deg;
         float time_total = current_target.t_arrival_ms - prev_time;
@@ -234,6 +246,7 @@ bool JointController::executeWaypointMovement() {
         if (time_total > 0) {
           progress = time_elapsed / time_total;
           progress = constrain(progress, 0.0f, 1.0f);
+          expected_velocity_deg_s = (target_angle - prev_angle) * 1000.0f / time_total;
         }
         
         // NOTE: Trajectory diagnostic logging removed to reduce serial overhead
@@ -267,7 +280,7 @@ bool JointController::executeWaypointMovement() {
         // HOLDING mode - maintain TARGET position (last waypoint target)
         // Use the last waypoint's target angle, NOT current encoder reading
         // This ensures the PID keeps trying to reach and hold the target
-        q_des = waypoint_buffer_prev_angle(dof);
+        q_des = prev_angle;
       }
       
       // Read current angle from shared state (updated by Core0)
@@ -277,14 +290,158 @@ bool JointController::executeWaypointMovement() {
       }
       float q_curr = shared_dof_angles.angles[dof];
       
+      // === COMPLIANCE DETECTION (Deflection / Stall) ===
+      ComplianceState &cs = compliance_state[dof];
+      float error = q_des - q_curr;
+      float abs_error = fabs(error);
+
+      // Filter actual velocity (deg/s)
+      float actual_velocity = shared_dof_angles.velocities[dof];
+      uint8_t samples = velocity_filter_samples;
+      if (samples < 1) samples = 1;
+      float alpha = 1.0f / (float)samples;
+      velocity_filtered[dof] = (1.0f - alpha) * velocity_filtered[dof] + alpha * actual_velocity;
+
+      bool expected_holding = fabs(expected_velocity_deg_s) <= expected_velocity_deadband_deg_s;
+      bool compliance_should_activate = false;
+
+      if (!cs.compliance_active) {
+        if (expected_holding) {
+          // HOLDING / fixed target: detect external deflection by error only
+          if (abs_error > hold_error_threshold_deg) {
+            if (cs.hold_candidate_start_ms == 0) {
+              cs.hold_candidate_start_ms = t_now;
+            }
+            if (t_now - cs.hold_candidate_start_ms >= hold_time_threshold_ms) {
+              compliance_should_activate = true;
+            }
+          } else if (abs_error < hold_release_threshold_deg) {
+            cs.hold_candidate_start_ms = 0;
+          }
+          cs.move_candidate_start_ms = 0;
+          cs.release_candidate_start_ms = 0;
+        } else {
+          // MOVING: detect stall when actual velocity is far below expected
+          cs.hold_candidate_start_ms = 0;
+          cs.release_candidate_start_ms = 0;
+          float expected_speed = fabs(expected_velocity_deg_s);
+          bool stalled = (abs_error > move_error_threshold_deg) &&
+                         (fabs(velocity_filtered[dof]) < expected_speed * move_velocity_ratio);
+          if (stalled) {
+            if (cs.move_candidate_start_ms == 0) {
+              cs.move_candidate_start_ms = t_now;
+            }
+            if (t_now - cs.move_candidate_start_ms >= move_time_threshold_ms) {
+              compliance_should_activate = true;
+            }
+          } else {
+            cs.move_candidate_start_ms = 0;
+          }
+        }
+
+        if (compliance_should_activate) {
+          cs.compliance_active = true;
+          cs.stall_entry_angle_deg = q_curr;
+          cs.original_target_deg = q_des;
+          cs.stall_count++;
+          cs.last_stall_ms = t_now;
+          cs.hold_candidate_start_ms = 0;
+          cs.move_candidate_start_ms = 0;
+
+          const char *mode_label = expected_holding ? "HOLDING" : "MOVING";
+          LOG_INFO("[Compliance] DOF " + String(dof) + " ACTIVE mode=" + String(mode_label) +
+                   " err=" + String(error, 2) + "deg exp_v=" + String(expected_velocity_deg_s, 2) +
+                   "deg/s act_v=" + String(velocity_filtered[dof], 2) + "deg/s");
+
+          // If stall detected during MOVING, abort trajectory and switch to HOLDING
+          // The host will decide what to do next (new trajectory, give up, etc.)
+          if (!expected_holding) {
+            waypoint_buffer_clear(dof);
+            waypoint_buffer_set_prev(dof, q_curr, t_now);
+            waypoint_buffer_set_state(dof, WaypointState::HOLDING);
+            dof_state = WaypointState::HOLDING;
+            has_waypoints = false;
+            q_des = q_curr;
+            error = 0.0f;
+            abs_error = 0.0f;
+
+            LOG_INFO("[Compliance] DOF " + String(dof) + 
+                     " STALL->HOLDING: trajectory aborted, holding at " + String(q_curr, 2) + "deg");
+          }
+        }
+      } else {
+        // Compliance active: check release condition
+        bool compliance_should_release = false;
+        if (expected_holding) {
+          // Error-based release: requires BOTH low error AND velocity below max threshold
+          // This prevents releasing while "flying through" the target position
+          bool release_by_error = (abs_error < hold_release_threshold_deg) &&
+                                  (fabs(velocity_filtered[dof]) < hold_release_max_velocity_deg_s);
+          // Velocity-based release: requires velocity settled for hold_release_time_ms
+          bool release_by_velocity = false;
+          if (fabs(velocity_filtered[dof]) < hold_release_velocity_deg_s) {
+            if (cs.release_candidate_start_ms == 0) {
+              cs.release_candidate_start_ms = t_now;
+            }
+            if (t_now - cs.release_candidate_start_ms >= hold_release_time_ms) {
+              release_by_velocity = true;
+            }
+          } else {
+            cs.release_candidate_start_ms = 0;
+          }
+          compliance_should_release = release_by_error || release_by_velocity;
+          if (compliance_should_release) {
+            String reason = release_by_error && release_by_velocity ? "HOLD_ERR+VEL"
+                            : (release_by_velocity ? "HOLD_VEL" : "HOLD_ERR");
+            LOG_INFO("[Compliance] DOF " + String(dof) + " RELEASE reason=" + reason +
+                     " err=" + String(error, 2) + "deg exp_v=" + String(expected_velocity_deg_s, 2) +
+                     "deg/s act_v=" + String(velocity_filtered[dof], 2) + "deg/s");
+          }
+        } else {
+          float expected_speed = fabs(expected_velocity_deg_s);
+          bool release_by_error = (abs_error < move_error_threshold_deg);
+          bool release_by_velocity = (fabs(velocity_filtered[dof]) >= expected_speed * move_velocity_ratio);
+          if (release_by_error || release_by_velocity) {
+            compliance_should_release = true;
+            String reason = release_by_error && release_by_velocity ? "MOVE_ERR+VEL"
+                            : (release_by_velocity ? "MOVE_VEL" : "MOVE_ERR");
+            LOG_INFO("[Compliance] DOF " + String(dof) + " RELEASE reason=" + reason +
+                     " err=" + String(error, 2) + "deg exp_v=" + String(expected_velocity_deg_s, 2) +
+                     "deg/s act_v=" + String(velocity_filtered[dof], 2) + "deg/s");
+          }
+        }
+
+        if (compliance_should_release) {
+          cs.compliance_active = false;
+          cs.hold_candidate_start_ms = 0;
+          cs.move_candidate_start_ms = 0;
+          cs.release_candidate_start_ms = 0;
+
+          // Teach mode: keep the current position as new target
+          if (recovery_policy == RECOVERY_STAY_AT_CURRENT) {
+            waypoint_buffer_clear(dof);
+            waypoint_buffer_set_prev(dof, q_curr, t_now);
+            waypoint_buffer_set_state(dof, WaypointState::HOLDING);
+            dof_state = WaypointState::HOLDING;
+            has_waypoints = false;
+            q_des = q_curr;
+            error = 0.0f;
+            abs_error = 0.0f;
+
+            // Reset outer PID to avoid integral bump after deflection
+            resetOuterPID(dof);
+            delta_theta[dof] = 0.0f;
+            delta_theta_prev[dof] = 0.0f;
+          }
+        }
+      }
+
       // === RUNTIME SAFETY CHECK (same as moveMultiDOF_cascade) ===
       // Check joint limits, mapping limits, and optionally motor limits (tendon breakage)
       // - MOVING mode: check every cycle (100 Hz) for immediate detection
       // - HOLDING mode: check immediately on transition, then every 100 cycles (~1 second)
       
       // Determine current state based on waypoint buffer
-      WaypointEntry check_waypoint;
-      bool has_waypoints = waypoint_buffer_peek(dof, check_waypoint);
       bool is_holding = !has_waypoints; // If no waypoints, we're holding position
       
       // Detect MOVING → HOLDING transition by comparing with previous cycle's state
@@ -403,8 +560,7 @@ bool JointController::executeWaypointMovement() {
         delta_theta[dof] = outer_pid->control(q_des, q_curr);
       }
 
-      // Compute error for metrics tracking
-      float error = q_des - q_curr;
+      // Error already computed above (used for compliance detection)
       
       // === METRICS: Update tracking during movement ===
       if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
@@ -585,6 +741,51 @@ bool JointController::executeWaypointMovement() {
                         cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref);
     float theta_B_ref = theta_0_antagonist_motor + 
                         cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
+
+    // === ANTI-SLACK CLAMP (active during compliance) ===
+    if (anti_slack_enabled && compliance_state[dof].compliance_active) {
+      float theta_A_ref_before = theta_A_ref;
+      float theta_B_ref_before = theta_B_ref;
+      float expected_A = 0.0f;
+      float expected_B = 0.0f;
+      float q_curr_inner = shared_dof_angles.angles[dof];
+      if (calculateMotorAnglesWithEquations(dof, q_curr_inner, q_curr_inner, expected_A, expected_B)) {
+        const float DELTA_THETA_EPS = 0.01f;
+        if (delta_theta_smooth > DELTA_THETA_EPS) {
+          // Agonist pulling, antagonist releasing
+          theta_B_ref = constrain(theta_B_ref,
+                                  expected_B - anti_slack_margin_deg,
+                                  expected_B + anti_slack_margin_deg);
+        } else if (delta_theta_smooth < -DELTA_THETA_EPS) {
+          // Antagonist pulling, agonist releasing
+          theta_A_ref = constrain(theta_A_ref,
+                                  expected_A - anti_slack_margin_deg,
+                                  expected_A + anti_slack_margin_deg);
+        } else {
+          // Near zero delta_theta: clamp both to prevent slack
+          theta_A_ref = constrain(theta_A_ref,
+                                  expected_A - anti_slack_margin_deg,
+                                  expected_A + anti_slack_margin_deg);
+          theta_B_ref = constrain(theta_B_ref,
+                                  expected_B - anti_slack_margin_deg,
+                                  expected_B + anti_slack_margin_deg);
+        }
+
+        bool clamped = (fabs(theta_A_ref - theta_A_ref_before) > 0.001f) ||
+                       (fabs(theta_B_ref - theta_B_ref_before) > 0.001f);
+        if (clamped) {
+          uint32_t now_ms = millis();
+          if (now_ms - last_anti_slack_log_ms[dof] > 500) {
+            LOG_INFO("[AntiSlack] DOF " + String(dof) +
+                     " Aref=" + String(theta_A_ref, 2) +
+                     " Bref=" + String(theta_B_ref, 2) +
+                     " expA=" + String(expected_A, 2) +
+                     " expB=" + String(expected_B, 2));
+            last_anti_slack_log_ms[dof] = now_ms;
+          }
+        }
+      }
+    }
     
     // Read current motor angles
     MultiAngleData data_A = agonist->getMultiAngleSync();
@@ -674,6 +875,57 @@ bool JointController::executeWaypointMovement() {
     float max_torque_A = config.motors[agonist_idx].max_torque;
     float max_torque_B = config.motors[antagonist_idx].max_torque;
 
+    // === SOFT HOLD TORQUE SCALING (compliance) ===
+    ComplianceState &cs = compliance_state[dof];
+    float target_ratio = (soft_hold_enabled && cs.compliance_active) ? soft_hold_torque_ratio : 1.0f;
+    uint32_t now_ms = millis();
+
+    if (target_ratio != cs.torque_ratio_target) {
+      cs.torque_ratio_start = cs.torque_ratio_current;
+      cs.torque_ratio_target = target_ratio;
+      cs.torque_ramp_start_ms = now_ms;
+      uint16_t ramp_ms =
+          (target_ratio < cs.torque_ratio_current) ? soft_hold_ramp_down_ms : soft_hold_ramp_up_ms;
+      cs.torque_ramp_duration_ms = ramp_ms;
+      cs.torque_ramp_active = (ramp_ms > 0);
+      if (!cs.torque_ramp_active) {
+        cs.torque_ratio_current = target_ratio;
+      }
+
+      LOG_INFO("[Compliance] DOF " + String(dof) + " torque_ratio " +
+               String(cs.torque_ratio_start, 2) + " -> " + String(target_ratio, 2) +
+               " ramp=" + String(ramp_ms) + "ms");
+    }
+
+    if (cs.torque_ramp_active) {
+      uint32_t elapsed_ms = (now_ms >= cs.torque_ramp_start_ms)
+                                ? (now_ms - cs.torque_ramp_start_ms)
+                                : 0;
+      if (elapsed_ms >= cs.torque_ramp_duration_ms) {
+        cs.torque_ratio_current = cs.torque_ratio_target;
+        cs.torque_ramp_active = false;
+      } else {
+        float t = (float)elapsed_ms / (float)cs.torque_ramp_duration_ms;
+        cs.torque_ratio_current =
+            cs.torque_ratio_start + (cs.torque_ratio_target - cs.torque_ratio_start) * t;
+      }
+    }
+
+    float max_torque_A_effective = max_torque_A;
+    float max_torque_B_effective = max_torque_B;
+    if (soft_hold_enabled) {
+      max_torque_A_effective = max_torque_A * cs.torque_ratio_current;
+      max_torque_B_effective = max_torque_B * cs.torque_ratio_current;
+      if (cs.compliance_active) {
+        if (min_tension_torque > max_torque_A_effective) {
+          max_torque_A_effective = min(min_tension_torque, max_torque_A);
+        }
+        if (min_tension_torque > max_torque_B_effective) {
+          max_torque_B_effective = min(min_tension_torque, max_torque_B);
+        }
+      }
+    }
+
     // === TORQUE SATURATION & RATE LIMITING ===
     // IMPORTANT: Saturate FIRST, then rate-limit the saturated value
     // This prevents prev_command from storing unsaturated values which would
@@ -682,8 +934,8 @@ bool JointController::executeWaypointMovement() {
     static float prev_command_B[MAX_DOFS] = {0};
 
     // Step 1: Apply absolute torque limits FIRST
-    command_A = constrain(command_A, -max_torque_A, max_torque_A);
-    command_B = constrain(command_B, -max_torque_B, max_torque_B);
+    command_A = constrain(command_A, -max_torque_A_effective, max_torque_A_effective);
+    command_B = constrain(command_B, -max_torque_B_effective, max_torque_B_effective);
 
     // Step 2: Apply rate limiting on saturated values
     if (torque_ramp_time_ms > 0) {
@@ -691,8 +943,8 @@ bool JointController::executeWaypointMovement() {
       // At 500 Hz with 100ms ramp time: 50 cycles to go 0→max
       // max_rate = max_torque / (ramp_time_ms / inner_loop_period_ms)
       //          = max_torque * inner_loop_period_us / (ramp_time_ms * 1000)
-      float rate_A = max_torque_A * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
-      float rate_B = max_torque_B * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
+      float rate_A = max_torque_A_effective * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
+      float rate_B = max_torque_B_effective * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
 
       command_A = constrain(command_A, prev_command_A[dof] - rate_A, prev_command_A[dof] + rate_A);
       command_B = constrain(command_B, prev_command_B[dof] - rate_B, prev_command_B[dof] + rate_B);
@@ -703,11 +955,12 @@ bool JointController::executeWaypointMovement() {
     prev_command_B[dof] = command_B;
     
     // === DIAGNOSTIC: Log extreme torque commands ===
-    if (fabs(command_A) >= max_torque_A * 0.95f || fabs(command_B) >= max_torque_B * 0.95f) {
+    if (fabs(command_A) >= max_torque_A_effective * 0.95f ||
+        fabs(command_B) >= max_torque_B_effective * 0.95f) {
       static uint32_t last_torque_warn = 0;
       if (millis() - last_torque_warn > 500) { // Log max every 500ms
         LOG_WARN("[Waypoint DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
-                 " B=" + String(command_B, 0) + " (max=" + String(max_torque_A, 0) + ")");
+                 " B=" + String(command_B, 0) + " (max=" + String(max_torque_A_effective, 0) + ")");
         LOG_WARN("  refs: A=" + String(theta_A_ref, 2) + " B=" + String(theta_B_ref, 2));
         LOG_WARN("  curr: A=" + String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
         last_torque_warn = millis();
