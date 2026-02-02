@@ -29,6 +29,10 @@ let sequencePlaybackHandle = null;
 let sequenceExecutionData = []; // Collected during playback: {stepIndex, targetDof0, targetDof1, startTimestamp, endTimestamp, encoderSamples[]}
 let isAddToSequenceMode = false;
 
+// Waypoint trajectory state tracking (prevents conflicts from overlapping commands)
+let waypointTrajectoryActive = false;
+let waypointTrajectoryStartTime = 0;
+
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
     KNEE: [
@@ -211,6 +215,29 @@ function validateEncoderForWaypoints(joint, dofIndices) {
     }
     
     return result;
+}
+
+/**
+ * Check if a waypoint trajectory is already active.
+ * Prevents conflicting waypoint commands that cause jerky movements.
+ * @returns {boolean} true if safe to send new waypoints, false if should block
+ */
+function checkTrajectoryNotActive() {
+    if (waypointTrajectoryActive) {
+        const elapsed = Date.now() - waypointTrajectoryStartTime;
+        appendStatusMessage(`❌ SAFETY: Cannot send new waypoints - trajectory already in progress (${(elapsed/1000).toFixed(1)}s)`);
+        appendStatusMessage(`⚠️ Wait for current movement to complete, or press Emergency Stop to clear`);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Mark waypoint trajectory as active (call when starting to send waypoints)
+ */
+function markTrajectoryActive() {
+    waypointTrajectoryActive = true;
+    waypointTrajectoryStartTime = Date.now();
 }
 
     // Main function executed when DOM is ready
@@ -449,6 +476,12 @@ $(document).ready(function() {
         if (data && data.dof !== undefined && data.angle !== undefined) {
             // Update holding target display for this DOF
             updateHoldingTargetDisplay(data.dof, data.angle);
+            
+            // Clear waypoint trajectory active flag - movement complete
+            if (waypointTrajectoryActive) {
+                waypointTrajectoryActive = false;
+                console.log(`[Waypoint] Trajectory complete for DOF ${data.dof}, target reached: ${data.angle.toFixed(2)}°`);
+            }
         }
     });
 
@@ -2405,6 +2438,11 @@ function sendMultiWaypointSmoothCurve() {
         appendStatusMessage("⚠️ Enter a valid angle in degrees.");
         return;
     }
+    
+    // SAFETY: Check if a trajectory is already in progress
+    if (!checkTrajectoryNotActive()) {
+        return;
+    }
 
     // SAFETY: Get current angle from encoder display (REQUIRED - prevents dangerous waypoints)
     const startAngle = getCurrentEncoderAngle(joint, dofIndex);
@@ -2470,6 +2508,9 @@ function sendMultiWaypointSmoothCurve() {
 
     appendStatusMessage(`📊 Generated ${waypoints.length} waypoints`);
 
+    // Mark trajectory as active before sending
+    markTrajectoryActive();
+    
     // Send as batch
     $.ajax({
         url: '/can/waypoint_batch',
@@ -2481,10 +2522,12 @@ function sendMultiWaypointSmoothCurve() {
             appendStatusMessage(`✅ Multi-WP batch sent: ${waypoints.length} waypoints [LINEAR interp]`);
         } else {
             appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
+            waypointTrajectoryActive = false;  // Clear on error
         }
     }).fail(xhr => {
         const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
         appendStatusMessage(`❌ Batch error: ${message}`);
+        waypointTrajectoryActive = false;  // Clear on error
     });
 }
 
@@ -2583,6 +2626,11 @@ function sendCanWaypointSequence() {
         return;
     }
     
+    // SAFETY: Check if a trajectory is already in progress
+    if (!checkTrajectoryNotActive()) {
+        return;
+    }
+    
     // SAFETY: Validate encoder data is available for all active DOFs
     const dofIndices = activeDofs.map(d => d.index);
     const encoderValidation = validateEncoderForWaypoints(joint, dofIndices);
@@ -2666,6 +2714,9 @@ function sendCanWaypointSequence() {
     // This guarantees order and completeness (no lost waypoints)
     
     appendStatusMessage(`📡 Sending ${testSequence.length} waypoints (batch mode)...`);
+    
+    // Mark trajectory as active before sending
+    markTrajectoryActive();
     
     // Convert to batch format
     const batchPayload = testSequence.map(wp => ({
@@ -2751,6 +2802,11 @@ function sendCosineOscillation() {
     
     if (activeDofs.length === 0) {
         appendStatusMessage("⚠️ Select at least one DOF for the oscillation test.");
+        return;
+    }
+    
+    // SAFETY: Check if a trajectory is already in progress
+    if (!checkTrajectoryNotActive()) {
         return;
     }
     
@@ -2861,6 +2917,9 @@ function sendCosineOscillation() {
     appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total`);
     appendStatusMessage(`   🎯 Active: ${dofInfo} (min↔max direct)`);
 
+    // Mark trajectory as active before sending
+    markTrajectoryActive();
+    
     // Convert to batch format
     const batchPayload = testSequence.map(wp => ({
         angles_deg: wp.angles,
@@ -2891,11 +2950,13 @@ function sendCosineOscillation() {
             appendStatusMessage(`❌ Batch failed: ${response.message}`);
             btn.prop('disabled', false);
             btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
+            waypointTrajectoryActive = false;  // Clear on error
         }
     }).fail(xhr => {
         const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
         appendStatusMessage(`❌ Batch error: ${message}`);
         btn.prop('disabled', false);
+        waypointTrajectoryActive = false;  // Clear on error
         btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
     });
 }
@@ -5049,6 +5110,9 @@ function resetOscillationTest() {
  */
 function cleanupHostTrajectoryState(reason = 'Unknown') {
     console.log('Cleaning up host trajectory state:', reason);
+    
+    // Clear waypoint trajectory active flag
+    waypointTrajectoryActive = false;
     
     // Stop oscillation test if active
     if (oscTestActive) {
