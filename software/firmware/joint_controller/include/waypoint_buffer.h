@@ -1,6 +1,8 @@
 /**
  * @file waypoint_buffer.h
- * @brief Thread-safe waypoint buffer manager for host-driven CAN control
+ * @brief Waypoint buffer manager for host-driven CAN control (Core1 only)
+ *
+ * All access is from Core1 — no cross-core locking needed.
  */
 
 #ifndef WAYPOINT_BUFFER_H
