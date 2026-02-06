@@ -3287,6 +3287,11 @@ function fetchMappingChartData() {
         method: "GET",
         dataType: "json",
         success: function(response) {
+            // Guard: if joint changed while AJAX was in flight, discard stale response
+            if ($("#jointSelect").val() !== selectedJoint) {
+                console.log("Discarding stale mapping response for", selectedJoint, "(now", $("#jointSelect").val(), ")");
+                return;
+            }
             console.log("Saved mapping data received for", selectedJoint, ":", response); // Debug
             if (response.has_data) {
                 // Use saved mapping data
@@ -3311,6 +3316,8 @@ function fetchMappingChartData() {
             }
         },
         error: function(xhr, status, error) {
+            // Guard: if joint changed while AJAX was in flight, discard
+            if ($("#jointSelect").val() !== selectedJoint) return;
             console.log("Error loading saved data for", selectedJoint, ", trying with in-memory data"); // Debug
             // If error with saved data, try with in-memory data
             loadMemoryMappingData(selectedJoint);
@@ -3334,6 +3341,8 @@ function loadMemoryMappingData(jointName) {
         data: { joint: jointName },
         dataType: "json",
         success: function(response) {
+            // Guard: if joint changed while AJAX was in flight, discard stale response
+            if ($("#jointSelect").val() !== jointName) return;
             console.log("In-memory mapping data received:", response); // Debug
             if (response.has_data) {
                 // Use mapping data in memory
@@ -3359,6 +3368,8 @@ function loadMemoryMappingData(jointName) {
             }
         },
         error: function(xhr, status, error) {
+            // Guard: if joint changed while AJAX was in flight, discard
+            if ($("#jointSelect").val() !== jointName) return;
             console.error("Error loading mapping data:", error); // Debug
             appendStatusMessage(`Error loading mapping data for ${jointName}`);
             updateMappingDataInfo('Error loading');
