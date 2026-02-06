@@ -733,6 +733,7 @@ void core0_main_loop() {
                       // This prevents old EMERGENCY_STOP frames from triggering during startup
                       {
                         int flushed = 0;
+                        bool flushed_estop = false;
                         unsigned long flush_start = millis();
                         while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && (millis() - flush_start) < 50) {
                           unsigned long rx_id;
@@ -741,14 +742,20 @@ void core0_main_loop() {
                           CAN_HOST.readMsgBuf(&rx_id, &len, buf);
                           if (rx_id == 0x000) {
                             LOG_WARN("Flushed stale EMERGENCY_STOP from CAN_HOST buffer");
+                            flushed_estop = true;
                           }
                           flushed++;
                         }
                         if (flushed > 0) {
                           LOG_INFO("Flushed " + String(flushed) + " stale CAN_HOST messages before motor check");
                         }
-                        // Clear any emergency stop flag that might have been set by stale messages
-                        emergency_stop_requested = false;
+                        // Only clear e-stop flag if stale EMERGENCY_STOP frames were actually found.
+                        // Safe: suspend_host_can_polling is true, so Core1 won't set new flags.
+                        // Avoids clearing a real e-stop that arrived from another source (e.g. encoder error).
+                        if (flushed_estop) {
+                          emergency_stop_requested = false;
+                          LOG_INFO("Cleared stale emergency stop flag from flushed CAN frames");
+                        }
                       }
                       
                       // SAFETY CHECK 3: Verify motors are accessible and responding

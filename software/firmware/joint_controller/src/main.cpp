@@ -52,6 +52,7 @@ bool init_prg = true;
 // On ARM Cortex-M33, aligned ≤32-bit reads/writes are naturally atomic.
 // volatile prevents compiler from caching values across loop iterations.
 volatile bool flash_operation_in_progress = false;  // Core0 writes, Core1 reads
+volatile bool core1_flash_acknowledged = false;     // Core1 writes, Core0 reads
 volatile bool movement_in_progress = false;         // Core1 writes, Core0 reads
 volatile bool suspend_host_can_polling = false;     // Core0 writes, Core1 reads
 // System settings (loaded from flash at boot)

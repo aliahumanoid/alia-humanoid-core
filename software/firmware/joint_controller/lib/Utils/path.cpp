@@ -25,6 +25,12 @@
 void path_linear(float xstart, float xstop, float vmax, float ta, int nstep,
                  std::array<float, MAX_STEPS> &t, std::array<float, MAX_STEPS> &x,
                  std::array<float, MAX_STEPS> &v, std::array<float, MAX_STEPS> &a) {
+  // Guard: nstep <= 1 causes division by zero in time spacing (t3 * i / (nstep-1))
+  if (nstep <= 1) {
+    if (nstep == 1) { t[0] = 0; x[0] = xstart; v[0] = 0; a[0] = 0; }
+    return;
+  }
+
   float tmax, t1, t2, t3;
 
   // Step 1: Determine motion direction
@@ -93,6 +99,11 @@ void path_linear(float xstart, float xstop, float vmax, float ta, int nstep,
 void path_trig(float xstart, float xstop, float vmax, float ta, int nstep,
                std::array<float, MAX_STEPS> &t, std::array<float, MAX_STEPS> &x,
                std::array<float, MAX_STEPS> &v, std::array<float, MAX_STEPS> &a) {
+  if (nstep <= 1) {
+    if (nstep == 1) { t[0] = 0; x[0] = xstart; v[0] = 0; a[0] = 0; }
+    return;
+  }
+
   float tmax, t1, t2, t3;
 
   // Determine motion direction
@@ -158,6 +169,11 @@ void path_trig(float xstart, float xstop, float vmax, float ta, int nstep,
 void path_quad(float xstart, float xstop, float vmax, float ta, int nstep,
                std::array<float, MAX_STEPS> &t, std::array<float, MAX_STEPS> &x,
                std::array<float, MAX_STEPS> &v, std::array<float, MAX_STEPS> &a) {
+  if (nstep <= 1) {
+    if (nstep == 1) { t[0] = 0; x[0] = xstart; v[0] = 0; a[0] = 0; }
+    return;
+  }
+
   float tmax, t1, t2, t3;
 
   // Determine motion direction

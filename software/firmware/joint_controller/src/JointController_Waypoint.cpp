@@ -104,6 +104,8 @@ static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 // === CAN ERROR TRACKING (file scope for reset on new movement) ===
 static float wp_last_theta_A[MAX_DOFS] = {0};
 static float wp_last_theta_B[MAX_DOFS] = {0};
+// Consecutive invalid CAN read counter — triggers emergency stop when sustained
+static uint8_t wp_consecutive_invalid[MAX_DOFS] = {0};
 
 // === OSCILLATION DETECTION (safety feature) ===
 // Detects dangerous oscillations (e.g., from too-high stiffness) and triggers emergency stop
@@ -242,6 +244,7 @@ bool JointController::executeWaypointMovement() {
       // Clear CAN error history for this DOF to prevent old errors from triggering false stops
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
+      wp_consecutive_invalid[dof] = 0;  // Reset invalid read counter
 
       LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (IDLE → MOVING)");
     }
@@ -1081,33 +1084,22 @@ bool JointController::executeWaypointMovement() {
     float theta_B_curr = data_B.angle;
     
     // === SANITY CHECK: Detect obviously invalid readings ===
-    // Values outside ±100000° are clearly garbage (CAN corruption)
+    // Values outside ±100000° are clearly garbage (CAN corruption, NaN)
     bool invalid_A = (theta_A_curr < -100000.0f || theta_A_curr > 100000.0f || isnan(theta_A_curr));
     bool invalid_B = (theta_B_curr < -100000.0f || theta_B_curr > 100000.0f || isnan(theta_B_curr));
     
-    if (invalid_A || invalid_B) {
-      static uint32_t last_invalid_log = 0;
-      if (millis() - last_invalid_log > 100) { // Log max every 100ms
-        LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ: A=" + 
-                  String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
-        last_invalid_log = millis();
-      }
-      // Skip this cycle entirely - don't send any torque command
-      continue;
-    }
-    
-    // === DIAGNOSTIC: Detect suspicious motor readings ===
-    // Check for sudden large jumps in motor angle (possible CAN corruption)
+    // === DIAGNOSTIC: Detect suspicious motor angle jumps ===
+    // Check for sudden large jumps (possible CAN corruption)
     // Uses time-window based detection via shared CANErrorTracker (main_common.h)
     // Variables are at file scope (wp_last_theta_A/B, wp_first_read, wp_canErrorTracker)
-    // so they can be reset when a new waypoint sequence starts
-
-    if (!wp_first_read[dof]) {
+    bool jump_detected = false;
+    if (!wp_first_read[dof] && !invalid_A && !invalid_B) {
       float jump_A = fabs(theta_A_curr - wp_last_theta_A[dof]);
       float jump_B = fabs(theta_B_curr - wp_last_theta_B[dof]);
 
       // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
       if (jump_A > 30.0f || jump_B > 30.0f) {
+        jump_detected = true;
         wp_canErrorTracker.recordError(dof);
         uint8_t recent_errors = wp_canErrorTracker.countRecentErrors(dof);
 
@@ -1127,18 +1119,61 @@ bool JointController::executeWaypointMovement() {
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
           wp_canErrorTracker.clearErrors(dof);
           wp_first_read[dof] = true;
+          wp_consecutive_invalid[dof] = 0;
           continue;
         }
-
-        // Skip this cycle to avoid sending bad commands, use last known good values
+      }
+    }
+    
+    // === FALLBACK LOGIC: Use last-known-good values on bad reads ===
+    // Instead of skipping the control cycle (which leaves motors uncontrolled),
+    // substitute with last valid reading so PID keeps running.
+    // Emergency stop triggers after sustained failures.
+    if (invalid_A || invalid_B || jump_detected) {
+      if (wp_first_read[dof]) {
+        // No previous good value to fall back to — must skip
+        static uint32_t last_invalid_log = 0;
+        if (millis() - last_invalid_log > 100) {
+          LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ on first read, skipping");
+          last_invalid_log = millis();
+        }
         continue;
       }
-      // Good reading - no need to reset anything, old errors expire naturally
-    }
 
-    wp_last_theta_A[dof] = theta_A_curr;
-    wp_last_theta_B[dof] = theta_B_curr;
-    wp_first_read[dof] = false;
+      // Fallback: use last known good motor angles
+      theta_A_curr = wp_last_theta_A[dof];
+      theta_B_curr = wp_last_theta_B[dof];
+      wp_consecutive_invalid[dof]++;
+
+      if (invalid_A || invalid_B) {
+        wp_canErrorTracker.recordError(dof);
+        static uint32_t last_invalid_log = 0;
+        if (millis() - last_invalid_log > 100) {
+          LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ (consecutive=" + 
+                    String(wp_consecutive_invalid[dof]) + "), using last-known-good");
+          last_invalid_log = millis();
+        }
+      }
+
+      // Emergency stop after sustained invalid reads (threshold from system config)
+      if (wp_consecutive_invalid[dof] >= can_error_threshold) {
+        LOG_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(wp_consecutive_invalid[dof]) +
+                  " consecutive invalid CAN reads, EMERGENCY STOP!");
+        stopAllMotors();
+        waypoint_buffer_clear(dof);
+        waypoint_buffer_set_state(dof, WaypointState::IDLE);
+        wp_canErrorTracker.clearErrors(dof);
+        wp_first_read[dof] = true;
+        wp_consecutive_invalid[dof] = 0;
+        continue;
+      }
+    } else {
+      // Valid reading — update last-known-good cache, reset consecutive counter
+      wp_last_theta_A[dof] = theta_A_curr;
+      wp_last_theta_B[dof] = theta_B_curr;
+      wp_first_read[dof] = false;
+      wp_consecutive_invalid[dof] = 0;
+    }
     
     // === UPDATE MOTOR ANGLE CACHE ===
     // This cache is used by checkMotorsInRange() to avoid redundant CAN reads

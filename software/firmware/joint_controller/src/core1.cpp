@@ -23,9 +23,13 @@
 // RAM-resident function for waiting during flash operations
 // This MUST be in RAM because flash is inaccessible during erase/program
 static void __not_in_flash_func(wait_for_flash_complete)(void) {
+  // Signal Core0 that we are safely parked in RAM
+  core1_flash_acknowledged = true;
   while (flash_operation_in_progress) {
     tight_loop_contents();  // CPU-friendly busy wait
   }
+  // Reset acknowledgment for next flash operation
+  core1_flash_acknowledged = false;
 }
 
 // ============================================================================

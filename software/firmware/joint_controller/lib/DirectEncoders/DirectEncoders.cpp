@@ -8,8 +8,23 @@
 #include "DirectEncoders.h"
 #include <debug.h>
 
-// External flag for flash operation synchronization with Core1
+// External flags for flash operation synchronization with Core1
 extern volatile bool flash_operation_in_progress;
+extern volatile bool core1_flash_acknowledged;
+
+/**
+ * @brief Handshake with Core1 before flash operations.
+ * Waits for Core1 to park in RAM, with 50ms timeout.
+ */
+static void wait_for_core1_flash_ready() {
+  core1_flash_acknowledged = false;
+  flash_operation_in_progress = true;
+  uint32_t start = millis();
+  while (!core1_flash_acknowledged) {
+    if (millis() - start > 50) break;
+    tight_loop_contents();
+  }
+}
 
 #ifndef PI
 #define PI 3.14159265358979323846f
@@ -538,9 +553,8 @@ bool DirectEncoders::saveOffsetsToFlash() {
   size_t data_size = sizeof(EncoderFlashData);
   size_t num_pages = (data_size + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE;
   
-  // Signal Core1 to enter RAM wait loop before flash operations
-  flash_operation_in_progress = true;
-  delay(5);  // Give Core1 time to enter the wait loop
+  // Handshake: wait for Core1 to park in RAM before flash erase/program
+  wait_for_core1_flash_ready();
   
   // Disable interrupts for flash operations
   uint32_t ints = save_and_disable_interrupts();

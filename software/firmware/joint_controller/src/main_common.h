@@ -106,6 +106,8 @@ extern DirectEncoders directEncoders;
 // Flash operation synchronization
 // Core0 sets this before flash operations, Core1 checks and waits in RAM
 extern volatile bool flash_operation_in_progress;
+// Core1 sets this to confirm it has entered the RAM wait loop
+extern volatile bool core1_flash_acknowledged;
 
 // Movement in progress flag
 // Core1 sets this during movement execution to pause Serial streaming on Core0
@@ -284,13 +286,14 @@ public:
   }
 
   // Count errors within the configured time window
+  // Uses unsigned subtraction (now - timestamp) which handles millis() wrap correctly
   uint8_t countRecentErrors(uint8_t dof_idx) const {
     if (dof_idx >= MAX_DOFS) return 0;
     uint32_t now = millis();
-    uint32_t cutoff = (now > can_error_window_ms) ? (now - can_error_window_ms) : 0;
     uint8_t count = 0;
     for (int i = 0; i < CAN_ERROR_HISTORY_SIZE; i++) {
-      if (error_timestamps[dof_idx][i] > cutoff) {
+      uint32_t ts = error_timestamps[dof_idx][i];
+      if (ts != 0 && (now - ts) < can_error_window_ms) {
         count++;
       }
     }

@@ -13,8 +13,38 @@
 #include <array>
 #include <cstring>
 
-// External flag for flash operation synchronization with Core1
+// External flags for flash operation synchronization with Core1
 extern volatile bool flash_operation_in_progress;
+extern volatile bool core1_flash_acknowledged;
+
+/**
+ * @brief Handshake with Core1 before flash operations.
+ *
+ * Signals Core1 to park in a RAM-resident wait loop, then waits for
+ * Core1 to acknowledge.  Replaces the previous delay(5) with a proper
+ * bidirectional handshake that is immune to Core1 timing jitter.
+ *
+ * Timeout (50 ms) covers the case where Core1 is not running yet
+ * (boot) or is stuck — the flash operation proceeds anyway.
+ */
+static void wait_for_core1_flash_ready() {
+  // Reset ack from any previous operation (safe: Core1 is not in the
+  // wait loop because flash_operation_in_progress is still false)
+  core1_flash_acknowledged = false;
+
+  // Signal Core1 to enter RAM wait loop
+  flash_operation_in_progress = true;
+
+  // Wait for Core1 to confirm it is safely in RAM
+  uint32_t start = millis();
+  while (!core1_flash_acknowledged) {
+    if (millis() - start > 50) {
+      LOG_WARN("[FLASH] Core1 handshake timeout — proceeding");
+      break;
+    }
+    tight_loop_contents();
+  }
+}
 
 // ===================================================================
 // FLASH MEMORY CONFIGURATION
@@ -159,9 +189,8 @@ void save_pid_only_data(struct PIDOnlyDeviceData data) {
   // Calculate number of sectors to erase (4KB each)
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
-  // Signal Core1 to enter RAM wait loop before flash operations
-  flash_operation_in_progress = true;
-  delay(5);  // Give Core1 time to enter the wait loop
+  // Handshake: wait for Core1 to park in RAM before flash erase/program
+  wait_for_core1_flash_ready();
   
   // Atomic flash operation: disable interrupts during write
   uint32_t ints = save_and_disable_interrupts();
@@ -388,9 +417,8 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
   // Calculate number of sectors to erase
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
-  // Signal Core1 to enter RAM wait loop before flash operations
-  flash_operation_in_progress = true;
-  delay(5);  // Give Core1 time to enter the wait loop
+  // Handshake: wait for Core1 to park in RAM before flash erase/program
+  wait_for_core1_flash_ready();
   
   // Atomic flash operation
   uint32_t ints = save_and_disable_interrupts();
@@ -537,9 +565,8 @@ void save_system_settings_data(struct SystemSettingsData data) {
   // Calculate number of sectors to erase (4KB each)
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
-  // Signal Core1 to enter RAM wait loop before flash operations
-  flash_operation_in_progress = true;
-  delay(5);  // Give Core1 time to enter the wait loop
+  // Handshake: wait for Core1 to park in RAM before flash erase/program
+  wait_for_core1_flash_ready();
 
   // Atomic flash operation: disable interrupts during write
   uint32_t ints = save_and_disable_interrupts();
