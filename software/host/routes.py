@@ -1226,6 +1226,10 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 # Manual startup sequence: recalc_offset all DOFs + enter HOLDING
                 handler.send_new_command(joint, 'ALL', COMMANDS['STARTUP_SEQUENCE'])
                 message = "Startup sequence initiated (recalc + hold)"
+            elif cmd == "check-offsets":
+                # Check if saved motor offsets are still valid (smart recalc detection)
+                handler.send_new_command(joint, 'ALL', COMMANDS['CHECK_OFFSETS'])
+                message = "Offset validation check initiated"
             elif cmd == "set-auto-start":
                 # Enable or disable auto-start on boot
                 enabled = int(data.get('enabled', 0))

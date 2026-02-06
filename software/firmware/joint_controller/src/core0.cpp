@@ -1033,6 +1033,15 @@ void core0_main_loop() {
     case CMD1_END_MOVE:
       SERIAL_COM_LN("RSP:MOVE_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.message) + ")");
+      // Check if motor offsets need saving to flash (after recalc_offset)
+      if (active_joint_controller != nullptr && active_joint_controller->isPendingOffsetsSave()) {
+        if (active_joint_controller->saveMotorOffsetsToFlash()) {
+          LOG_INFO("Motor offsets saved to flash after recalc");
+        } else {
+          LOG_WARN("Failed to save motor offsets to flash");
+        }
+        active_joint_controller->clearPendingOffsetsSave();
+      }
       break;
 
     case CMD1_FAIL_MOVE:

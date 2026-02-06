@@ -254,6 +254,9 @@ class SerialHandler:
             elif actual_message.startswith(("KNEE", "ANKLE", "HIP")):
                 self.status_message.append(actual_message)
                 self.handle_joint_message(actual_message)
+            elif actual_message.startswith("RECALC_STATUS("):
+                # Parse offset validation result: RECALC_STATUS(joint_id,dof,status,err_a,err_b)
+                self._handle_recalc_status(actual_message)
             elif actual_message.startswith("JOINT "):
                 # Parse joint identification: "JOINT <id> <name>"
                 self._handle_joint_identification(actual_message)
@@ -312,6 +315,43 @@ class SerialHandler:
                 "dof": dof,
                 "angle": angle
             }, namespace="/movement")
+
+    def _handle_recalc_status(self, message: str) -> None:
+        """Parse RECALC_STATUS(joint_id,dof,status,err_agonist,err_antagonist)"""
+        match = re.match(
+            r"RECALC_STATUS\((\d+),(\d+),(VALID|NEEDED|NO_DATA),([-+]?\d*\.?\d+),([-+]?\d*\.?\d+)\)",
+            message,
+        )
+        if match:
+            joint_id = int(match.group(1))
+            dof = int(match.group(2))
+            status = match.group(3)
+            err_a = float(match.group(4))
+            err_b = float(match.group(5))
+
+            icon = {"VALID": "✅", "NEEDED": "⚠️", "NO_DATA": "ℹ️"}.get(status, "❓")
+            self.status_message.append(
+                f"{icon} DOF {dof} offset check: {status} (err: {err_a:.1f}°/{err_b:.1f}°)"
+            )
+            logger.info(
+                f"Recalc status DOF {dof}: {status} (agon={err_a:.2f}° antag={err_b:.2f}°)"
+            )
+
+            if self.socketio:
+                self.socketio.emit(
+                    "recalc_status",
+                    {
+                        "joint_id": joint_id,
+                        "dof": dof,
+                        "status": status,
+                        "error_agonist": err_a,
+                        "error_antagonist": err_b,
+                    },
+                    namespace="/movement",
+                )
+        else:
+            logger.warning(f"Failed to parse RECALC_STATUS: {message}")
+            self.status_message.append(message)
 
     def handle_mapping_data(self, line: str, ser: serial.Serial) -> None:
         # MAPPING_DATA(total_points,dof_count) protocol

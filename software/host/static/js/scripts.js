@@ -564,6 +564,14 @@ $(document).ready(function() {
         cleanupHostTrajectoryState('Stall detected on DOF ' + data.dof);
     });
 
+    // Listener for recalc offset validation results (smart recalc detection)
+    socket.on('recalc_status', function(data) {
+        if (data && data.status !== undefined) {
+            console.log('Recalc status:', data);
+            updateRecalcBadge(data.joint_id, data.dof, data.status, data.error_agonist, data.error_antagonist);
+        }
+    });
+
     // Listener for PID diagnostics data (target/error)
     // Temporary storage for combining pid_diag and pid_torque into single records
     let pendingPidRecord = null;
@@ -8006,5 +8014,55 @@ async function sendMultiWaypointSmoothCurveAsync() {
  */
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================================
+// SMART RECALC DETECTION — Badge update
+// ============================================================================
+
+// Map joint_id to joint type for badge lookup
+const JOINT_ID_TO_TYPE = {1: 'knee', 2: 'knee', 3: 'ankle', 4: 'ankle', 5: 'hip', 6: 'hip'};
+
+// Track per-DOF status for aggregate badge (worst status wins)
+let recalcDofStatuses = {};
+
+/**
+ * Update the recalc status badge for a joint panel based on per-DOF results.
+ * Called when firmware sends EVT:RECALC_STATUS for each DOF.
+ */
+function updateRecalcBadge(jointId, dof, status, errA, errB) {
+    const jointType = JOINT_ID_TO_TYPE[jointId];
+    if (!jointType) return;
+
+    // Track per-DOF status
+    const key = `${jointId}_${dof}`;
+    recalcDofStatuses[key] = status;
+
+    // Determine aggregate status: NO_DATA > NEEDED > VALID
+    let aggregate = 'VALID';
+    let hasNeeded = false;
+    let hasNoData = false;
+    for (const k in recalcDofStatuses) {
+        if (!k.startsWith(`${jointId}_`)) continue;
+        if (recalcDofStatuses[k] === 'NO_DATA') hasNoData = true;
+        if (recalcDofStatuses[k] === 'NEEDED') hasNeeded = true;
+    }
+    if (hasNoData) aggregate = 'NO_DATA';
+    else if (hasNeeded) aggregate = 'NEEDED';
+
+    // Update badge element
+    const badge = document.getElementById(`recalcBadge_${jointType}`);
+    if (!badge) return;
+
+    if (aggregate === 'VALID') {
+        badge.textContent = 'Offsets Valid';
+        badge.className = 'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-green-100 text-green-800';
+    } else if (aggregate === 'NEEDED') {
+        badge.textContent = 'Recalc Needed';
+        badge.className = 'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-yellow-100 text-yellow-800';
+    } else {
+        badge.textContent = 'No Saved Data';
+        badge.className = 'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700';
+    }
 }
 

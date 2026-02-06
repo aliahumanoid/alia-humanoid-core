@@ -55,11 +55,13 @@ static void wait_for_core1_flash_ready() {
 #define FLASH_PID_OFFSET (FLASH_STORAGE_BASE_OFFSET)  ///< PID data at base
 #define FLASH_LINEAR_EQ_OFFSET (FLASH_STORAGE_BASE_OFFSET + 64 * 1024)  ///< Equations at base + 64KB
 #define FLASH_SYSTEM_SETTINGS_OFFSET (FLASH_STORAGE_BASE_OFFSET + 128 * 1024)  ///< System settings at base + 128KB
+#define FLASH_MOTOR_OFFSETS_OFFSET (FLASH_STORAGE_BASE_OFFSET + 192 * 1024)   ///< Motor offsets at base + 192KB
 
 // Data format versions
 static constexpr uint16_t PID_FLASH_VERSION            = 4;  ///< PID-only format version
 static constexpr uint16_t LINEAR_EQ_FLASH_VERSION      = 5;  ///< Linear equations format version
 static constexpr uint16_t SYSTEM_SETTINGS_FLASH_VERSION = 6;  ///< System settings format version
+static constexpr uint16_t MOTOR_OFFSETS_FLASH_VERSION   = 7;  ///< Motor offsets format version
 
 // Time tracking globals for overflow handling
 unsigned long overflow_count;  ///< Number of micros() overflows
@@ -660,6 +662,123 @@ bool load_system_settings_data(struct SystemSettingsData *data) {
   LOG_INFO("System settings loaded successfully!");
   LOG_DEBUG("Joint type: " + String(data->joint_type));
   LOG_DEBUG("Auto-start: " + String(data->auto_start_enabled ? "ENABLED" : "DISABLED"));
+
+  return true;
+}
+
+// ===================================================================
+// FLASH STORAGE - MOTOR OFFSETS SAVE/LOAD
+// ===================================================================
+
+/**
+ * Save motor encoder offsets to flash
+ * 
+ * Stores offsets from recalculateMotorOffsets() so they can be
+ * validated at next boot without requiring full recalibration.
+ */
+void save_motor_offsets_data(struct MotorOffsetsDeviceData data) {
+  // Populate header metadata
+  data.magic_number = MAGIC_NUMBER;
+  data.version      = MOTOR_OFFSETS_FLASH_VERSION;
+  data.timestamp    = millis();
+
+  // Calculate checksum (excludes header)
+  data.checksum =
+      calculate_checksum((uint8_t *)&data + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         sizeof(MotorOffsetsDeviceData) - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  uint8_t *data_ptr = (uint8_t *)&data;
+  size_t data_size  = sizeof(struct MotorOffsetsDeviceData);
+  size_t offset     = 0;
+
+  // Calculate number of sectors to erase (4KB each)
+  size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
+
+  // Handshake: wait for Core1 to park in RAM before flash erase/program
+  wait_for_core1_flash_ready();
+
+  // Atomic flash operation: disable interrupts during write
+  uint32_t ints = save_and_disable_interrupts();
+
+  // Erase flash sectors before programming
+  flash_range_erase(FLASH_MOTOR_OFFSETS_OFFSET, num_sectors * FLASH_SECTOR_SIZE);
+
+  // Program data in 256-byte pages
+  while (offset < data_size) {
+    size_t chunk_size =
+        (data_size - offset > FLASH_PAGE_SIZE) ? FLASH_PAGE_SIZE : data_size - offset;
+
+    uint8_t flash_page[FLASH_PAGE_SIZE];
+    memset(flash_page, 0xFF, FLASH_PAGE_SIZE);
+    memcpy(flash_page, data_ptr + offset, chunk_size);
+
+    flash_range_program(FLASH_MOTOR_OFFSETS_OFFSET + offset, flash_page, FLASH_PAGE_SIZE);
+    offset += FLASH_PAGE_SIZE;
+  }
+
+  // Restore interrupts
+  restore_interrupts(ints);
+
+  // Signal Core1 to resume normal operation
+  flash_operation_in_progress = false;
+
+  LOG_INFO("Motor offsets saved to flash successfully!");
+  LOG_DEBUG("Joint type: " + String(data.joint_type));
+  LOG_DEBUG("DOF count: " + String(data.dof_count));
+}
+
+/**
+ * Load motor encoder offsets from flash
+ * 
+ * Reads and validates saved motor offsets for boot-time validation.
+ */
+bool load_motor_offsets_data(struct MotorOffsetsDeviceData *data) {
+  if (data == NULL) {
+    LOG_ERROR("Invalid data pointer provided!");
+    return false;
+  }
+
+  uint8_t *data_ptr        = (uint8_t *)data;
+  size_t data_size         = sizeof(struct MotorOffsetsDeviceData);
+  size_t offset            = 0;
+  const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + FLASH_MOTOR_OFFSETS_OFFSET);
+
+  // Step 1: Read header for validation
+  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
+
+  // Step 2: Verify magic number
+  if (data->magic_number != MAGIC_NUMBER) {
+    LOG_DEBUG("No motor offsets found in flash (magic number not found)");
+    return false;
+  }
+
+  // Step 3: Verify version
+  if (data->version != MOTOR_OFFSETS_FLASH_VERSION) {
+    LOG_WARN("Unexpected motor offsets version: " + String(data->version) +
+             " (expected " + String(MOTOR_OFFSETS_FLASH_VERSION) + ")");
+    return false;
+  }
+
+  // Step 4: Read the rest of the data
+  while (offset < data_size) {
+    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
+    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
+    offset += chunk_size;
+  }
+
+  // Step 5: Verify checksum
+  uint16_t calculated_checksum =
+      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  if (calculated_checksum != data->checksum) {
+    LOG_ERROR("Motor offsets checksum mismatch - data corrupted!");
+    return false;
+  }
+
+  LOG_INFO("Motor offsets loaded from flash successfully!");
+  LOG_DEBUG("Joint type: " + String(data->joint_type));
+  LOG_DEBUG("DOF count: " + String(data->dof_count));
 
   return true;
 }

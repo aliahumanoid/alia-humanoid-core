@@ -130,5 +130,6 @@ COMMANDS = {
     'CAN_DIAG': 'CAN_DIAG',       # CAN bus diagnostic test
     'STARTUP_SEQUENCE': 'STARTUP_SEQUENCE',  # Manual startup sequence (recalc all DOFs + enter HOLDING)
     'SET_AUTO_START': 'SET_AUTO_START',      # Enable/disable auto-start on boot
-    'GET_AUTO_START': 'GET_AUTO_START'       # Query auto-start setting
+    'GET_AUTO_START': 'GET_AUTO_START',       # Query auto-start setting
+    'CHECK_OFFSETS': 'CHECK_OFFSETS'          # Validate saved motor offsets (smart recalc detection)
 }

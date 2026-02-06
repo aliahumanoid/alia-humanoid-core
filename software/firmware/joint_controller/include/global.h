@@ -291,4 +291,33 @@ struct SystemSettingsData {
   uint32_t timestamp;             // Unix timestamp of last save
 };
 
+/**
+ * @brief Flash structure for motor encoder offsets (Version 7)
+ * 
+ * Stores motor encoder offsets calculated during recalc_offset.
+ * Used to detect whether recalculation is needed after reboot:
+ * - If motors kept power: saved offsets are still valid (skip recalc)
+ * - If motors lost power: encoder positions reset, offsets invalid (need recalc)
+ * 
+ * Validation at boot:
+ * 1. Load saved offsets from flash
+ * 2. Read raw motor angles via CAN
+ * 3. Apply saved offsets, compare with expected angles from linear equations
+ * 4. If error < threshold → offsets valid → skip recalc
+ */
+struct MotorOffsetsDeviceData {
+  uint32_t magic_number;       // Magic number (0xABCD1234) for validation
+  uint16_t version;            // Structure version (7)
+  uint16_t checksum;           // Data integrity checksum
+  uint8_t joint_type;          // Joint type: JOINT_KNEE, JOINT_ANKLE, JOINT_HIP
+  uint8_t dof_count;           // Number of degrees of freedom
+  uint8_t reserved[2];         // Padding for alignment
+  struct {
+    float agonist_offset;       // Saved agonist encoder offset (degrees)
+    float antagonist_offset;    // Saved antagonist encoder offset (degrees)
+    float joint_angle_at_calib; // Joint encoder angle when offsets were calculated (degrees)
+  } dof_offsets[MAX_DOFS];     // Offsets for each DOF
+  uint32_t timestamp;          // millis() at save time
+};
+
 #endif // GLOBAL_H

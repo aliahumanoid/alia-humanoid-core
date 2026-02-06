@@ -123,6 +123,16 @@ private:
   // Flag: offsets recalculated after boot
   bool *motor_offsets_calibrated;
 
+  // Saved motor offsets (for flash persistence and boot-time validation)
+  struct SavedDofOffset {
+    float agonist_offset;
+    float antagonist_offset;
+    float joint_angle_at_calib;
+    bool valid;
+  };
+  SavedDofOffset _saved_offsets[MAX_DOFS];
+  volatile bool _pending_offsets_save = false;  // Core1 sets, Core0 saves to flash
+
   // Outer‑loop (cascade) control parameters per DOF
   float *outer_loop_kp_values;
   float *outer_loop_ki_values;
@@ -558,6 +568,51 @@ public:
    * @brief Clear the pending flash save flag (call after saving)
    */
   void clearPendingFlashSave() { _pending_flash_save = false; }
+
+  // --- Motor offset persistence (for smart recalc detection) ---
+
+  /**
+   * @brief Check if Core1 has requested saving motor offsets to flash
+   */
+  bool isPendingOffsetsSave() const { return _pending_offsets_save; }
+
+  /**
+   * @brief Clear the pending offsets save flag (call after saving)
+   */
+  void clearPendingOffsetsSave() { _pending_offsets_save = false; }
+
+  /**
+   * @brief Save motor offsets to flash (called from Core0)
+   * @return true if saved successfully
+   */
+  bool saveMotorOffsetsToFlash();
+
+  /**
+   * @brief Load motor offsets from flash (called at boot from Core0)
+   * @return true if valid offsets were loaded
+   */
+  bool loadMotorOffsetsFromFlash();
+
+  /**
+   * @brief Result of offset validation check
+   */
+  struct OffsetValidationResult {
+    bool valid;                  // true = offsets still good, skip recalc
+    float error_agonist_deg;     // Deviation for agonist motor (degrees)
+    float error_antagonist_deg;  // Deviation for antagonist motor (degrees)
+    bool has_saved_data;         // true = saved offsets exist in flash
+  };
+
+  /**
+   * @brief Validate saved offsets against current motor positions
+   * 
+   * Reads raw motor angles via CAN, applies saved offsets, and compares
+   * with expected angles from linear equations. Must run on Core1 (CAN access).
+   * 
+   * @param dof_index DOF to validate
+   * @return Validation result with error magnitudes
+   */
+  OffsetValidationResult validateSavedOffsets(uint8_t dof_index);
 
   /**
    * @brief Check whether auto‑mapping is active

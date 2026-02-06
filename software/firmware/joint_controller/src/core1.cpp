@@ -910,7 +910,8 @@ void core1_loop() {
         command != CMD_SET_ZERO_CURRENT_POS &&
         command != CMD_ZERO_MOTOR_ENCODERS &&
         command != CMD_STOP_AUTO_MAPPING &&
-        command != CMD_CAN_DIAG) {
+        command != CMD_CAN_DIAG &&
+        command != CMD_CHECK_OFFSETS) {
       if (shared_data_ext.flag == 0) {
         shared_data_ext.flag = CMD1_FAIL_MOVE;
         strcpy(shared_data_ext.message, "ERROR: Motor power disabled. Send PRETENSION to recover.");
@@ -1204,6 +1205,37 @@ void core1_loop() {
       }
       
       LOG_INFO("=== END CAN DIAGNOSTIC ===");
+    } break;
+
+    case CMD_CHECK_OFFSETS: {
+      // Validate saved motor offsets against current motor positions
+      // Used by UI to determine if recalc_offset is needed before startup
+      bool all_valid = true;
+      bool has_any_data = false;
+      char detail_buf[80];
+
+      for (uint8_t dof = 0; dof < controller->getConfig().dof_count; dof++) {
+        JointController::OffsetValidationResult vr = controller->validateSavedOffsets(dof);
+
+        // Emit per-DOF status as EVT line (parsed by host)
+        const char* status_str = !vr.has_saved_data ? "NO_DATA" : (vr.valid ? "VALID" : "NEEDED");
+        if (vr.has_saved_data) has_any_data = true;
+        if (!vr.valid) all_valid = false;
+
+        snprintf(detail_buf, sizeof(detail_buf),
+                 "EVT:RECALC_STATUS(%d,%d,%s,%.2f,%.2f)",
+                 ACTIVE_JOINT, dof, status_str,
+                 vr.error_agonist_deg, vr.error_antagonist_deg);
+        SERIAL_COM_LN(detail_buf);
+      }
+
+      // Summary result
+      const char* summary = !has_any_data ? "NO_DATA" : (all_valid ? "ALL_VALID" : "RECALC_NEEDED");
+      if (shared_data_ext.flag == 0) {
+        snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
+                 "CHECK_OFFSETS:%s", summary);
+        shared_data_ext.flag = CMD1_END_MOVE;
+      }
     } break;
 
     default:

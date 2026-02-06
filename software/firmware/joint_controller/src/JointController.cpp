@@ -1195,6 +1195,14 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
 
   // Set flag that offsets have been calibrated for this DOF
   motor_offsets_calibrated[dof_index] = true;
+
+  // Save offsets for flash persistence (Core0 will write to flash)
+  _saved_offsets[dof_index].agonist_offset = new_agonist_offset;
+  _saved_offsets[dof_index].antagonist_offset = new_antagonist_offset;
+  _saved_offsets[dof_index].joint_angle_at_calib = current_joint_angle;
+  _saved_offsets[dof_index].valid = true;
+  _pending_offsets_save = true;
+
   SERIAL_COM_LN("CALIBRATION_STATUS: Offsets calibrated for DOF " + String(dof_index) +
                  " - movement enabled");
 

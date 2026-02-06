@@ -15,6 +15,7 @@
 #include <debug.h>
 #include <utils.h>
 #include <algorithm>
+#include "main_common.h"  // For shared_dof_angles
 
 // ============================================================================
 // FLASH STORAGE
@@ -360,6 +361,158 @@ bool JointController::loadLinearEquationsFromFlash() {
   LOG_INFO("Compact linear equations loaded - system ready for precise control");
 
   return loaded_equations_count > 0;
+}
+
+// ============================================================================
+// MOTOR OFFSETS FLASH STORAGE
+// ============================================================================
+
+bool JointController::saveMotorOffsetsToFlash() {
+  LOG_INFO("Saving motor offsets to flash...");
+
+  MotorOffsetsDeviceData offsets_data = {};
+  offsets_data.joint_type = config.joint_id;
+  offsets_data.dof_count  = config.dof_count;
+
+  for (int i = 0; i < config.dof_count && i < MAX_DOFS; i++) {
+    if (_saved_offsets[i].valid) {
+      offsets_data.dof_offsets[i].agonist_offset       = _saved_offsets[i].agonist_offset;
+      offsets_data.dof_offsets[i].antagonist_offset     = _saved_offsets[i].antagonist_offset;
+      offsets_data.dof_offsets[i].joint_angle_at_calib  = _saved_offsets[i].joint_angle_at_calib;
+    }
+  }
+
+  save_motor_offsets_data(offsets_data);
+  LOG_INFO("Motor offsets saved to flash");
+  return true;
+}
+
+bool JointController::loadMotorOffsetsFromFlash() {
+  LOG_INFO("Loading motor offsets from flash...");
+
+  MotorOffsetsDeviceData offsets_data;
+  if (!load_motor_offsets_data(&offsets_data)) {
+    LOG_INFO("No motor offsets found in flash");
+    return false;
+  }
+
+  if (offsets_data.joint_type != config.joint_id) {
+    LOG_WARN("Joint type mismatch in motor offsets flash data");
+    return false;
+  }
+
+  if (offsets_data.dof_count != config.dof_count) {
+    LOG_ERROR("DOF count mismatch in motor offsets flash data");
+    return false;
+  }
+
+  for (int i = 0; i < config.dof_count && i < MAX_DOFS; i++) {
+    _saved_offsets[i].agonist_offset       = offsets_data.dof_offsets[i].agonist_offset;
+    _saved_offsets[i].antagonist_offset     = offsets_data.dof_offsets[i].antagonist_offset;
+    _saved_offsets[i].joint_angle_at_calib  = offsets_data.dof_offsets[i].joint_angle_at_calib;
+    _saved_offsets[i].valid                 = true;
+
+    LOG_INFO("DOF " + String(i) + " saved offsets: agon=" +
+             String(_saved_offsets[i].agonist_offset, 2) + " antag=" +
+             String(_saved_offsets[i].antagonist_offset, 2) + " joint=" +
+             String(_saved_offsets[i].joint_angle_at_calib, 2) + "°");
+  }
+
+  LOG_INFO("Motor offsets loaded from flash successfully");
+  return true;
+}
+
+JointController::OffsetValidationResult JointController::validateSavedOffsets(uint8_t dof_index) {
+  OffsetValidationResult result = {false, 0.0f, 0.0f, false};
+
+  if (dof_index >= config.dof_count) return result;
+
+  // Check if we have saved offsets for this DOF
+  if (!_saved_offsets[dof_index].valid) {
+    LOG_INFO("No saved offsets for DOF " + String(dof_index));
+    return result;  // has_saved_data = false, valid = false
+  }
+  result.has_saved_data = true;
+
+  // Check if linear equations are available (needed for expected angle calculation)
+  if (!hasValidEquations(dof_index)) {
+    LOG_WARN("No linear equations for DOF " + String(dof_index) + " - cannot validate offsets");
+    return result;
+  }
+
+  // Find agonist and antagonist motors for this DOF
+  LKM_Motor *agonist_motor = nullptr;
+  LKM_Motor *antagonist_motor = nullptr;
+
+  for (int i = 0; i < config.motor_count; i++) {
+    if (config.motors[i].dof_index == dof_index) {
+      if (config.motors[i].is_agonist) {
+        agonist_motor = motors[i];
+      } else {
+        antagonist_motor = motors[i];
+      }
+    }
+  }
+
+  if (agonist_motor == nullptr || antagonist_motor == nullptr) {
+    LOG_ERROR("Motors not found for DOF " + String(dof_index));
+    return result;
+  }
+
+  // Read raw motor angles (no offset applied) via CAN
+  float raw_agonist = agonist_motor->getMultiAngleSync(false).angle;
+  float raw_antagonist = antagonist_motor->getMultiAngleSync(false).angle;
+
+  if (isnan(raw_agonist) || isnan(raw_antagonist)) {
+    LOG_ERROR("CAN timeout reading motors for DOF " + String(dof_index));
+    return result;
+  }
+
+  // Read current joint angle (MT6835 absolute encoder - always valid)
+  if (!shared_dof_angles.valid[dof_index]) {
+    LOG_ERROR("Encoder not valid for DOF " + String(dof_index));
+    return result;
+  }
+  float joint_angle = shared_dof_angles.angles[dof_index];
+
+  // Calculate expected motor angles using linear equations
+  float expected_agonist, expected_antagonist;
+  if (!calculateMotorAnglesWithEquations(dof_index, joint_angle, joint_angle,
+                                          expected_agonist, expected_antagonist)) {
+    LOG_ERROR("Failed to calculate expected angles for DOF " + String(dof_index));
+    return result;
+  }
+
+  // Apply saved offsets to raw angles and compare with expected
+  // The offset relationship depends on invert_logic (same as recalculateMotorOffsets)
+  bool invert_logic = config.dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
+
+  float calibrated_agonist, calibrated_antagonist;
+  if (invert_logic) {
+    // Inverted: raw + offset = calibrated
+    calibrated_agonist    = raw_agonist + _saved_offsets[dof_index].agonist_offset;
+    calibrated_antagonist = raw_antagonist + _saved_offsets[dof_index].antagonist_offset;
+  } else {
+    // Standard: raw - offset = calibrated
+    calibrated_agonist    = raw_agonist - _saved_offsets[dof_index].agonist_offset;
+    calibrated_antagonist = raw_antagonist - _saved_offsets[dof_index].antagonist_offset;
+  }
+
+  result.error_agonist_deg    = fabs(calibrated_agonist - expected_agonist);
+  result.error_antagonist_deg = fabs(calibrated_antagonist - expected_antagonist);
+
+  // Threshold: < 5° means motors kept power and offsets are valid
+  // Typical values: < 1° if motors kept power, > 50° if they lost power
+  const float OFFSET_VALID_THRESHOLD = 5.0f;
+  result.valid = (result.error_agonist_deg < OFFSET_VALID_THRESHOLD &&
+                  result.error_antagonist_deg < OFFSET_VALID_THRESHOLD);
+
+  LOG_INFO("DOF " + String(dof_index) + " offset validation: " +
+           String(result.valid ? "VALID" : "NEEDS RECALC") +
+           " (agon_err=" + String(result.error_agonist_deg, 2) +
+           "° antag_err=" + String(result.error_antagonist_deg, 2) + "°)");
+
+  return result;
 }
 
 // Recalculate safe limits based on current equations and physical limits

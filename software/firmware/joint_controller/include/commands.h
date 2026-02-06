@@ -100,7 +100,11 @@
 #define CMD_ZERO_MOTOR_ENCODERS 36
 #endif
 
-// Reserved: 37-39 for future calibration commands
+#ifndef CMD_CHECK_OFFSETS
+#define CMD_CHECK_OFFSETS 37  // Validate saved motor offsets (smart recalc detection)
+#endif
+
+// Reserved: 38-39 for future calibration commands
 
 // --- PID Control Commands (40-49) ---
 #ifndef CMD_SET_PID
@@ -241,6 +245,7 @@
 #define SERIAL_CMD_STOP_AUTO_MAPPING "STOP_AUTO_MAPPING"
 #define SERIAL_CMD_SAVE_LINEAR_EQUATIONS "SAVE_LINEAR_EQUATIONS"
 #define SERIAL_CMD_LOAD_LINEAR_EQUATIONS "LOAD_LINEAR_EQUATIONS"
+#define SERIAL_CMD_CHECK_OFFSETS "CHECK_OFFSETS"
 
 // --- Command Strings (PID Control) ---
 #define SERIAL_CMD_SET_PID "SET_PID"
@@ -355,6 +360,8 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_SAVE_LINEAR_EQUATIONS;
   } else if (strcmp(cmd_name, SERIAL_CMD_LOAD_LINEAR_EQUATIONS) == 0) {
     return CMD_LOAD_LINEAR_EQUATIONS;
+  } else if (strcmp(cmd_name, SERIAL_CMD_CHECK_OFFSETS) == 0) {
+    return CMD_CHECK_OFFSETS;
   }
   // PID Control
   else if (strcmp(cmd_name, SERIAL_CMD_SET_PID) == 0) {

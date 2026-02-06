@@ -488,6 +488,15 @@ void setup() {
     led_blink(1, 100, 0);
   }
 
+  // Attempt to load saved motor offsets from flash (for smart recalc detection)
+  LOG_INFO("------------------------------------");
+  LOG_INFO("Attempting to load motor offsets from flash...");
+  if (active_joint_controller->loadMotorOffsetsFromFlash()) {
+    LOG_INFO("Motor offsets loaded — will validate at startup to check if recalc needed");
+  } else {
+    LOG_INFO("No motor offsets in flash — recalc_offset required");
+  }
+
   // SAFETY: Movement is controlled by isSystemReadyForMovement()
   LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
   LOG_INFO("Mapping data will be sent to the client for visualization/diagnostics only");

@@ -146,6 +146,33 @@ void save_system_settings_data(struct SystemSettingsData data);
 bool load_system_settings_data(struct SystemSettingsData *data);
 
 // ===================================================================
+// FLASH STORAGE - MOTOR OFFSETS
+// ===================================================================
+
+/**
+ * @brief Save motor encoder offsets to flash memory
+ * 
+ * Stores offsets calculated by recalculateMotorOffsets() for later
+ * validation at boot. Enables skipping recalc when motors kept power.
+ * 
+ * @param data Motor offsets structure to save
+ * 
+ * @note Stored at base + 192KB in flash
+ */
+void save_motor_offsets_data(struct MotorOffsetsDeviceData data);
+
+/**
+ * @brief Load motor encoder offsets from flash memory
+ * 
+ * Reads and validates saved motor offsets. Used at boot to check
+ * whether recalc_offset can be skipped.
+ * 
+ * @param[out] data Pointer to structure where loaded offsets will be stored
+ * @return true if offsets loaded successfully, false if not found or invalid
+ */
+bool load_motor_offsets_data(struct MotorOffsetsDeviceData *data);
+
+// ===================================================================
 // TIME MANAGEMENT
 // ===================================================================
 

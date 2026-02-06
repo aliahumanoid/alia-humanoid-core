@@ -525,6 +525,14 @@
                                     title="Run startup sequence: recalc_offset all DOFs + enter HOLDING mode">
                                     <i class="fas fa-power-off mr-2"></i>Startup Sequence
                                 </button>
+                                <button onclick="sendCommand('check-offsets')"
+                                    class="px-3 py-2 rounded-md bg-blue-100 text-blue-700 text-sm font-medium hover:bg-blue-200 transition-colors"
+                                    title="Check if saved motor offsets are still valid (skip recalc if motors kept power)">
+                                    <i class="fas fa-search mr-1"></i>Check Offsets
+                                </button>
+                                <span id="recalcBadge_knee" class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700">
+                                    Unknown
+                                </span>
                                 <div class="flex items-center gap-2">
                                     <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
                                         <input type="checkbox" id="autoStartToggle" 
@@ -609,6 +617,14 @@
                                     title="Run startup sequence: recalc_offset all DOFs + enter HOLDING mode">
                                     <i class="fas fa-power-off mr-2"></i>Startup Sequence
                                 </button>
+                                <button onclick="sendCommand('check-offsets')"
+                                    class="px-3 py-2 rounded-md bg-blue-100 text-blue-700 text-sm font-medium hover:bg-blue-200 transition-colors"
+                                    title="Check if saved motor offsets are still valid (skip recalc if motors kept power)">
+                                    <i class="fas fa-search mr-1"></i>Check Offsets
+                                </button>
+                                <span id="recalcBadge_ankle" class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700">
+                                    Unknown
+                                </span>
                                 <div class="flex items-center gap-2">
                                     <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
                                         <input type="checkbox" id="autoStartToggleAnkle" 
@@ -712,6 +728,14 @@
                                     title="Run startup sequence: recalc_offset all DOFs + enter HOLDING mode">
                                     <i class="fas fa-power-off mr-2"></i>Startup Sequence
                                 </button>
+                                <button onclick="sendCommand('check-offsets')"
+                                    class="px-3 py-2 rounded-md bg-blue-100 text-blue-700 text-sm font-medium hover:bg-blue-200 transition-colors"
+                                    title="Check if saved motor offsets are still valid (skip recalc if motors kept power)">
+                                    <i class="fas fa-search mr-1"></i>Check Offsets
+                                </button>
+                                <span id="recalcBadge_hip" class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700">
+                                    Unknown
+                                </span>
                                 <div class="flex items-center gap-2">
                                     <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
                                         <input type="checkbox" id="autoStartToggleHip" 
