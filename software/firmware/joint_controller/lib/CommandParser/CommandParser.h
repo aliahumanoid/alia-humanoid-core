@@ -15,7 +15,7 @@
  * Named params:    "joint_id dof_index COMMAND_NAME angle=90.0 speed=100.0"
  * All DOFs:        "joint_id all COMMAND_NAME ..."
  * 
- * Example: "0 0 MOVE_MULTI_DOF 45.0 90.0 100.0 500.0 1"
+ * Example: "0 0 PRETENSION 10 500"
  * 
  * WORKFLOW:
  * 1. parseCommand() - Parse raw string into ParsedCommand struct
@@ -67,7 +67,7 @@ struct ParsedCommand {
  * ParsedCommand parsed;
  * command_data_extended_t cmd_data;
  * 
- * if (parser.parseCommand("0 0 MOVE_MULTI_DOF 45.0 90.0", parsed)) {
+ * if (parser.parseCommand("0 0 PRETENSION 10 500", parsed)) {
  *   parser.populateCommandData(parsed, cmd_data);
  *   // Send cmd_data to core1
  * }
@@ -123,7 +123,6 @@ public:
    * fields based on command type.
    * 
    * This method knows the parameter order for each command type:
-   * - MOVE_MULTI_DOF: target_angles[], speed, accel, sync_strategy
    * - AUTO_MAP: min_angles[], max_angles[], steps[], torque, settle_time
    * - etc.
    * 

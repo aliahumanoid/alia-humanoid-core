@@ -93,7 +93,7 @@ Implements the relation between joint angle and motor angles:
 The system accepts serial commands from a host (PC/Raspberry Pi). See `src/commands.h` for the authoritative list. Examples:
 - `STOP`, `MOVE`, `PRETENSION`, `RELEASE`
 - `SET_ZERO_CURRENT_POS`, `RECALC_OFFSET`
-- `MOVE_MULTI_DOF`, `SET_PID`, `GET_PID`, `SET_PID_OUTER`, `GET_PID_OUTER`
+- `SET_PID`, `GET_PID`, `SET_PID_OUTER`, `GET_PID_OUTER`
 Notes:
 - Lines that start with `EVT:` are events parsed by the host — do not rename without versioned Decision.
 

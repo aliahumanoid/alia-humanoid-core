@@ -3820,23 +3820,14 @@ function refreshMappingDataForCurrentJoint() {
  * If auto-execute toggle is active, immediately executes movement
  * If sequence mode is active, adds step to sequence instead
  */
+// NOTE: setMultiDofQuickAngles — serial MOVE_MULTI_DOF removed.
+// Kept as stub for any remaining generated buttons; use CAN waypoint buttons instead.
 function setMultiDofQuickAngles(angle0, angle1) {
-    $("#multiDofAngle0").val(angle0);
-    $("#multiDofAngle1").val(angle1);
-    updateMultiDofCommandPreview();
-    
-    // Check which mode is active
     if ($("#sequenceModeToggle").is(":checked")) {
-        // Add to sequence instead of executing
         addStepToSequence(angle0, angle1);
         appendStatusMessage(`➕ Added to sequence: DOF0=${angle0}°, DOF1=${angle1}°`);
-    } else if ($("#autoExecuteToggle").is(":checked")) {
-        // Execute immediately (existing behavior)
-        sendMultiDofMove();
-        appendStatusMessage(`🚀 Auto-execute active: movement started immediately`);
     } else {
-        // Normal mode: just set angles
-        appendStatusMessage(`Quick angles set: DOF0=${angle0}°, DOF1=${angle1}°`);
+        appendStatusMessage(`⚠️ Serial MOVE_MULTI_DOF deprecated. Use CAN waypoint buttons instead.`);
     }
 }
 
@@ -5101,92 +5092,15 @@ function getDefaultButtonsForJoint(jointType) {
     return defaults[jointType] || defaults['KNEE'];
 }
 
-/**
- * Sends Multi-DOF command to system
- */
+// NOTE: sendMultiDofMove() removed — serial MOVE_MULTI_DOF is deprecated.
+// Use CAN waypoints instead (sendCanWaypointCommand, sendMultiWaypointSmoothCurve).
 function sendMultiDofMove() {
-    const joint = $("#jointSelect").val();
-    const angle0 = parseFloat($("#multiDofAngle0").val()) || 0;
-    const angle1 = parseFloat($("#multiDofAngle1").val()) || 0;
-    const mask = parseInt($("#multiDofMask").val()) || 3;
-    const sync = parseInt($("#multiDofSync").val()) ?? 1;  // Use ?? to allow 0 (SYNC_NONE)
-    const speed = parseFloat($("#multiDofSpeed").val()) || 0.5;
-    const accel = parseFloat($("#multiDofAccel").val()) || 2.0;
-    const path = parseInt($("#multiDofPath").val()) ?? 1;  // Use ?? to allow 0 (PATH_LINEAR)
-    
-    // Validazione input
-    if (!joint) {
-        alert("Select a joint before sending command");
-        return;
-    }
-    
-    // Check angle limits (typical range -180 to +180)
-    if (Math.abs(angle0) > 180 || Math.abs(angle1) > 180) {
-        if (!confirm("Warning: one or more angles exceed ±180°. Continue?")) {
-            return;
-        }
-    }
-    
-    // Build command according to MOVE_MULTI_DOF protocol
-    const multiDofData = {
-        joint: joint,
-        angle0: angle0,
-        angle1: angle1,
-        angle2: 0, // Fixed at 0 for now (DOF 2 not implemented in UI)
-        mask: mask,
-        sync: sync,
-        speed: speed,
-        accel: accel,
-        path: path
-    };
-    
-    // Update command preview
-    updateMultiDofCommandPreview();
-    
-    // Detailed status message
-    const maskBinary = mask.toString(2).padStart(3, '0');
-    const activeDofs = [];
-    if (mask & 1) activeDofs.push("DOF 0");
-    if (mask & 2) activeDofs.push("DOF 1");
-    if (mask & 4) activeDofs.push("DOF 2");
-    
-    const syncMessages = ["no synchronization", "sync by duration", "sync by speed"];
-    const pathMessages = ["PATH_LINEAR", "PATH_TRIG", "PATH_QUAD"];
-    
-    appendStatusMessage(`🚀 Sending Multi-DOF command for ${joint}:`);
-    appendStatusMessage(`  • Active DOFs: ${activeDofs.join(", ")} (mask: ${mask} = ${maskBinary}b)`);
-    appendStatusMessage(`  • Angles: DOF0=${angle0}°, DOF1=${angle1}°`);
-    appendStatusMessage(`  • Strategy: ${syncMessages[sync] || "unknown"}`);
-    appendStatusMessage(`  • Speed: ${speed} rad/s, Accel: ${accel}s`);
-    appendStatusMessage(`  • Path: ${pathMessages[path] || "unknown"}`);
-    
-    // Send command
-    sendCommand('move-multi-dof', multiDofData);
+    appendStatusMessage("❌ Serial MOVE_MULTI_DOF is deprecated. Use CAN waypoints instead.");
 }
-
-// === MULTI-DOF EVENT INITIALIZATION ===
 
 // Add event handlers when document is ready
 $(document).ready(function() {
-    // Add event handlers for automatic Multi-DOF command preview update
-    $("#multiDofAngle0, #multiDofAngle1, #multiDofMask, #multiDofSync, #multiDofSpeed, #multiDofAccel, #multiDofPath").on('input change', function() {
-        updateMultiDofCommandPreview();
-    });
-    
-    // Also update when selected joint changes
-    $("#jointSelect").on('change', function() {
-        updateMultiDofCommandPreview();
-        
-    });
-    
-    // Note: autoExecuteToggle event listener is already registered earlier in the code
-    // (with mutual exclusion logic for sequence mode)
-    
-    // Initialize preview on load (with brief delay)
-    setTimeout(updateMultiDofCommandPreview, 200);
-    
-    // Initialize smart buttons on load
-    setTimeout(generateSmartQuickButtons, 250);
+    // Initialize CAN waypoint buttons on load
     setTimeout(generateSmartWaypointButtons, 300);
     
     // Initialize DOF-specific buttons on load
@@ -7488,68 +7402,10 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * Async version of sendMultiDofMove that waits for movement completion
- * This uses the backend acknowledgment system that waits for RSP:MOVE_COMPLETE
- */
+// NOTE: sendMultiDofMoveAsync() removed — serial MOVE_MULTI_DOF is deprecated.
+// Use CAN waypoints instead.
 function sendMultiDofMoveAsync() {
-    return new Promise((resolve, reject) => {
-        const joint = $("#jointSelect").val();
-        const angle0 = parseFloat($("#multiDofAngle0").val()) || 0;
-        const angle1 = parseFloat($("#multiDofAngle1").val()) || 0;
-        const mask = parseInt($("#multiDofMask").val()) || 3;
-        const sync = parseInt($("#multiDofSync").val()) ?? 1;
-        const speed = parseFloat($("#multiDofSpeed").val()) || 0.5;
-        const accel = parseFloat($("#multiDofAccel").val()) || 2.0;
-        const path = parseInt($("#multiDofPath").val()) ?? 1;
-        
-        // Validation
-        if (!joint) {
-            reject(new Error("No joint selected"));
-            return;
-        }
-        
-        const assignedPort = jointPortMapping[joint];
-        if (!assignedPort) {
-            appendStatusMessage(`⚠️ Associate a serial port to ${joint} before sending command.`);
-            reject(new Error("No serial port assigned"));
-            return;
-        }
-        
-        // Build command data
-        const multiDofData = {
-            joint: joint,
-            angle0: angle0,
-            angle1: angle1,
-            angle2: 0,
-            mask: mask,
-            sync: sync,
-            speed: speed,
-            accel: accel,
-            path: path
-        };
-        
-        const data = { cmd: 'move-multi-dof', joint: joint, dof: 'ALL', ...multiDofData };
-        
-        // Send command and WAIT for completion (backend waits for RSP:MOVE_COMPLETE)
-        $.ajax({
-            url: "/command",
-            method: "POST",
-            data: JSON.stringify(data),
-            contentType: "application/json; charset=utf-8",
-            dataType: "json",
-            timeout: 30000, // 30 second timeout
-            success: function(response) {
-                appendStatusMessage(response.message);
-                resolve(response);
-            },
-            error: function(xhr, status, error) {
-                const errorMsg = `Error sending move command: ${error}`;
-                appendStatusMessage(`❌ ${errorMsg}`);
-                reject(new Error(errorMsg));
-            }
-        });
-    });
+    return Promise.reject(new Error("Serial MOVE_MULTI_DOF is deprecated. Use CAN waypoints."));
 }
 
 /**

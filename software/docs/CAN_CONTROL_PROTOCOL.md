@@ -289,13 +289,13 @@ WaypointBuffer waypoint_buffers[MAX_DOFS];
 
 For 3 DOFs (ankle): **~96 bytes** (minimal RAM usage!)
 
-**Note**: Unlike `moveMultiDOF_cascade` which pre-generates 100-point trajectory arrays, this implementation uses **simple linear interpolation** between waypoints. Smoothness comes from the **density of waypoints** (50-100 Hz from host), not from complex trajectory generation. `WAYPOINT_BUFFER_DEPTH` defaults to 2, but it can be increased (e.g., 4) when experimenting with >100 Hz updates to absorb jitter.
+**Note**: This implementation uses **simple linear interpolation** between waypoints (no pre-generated trajectory arrays). Smoothness comes from the **density of waypoints** (50-100 Hz from host), not from complex trajectory generation. `WAYPOINT_BUFFER_DEPTH` defaults to 2, but it can be increased (e.g., 4) when experimenting with >100 Hz updates to absorb jitter.
 
 ---
 
 ### 5.2 Execution Logic
 
-**Design Philosophy**: The CAN control implementation **reuses the existing cascade control architecture** from `moveMultiDOF_cascade()` (outer PID @ 100 Hz, inner motor control @ 500 Hz, same 2ms sampling period). The key difference is that trajectory generation is **simplified**: instead of pre-computing smooth velocity profiles, the controller uses **simple linear interpolation** between consecutive waypoints.
+**Design Philosophy**: The CAN waypoint control uses a **dual-loop cascade architecture** (outer PID @ 100 Hz, inner motor control @ 500 Hz, 2 ms sampling period). Trajectory generation is kept **simple**: the controller uses **linear interpolation** between consecutive waypoints rather than pre-computing smooth velocity profiles.
 
 **Smoothness comes from waypoint density** (50-100 Hz from host), not from complex on-controller trajectory generation.
 
@@ -358,13 +358,13 @@ where progress = (t_now - prev_time) / (t_arrival - prev_time)
 
 ---
 
-#### 5.2.3 Cascade Control Loop (Analogous to moveMultiDOF_cascade)
+#### 5.2.3 Cascade Control Loop
 
 The main control loop executes continuously, using the **same dual-loop cascade architecture**:
 
 ```cpp
-// Core1 main loop (runs forever, NOT blocking like moveMultiDOF_cascade)
-// SAMPLING_PERIOD = 2000 µs (same as moveMultiDOF_cascade default)
+// Core1 main loop (runs continuously, non-blocking)
+// SAMPLING_PERIOD = 2000 µs (500 Hz inner loop)
 void core1_loop() {
     while (true) {
         uint64_t next_time = time_us_64() + SAMPLING_PERIOD;
@@ -443,7 +443,7 @@ void updateTrajectory_Linear(uint8_t dof) {
             return;
         }
         
-        // Outer PID control (EXISTING logic from moveMultiDOF_cascade)
+        // Outer PID control (joint-level)
         float error = q_des - q_curr;
         float delta_theta = computeOuterPID(dof, error);
         
@@ -454,19 +454,19 @@ void updateTrajectory_Linear(uint8_t dof) {
     }
     
     // === INNER LOOP @ 500 Hz (Motor Control) ===
-    // Execute motor PID control (EXISTING logic from moveMultiDOF_cascade)
+    // Execute motor PID control (inner loop @ 500 Hz)
     executeMotorControl(dof);
 }
 ```
 
-**Key Differences from `moveMultiDOF_cascade`**:
-1. **Non-blocking**: Loop runs forever, not just for one movement
+**Key Design Points**:
+1. **Non-blocking**: Loop runs continuously, processing waypoints as they arrive
 2. **Linear interpolation**: No trajectory arrays, just `start + (end - start) × progress`
 3. **Holding mode**: Automatically holds position when waypoints stop
 4. **Resumable**: New waypoints can arrive anytime, motion resumes seamlessly
 
-**Preserved from `moveMultiDOF_cascade`**:
-1. ✅ **SAMPLING_PERIOD = 2000 µs** (2 ms, exactly the same!)
+**Architecture**:
+1. ✅ **SAMPLING_PERIOD = 2000 µs** (2 ms)
 2. ✅ Outer PID @ 100 Hz (joint-level control)
 3. ✅ Inner motor control @ 500 Hz
 4. ✅ Cascade control architecture (delta_theta → motor references)

@@ -1147,59 +1147,6 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 message = "Error counters reset and message queue cleared."
             elif cmd == "stop-move":
                 handler.send_new_command(joint, dof, COMMANDS['STOP'])
-            elif cmd == "move-multi-dof":
-                # Handle simultaneous Multi-DOF command
-                angle0 = float(data.get('angle0', 0))
-                angle1 = float(data.get('angle1', 0))
-                angle2 = float(data.get('angle2', 0))
-                mask = int(data.get('mask', 3))
-                sync = int(data.get('sync', 1))
-                speed = float(data.get('speed', 0.5))
-                accel = float(data.get('accel', 2.0))
-                path = int(data.get('path', 1))
-                
-                # Verify angular limits for active DOFs
-                valid_angles = True
-                error_msgs = []
-                
-                # Check DOF 0 if included in mask
-                if mask & 1:  # Bit 0 active
-                    if isinstance(MIN_ANGLES[joint], dict):
-                        if not (MIN_ANGLES[joint][0] <= angle0 <= MAX_ANGLES[joint][0]):
-                            valid_angles = False
-                            error_msgs.append(f"DOF 0: angle must be between {MIN_ANGLES[joint][0]} and {MAX_ANGLES[joint][0]} degrees")
-                    else:
-                        if not (MIN_ANGLES[joint] <= angle0 <= MAX_ANGLES[joint]):
-                            valid_angles = False
-                            error_msgs.append(f"DOF 0: angle must be between {MIN_ANGLES[joint]} and {MAX_ANGLES[joint]} degrees")
-                
-                # Check DOF 1 if included in mask
-                if mask & 2:  # Bit 1 active
-                    if isinstance(MIN_ANGLES[joint], dict) and len(MIN_ANGLES[joint]) > 1:
-                        if not (MIN_ANGLES[joint][1] <= angle1 <= MAX_ANGLES[joint][1]):
-                            valid_angles = False
-                            error_msgs.append(f"DOF 1: angle must be between {MIN_ANGLES[joint][1]} and {MAX_ANGLES[joint][1]} degrees")
-                
-                # Check DOF 2 if included in mask (not yet implemented in UI but prepared)
-                if mask & 4:  # Bit 2 active
-                    if isinstance(MIN_ANGLES[joint], dict) and len(MIN_ANGLES[joint]) > 2:
-                        if not (MIN_ANGLES[joint][2] <= angle2 <= MAX_ANGLES[joint][2]):
-                            valid_angles = False
-                            error_msgs.append(f"DOF 2: angle must be between {MIN_ANGLES[joint][2]} and {MAX_ANGLES[joint][2]} degrees")
-                
-                if valid_angles:
-                    # Build parameters for Multi-DOF command
-                    params = [angle0, angle1, angle2, mask, sync, speed, accel, path]
-                    # Use acknowledgment-based sending to wait for movement completion
-                    success = handler.send_movement_command_with_ack(joint, 'ALL', COMMANDS['MOVE_MULTI_DOF'], params, timeout=30.0)
-                    if success:
-                        message = f"✅ Multi-DOF movement completed for {joint}: DOF0={angle0}°, DOF1={angle1}°, mask={mask}, sync={sync}"
-                    else:
-                        status = "error"
-                        message = f"❌ Multi-DOF movement timeout or error for {joint}"
-                else:
-                    status = "error"
-                    message = "Angle validation errors: " + "; ".join(error_msgs)
             elif cmd == "get-pid":
                 # New format: Request PID for specific DOF and motor type
                 dof_index = data.get('dof', 0)

@@ -259,7 +259,7 @@ struct command_data_extended_t {
   int torque;         // Pretension torque
   int duration;       // Pretension duration (ms)
 
-  // Multi-DOF movement params
+  // Movement params (legacy fields, kept for struct compatibility)
   float target_angles[MAX_DOFS]; // Target angles per DOF (degrees)
   uint8_t active_dofs_mask;      // Active DOFs bitmask (bit 0=DOF0, bit 1=DOF1, ...)
   int sync_strategy;             // Sync strategy (0=none, 1=duration, 2=velocity)

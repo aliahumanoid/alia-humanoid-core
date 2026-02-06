@@ -94,7 +94,7 @@ The protocol version should be bumped when you make **incompatible changes** to 
 ### Examples of Protocol Changes
 
 **Requires version bump** (breaking changes):
-- ❌ Changing command format (e.g., `MOVE` → `MOVE_MULTI_DOF`)
+- ❌ Changing command format (e.g., adding/removing serial commands)
 - ❌ Changing event format (e.g., adding/removing fields)
 - ❌ Changing parameter order
 - ❌ Removing commands or events

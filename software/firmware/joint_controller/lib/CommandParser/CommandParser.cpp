@@ -53,7 +53,7 @@ bool CommandParser::findParam(const char *cmd, const char *param_name, float &va
  * Parse command string into structured components
  * 
  * Format: "JOINT:DOF:COMMAND:PARAM1:PARAM2:..."
- * Example: "ankle:0:MOVE_MULTI_DOF:45.0:90.0:30.0:7:1:100.0:500.0:0"
+ * Example: "ankle:0:PRETENSION:10:500"
  */
 bool CommandParser::parseCommand(const char *cmd, ParsedCommand &result) {
   // Initialize result structure
@@ -197,59 +197,6 @@ void CommandParser::populateCommandData(const ParsedCommand &result,
   // Populate command-specific fields based on command type
   // ---------------------------------------------------------------
   switch (result.command) {
-  case CMD_MOVE_MULTI_DOF:
-    // -----------------------------------------------------------
-    // Multi-DOF coordinated movement
-    // -----------------------------------------------------------
-    // Expected format: JOINT:ALL:MOVE_MULTI_DOF:ANGLE0:ANGLE1:ANGLE2:MASK:SYNC:SPEED:ACCEL:PATH
-    // 
-    // Parameters:
-    //   [0-2]: Target angles for DOF 0, 1, 2 (degrees)
-    //   [3]:   Active DOFs bitmask (e.g., 7=0b111 = all 3 DOFs, 5=0b101 = DOF 0&2)
-    //   [4]:   Sync strategy (0=none, 1=duration, 2=velocity)
-    //   [5]:   Max speed (degrees/sec)
-    //   [6]:   Acceleration time (ms)
-    //   [7]:   Path type (0=linear, 1=trig)
-    
-    cmd_data.active_dofs_mask = 0; // Will be set below
-    cmd_data.sync_strategy    = 0; // Default: no synchronization
-
-    // Extract target angles for each DOF (params 0-2)
-    for (int i = 0; i < MAX_DOFS && i < result.param_count; i++) {
-      cmd_data.target_angles[i] = result.params[i];
-    }
-
-    // Extract active DOFs bitmask (param 3)
-    if (result.param_count > 3) {
-      cmd_data.active_dofs_mask = (uint8_t)result.params[3];
-    } else {
-      // Default: enable all DOFs if mask not specified
-      for (int i = 0; i < MAX_DOFS; i++) {
-        cmd_data.active_dofs_mask |= (1 << i);
-      }
-    }
-
-    // Extract synchronization strategy (param 4)
-    if (result.param_count > 4) {
-      cmd_data.sync_strategy = (int)result.params[4];
-    }
-
-    // Extract max speed (param 5)
-    if (result.param_count > 5) {
-      cmd_data.speed = result.params[5];
-    }
-
-    // Extract acceleration time (param 6)
-    if (result.param_count > 6) {
-      cmd_data.acceleration = result.params[6];
-    }
-
-    // Extract path type (param 7)
-    if (result.param_count > 7) {
-      cmd_data.path_type = (int)result.params[7];
-    }
-    break;
-
   case CMD_PRETENSION:
   case CMD_RELEASE:
     // -----------------------------------------------------------

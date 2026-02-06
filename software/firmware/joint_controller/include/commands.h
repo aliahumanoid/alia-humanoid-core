@@ -67,11 +67,7 @@
 // Reserved: 14-19 for future motor control commands
 
 // --- Movement Commands (20-29) ---
-#ifndef CMD_MOVE_MULTI_DOF
-#define CMD_MOVE_MULTI_DOF 20  // Coordinated multi-DOF movement
-#endif
-
-// Reserved: 21-29 for future movement commands
+// Reserved: 20-29 (CMD_MOVE_MULTI_DOF removed — use CAN waypoints)
 
 // --- Calibration & Mapping Commands (30-39) ---
 #ifndef CMD_SET_ZERO_CURRENT_POS
@@ -238,9 +234,6 @@
 #define SERIAL_CMD_RELEASE "RELEASE"
 #define SERIAL_CMD_RELEASE_ALL "RELEASE_ALL"
 
-// --- Command Strings (Movement) ---
-#define SERIAL_CMD_MOVE_MULTI_DOF "MOVE_MULTI_DOF"
-
 // --- Command Strings (Calibration & Mapping) ---
 #define SERIAL_CMD_SET_ZERO_CURRENT_POS "SET_ZERO_CURRENT_POS"
 #define SERIAL_CMD_RECALC_OFFSET "RECALC_OFFSET"
@@ -323,7 +316,7 @@ inline uint8_t getJointId(const char *joint_name) {
 
 /**
  * @brief Map command name string to command ID
- * @param cmd_name String identifier (e.g., "STOP", "MOVE_MULTI_DOF")
+ * @param cmd_name String identifier (e.g., "STOP", "PRETENSION")
  * @return Command ID constant or CMD_UNKNOWN if not found
  */
 inline uint8_t getCommandId(const char *cmd_name) {
@@ -348,10 +341,6 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_RELEASE;
   } else if (strcmp(cmd_name, SERIAL_CMD_RELEASE_ALL) == 0) {
     return CMD_RELEASE_ALL;
-  }
-  // Movement
-  else if (strcmp(cmd_name, SERIAL_CMD_MOVE_MULTI_DOF) == 0) {
-    return CMD_MOVE_MULTI_DOF;
   }
   // Calibration & Mapping
   else if (strcmp(cmd_name, SERIAL_CMD_SET_ZERO_CURRENT_POS) == 0) {

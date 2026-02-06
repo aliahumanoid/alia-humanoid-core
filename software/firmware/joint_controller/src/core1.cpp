@@ -693,7 +693,7 @@ void pollHostCan() {
  * - CMD_PRETENSION / CMD_PRETENSION_ALL: Apply tensioning torque
  * - CMD_RELEASE / CMD_RELEASE_ALL: Release tensioning torque
  * - CMD_SET_ZERO_CURRENT_POS: Set current position as zero
- * - CMD_MOVE_MULTI_DOF: (DEPRECATED - returns error, use waypoints via CAN)
+ * - Movement: via CAN waypoints (executeWaypointMovement)
  * - CMD_RECALC_OFFSET: Recalculate motor offset calibration
  * - CMD_START_AUTO_MAPPING: Start automatic joint calibration
  * - CMD_STOP_AUTO_MAPPING: Stop automatic joint calibration
@@ -958,17 +958,6 @@ void core1_loop() {
       LOG_DEBUG_F("Motor encoders zeroed for DOF %d", dof_index);
       break;
 
-    case CMD_MOVE_MULTI_DOF: {
-      // DEPRECATED: moveMultiDOF_cascade has been removed. Use waypoints via CAN instead.
-      LOG_WARN("CMD_MOVE_MULTI_DOF is deprecated - use waypoint control via CAN");
-      if (shared_data_ext.flag == 0) {
-        strcpy(shared_data_ext.message,
-               "CMD_MOVE_MULTI_DOF deprecated - use waypoint control via CAN");
-        shared_data_ext.flag = CMD1_FAIL_MOVE;
-      }
-    } break;
-
-    
     case CMD_RECALC_OFFSET:
       // Recalculate the offsets of the motors for the specific DOF
       if (controller->recalculateMotorOffsets(

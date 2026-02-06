@@ -109,7 +109,6 @@ JOINTS, MIN_ANGLES, MAX_ANGLES = _load_joint_config()
 # This is the current protocol used for communication with firmware
 COMMANDS = {
     'STOP': 'STOP',              # Stop motors
-    'MOVE_MULTI_DOF': 'MOVE_MULTI_DOF',  # Coordinated multi-DOF movement (used for all moves)
     'PRETENSION': 'PRETENSION',  # Pretension motors
     'PRETENSION_ALL': 'PRETENSION_ALL',  # Pretension all motors simultaneously
     'RELEASE': 'RELEASE',        # Release motors
