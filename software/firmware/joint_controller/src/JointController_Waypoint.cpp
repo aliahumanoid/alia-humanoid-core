@@ -1097,8 +1097,10 @@ bool JointController::executeWaypointMovement() {
       float jump_A = fabs(theta_A_curr - wp_last_theta_A[dof]);
       float jump_B = fabs(theta_B_curr - wp_last_theta_B[dof]);
 
-      // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
-      if (jump_A > 30.0f || jump_B > 30.0f) {
+      // Threshold adapts to loop rate: max_speed_dps * dt_seconds
+      // Default: 15000°/s * 0.002s = 30° per cycle @ 500Hz
+      float max_jump_per_cycle = can_motor_jump_threshold_dps * inner_loop_period_us / 1000000.0f;
+      if (jump_A > max_jump_per_cycle || jump_B > max_jump_per_cycle) {
         jump_detected = true;
         wp_canErrorTracker.recordError(dof);
         uint8_t recent_errors = wp_canErrorTracker.countRecentErrors(dof);

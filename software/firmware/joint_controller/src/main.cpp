@@ -66,6 +66,7 @@ volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold 
 // CAN error detection: time-window based (more robust to EMI glitches)
 volatile uint16_t can_error_window_ms = 50;      // 50ms window (default)
 volatile uint8_t can_error_threshold = 5;         // 5 errors in window = emergency stop
+volatile float can_motor_jump_threshold_dps = 10000.0f;  // 10000°/s → 20° per cycle @ 500Hz (~1.4× motor max)
 // Compliance control (deflection/stall, anti-slack, soft hold)
 volatile float expected_velocity_deadband_deg_s = 1.0f;
 volatile float hold_error_threshold_deg = 6.0f;

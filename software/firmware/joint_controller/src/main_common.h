@@ -166,6 +166,10 @@ extern volatile uint16_t encoder_error_threshold_ms;  // Time before encoder err
 // Emergency stop triggers if can_error_threshold errors occur within can_error_window_ms
 extern volatile uint16_t can_error_window_ms;     // Time window for CAN error detection (default: 50ms)
 extern volatile uint8_t can_error_threshold;       // Number of errors in window before emergency stop (default: 5)
+// Motor angle jump detection threshold expressed as max speed (°/s).
+// Per-cycle threshold is computed automatically: jump_threshold_dps * inner_loop_period_us / 1e6
+// Default 10000°/s → 20° per cycle @ 500Hz (~1.4× motor max of 7200°/s).
+extern volatile float can_motor_jump_threshold_dps;
 
 // ============================================================================
 // COMPLIANCE CONTROL (Deflection/Stall, Anti-Slack, Soft Hold)
