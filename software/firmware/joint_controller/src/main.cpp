@@ -478,6 +478,17 @@ void setup() {
     LOG_INFO("✓ System ready for autonomous control without Pi5");
     LOG_INFO("✓ Ultra-compact equations enable precise motion");
 
+    // Emit safe limits at boot so host UI has them immediately
+    for (int dof = 0; dof < ACTIVE_JOINT_CONFIG.dof_count; dof++) {
+      DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
+      if (eq != nullptr && eq->calculated && eq->limits_valid) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
+                 ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
+        SERIAL_COM_LN(buf);
+      }
+    }
+
     // Brief blink: equations loaded from flash
     led_blink(2, 100, 100);
   } else {

@@ -8067,10 +8067,17 @@ function sleep(ms) {
 // TRAJECTORY LIMITS PANEL — Show movement limits per DOF
 // ============================================================================
 
+// Host-computed safe limits from saved mapping data (keyed by "JOINT_NAME_dof")
+let hostComputedSafeLimits = {};
+
 /**
- * Update the trajectory limits panel with physical, mapping and firmware safe limits.
- * Uses jointConfigData (already loaded) + firmwareSafeLimits (from CHECK_OFFSETS).
- * Also sets min/max attributes on angle input fields.
+ * Update the trajectory limits panel with all limit levels:
+ * 1. Physical (from config)
+ * 2. Mapping config (auto_mapping range from config)
+ * 3. Host-computed safe (from saved mapping data + computeJointSafeRange)
+ * 4. Firmware safe (from EVT:SAFE_LIMITS via CHECK_OFFSETS)
+ *
+ * Also loads saved mapping data to compute host-side safe range for comparison.
  */
 function updateTrajectoryLimitsPanel(jointName) {
     const panel = document.getElementById('trajectoryLimitsPanel');
@@ -8088,11 +8095,43 @@ function updateTrajectoryLimitsPanel(jointName) {
         return;
     }
 
+    // Render immediately with available data, then async-load host safe limits
+    renderTrajectoryLimitsHTML(jointName, jointConfig);
+
+    // Async: load saved mapping data to compute host-side safe range
+    $.ajax({
+        url: `/get_saved_mapping_data/${jointName}`,
+        method: 'GET',
+        dataType: 'json',
+        success: function(response) {
+            if (response.has_data && response.data && response.data.mapping_data) {
+                const mappingData = response.data.mapping_data;
+                for (let dof = 0; dof < (jointConfig.dofs || []).length; dof++) {
+                    const dofKey = `dof_${dof}`;
+                    if (mappingData[dofKey] && mappingData[dofKey].joint_angles) {
+                        const safeRange = computeJointSafeRange(jointName, dof, mappingData[dofKey].joint_angles);
+                        if (safeRange) {
+                            hostComputedSafeLimits[`${jointName}_${dof}`] = safeRange;
+                        }
+                    }
+                }
+                // Re-render with host safe limits now available
+                renderTrajectoryLimitsHTML(jointName, jointConfig);
+            }
+        }
+    });
+}
+
+/**
+ * Render the limits panel HTML and apply input constraints.
+ */
+function renderTrajectoryLimitsHTML(jointName, jointConfig) {
+    const panel = document.getElementById('trajectoryLimitsPanel');
+    if (!panel) return;
+
     const jointId = jointConfig.id;
     const dofs = jointConfig.dofs;
     let html = '';
-
-    // Collect the most restrictive limits per DOF for input validation
     const effectiveLimits = [];
 
     for (let i = 0; i < dofs.length; i++) {
@@ -8103,41 +8142,54 @@ function updateTrajectoryLimitsPanel(jointName) {
         const mapMin = dof.auto_mapping_min_angle !== undefined ? dof.auto_mapping_min_angle : null;
         const mapMax = dof.auto_mapping_max_angle !== undefined ? dof.auto_mapping_max_angle : null;
 
-        // Firmware safe limits (may not be available yet)
-        const safeKey = `${jointId}_${i}`;
-        const safeLimits = firmwareSafeLimits[safeKey] || null;
+        // Host-computed safe limits (from saved mapping data)
+        const hostSafe = hostComputedSafeLimits[`${jointName}_${i}`] || null;
 
-        // Determine effective (most restrictive) limits for input validation
-        let effMin = physMin;
-        let effMax = physMax;
+        // Firmware safe limits (from EVT:SAFE_LIMITS)
+        const fwSafe = firmwareSafeLimits[`${jointId}_${i}`] || null;
+
+        // Effective = most restrictive available
+        let effMin = physMin, effMax = physMax;
         if (mapMin !== null) effMin = Math.max(effMin, mapMin);
         if (mapMax !== null) effMax = Math.min(effMax, mapMax);
-        if (safeLimits) {
-            effMin = Math.max(effMin, safeLimits.min);
-            effMax = Math.min(effMax, safeLimits.max);
-        }
+        if (hostSafe) { effMin = Math.max(effMin, hostSafe.min); effMax = Math.min(effMax, hostSafe.max); }
+        if (fwSafe) { effMin = Math.max(effMin, fwSafe.min); effMax = Math.min(effMax, fwSafe.max); }
         effectiveLimits.push({ min: effMin, max: effMax });
 
-        // Build compact row for this DOF
+        // Build row
         html += `<div class="mb-1 ${i > 0 ? 'mt-1.5 pt-1.5 border-t border-gray-100' : ''}">`;
         html += `<span class="font-semibold text-gray-700">DOF ${i}</span> <span class="text-gray-400">(${dofName})</span>`;
-        html += `<div class="grid grid-cols-3 gap-x-3 mt-0.5">`;
+        html += `<div class="grid grid-cols-4 gap-x-2 mt-0.5">`;
 
-        // Physical limits
-        html += `<div><span class="text-gray-400">Physical:</span> <span class="font-mono">${physMin.toFixed(1)} .. ${physMax.toFixed(1)}</span></div>`;
+        // Physical
+        html += `<div><span class="text-gray-400">Phys:</span> <span class="font-mono">${physMin.toFixed(1)}..${physMax.toFixed(1)}</span></div>`;
 
-        // Mapping limits
+        // Mapping config
         if (mapMin !== null && mapMax !== null) {
-            html += `<div><span class="text-blue-400">Mapping:</span> <span class="font-mono text-blue-600">${mapMin.toFixed(1)} .. ${mapMax.toFixed(1)}</span></div>`;
+            html += `<div><span class="text-blue-400">Map:</span> <span class="font-mono text-blue-600">${mapMin.toFixed(1)}..${mapMax.toFixed(1)}</span></div>`;
         } else {
-            html += `<div><span class="text-gray-300">Mapping: n/a</span></div>`;
+            html += `<div><span class="text-gray-300">Map: n/a</span></div>`;
         }
 
-        // Firmware safe limits
-        if (safeLimits) {
-            html += `<div><span class="text-green-500">Safe:</span> <span class="font-mono text-green-700 font-semibold">${safeLimits.min.toFixed(1)} .. ${safeLimits.max.toFixed(1)}</span></div>`;
+        // Host-computed safe (from saved mapping data)
+        if (hostSafe) {
+            html += `<div><span class="text-purple-400">Host:</span> <span class="font-mono text-purple-600">${hostSafe.min.toFixed(1)}..${hostSafe.max.toFixed(1)}</span></div>`;
         } else {
-            html += `<div><span class="text-gray-300">Safe: <i>Check Offsets</i></span></div>`;
+            html += `<div><span class="text-gray-300">Host: --</span></div>`;
+        }
+
+        // Firmware safe
+        if (fwSafe) {
+            // Highlight match/mismatch with host
+            let fwClass = 'text-green-700 font-semibold';
+            let matchIcon = '';
+            if (hostSafe) {
+                const delta = Math.abs(fwSafe.min - hostSafe.min) + Math.abs(fwSafe.max - hostSafe.max);
+                matchIcon = delta < 1.0 ? ' =' : ' ~';
+            }
+            html += `<div><span class="text-green-500">FW:</span> <span class="font-mono ${fwClass}">${fwSafe.min.toFixed(1)}..${fwSafe.max.toFixed(1)}${matchIcon}</span></div>`;
+        } else {
+            html += `<div><span class="text-gray-300">FW: --</span></div>`;
         }
 
         html += `</div></div>`;
@@ -8145,8 +8197,6 @@ function updateTrajectoryLimitsPanel(jointName) {
 
     panel.innerHTML = html;
     panel.classList.remove('hidden');
-
-    // Apply effective limits to angle input fields
     applyAngleLimitsToInputs(dofs.length, effectiveLimits);
 }
 
