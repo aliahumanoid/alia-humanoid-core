@@ -133,6 +133,13 @@ extern unsigned long last_encoder_test_time;
 extern volatile bool encoder_stream_can_active;
 extern volatile uint32_t encoder_stream_last_send_us;
 
+// Joint identification broadcast (triggered via CAN, emitted on Serial)
+extern volatile bool identify_broadcast_active;
+extern volatile uint32_t identify_broadcast_start_ms;
+extern const uint32_t IDENTIFY_BROADCAST_DURATION_MS;
+extern const uint32_t IDENTIFY_BROADCAST_INTERVAL_MS;
+extern volatile uint32_t identify_broadcast_last_emit_ms;
+
 // ============================================================================
 // CONTROL LOOP TIMING (configurable)
 // ============================================================================
@@ -141,7 +148,7 @@ extern volatile uint32_t encoder_stream_last_send_us;
  * @brief Control loop timing parameters
  * 
  * Inner loop: Motor PID, runs at base frequency (500 Hz default)
- * Outer loop: Joint PID, runs at reduced frequency (100 Hz default)
+ * Outer loop: Joint PID, runs every N inner cycles (default matches inner at 500 Hz)
  * 
  * These can be adjusted via CAN for tuning experiments.
  * Changes take effect immediately.
@@ -386,6 +393,17 @@ struct MovementMetrics {
   int16_t max_torque_B;           // Peak torque antagonist
   uint16_t torque_integral;       // Sum of |torque| (energy proxy, saturated)
   
+  // Smoothness/Oscillation metrics (tracking quality during MOVING)
+  int16_t rms_error_x100;         // RMS tracking error during MOVING (°×100)
+  uint16_t oscillation_count;     // Zero-crossings of error during MOVING (sign changes)
+  int16_t jitter_x100;            // RMS of error derivative (°×100) - high = vibrations
+  
+  // Smoothness scores (0-100, higher = better)
+  uint8_t score_rms;              // RMS error score: 100 if <0.1°, 0 if >2°
+  uint8_t score_oscillation;      // Oscillation score: 100 if 0, decreases with count
+  uint8_t score_jitter;           // Jitter score: 100 if <0.02°, 0 if >0.3°
+  uint8_t score_smoothness;       // Overall smoothness (weighted average)
+  
   // Movement info
   int16_t start_angle_x100;       // Starting angle (°×100)
   int16_t target_angle_x100;      // Target angle (°×100)
@@ -429,6 +447,15 @@ struct MetricsTracker {
   float sse_accumulator;          // Accumulator for SSE calculation
   uint16_t sse_sample_count;      // Number of samples in HOLDING
   
+  // Oscillation/Smoothness tracking (during MOVING phase)
+  float error_sum_sq;             // Sum of squared errors (for RMS)
+  uint32_t moving_sample_count;   // Number of samples during MOVING
+  uint16_t zero_crossings;        // Count of sign changes in error
+  float prev_error_sign;          // Previous error sign (-1, 0, +1)
+  float error_deriv_sum_sq;       // Sum of squared (error - prev_error) for jitter
+  float prev_error_deg;           // Previous error value for derivative
+  bool prev_error_valid;          // True after first sample (for derivative)
+  
   // Torque tracking
   int16_t max_torque_A;           // Peak torque agonist
   int16_t max_torque_B;           // Peak torque antagonist
@@ -462,6 +489,15 @@ struct MetricsTracker {
     sse_accumulator = 0.0f;
     sse_sample_count = 0;
     
+    // Oscillation/Smoothness reset
+    error_sum_sq = 0.0f;
+    moving_sample_count = 0;
+    zero_crossings = 0;
+    prev_error_sign = 0.0f;
+    error_deriv_sum_sq = 0.0f;
+    prev_error_deg = 0.0f;
+    prev_error_valid = false;
+    
     max_torque_A = 0;
     max_torque_B = 0;
     torque_integral = 0;
@@ -487,6 +523,51 @@ struct MetricsTracker {
     m.max_torque_A = max_torque_A;
     m.max_torque_B = max_torque_B;
     m.torque_integral = (uint16_t)min(torque_integral / 100, 65535UL); // Scale down
+    
+    // Oscillation/Smoothness metrics (calculated from MOVING phase data)
+    // RMS error: sqrt(sum_sq / n)
+    float rms_error = (moving_sample_count > 0) ? sqrtf(error_sum_sq / moving_sample_count) : 0.0f;
+    m.rms_error_x100 = (int16_t)(rms_error * 100.0f);
+    
+    // Zero-crossings: direct count
+    m.oscillation_count = zero_crossings;
+    
+    // Jitter: RMS of error derivative (indicates high-frequency vibrations)
+    // Note: we have (n-1) derivative samples for n error samples
+    uint32_t deriv_samples = (moving_sample_count > 1) ? (moving_sample_count - 1) : 0;
+    float jitter = (deriv_samples > 0) ? sqrtf(error_deriv_sum_sq / deriv_samples) : 0.0f;
+    m.jitter_x100 = (int16_t)(jitter * 100.0f);
+    
+    // === SMOOTHNESS SCORES (0-100, higher = better) ===
+    // RMS Score: 100 if rms < 0.1°, 0 if rms > 2°, linear interpolation
+    const float RMS_EXCELLENT = 0.1f;  // 100 points
+    const float RMS_POOR = 2.0f;       // 0 points
+    if (rms_error <= RMS_EXCELLENT) {
+      m.score_rms = 100;
+    } else if (rms_error >= RMS_POOR) {
+      m.score_rms = 0;
+    } else {
+      m.score_rms = (uint8_t)(100.0f * (RMS_POOR - rms_error) / (RMS_POOR - RMS_EXCELLENT));
+    }
+    
+    // Oscillation Score: 100 if 0 crossings, decreases exponentially
+    // Score = 100 * exp(-osc/5), so 5 crossings = 37, 10 crossings = 14
+    const float OSC_DECAY = 5.0f;
+    m.score_oscillation = (uint8_t)(100.0f * expf(-((float)zero_crossings) / OSC_DECAY));
+    
+    // Jitter Score: 100 if jitter < 0.02°, 0 if jitter > 0.3°, linear
+    const float JITTER_EXCELLENT = 0.02f;  // 100 points
+    const float JITTER_POOR = 0.30f;       // 0 points
+    if (jitter <= JITTER_EXCELLENT) {
+      m.score_jitter = 100;
+    } else if (jitter >= JITTER_POOR) {
+      m.score_jitter = 0;
+    } else {
+      m.score_jitter = (uint8_t)(100.0f * (JITTER_POOR - jitter) / (JITTER_POOR - JITTER_EXCELLENT));
+    }
+    
+    // Overall Smoothness Score: weighted average (rms 40%, osc 30%, jitter 30%)
+    m.score_smoothness = (uint8_t)(0.4f * m.score_rms + 0.3f * m.score_oscillation + 0.3f * m.score_jitter);
     
     m.start_angle_x100 = (int16_t)(start_angle_deg * 100.0f);
     m.target_angle_x100 = (int16_t)(target_angle_deg * 100.0f);

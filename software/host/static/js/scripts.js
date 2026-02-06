@@ -33,6 +33,20 @@ let isAddToSequenceMode = false;
 let waypointTrajectoryActive = false;
 let waypointTrajectoryStartTime = 0;
 
+// Last waypoint batch info for debugging
+let lastWaypointBatch = {
+    timestamp: null,
+    joint: null,
+    source: null,  // 'manual', 'auto-single', 'auto-dual', 'preview'
+    startAngles: null,
+    targetAngles: null,
+    waypoints: [],
+    rate: null,
+    totalTimeMs: null,
+    sent: false,
+    startSource: null  // 'encoder' or 'default (0°)' - indicates where start angle came from
+};
+
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
     KNEE: [
@@ -274,6 +288,58 @@ $(document).ready(function() {
         console.log('Websocket connected!');
     });
 
+    // Boot sequence status updates
+    socket.on('boot_status', function(data) {
+        console.log('Boot status:', data);
+        
+        if (data.message) {
+            appendStatusMessage(`🚀 Boot: ${data.message}`);
+        }
+        
+        // Update UI based on boot step
+        if (data.step === 'can_connected') {
+            // Refresh CAN status
+            fetchCanInterfaces({ showStatus: false });
+        } else if (data.step === 'discovery_complete') {
+            // Update serial port mappings from discovery
+            if (data.mappings) {
+                jointPortMapping = data.mappings;
+                updateSerialPortSelectUI($("#jointSelect").val());
+            }
+            
+            if (data.discovered) {
+                const count = Object.keys(data.discovered).length;
+                if (count > 0) {
+                    let msg = `✅ Auto-discovered ${count} joint(s):\n`;
+                    for (const [joint, port] of Object.entries(data.discovered)) {
+                        msg += `  - ${joint} → ${port}\n`;
+                    }
+                    appendStatusMessage(msg);
+                }
+            }
+        }
+    });
+
+    // Client state update (sent on reconnect/refresh to restore UI state)
+    socket.on('client_state', function(data) {
+        console.log('Client state received:', data);
+        
+        // Restore serial port mappings from previous discovery
+        if (data.serial_mappings && Object.keys(data.serial_mappings).length > 0) {
+            jointPortMapping = data.serial_mappings;
+            updateSerialPortSelectUI($("#jointSelect").val());
+            console.log('Restored serial mappings:', jointPortMapping);
+        }
+        
+        // Update CAN connection state
+        if (data.can_connected !== undefined) {
+            canConnectionState.connected = data.can_connected;
+            if (data.can_connected && data.can_interface) {
+                console.log('CAN already connected:', data.can_interface);
+            }
+        }
+    });
+
     // Listener for multi-DOF movement data
     socket.on('movement_data_multi_dof', function(data) {
         console.log('Movement data multi-DOF received');
@@ -378,6 +444,7 @@ $(document).ready(function() {
         // Regenerate smart buttons with new mapping data
         setTimeout(() => {
             generateSmartQuickButtons();
+            generateSmartWaypointButtons();
         }, 200);
         
         // Show status message
@@ -571,6 +638,39 @@ $(document).ready(function() {
         console.log('Movement metrics received:', data);
         updateMovementMetricsDisplay(data);
     });
+    
+    // Listener for smoothness metrics (received after movement_metrics)
+    socket.on('smoothness_metrics', function(data) {
+        // Filter by currently selected joint
+        const selectedJoint = $('#jointSelect').val();
+        if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) {
+            return;  // Ignore metrics from other joints
+        }
+        
+        console.log('Smoothness metrics received:', data);
+        updateSmoothnessMetricsDisplay(data);
+    });
+
+    // Auto-detection of joint on serial port (from firmware EVT:JOINT event)
+    socket.on('joint_detected', function(data) {
+        console.log('Joint auto-detected:', data);
+        
+        if (data.port && data.joint_name) {
+            // Normalize joint name to uppercase (firmware uses lowercase, UI uses uppercase)
+            const normalizedJointName = data.joint_name.toUpperCase();
+            
+            // Update jointPortMapping with auto-detected association
+            jointPortMapping[normalizedJointName] = data.port;
+            
+            // Update UI
+            const selectedJoint = $('#jointSelect').val();
+            if (selectedJoint === normalizedJointName) {
+                updateSerialPortSelectUI(selectedJoint);
+            }
+            
+            appendStatusMessage(`🔌 Auto-detected ${normalizedJointName} on port ${data.port}`);
+        }
+    });
 
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
@@ -621,6 +721,7 @@ $(document).ready(function() {
         // Regenerate smart buttons for new joint
         setTimeout(() => {
             generateSmartQuickButtons();
+            generateSmartWaypointButtons();
         }, 150); // Slightly longer delay to allow mapping data loading
         
         // Send command to select joint and load PIDs
@@ -679,6 +780,17 @@ $(document).ready(function() {
             appendStatusMessage("Sequence mode disabled");
         }
     });
+
+    $("#autoWaypointSendToggle").change(function() {
+        if ($(this).is(":checked")) {
+            $("#smartWaypointButtons").addClass("auto-execute-enabled");
+            appendStatusMessage("⚡ Waypoint auto-send enabled");
+        } else {
+            $("#smartWaypointButtons").removeClass("auto-execute-enabled");
+            appendStatusMessage("⏸️ Waypoint auto-send disabled");
+        }
+        generateSmartWaypointButtons();
+    });
     
     // Initialize sequence builder visibility based on initial joint
     updateSequenceBuilderVisibility($("#jointSelect").val());
@@ -691,6 +803,10 @@ $(document).ready(function() {
 
     $("#refreshSerialPorts").on('click', function() {
         fetchSerialPortConfiguration({ showStatus: true });
+    });
+
+    $("#discoverJointsBtn").on('click', function() {
+        discoverJoints();
     });
 
     $("#canInterfaceSelect").change(function() {
@@ -724,6 +840,7 @@ $(document).ready(function() {
     
     // Initialize smart buttons on load
     setTimeout(generateSmartQuickButtons, 250);
+    setTimeout(generateSmartWaypointButtons, 300);
     
     // DOF-specific buttons are now initialized in fetchJointPhysicalLimits().done() callback
     
@@ -1899,6 +2016,57 @@ function fetchSerialPortConfiguration(options = {}) {
     });
 }
 
+function discoverJoints() {
+    /**
+     * Auto-discover joints on serial ports.
+     * Sends CAN identify request (if connected) and scans all serial ports.
+     */
+    const btn = $("#discoverJointsBtn");
+    btn.prop('disabled', true);
+    btn.find('i').addClass('fa-spin');
+    appendStatusMessage('🔍 Starting joint discovery (scanning all serial ports for ~4s)...');
+    
+    $.ajax({
+        url: '/discover_joints',
+        method: 'POST',
+        contentType: 'application/json',
+        dataType: 'json'
+    }).done(response => {
+        if (response.status === 'success') {
+            const discovered = response.discovered || {};
+            const count = Object.keys(discovered).length;
+            
+            if (count > 0) {
+                // Update local mapping
+                jointPortMapping = response.mappings || {};
+                
+                // Update UI
+                updateSerialPortSelectUI($("#jointSelect").val());
+                
+                // Build discovery message
+                let msg = `✅ Discovery complete: found ${count} joint(s):\n`;
+                for (const [joint, port] of Object.entries(discovered)) {
+                    msg += `  - ${joint} → ${port}\n`;
+                }
+                appendStatusMessage(msg);
+                
+                if (response.can_request_sent) {
+                    appendStatusMessage('📡 CAN identify request was sent to all controllers');
+                }
+            } else {
+                appendStatusMessage('⚠️ No joints discovered. Make sure controllers are connected and CAN bus is active.');
+            }
+        } else {
+            appendStatusMessage(`❌ Discovery failed: ${response.message}`);
+        }
+    }).fail((xhr, status, error) => {
+        appendStatusMessage(`❌ Discovery request failed: ${error}`);
+    }).always(() => {
+        btn.prop('disabled', false);
+        btn.find('i').removeClass('fa-spin');
+    });
+}
+
 function getJointUsingPort(port) {
     for (const [joint, mappedPort] of Object.entries(jointPortMapping)) {
         if (mappedPort === port) {
@@ -2025,13 +2193,18 @@ function fetchCanInterfaces(options = {}) {
     }).done(response => {
         if (response.status === 'success') {
             availableCanInterfaces = response.interfaces || [];
-            updateCanInterfaceSelectUI();
+            // Pass connected config to auto-select in dropdown
+            updateCanInterfaceSelectUI(response.connected_config || null);
             if (showStatus) {
                 appendStatusMessage(`🔌 CAN interfaces detected: ${availableCanInterfaces.length}`);
             }
+            // Update connection state
+            if (response.connected) {
+                canConnectionState.connected = true;
+            }
         } else {
             availableCanInterfaces = [];
-            updateCanInterfaceSelectUI();
+            updateCanInterfaceSelectUI(null);
             if (showStatus) {
                 appendStatusMessage(`⚠️ ${response.message || 'No CAN interfaces found'}`);
             }
@@ -2039,11 +2212,11 @@ function fetchCanInterfaces(options = {}) {
     }).fail((xhr, status, error) => {
         appendStatusMessage(`⚠️ Error fetching CAN interfaces: ${error}`);
         availableCanInterfaces = [];
-        updateCanInterfaceSelectUI();
+        updateCanInterfaceSelectUI(null);
     });
 }
 
-function updateCanInterfaceSelectUI() {
+function updateCanInterfaceSelectUI(connectedConfig = null) {
     const select = $("#canInterfaceSelect");
     if (!select.length) {
         return;
@@ -2060,8 +2233,21 @@ function updateCanInterfaceSelectUI() {
         select.append(option);
     });
 
-    // Restore previous selection if still available
-    if (currentSelection) {
+    // Select connected interface if provided, otherwise restore previous selection
+    if (connectedConfig) {
+        // Find matching interface by comparing parsed values
+        let found = false;
+        availableCanInterfaces.forEach(iface => {
+            if (iface.value === connectedConfig) {
+                select.val(connectedConfig);
+                selectedCanInterface = connectedConfig;
+                found = true;
+            }
+        });
+        if (found) {
+            console.log('Auto-selected connected CAN interface:', connectedConfig);
+        }
+    } else if (currentSelection) {
         select.val(currentSelection);
     }
 
@@ -2339,6 +2525,63 @@ function updateCanMotionJoint() {
     
     // Update DOF options based on selected joint
     updateCanWaypointDofOptions();
+    
+    // Switch between 1DOF and 2DOF input layouts
+    updateWaypointInputLayout();
+}
+
+/**
+ * Get number of DOFs for a joint
+ */
+function getJointDofCount(joint) {
+    if (!joint || !jointConfigData || !jointConfigData.joints) return 1;
+    const configKey = joint.toLowerCase();
+    const jointEntry = jointConfigData.joints[configKey];
+    return jointEntry ? jointEntry.dofs.length : 1;
+}
+
+/**
+ * Switch waypoint input layout between 1DOF and 2DOF mode
+ */
+function updateWaypointInputLayout() {
+    const joint = $("#jointSelect").val();
+    const dofCount = getJointDofCount(joint);
+    
+    if (dofCount >= 2) {
+        // 2DOF mode: show dual angle inputs
+        $("#waypointInput1DOF").hide();
+        $("#waypointInput2DOF").show();
+        
+        // Update labels based on joint type
+        const dofLabels = getJointDofLabels(joint);
+        $("label[for='canWaypointAngleDof0']").text(dofLabels[0] + " (°)");
+        $("label[for='canWaypointAngleDof1']").text(dofLabels[1] + " (°)");
+    } else {
+        // 1DOF mode: show DOF selector + single angle
+        $("#waypointInput1DOF").show();
+        $("#waypointInput2DOF").hide();
+    }
+}
+
+/**
+ * Get descriptive labels for DOFs of a joint
+ */
+function getJointDofLabels(joint) {
+    if (!joint || !jointConfigData || !jointConfigData.joints) {
+        return ["DOF0", "DOF1"];
+    }
+    const configKey = joint.toLowerCase();
+    const jointEntry = jointConfigData.joints[configKey];
+    if (!jointEntry || !jointEntry.dofs) {
+        return ["DOF0", "DOF1"];
+    }
+    return jointEntry.dofs.map((dof, idx) => {
+        if (dof.name) {
+            // Capitalize and format: plantar_dorsal -> Plantar/Dorsal
+            return dof.name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('/');
+        }
+        return `DOF${idx}`;
+    });
 }
 
 function updateCanWaypointDofOptions() {
@@ -2508,6 +2751,21 @@ function sendMultiWaypointSmoothCurve() {
 
     appendStatusMessage(`📊 Generated ${waypoints.length} waypoints`);
 
+    // Save waypoint batch info for debugging
+    lastWaypointBatch = {
+        timestamp: new Date(),
+        joint: joint,
+        source: 'single-dof',
+        startAngles: { dof0: dofIndex === 0 ? startAngle : null, dof1: dofIndex === 1 ? startAngle : null },
+        targetAngles: { dof0: dofIndex === 0 ? targetAngle : null, dof1: dofIndex === 1 ? targetAngle : null },
+        waypoints: waypoints,
+        rate: waypointRate,
+        totalTimeMs: totalTimeMs,
+        numPoints: waypoints.length,
+        deltaT: deltaT,
+        sent: false
+    };
+
     // Mark trajectory as active before sending
     markTrajectoryActive();
     
@@ -2520,6 +2778,7 @@ function sendMultiWaypointSmoothCurve() {
     }).done(response => {
         if (response.status === 'success') {
             appendStatusMessage(`✅ Multi-WP batch sent: ${waypoints.length} waypoints [LINEAR interp]`);
+            lastWaypointBatch.sent = true;
         } else {
             appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
             waypointTrajectoryActive = false;  // Clear on error
@@ -3258,6 +3517,7 @@ function renderMappingChart(mappingData) {
     // Regenerate smart buttons after loading new mapping data
     setTimeout(() => {
         generateSmartQuickButtons();
+        generateSmartWaypointButtons();
     }, 100);
     
     appendStatusMessage(`Displayed mapping charts for ${selectedJoint}: ${dofInfo}`);
@@ -3781,7 +4041,7 @@ function generateIntelligentQuickButtons(ranges, container) {
                 multiDofContainer.append(`
                     <button onclick="setMultiDofQuickAngles(${angle0}, ${angle1})" 
                             class="${colorClass} text-white rounded transition-colors"
-                            style="width: 36px; height: 36px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                            style="width: 36px; height: 36px; font-size: 8px; padding: 1px; line-height: 1.1;"
                             title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoExecuteEnabled ? ' (auto-exec)' : ''}">
                         ${angle0}°<br>${angle1}°
                     </button>
@@ -3811,6 +4071,654 @@ function generateIntelligentQuickButtons(ranges, container) {
     } else {
         container.removeClass("auto-execute-enabled");
     }
+}
+
+/**
+ * Set waypoint input fields from smart buttons (single-DOF).
+ */
+function setWaypointQuickAngle(dofIndex, angle) {
+    $("#canWaypointDof").val(String(dofIndex));
+    $("#canWaypointAngle").val(angle);
+    
+    // Check if waypoint sequence mode is active
+    if (isWpSequenceModeActive()) {
+        const angle0 = dofIndex === 0 ? angle : null;
+        const angle1 = dofIndex === 1 ? angle : null;
+        addWpStepToSequence(angle0, angle1);
+        return;
+    }
+    
+    const autoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
+    if (autoSendEnabled) {
+        appendStatusMessage(`⚡ Auto-send: DOF${dofIndex} → ${angle}° (Multi-WP)`);
+        sendMultiWaypointSmoothCurve();
+    } else {
+        appendStatusMessage(`Smart waypoint set: DOF${dofIndex} = ${angle}°`);
+    }
+}
+
+/**
+ * Set waypoint for dual-DOF from grid buttons (2D grid click).
+ * Sends waypoints for both DOF0 and DOF1 together.
+ */
+function setWaypointQuickAngles(angle0, angle1) {
+    // Always update the 2DOF input textboxes
+    $("#canWaypointAngleDof0").val(angle0);
+    $("#canWaypointAngleDof1").val(angle1);
+    
+    // Check if waypoint sequence mode is active
+    if (isWpSequenceModeActive()) {
+        addWpStepToSequence(angle0, angle1);
+        return;
+    }
+    
+    const autoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
+    if (autoSendEnabled) {
+        appendStatusMessage(`⚡ Auto-send: DOF0=${angle0}°, DOF1=${angle1}° (Multi-WP)`);
+        sendMultiWaypointDualDof(angle0, angle1);
+    } else {
+        appendStatusMessage(`Target set: DOF0=${angle0}°, DOF1=${angle1}°`);
+    }
+}
+
+/**
+ * Send multi-waypoint smooth curve for both DOF0 and DOF1 simultaneously.
+ * Generates waypoints with angles for both DOFs at each step.
+ */
+function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
+    const joint = $("#jointSelect").val();
+    const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
+    const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
+    const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
+    const deltaT = Math.round(1000 / waypointRate);
+
+    if (!joint) {
+        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
+        return;
+    }
+    
+    // SAFETY: Check if a trajectory is already in progress
+    if (!checkTrajectoryNotActive()) {
+        return;
+    }
+
+    // Get current angles from encoder for both DOFs
+    const startAngle0 = getCurrentEncoderAngle(joint, 0);
+    const startAngle1 = getCurrentEncoderAngle(joint, 1);
+    
+    if (startAngle0 === null || startAngle1 === null) {
+        appendStatusMessage("❌ SAFETY: Cannot generate waypoints without valid encoder readings for both DOFs!");
+        appendStatusMessage("⚠️ Please start 'Encoder Test' (CAN streaming) first.");
+        return;
+    }
+
+    appendStatusMessage(`🔬 Dual-DOF WP: (${startAngle0.toFixed(1)}°,${startAngle1.toFixed(1)}°) → (${targetAngle0}°,${targetAngle1}°) @ ${waypointRate} pts/s`);
+
+    // Force LINEAR interpolation
+    $.ajax({
+        url: '/can/interpolation_mode',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ mode: 'linear' }),
+        async: false
+    });
+
+    // Generate waypoints for both DOFs with COSINE S-curve
+    const waypoints = [];
+    const actualDeltaT = totalTimeMs / numPoints;
+    const initialOffset = 50;
+
+    for (let i = 0; i <= numPoints; i++) {
+        const t = i / numPoints;
+        const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+        
+        const angle0 = startAngle0 + (targetAngle0 - startAngle0) * smoothT;
+        const angle1 = startAngle1 + (targetAngle1 - startAngle1) * smoothT;
+        const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
+        
+        waypoints.push({
+            joint: joint,
+            angles_deg: [angle0, angle1, null],
+            t_offset_ms: Math.round(desiredArrivalFromStart)
+        });
+    }
+
+    appendStatusMessage(`📊 Generated ${waypoints.length} dual-DOF waypoints`);
+
+    // Save waypoint batch info for debugging
+    lastWaypointBatch = {
+        timestamp: new Date(),
+        joint: joint,
+        source: 'dual-dof',
+        startAngles: { dof0: startAngle0, dof1: startAngle1 },
+        targetAngles: { dof0: targetAngle0, dof1: targetAngle1 },
+        waypoints: waypoints,
+        rate: waypointRate,
+        totalTimeMs: totalTimeMs,
+        numPoints: waypoints.length,
+        deltaT: deltaT,
+        sent: false
+    };
+
+    markTrajectoryActive();
+    
+    $.ajax({
+        url: '/can/waypoint_batch',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ joint: joint, waypoints: waypoints })
+    }).done(response => {
+        if (response.status === 'success') {
+            appendStatusMessage(`✅ Dual-DOF batch sent: ${waypoints.length} waypoints`);
+            lastWaypointBatch.sent = true;
+        } else {
+            appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
+            waypointTrajectoryActive = false;
+        }
+    }).fail(xhr => {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+        appendStatusMessage(`❌ Batch error: ${message}`);
+        waypointTrajectoryActive = false;
+    });
+}
+
+/**
+ * Preview waypoint batch without sending - useful for debug without hardware.
+ * Uses current input values (DOF, Angle, Time) and assumes start angle = 0 if no encoder.
+ */
+function previewWaypointBatch() {
+    const joint = $("#jointSelect").val() || "UNKNOWN";
+    const dofCount = getJointDofCount(joint);
+    const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
+    const deltaT = Math.round(1000 / waypointRate);
+    
+    let totalTimeMs, targetAngle0, targetAngle1, startAngle0, startAngle1;
+    let startSource = "default (0°)";
+    let is2DOF = dofCount >= 2;
+    
+    if (is2DOF) {
+        // 2DOF mode: read from dual inputs
+        targetAngle0 = parseFloat($("#canWaypointAngleDof0").val());
+        targetAngle1 = parseFloat($("#canWaypointAngleDof1").val());
+        totalTimeMs = parseInt($("#canWaypointArrival2DOF").val(), 10) || 1000;
+        
+        if (Number.isNaN(targetAngle0) || Number.isNaN(targetAngle1)) {
+            showWaypointPopup("Error", "<p class='text-red-500'>Enter valid angles for DOF0 and DOF1.</p>");
+            return;
+        }
+        
+        // Get start angles
+        startAngle0 = getCurrentEncoderAngle(joint, 0);
+        startAngle1 = getCurrentEncoderAngle(joint, 1);
+        if (startAngle0 !== null && startAngle1 !== null) {
+            startSource = "encoder";
+        } else {
+            startAngle0 = startAngle0 ?? 0;
+            startAngle1 = startAngle1 ?? 0;
+        }
+    } else {
+        // 1DOF mode: read from single input with DOF selector
+        const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
+        const targetAngle = parseFloat($("#canWaypointAngle").val());
+        totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 1000;
+        
+        if (Number.isNaN(targetAngle)) {
+            showWaypointPopup("Error", "<p class='text-red-500'>Enter a valid target angle.</p>");
+            return;
+        }
+        
+        targetAngle0 = dofIndex === 0 ? targetAngle : null;
+        targetAngle1 = dofIndex === 1 ? targetAngle : null;
+        
+        const startAngle = getCurrentEncoderAngle(joint, dofIndex);
+        if (startAngle !== null) {
+            startSource = "encoder";
+            startAngle0 = dofIndex === 0 ? startAngle : null;
+            startAngle1 = dofIndex === 1 ? startAngle : null;
+        } else {
+            startAngle0 = dofIndex === 0 ? 0 : null;
+            startAngle1 = dofIndex === 1 ? 0 : null;
+        }
+    }
+
+    const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
+    const actualDeltaT = totalTimeMs / numPoints;
+    const initialOffset = 50;
+    const waypoints = [];
+
+    for (let i = 0; i <= numPoints; i++) {
+        const t = i / numPoints;
+        const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+        const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
+        
+        const angles = [null, null, null];
+        if (targetAngle0 !== null) {
+            angles[0] = (startAngle0 ?? 0) + (targetAngle0 - (startAngle0 ?? 0)) * smoothT;
+        }
+        if (targetAngle1 !== null) {
+            angles[1] = (startAngle1 ?? 0) + (targetAngle1 - (startAngle1 ?? 0)) * smoothT;
+        }
+        
+        waypoints.push({
+            joint: joint,
+            angles_deg: angles,
+            t_offset_ms: Math.round(desiredArrivalFromStart)
+        });
+    }
+
+    // Save to lastWaypointBatch for info display
+    lastWaypointBatch = {
+        timestamp: new Date(),
+        joint: joint,
+        source: is2DOF ? 'preview-2dof' : 'preview',
+        startAngles: { dof0: startAngle0, dof1: startAngle1 },
+        targetAngles: { dof0: targetAngle0, dof1: targetAngle1 },
+        waypoints: waypoints,
+        rate: waypointRate,
+        totalTimeMs: totalTimeMs,
+        numPoints: waypoints.length,
+        deltaT: deltaT,
+        sent: false,
+        startSource: startSource
+    };
+
+    // Show the info popup immediately
+    showLastWaypointInfo();
+}
+
+/**
+ * Show information about the last waypoint batch generated/sent.
+ */
+function showLastWaypointInfo() {
+    if (!lastWaypointBatch.timestamp) {
+        showWaypointPopup("No Data", "<p class='text-gray-500'>No waypoint batch generated yet.<br>Use <b>Preview</b> to generate without hardware.</p>");
+        return;
+    }
+    
+    const batch = lastWaypointBatch;
+    const timeStr = batch.timestamp.toLocaleTimeString();
+    const isPreview = batch.source === 'preview' || batch.source === 'preview-2dof';
+    const sentStatus = isPreview ? '<span class="text-blue-600">Preview only</span>' : 
+                       (batch.sent ? '<span class="text-green-600">Sent</span>' : '<span class="text-yellow-600">Not sent</span>');
+    
+    // Build HTML content
+    let html = `<div class="text-sm space-y-3">`;
+    
+    // Header info
+    html += `<div class="grid grid-cols-2 gap-2 text-xs">`;
+    html += `<div><span class="text-gray-500">Time:</span> ${timeStr}</div>`;
+    html += `<div><span class="text-gray-500">Joint:</span> <b>${batch.joint}</b></div>`;
+    html += `<div><span class="text-gray-500">Status:</span> ${sentStatus}</div>`;
+    html += `<div><span class="text-gray-500">Type:</span> ${batch.source}</div>`;
+    if (batch.startSource) {
+        html += `<div class="col-span-2"><span class="text-gray-500">Start from:</span> ${batch.startSource}</div>`;
+    }
+    html += `</div>`;
+    
+    // Movement details
+    // Movement details - check if both DOFs have values
+    html += `<div class="border-t pt-2">`;
+    const hasDof0 = batch.targetAngles.dof0 !== null && batch.targetAngles.dof0 !== undefined;
+    const hasDof1 = batch.targetAngles.dof1 !== null && batch.targetAngles.dof1 !== undefined;
+    
+    if (hasDof0 && hasDof1) {
+        // 2DOF movement
+        html += `<div class="text-xs"><span class="text-gray-500">Start:</span> DOF0=${batch.startAngles.dof0?.toFixed(1)}°, DOF1=${batch.startAngles.dof1?.toFixed(1)}°</div>`;
+        html += `<div class="text-xs"><span class="text-gray-500">Target:</span> <b>DOF0=${batch.targetAngles.dof0}°, DOF1=${batch.targetAngles.dof1}°</b></div>`;
+    } else {
+        // 1DOF movement
+        const dof = hasDof0 ? 0 : 1;
+        const start = dof === 0 ? batch.startAngles.dof0 : batch.startAngles.dof1;
+        const target = dof === 0 ? batch.targetAngles.dof0 : batch.targetAngles.dof1;
+        html += `<div class="text-xs"><span class="text-gray-500">DOF${dof}:</span> ${start?.toFixed(1)}° → <b>${target}°</b></div>`;
+    }
+    html += `</div>`;
+    
+    // Trajectory params
+    html += `<div class="grid grid-cols-2 gap-1 text-xs border-t pt-2">`;
+    html += `<div><span class="text-gray-500">Rate:</span> ${batch.rate} pts/s</div>`;
+    html += `<div><span class="text-gray-500">Duration:</span> ${batch.totalTimeMs}ms</div>`;
+    html += `<div><span class="text-gray-500">Waypoints:</span> ${batch.numPoints}</div>`;
+    html += `<div><span class="text-gray-500">Δt:</span> ${batch.deltaT}ms</div>`;
+    html += `</div>`;
+    
+    // Waypoints table - show ALL points
+    if (batch.waypoints.length > 0) {
+        html += `<div class="border-t pt-2">`;
+        html += `<div class="text-xs text-gray-500 mb-1">All waypoints (${batch.waypoints.length}):</div>`;
+        html += `<div class="max-h-60 overflow-y-auto bg-gray-50 rounded p-1">`;
+        html += `<table class="w-full text-xs font-mono"><thead class="sticky top-0 bg-gray-100"><tr class="text-gray-500"><th class="text-left px-1">#</th><th class="text-left px-1">t(ms)</th><th class="text-right px-1">DOF0</th><th class="text-right px-1">DOF1</th></tr></thead><tbody>`;
+        
+        for (let i = 0; i < batch.waypoints.length; i++) {
+            const wp = batch.waypoints[i];
+            const dof0 = wp.angles_deg[0] !== null ? wp.angles_deg[0].toFixed(1) + "°" : "--";
+            const dof1 = wp.angles_deg[1] !== null ? wp.angles_deg[1].toFixed(1) + "°" : "--";
+            const rowClass = i % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+            html += `<tr class="${rowClass}"><td class="px-1">${i}</td><td class="px-1">${wp.t_offset_ms}</td><td class="text-right px-1">${dof0}</td><td class="text-right px-1">${dof1}</td></tr>`;
+        }
+        
+        html += `</tbody></table></div></div>`;
+    }
+    
+    html += `</div>`;
+    
+    const title = isPreview ? "Waypoint Preview" : "Last Waypoint Batch";
+    showWaypointPopup(title, html);
+    
+    // Also log to console for debugging
+    console.log("Waypoint batch info:", batch);
+}
+
+/**
+ * Show a popup modal with waypoint information.
+ */
+function showWaypointPopup(title, content) {
+    // Remove existing popup if any
+    $('#waypointInfoPopup').remove();
+    
+    const popup = $(`
+        <div id="waypointInfoPopup" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[80vh] flex flex-col">
+                <div class="flex items-center justify-between p-3 border-b">
+                    <h3 class="font-semibold text-gray-800"><i class="fas fa-route mr-2"></i>${title}</h3>
+                    <button onclick="$('#waypointInfoPopup').remove()" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+                </div>
+                <div class="p-4 overflow-y-auto">
+                    ${content}
+                </div>
+                <div class="p-3 border-t text-right">
+                    <button onclick="$('#waypointInfoPopup').remove()" class="px-4 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm">Close</button>
+                </div>
+            </div>
+        </div>
+    `);
+    
+    // Close on background click
+    popup.on('click', function(e) {
+        if (e.target === this) {
+            $(this).remove();
+        }
+    });
+    
+    // Close on Escape key
+    $(document).on('keydown.waypointPopup', function(e) {
+        if (e.key === 'Escape') {
+            $('#waypointInfoPopup').remove();
+            $(document).off('keydown.waypointPopup');
+        }
+    });
+    
+    $('body').append(popup);
+}
+
+/**
+ * Generates smart waypoint buttons with grid layout (like Direct Movement).
+ * - KNEE: single column with step 5° (top view, like ankle center column)
+ * - ANKLE/HIP: 2D grid with step 5°
+ */
+function generateSmartWaypointButtons() {
+    const joint = $("#jointSelect").val();
+    const jointType = joint ? joint.split('_')[0] : '';
+    const container = $('#smartWaypointButtons');
+    if (!container.length) return;
+
+    if (!joint) {
+        container.empty().append('<div class="text-xs text-gray-500">Select a joint to load smart positions.</div>');
+        return;
+    }
+
+    const isAutoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
+
+    // If no mapping data available, use defaults
+    if (!automaticMappingData || !automaticMappingData.present_dofs) {
+        generateDefaultWaypointButtons(jointType, container);
+        return;
+    }
+
+    const mappingRanges = extractMappingRanges(automaticMappingData, jointType);
+    if (!mappingRanges) {
+        generateDefaultWaypointButtons(jointType, container);
+        return;
+    }
+
+    container.empty();
+    
+    // Info text about trajectory behavior (no duplicate title - it's in HTML)
+    const modeText = isAutoSendEnabled 
+        ? '<span class="text-orange-600 font-medium">Click = smooth trajectory</span>' 
+        : '<span class="text-gray-500">Click to set target angle</span>';
+    container.append(`<div class="text-xs mb-2">${modeText}</div>`);
+
+    const range0 = mappingRanges[0];
+    const range1 = mappingRanges[1];
+
+    // KNEE (1 DOF): single column with step 10° (top view, min at top = extended leg)
+    if (jointType === 'KNEE' && range0) {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view:</h5>');
+        
+        // Generate angles from min to max (top to bottom: extended → bent)
+        const dof0Values = [];
+        for (let angle = Math.floor(range0.extended_min / 10) * 10; 
+             angle <= Math.ceil(range0.extended_max / 10) * 10; 
+             angle += 10) {
+            dof0Values.push(angle);
+        }
+        
+        // Single column grid (centered, compact size)
+        const gridContainer = $('<div class="grid gap-0.5" style="grid-template-columns: 29px; justify-content: center;"></div>');
+        
+        dof0Values.forEach(angle => {
+            const colorClass = angle === 0 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-indigo-400 hover:bg-indigo-500';
+            gridContainer.append(`
+                <button onclick="setWaypointQuickAngle(0, ${angle})"
+                        class="${colorClass} text-white rounded transition-colors"
+                        style="width: 29px; height: 29px; font-size: 8px; padding: 1px; line-height: 1.1;"
+                        title="Target: ${angle}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
+                    ${angle}°
+                </button>
+            `);
+        });
+        container.append(gridContainer);
+    }
+    // ANKLE/HIP (2 DOF): 2D grid with step 5°
+    else if (jointType !== 'KNEE' && range0 && range1) {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (DOF0 ↕ / DOF1 ↔):</h5>');
+        
+        // Generate DOF 0 values (rows): from max to min, step 5°
+        const dof0Values = [];
+        for (let angle = Math.ceil(range0.extended_max / 5) * 5; 
+             angle >= Math.floor(range0.extended_min / 5) * 5; 
+             angle -= 5) {
+            dof0Values.push(angle);
+        }
+        
+        // Generate DOF 1 values (cols): from min to max, step 5°
+        const dof1Values = [];
+        for (let angle = Math.floor(range1.extended_min / 5) * 5; 
+             angle <= Math.ceil(range1.extended_max / 5) * 5; 
+             angle += 5) {
+            dof1Values.push(angle);
+        }
+        
+        // Create grid container (centered, compact size)
+        const gridCols = dof1Values.length;
+        const gridContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 29px); justify-content: center;"></div>`);
+        
+        // Generate grid buttons
+        dof0Values.forEach(angle0 => {
+            dof1Values.forEach(angle1 => {
+                let colorClass;
+                
+                // Zero position (center of cross)
+                if (angle0 === 0 && angle1 === 0) {
+                    colorClass = 'bg-gray-500 hover:bg-gray-600';
+                }
+                // Horizontal axis: DOF 0 movements (DOF 1 = 0) - Blue
+                else if (angle1 === 0) {
+                    colorClass = 'bg-indigo-400 hover:bg-indigo-500';
+                }
+                // Vertical axis: DOF 1 movements (DOF 0 = 0) - Teal
+                else if (angle0 === 0) {
+                    colorClass = 'bg-teal-400 hover:bg-teal-500';
+                }
+                // Edge positions (multi-DOF extremes)
+                else if (angle0 === dof0Values[0] || angle0 === dof0Values[dof0Values.length - 1] ||
+                         angle1 === dof1Values[0] || angle1 === dof1Values[dof1Values.length - 1]) {
+                    colorClass = 'bg-purple-500 hover:bg-purple-600';
+                }
+                // Internal multi-DOF positions
+                else {
+                    colorClass = 'bg-purple-400 hover:bg-purple-500';
+                }
+                
+                gridContainer.append(`
+                    <button onclick="setWaypointQuickAngles(${angle0}, ${angle1})" 
+                            class="${colorClass} text-white rounded transition-colors"
+                            style="width: 29px; height: 29px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                            title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
+                        ${angle0}°<br>${angle1}°
+                    </button>
+                `);
+            });
+        });
+        
+        container.append(gridContainer);
+    }
+
+    if (isAutoSendEnabled) {
+        container.addClass("auto-execute-enabled");
+    } else {
+        container.removeClass("auto-execute-enabled");
+    }
+}
+
+/**
+ * Generates default waypoint buttons when no mapping data is available.
+ * Uses fixed ranges based on joint type with step 5°.
+ */
+function generateDefaultWaypointButtons(jointType, container) {
+    container.empty();
+    const isAutoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
+    
+    // Define default ranges per joint type
+    const defaultRanges = {
+        'KNEE': { dof0: { min: 0, max: 120 } },
+        'ANKLE': { dof0: { min: -50, max: 25 }, dof1: { min: -25, max: 25 } },
+        'HIP': { dof0: { min: -30, max: 90 }, dof1: { min: -30, max: 45 } }  // Flex/Abd
+    };
+    
+    const ranges = defaultRanges[jointType] || defaultRanges['KNEE'];
+
+    // Info text (no duplicate title - it's in HTML)
+    const modeText = isAutoSendEnabled 
+        ? '<span class="text-orange-600 font-medium">Click = smooth trajectory</span>' 
+        : '<span class="text-gray-500">Click to set target angle</span>';
+    container.append(`<div class="text-xs mb-2">${modeText}</div>`);
+
+    // KNEE (1 DOF): single column with step 10° (top view, min at top = extended leg)
+    if (jointType === 'KNEE') {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (default):</h5>');
+        
+        // Generate angles from min to max (top to bottom: extended → bent)
+        const dof0Values = [];
+        for (let angle = ranges.dof0.min; angle <= ranges.dof0.max; angle += 10) {
+            dof0Values.push(angle);
+        }
+        
+        // Single column grid (centered, compact size)
+        const gridContainer = $('<div class="grid gap-0.5" style="grid-template-columns: 29px; justify-content: center;"></div>');
+        
+        dof0Values.forEach(angle => {
+            const colorClass = angle === 0 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-indigo-400 hover:bg-indigo-500';
+            gridContainer.append(`
+                <button onclick="setWaypointQuickAngle(0, ${angle})"
+                        class="${colorClass} text-white rounded transition-colors"
+                        style="width: 29px; height: 29px; font-size: 8px; padding: 1px; line-height: 1.1;"
+                        title="Target: ${angle}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
+                    ${angle}°
+                </button>
+            `);
+        });
+        container.append(gridContainer);
+    }
+    // ANKLE/HIP (2 DOF): 2D grid with step 5°
+    else if (ranges.dof0 && ranges.dof1) {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (DOF0 ↕ / DOF1 ↔):</h5>');
+        
+        // Generate DOF 0 values (rows): from max to min
+        const dof0Values = [];
+        for (let angle = ranges.dof0.max; angle >= ranges.dof0.min; angle -= 5) {
+            dof0Values.push(angle);
+        }
+        
+        // Generate DOF 1 values (cols): from min to max
+        const dof1Values = [];
+        for (let angle = ranges.dof1.min; angle <= ranges.dof1.max; angle += 5) {
+            dof1Values.push(angle);
+        }
+        
+        // Create grid container (compact size)
+        const gridCols = dof1Values.length;
+        const gridContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 29px); justify-content: center;"></div>`);
+        
+        dof0Values.forEach(angle0 => {
+            dof1Values.forEach(angle1 => {
+                let colorClass;
+                
+                if (angle0 === 0 && angle1 === 0) {
+                    colorClass = 'bg-gray-500 hover:bg-gray-600';
+                } else if (angle1 === 0) {
+                    colorClass = 'bg-indigo-400 hover:bg-indigo-500';
+                } else if (angle0 === 0) {
+                    colorClass = 'bg-teal-400 hover:bg-teal-500';
+                } else if (angle0 === dof0Values[0] || angle0 === dof0Values[dof0Values.length - 1] ||
+                         angle1 === dof1Values[0] || angle1 === dof1Values[dof1Values.length - 1]) {
+                    colorClass = 'bg-purple-500 hover:bg-purple-600';
+                } else {
+                    colorClass = 'bg-purple-400 hover:bg-purple-500';
+                }
+                
+                gridContainer.append(`
+                    <button onclick="setWaypointQuickAngles(${angle0}, ${angle1})" 
+                            class="${colorClass} text-white rounded transition-colors"
+                            style="width: 29px; height: 29px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                            title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
+                        ${angle0}°<br>${angle1}°
+                    </button>
+                `);
+            });
+        });
+        
+        container.append(gridContainer);
+    }
+
+    container.append('<div class="mt-2 text-xs text-gray-600">⚠️ No mapping data - using default ranges</div>');
+    
+    if (isAutoSendEnabled) {
+        container.addClass("auto-execute-enabled");
+    } else {
+        container.removeClass("auto-execute-enabled");
+    }
+}
+
+/**
+ * Builds an ordered list of angles from a mapping range.
+ */
+function buildOrderedAngles(range) {
+    if (!range) return [];
+    const minAngle = range.extended_min;
+    const maxAngle = range.extended_max;
+    if (!Number.isFinite(minAngle) || !Number.isFinite(maxAngle)) return [];
+
+    const fractions = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0];
+    const angles = fractions.map(f => minAngle + (maxAngle - minAngle) * f)
+        .map(angle => Math.round(angle * 10) / 10);
+
+    if (minAngle <= 0 && maxAngle >= 0) {
+        angles.push(0);
+    }
+
+    return [...new Set(angles)].sort((a, b) => a - b);
 }
 
 /**
@@ -4086,7 +4994,7 @@ function generateDefaultQuickButtons(jointType, container) {
                     multiContainer.append(`
                         <button onclick="setMultiDofQuickAngles(${angle0}, ${angle1})" 
                                 class="${colorClass} text-white rounded transition-colors"
-                                style="width: 36px; height: 36px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                                style="width: 36px; height: 36px; font-size: 8px; padding: 1px; line-height: 1.1;"
                                 title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoExecuteEnabled ? ' (auto-exec)' : ''}">
                             ${angle0}°<br>${angle1}°
                         </button>
@@ -4279,6 +5187,7 @@ $(document).ready(function() {
     
     // Initialize smart buttons on load
     setTimeout(generateSmartQuickButtons, 250);
+    setTimeout(generateSmartWaypointButtons, 300);
     
     // Initialize DOF-specific buttons on load
     renderDofControlButtons();
@@ -4896,6 +5805,55 @@ function updateMovementMetricsDisplay(data) {
     
     // Log to status
     appendStatusMessage(`🏆 DOF ${dof} movement complete: Score ${score}/100 (rise=${data.rise_time_ms}ms, settle=${data.settling_time_ms}ms)`);
+}
+
+/**
+ * Update smoothness metrics display for a specific DOF
+ * Called when smoothness_metrics event is received from the controller
+ */
+function updateSmoothnessMetricsDisplay(data) {
+    if (!data) return;
+    
+    const dof = data.dof;
+    const smoothScore = data.score_smoothness || 0;
+    
+    // Get color based on smoothness score
+    const getSmoothnessColor = (s) => {
+        if (s >= 80) return 'text-green-500';
+        if (s >= 60) return 'text-yellow-500';
+        if (s >= 40) return 'text-orange-500';
+        return 'text-red-500';
+    };
+    
+    // Update the appropriate DOF card's smoothness section
+    const prefix = `#metricsDof${dof}`;
+    
+    // Update smoothness score
+    $(prefix + 'Smoothness')
+        .text(smoothScore + '/100')
+        .removeClass('text-gray-400 text-green-500 text-yellow-500 text-orange-500 text-red-500')
+        .addClass(getSmoothnessColor(smoothScore));
+    
+    // Update individual smoothness metrics
+    $(prefix + 'Rms').text(data.rms_error_deg?.toFixed(2) + '°');
+    $(prefix + 'Osc').text(data.oscillation_count);
+    $(prefix + 'Jitter').text(data.jitter_deg?.toFixed(3) + '°');
+    
+    // Update scores breakdown
+    $(prefix + 'ScoreRms').text(data.score_rms);
+    $(prefix + 'ScoreJitter').text(data.score_jitter);
+    
+    // Update the most recent history entry with smoothness data
+    if (metricsHistory.length > 0 && metricsHistory[0].dof === dof) {
+        metricsHistory[0].smoothness_score = smoothScore;
+        metricsHistory[0].rms_error_deg = data.rms_error_deg;
+        metricsHistory[0].oscillation_count = data.oscillation_count;
+        metricsHistory[0].jitter_deg = data.jitter_deg;
+        updateMetricsHistoryDisplay();
+    }
+    
+    // Log to status with smoothness
+    appendStatusMessage(`📊 DOF ${dof} smoothness: ${smoothScore}/100 (rms=${data.rms_error_deg?.toFixed(2)}°, osc=${data.oscillation_count}, jit=${data.jitter_deg?.toFixed(3)}°)`);
 }
 
 /**
@@ -6850,11 +7808,347 @@ function handleAutoStartResponse(message) {
     const enabledMatch = message.match(/ENABLED=(\d+)/);
     if (enabledMatch) {
         const enabled = parseInt(enabledMatch[1]) !== 0;
-        const checkbox = document.getElementById('autoStartToggle');
-        if (checkbox) {
-            checkbox.checked = enabled;
-        }
+        // Update all autoStartToggle checkboxes (one per joint panel)
+        ['autoStartToggle', 'autoStartToggleAnkle', 'autoStartToggleHip'].forEach(id => {
+            const checkbox = document.getElementById(id);
+            if (checkbox) {
+                checkbox.checked = enabled;
+            }
+        });
         appendStatusMessage(`⚙️ Auto-start: ${enabled ? 'ENABLED' : 'DISABLED'}`);
     }
+}
+
+// ============================================================================
+// WAYPOINT SEQUENCE BUILDER (CAN)
+// ============================================================================
+
+let wpSequence = [];
+let isWpSequencePlaying = false;
+
+/**
+ * Initialize Waypoint Sequence Builder event handlers
+ */
+$(document).ready(function() {
+    // Toggle sequence mode
+    $("#wpSequenceModeToggle").change(function() {
+        const enabled = $(this).is(":checked");
+        if (enabled) {
+            $("#wpSequenceBuilderContainer").slideDown(200);
+            appendStatusMessage(`🎬 Waypoint Sequence Mode: ON - Click Smart Waypoints to build sequence`);
+        } else {
+            $("#wpSequenceBuilderContainer").slideUp(200);
+            appendStatusMessage(`🎬 Waypoint Sequence Mode: OFF`);
+        }
+    });
+});
+
+/**
+ * Check if waypoint sequence mode is active
+ */
+function isWpSequenceModeActive() {
+    return $("#wpSequenceModeToggle").is(":checked");
+}
+
+/**
+ * Add waypoint step to sequence (called from Smart Waypoint buttons when sequence mode is ON)
+ */
+function addWpStepToSequence(angle0, angle1) {
+    const joint = $("#jointSelect").val();
+    const totalTimeMs = parseInt($("#canWaypointArrival2DOF").val() || $("#canWaypointArrival").val(), 10) || 1000;
+    
+    wpSequence.push({
+        type: "waypoint",
+        joint: joint,
+        angle0: angle0,
+        angle1: angle1,
+        durationMs: totalTimeMs
+    });
+    
+    renderWpSequenceList();
+    appendStatusMessage(`➕ Added waypoint: DOF0=${angle0}°, DOF1=${angle1}°`);
+}
+
+/**
+ * Add pause step to waypoint sequence
+ */
+function addWpPauseToSequence() {
+    const duration = parseFloat($("#wpPauseDuration").val()) || 1.0;
+    
+    wpSequence.push({
+        type: "pause",
+        duration: duration
+    });
+    
+    renderWpSequenceList();
+    appendStatusMessage(`⏸️ Added pause: ${duration}s`);
+}
+
+/**
+ * Render the waypoint sequence list UI
+ */
+function renderWpSequenceList() {
+    const container = $("#wpSequenceList");
+    container.empty();
+    
+    if (wpSequence.length === 0) {
+        container.html('<div class="sequence-empty-state">Click Smart Waypoint buttons to add steps</div>');
+        return;
+    }
+    
+    wpSequence.forEach((step, index) => {
+        const stepEl = $('<div class="sequence-step"></div>');
+        
+        if (step.type === "waypoint") {
+            const angles = step.angle1 !== null ? 
+                `DOF0: ${step.angle0}° / DOF1: ${step.angle1}°` : 
+                `DOF0: ${step.angle0}°`;
+            stepEl.html(`
+                <span class="step-number">${index + 1}</span>
+                <span class="step-content">
+                    <i class="fas fa-crosshairs text-indigo-500 mr-1"></i>
+                    ${angles}
+                    <span class="text-gray-400 text-xs ml-1">(${step.durationMs}ms)</span>
+                </span>
+                <button onclick="removeWpStep(${index})" class="step-remove" title="Remove step">
+                    <i class="fas fa-times"></i>
+                </button>
+            `);
+        } else if (step.type === "pause") {
+            stepEl.html(`
+                <span class="step-number">${index + 1}</span>
+                <span class="step-content">
+                    <i class="fas fa-pause text-yellow-500 mr-1"></i>
+                    Pause ${step.duration}s
+                </span>
+                <button onclick="removeWpStep(${index})" class="step-remove" title="Remove step">
+                    <i class="fas fa-times"></i>
+                </button>
+            `);
+        }
+        
+        container.append(stepEl);
+    });
+}
+
+/**
+ * Remove a specific step from waypoint sequence
+ */
+function removeWpStep(index) {
+    if (index >= 0 && index < wpSequence.length) {
+        wpSequence.splice(index, 1);
+        renderWpSequenceList();
+        appendStatusMessage(`🗑️ Removed waypoint step ${index + 1}`);
+    }
+}
+
+/**
+ * Remove the last step from waypoint sequence
+ */
+function removeLastWpStep() {
+    if (wpSequence.length === 0) {
+        appendStatusMessage(`⚠️ Sequence is empty`);
+        return;
+    }
+    wpSequence.pop();
+    renderWpSequenceList();
+    appendStatusMessage(`↩️ Removed last waypoint step`);
+}
+
+/**
+ * Clear all waypoint sequence steps
+ */
+function clearWpSequence() {
+    wpSequence = [];
+    renderWpSequenceList();
+    appendStatusMessage(`🗑️ Waypoint sequence cleared`);
+}
+
+/**
+ * Play the waypoint sequence
+ */
+async function playWpSequence() {
+    if (wpSequence.length === 0) {
+        appendStatusMessage(`⚠️ Waypoint sequence is empty. Add steps first.`);
+        return;
+    }
+    
+    const loopEnabled = $("#wpSequenceLoopToggle").is(":checked");
+    isWpSequencePlaying = true;
+    updateWpPlaybackControls();
+    
+    appendStatusMessage(`▶️ Starting waypoint sequence (${wpSequence.length} steps${loopEnabled ? ', loop' : ''})`);
+    
+    let loopCount = 0;
+    
+    do {
+        if (loopEnabled && loopCount > 0) {
+            appendStatusMessage(`🔄 Loop iteration ${loopCount + 1}`);
+        }
+        
+        for (let i = 0; i < wpSequence.length; i++) {
+            if (!isWpSequencePlaying) {
+                appendStatusMessage(`⏹️ Waypoint sequence stopped`);
+                updateWpPlaybackControls();
+                return;
+            }
+            
+            const step = wpSequence[i];
+            
+            if (step.type === "waypoint") {
+                appendStatusMessage(`📍 Step ${i + 1}: Moving to DOF0=${step.angle0}°${step.angle1 !== null ? `, DOF1=${step.angle1}°` : ''}`);
+                
+                // Send waypoint trajectory
+                if (step.angle1 !== null) {
+                    await sendMultiWaypointDualDofAsync(step.angle0, step.angle1, step.durationMs);
+                } else {
+                    // Single DOF - use existing function
+                    $("#canWaypointAngle").val(step.angle0);
+                    $("#canWaypointArrival").val(step.durationMs);
+                    await sendMultiWaypointSmoothCurveAsync();
+                }
+                
+                // Wait for movement to complete
+                await sleep(step.durationMs + 200);
+                
+            } else if (step.type === "pause") {
+                appendStatusMessage(`⏸️ Step ${i + 1}: Pause ${step.duration}s`);
+                await sleep(step.duration * 1000);
+            }
+        }
+        
+        loopCount++;
+        
+    } while (loopEnabled && isWpSequencePlaying);
+    
+    isWpSequencePlaying = false;
+    updateWpPlaybackControls();
+    appendStatusMessage(`✅ Waypoint sequence completed`);
+}
+
+/**
+ * Stop the waypoint sequence playback
+ */
+function stopWpSequence() {
+    isWpSequencePlaying = false;
+    updateWpPlaybackControls();
+    appendStatusMessage(`⏹️ Stopping waypoint sequence...`);
+}
+
+/**
+ * Update playback control buttons state
+ */
+function updateWpPlaybackControls() {
+    $("#playWpSequenceBtn").prop("disabled", isWpSequencePlaying);
+    $("#stopWpSequenceBtn").prop("disabled", !isWpSequencePlaying);
+}
+
+/**
+ * Async version of sendMultiWaypointDualDof for sequence playback
+ */
+async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTimeMs) {
+    return new Promise((resolve, reject) => {
+        const joint = $("#jointSelect").val();
+        const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
+        const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
+        
+        // Get current angles
+        let startAngle0 = getCurrentEncoderAngle(joint, 0) ?? 0;
+        let startAngle1 = getCurrentEncoderAngle(joint, 1) ?? 0;
+        
+        // Generate waypoints
+        const waypoints = [];
+        const actualDeltaT = totalTimeMs / numPoints;
+        const initialOffset = 50;
+        
+        for (let i = 0; i <= numPoints; i++) {
+            const t = i / numPoints;
+            const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+            const angle0 = startAngle0 + (targetAngle0 - startAngle0) * smoothT;
+            const angle1 = startAngle1 + (targetAngle1 - startAngle1) * smoothT;
+            const desiredArrival = initialOffset + (i * actualDeltaT);
+            
+            waypoints.push({
+                joint: joint,
+                angles_deg: [angle0, angle1, null],
+                t_offset_ms: Math.round(desiredArrival)
+            });
+        }
+        
+        // Send batch
+        $.ajax({
+            url: '/can/waypoint_batch',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ waypoints: waypoints })
+        }).done(response => {
+            if (response.status === 'success') {
+                resolve(response);
+            } else {
+                reject(new Error(response.message || 'Failed to send waypoints'));
+            }
+        }).fail((xhr) => {
+            reject(new Error(xhr.responseJSON?.message || 'Request failed'));
+        });
+    });
+}
+
+/**
+ * Async version of sendMultiWaypointSmoothCurve for sequence playback
+ */
+async function sendMultiWaypointSmoothCurveAsync() {
+    return new Promise((resolve, reject) => {
+        // Reuse existing function logic but return promise
+        const joint = $("#jointSelect").val();
+        const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
+        const targetAngle = parseFloat($("#canWaypointAngle").val());
+        const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
+        const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
+        const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
+        
+        let startAngle = getCurrentEncoderAngle(joint, dofIndex) ?? 0;
+        
+        const waypoints = [];
+        const actualDeltaT = totalTimeMs / numPoints;
+        const initialOffset = 50;
+        
+        for (let i = 0; i <= numPoints; i++) {
+            const t = i / numPoints;
+            const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+            const angle = startAngle + (targetAngle - startAngle) * smoothT;
+            const desiredArrival = initialOffset + (i * actualDeltaT);
+            
+            const angles = [null, null, null];
+            angles[dofIndex] = angle;
+            
+            waypoints.push({
+                joint: joint,
+                angles_deg: angles,
+                t_offset_ms: Math.round(desiredArrival)
+            });
+        }
+        
+        $.ajax({
+            url: '/can/waypoint_batch',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ waypoints: waypoints })
+        }).done(response => {
+            if (response.status === 'success') {
+                resolve(response);
+            } else {
+                reject(new Error(response.message || 'Failed to send waypoints'));
+            }
+        }).fail((xhr) => {
+            reject(new Error(xhr.responseJSON?.message || 'Request failed'));
+        });
+    });
+}
+
+/**
+ * Sleep utility for async sequences
+ */
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 

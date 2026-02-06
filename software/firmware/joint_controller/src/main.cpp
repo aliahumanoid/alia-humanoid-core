@@ -112,6 +112,13 @@ unsigned long last_encoder_test_time = 0;
 volatile bool encoder_stream_can_active = false;
 volatile uint32_t encoder_stream_last_send_us = 0;
 
+// Joint identification broadcast (triggered via CAN, emitted on Serial)
+volatile bool identify_broadcast_active = false;
+volatile uint32_t identify_broadcast_start_ms = 0;
+const uint32_t IDENTIFY_BROADCAST_DURATION_MS = 3000;  // Broadcast for 3 seconds
+const uint32_t IDENTIFY_BROADCAST_INTERVAL_MS = 500;   // Emit every 500ms
+volatile uint32_t identify_broadcast_last_emit_ms = 0;
+
 // PID diagnostics for tuning (updated by Core1 waypoint loop)
 volatile PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
@@ -215,10 +222,15 @@ void setup() {
   delay(5000);
 
   // Version handshake events
-  Serial.println("EVT:FW:VERSION " FW_VERSION);
-  Serial.println("EVT:PROTO " PROTO_VERSION);
-  Serial.println("EVT:BUILD " BUILD_GIT_SHA " " BUILD_DATE);
-  Serial.println("EVT:READY");
+  SERIAL_COM_LN("EVT:FW:VERSION " FW_VERSION);
+  SERIAL_COM_LN("EVT:PROTO " PROTO_VERSION);
+  SERIAL_COM_LN("EVT:BUILD " BUILD_GIT_SHA " " BUILD_DATE);
+  // Joint identification event (for auto-port selection)
+  SERIAL_COM("EVT:JOINT ");
+  SERIAL_COM(ACTIVE_JOINT);
+  SERIAL_COM(" ");
+  SERIAL_COM_LN(ACTIVE_JOINT_CONFIG.name);
+  SERIAL_COM_LN("EVT:READY");
 
   // Configure SPI1 - CANBUS
   SPI1.setRX(12);
@@ -560,12 +572,17 @@ void setup() {
     system_settings_loaded = true;
     LOG_INFO("System settings loaded: auto_start=" + String(system_settings.auto_start_enabled ? "ENABLED" : "DISABLED"));
   } else {
-    // Initialize with defaults
+    // Initialize with defaults and save to flash (first boot / new Pico)
+    LOG_INFO("No system settings found — initializing defaults and saving to flash...");
     system_settings.auto_start_enabled = false;
     system_settings.auto_start_pretension = 0;
     system_settings.auto_start_duration = 0;
     system_settings.joint_type = ACTIVE_JOINT;
-    LOG_INFO("No system settings found — auto-start DISABLED by default");
+    
+    // Save defaults to flash so next boot will find valid settings
+    save_system_settings_data(system_settings);
+    system_settings_loaded = true;
+    LOG_INFO("Default system settings saved: auto_start=DISABLED");
   }
 
   // Blink LED to signal test mode (different pattern)

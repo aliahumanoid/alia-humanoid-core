@@ -131,10 +131,11 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
   // These handle joint-level position control with proper filtering and anti-windup
   outer_pid_controllers = new PID *[config.dof_count];
   for (int i = 0; i < config.dof_count; i++) {
-    // Outer loop default: 100 Hz (Ts = 10ms)
+    // Outer loop PID is initialized with a conservative Ts (10ms)
+    // Sampling period is updated at runtime via setOuterLoopSamplingPeriod()
     // Output is delta_theta in degrees, limited to ±MAX_DELTA_THETA
     outer_pid_controllers[i] = new PID(
-        DEFAULT_OUTER_LOOP_TS,           // Sampling period (10ms = 100Hz)
+        DEFAULT_OUTER_LOOP_TS,           // Initial sampling period (updated at runtime)
         DEFAULT_OUTER_LOOP_KP,           // Kp
         DEFAULT_OUTER_LOOP_KI,           // Ki
         DEFAULT_OUTER_LOOP_KD,           // Kd
@@ -1276,7 +1277,7 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
 
   // Set flag that offsets have been calibrated for this DOF
   motor_offsets_calibrated[dof_index] = true;
-  Serial.println("CALIBRATION_STATUS: Offsets calibrated for DOF " + String(dof_index) +
+  SERIAL_COM_LN("CALIBRATION_STATUS: Offsets calibrated for DOF " + String(dof_index) +
                  " - movement enabled");
 
   return true;
@@ -1315,7 +1316,7 @@ bool JointController::getPid(uint8_t dof_index, uint8_t motor_type, float &kp, f
                              float &tau) {
   // Validate parameters
   if (dof_index >= config.dof_count || (motor_type != 1 && motor_type != 2)) {
-    Serial.println("Invalid parameters in getPid");
+    SERIAL_COM_LN("Invalid parameters in getPid");
     return false;
   }
 
@@ -1416,7 +1417,7 @@ bool JointController::setOuterLoopParameters(uint8_t dof_index, float kp, float 
 
   if (!std::isfinite(kp) || !std::isfinite(ki) || !std::isfinite(kd) ||
       !std::isfinite(stiffness_deg) || !std::isfinite(cascade_influence)) {
-    Serial.println("NaN/Inf parameters in setOuterLoopParameters");
+    SERIAL_COM_LN("NaN/Inf parameters in setOuterLoopParameters");
     return false;
   }
 
@@ -1438,9 +1439,9 @@ bool JointController::setOuterLoopParameters(uint8_t dof_index, float kp, float 
     outer_pid_controllers[dof_index]->setTunings(kp, ki, kd, DEFAULT_OUTER_LOOP_TAU);
   }
 
-  Serial.println("Outer loop parameters updated for DOF " + String(dof_index));
-  Serial.println("  Kp=" + String(kp, 4) + ", Ki=" + String(ki, 4) + ", Kd=" + String(kd, 4));
-  Serial.println("  Stiffness=" + String(stiffness_deg, 4) +
+  SERIAL_COM_LN("Outer loop parameters updated for DOF " + String(dof_index));
+  SERIAL_COM_LN("  Kp=" + String(kp, 4) + ", Ki=" + String(ki, 4) + ", Kd=" + String(kd, 4));
+  SERIAL_COM_LN("  Stiffness=" + String(stiffness_deg, 4) +
                  "°, Influence=" + String(cascade_influence * 100.0f, 1) + "%");
 
   return true;

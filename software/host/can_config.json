@@ -1,0 +1,6 @@
+{
+  "interface": "virtual",
+  "channel": "channel-386",
+  "bitrate": 1000000,
+  "channel_info": "Virtual bus channel channel-386"
+}

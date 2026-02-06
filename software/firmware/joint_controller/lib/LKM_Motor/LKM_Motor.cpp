@@ -164,7 +164,7 @@ bool LKM_Motor::setTorque(int torque) {
   buf[5]                 = (torque >> 8) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
     // Optional debug: Serial.print("SET_TORQUE sent with value (limited): ");
-    // Serial.println(torque);
+    // SERIAL_COM_LN(torque);
     return true;
   }
   LOG_ERROR("Error sending SET_TORQUE.");

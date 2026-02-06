@@ -439,16 +439,16 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
       auto_mapping_state.previous_angle[i] = current_angle;
 
       // Debug to see actual values
-      Serial.print("DOF ");
-      Serial.print(i);
-      Serial.print(": initial_error=");
-      Serial.print(auto_mapping_state.initial_error[i]);
-      Serial.print(", angle_change=");
-      Serial.print(angle_change);
-      Serial.print(", current=");
-      Serial.print(current_angle);
-      Serial.print(", product=");
-      Serial.println(angle_change * auto_mapping_state.initial_error[i]);
+      SERIAL_COM("DOF ");
+      SERIAL_COM(i);
+      SERIAL_COM(": initial_error=");
+      SERIAL_COM(auto_mapping_state.initial_error[i]);
+      SERIAL_COM(", angle_change=");
+      SERIAL_COM(angle_change);
+      SERIAL_COM(", current=");
+      SERIAL_COM(current_angle);
+      SERIAL_COM(", product=");
+      SERIAL_COM_LN(angle_change * auto_mapping_state.initial_error[i]);
 
       // Verify we haven't exceeded DOF limits
       if (!isAngleInLimits(i, current_angle)) {
@@ -548,7 +548,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
           auto_mapping_state.applied_torques[antagonist_index] = 0; // Speed, not torque
           auto_mapping_state.applied_torques[agonist_index]    = resistance_torque;
 
-          Serial.println("DOF " + String(i) + ": Changed direction, now " + 
+          SERIAL_COM_LN("DOF " + String(i) + ": Changed direction, now " + 
                          (invert_logic ? "decreasing (inverted logic)" : "increasing") + " angle");
         } else {
           // We need to decrease DOF angle (target < current) [OR inverted logic]
@@ -570,7 +570,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
           auto_mapping_state.applied_torques[agonist_index]    = 0; // Speed, not torque
           auto_mapping_state.applied_torques[antagonist_index] = -resistance_torque;
 
-          Serial.println("DOF " + String(i) + ": Changed direction, now " + 
+          SERIAL_COM_LN("DOF " + String(i) + ": Changed direction, now " + 
                          (invert_logic ? "increasing (inverted logic)" : "decreasing") + " angle");
         }
       }
@@ -579,17 +579,17 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
       auto_mapping_state.debug_counter[i]++;
       if (auto_mapping_state.debug_counter[i] >= 500000) {
         auto_mapping_state.debug_counter[i] = 0;
-        Serial.println("DOF " + String(i) + ": target=" + String(target_angle, 2) + ", current=" +
+        SERIAL_COM_LN("DOF " + String(i) + ": target=" + String(target_angle, 2) + ", current=" +
                        String(current_angle, 2) + ", error=" + String(angle_error, 2));
 
         // Direction determines which values to print
         if (auto_mapping_state.last_direction[i] > 0) {
-          Serial.println("  Antagonist (motor " + String(antagonist_index) +
+          SERIAL_COM_LN("  Antagonist (motor " + String(antagonist_index) +
                          ") moving at speed " + String(-motor_speed) +
                          ", Agonist (motor " + String(agonist_index) +
                          ") resisting with torque " + String(resistance_torque));
         } else {
-          Serial.println("  Agonist (motor " + String(agonist_index) +
+          SERIAL_COM_LN("  Agonist (motor " + String(agonist_index) +
                          ") moving at speed " + String(motor_speed) +
                          ", Antagonist (motor " + String(antagonist_index) +
                          ") resisting with torque " + String(-resistance_torque));
@@ -688,14 +688,14 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
   // Global safety timeout - abort if stuck for too long
   unsigned long time_diff = millis() - auto_mapping_state.last_valid_reading;
   if (time_diff > 5000) { // 5 seconds without valid readings
-    Serial.println("!!!!! SAFETY TIMEOUT TRIGGERED !!!!!");
+    SERIAL_COM_LN("!!!!! SAFETY TIMEOUT TRIGGERED !!!!!");
     LOG_ERROR("Safety timeout during auto mapping — aborting");
-    Serial.print("Last valid timestamp: ");
-    Serial.println(auto_mapping_state.last_valid_reading);
-    Serial.print("Current timestamp: ");
-    Serial.println(millis());
-    Serial.print("Difference: ");
-    Serial.println(time_diff);
+    SERIAL_COM("Last valid timestamp: ");
+    SERIAL_COM_LN(auto_mapping_state.last_valid_reading);
+    SERIAL_COM("Current timestamp: ");
+    SERIAL_COM_LN(millis());
+    SERIAL_COM("Difference: ");
+    SERIAL_COM_LN(time_diff);
     stopAllMotors();
     auto_mapping_state.active = false;
     resetAutoMappingCounters(auto_mapping_state);

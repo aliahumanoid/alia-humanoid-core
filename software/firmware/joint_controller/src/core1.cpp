@@ -47,6 +47,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_INTERPOLATION_MODE 0x005   // Waypoint interpolation mode (linear/smooth)
 #define CAN_ID_LOOP_FREQUENCY 0x006       // Control loop frequencies (inner/outer)
 #define CAN_ID_PID_DIAG_FREQ 0x007        // PID diagnostics stream frequency
+#define CAN_ID_IDENTIFY_REQUEST 0x008     // Joint identification request (broadcast)
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -59,6 +60,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_PID_DIAG_DATA 0x420        // PID diagnostics (target, error) per joint
 #define CAN_ID_PID_TORQUE_DATA 0x430      // PID torque commands per joint
 #define CAN_ID_MOVEMENT_METRICS 0x440     // Movement metrics (per DOF, sent on HOLDING)
+#define CAN_ID_SMOOTHNESS_METRICS 0x460   // Smoothness/oscillation metrics (per DOF)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -485,11 +487,32 @@ void sendMovementMetrics(uint8_t dof) {
   uint32_t can_id_2 = CAN_ID_MOVEMENT_METRICS + 0x10 + ACTIVE_JOINT * 3 + dof;
   CAN_HOST.sendMsgBuf(can_id_2, 0, sizeof(frame2), (uint8_t*)&frame2);
   
+  // Frame 3: Smoothness/oscillation metrics (new)
+  struct __attribute__((packed)) {
+    int16_t rms_error_x100;      // RMS error × 100
+    int16_t jitter_x100;         // Jitter × 100
+    uint8_t oscillation_count;   // Zero-crossings (capped at 255)
+    uint8_t score_rms;           // RMS score (0-100)
+    uint8_t score_jitter;        // Jitter score (0-100)
+    uint8_t score_smoothness;    // Overall smoothness score (0-100)
+  } frame3;
+  
+  frame3.rms_error_x100 = m.rms_error_x100;
+  frame3.jitter_x100 = m.jitter_x100;
+  frame3.oscillation_count = (m.oscillation_count > 255) ? 255 : (uint8_t)m.oscillation_count;
+  frame3.score_rms = m.score_rms;
+  frame3.score_jitter = m.score_jitter;
+  frame3.score_smoothness = m.score_smoothness;
+  
+  // Use ID 0x460 + joint*3 + dof for third frame
+  uint32_t can_id_3 = CAN_ID_SMOOTHNESS_METRICS + ACTIVE_JOINT * 3 + dof;
+  CAN_HOST.sendMsgBuf(can_id_3, 0, sizeof(frame3), (uint8_t*)&frame3);
+  
   // Clear the ready flag
   metrics_ready[dof] = false;
   
   LOG_INFO("[CAN] Metrics sent for DOF " + String(dof) + ": rise=" + String(m.rise_time_ms) + 
-           "ms, settle=" + String(m.settling_time_ms) + "ms");
+           "ms, settle=" + String(m.settling_time_ms) + "ms, smooth=" + String(m.score_smoothness) + "/100");
 }
 
 /**
@@ -635,6 +658,13 @@ void pollHostCan() {
                    "Hz (valid: 10-200Hz)");
         }
       }
+    } else if (rx_id == CAN_ID_IDENTIFY_REQUEST) {
+      // Joint identification broadcast request
+      // All controllers start emitting EVT:JOINT on Serial periodically
+      identify_broadcast_active = true;
+      identify_broadcast_start_ms = millis();
+      identify_broadcast_last_emit_ms = 0;  // Force immediate first emit
+      LOG_INFO("[CAN_HOST] Joint identification broadcast STARTED (3s)");
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
@@ -708,7 +738,7 @@ void core1_loop() {
 
     // === WAYPOINT-BASED MOVEMENT ===
     // Execute waypoint trajectory for all DOFs (if waypoints available)
-    // This runs @ 500 Hz with precise timing (outer loop @ 100 Hz, inner loop @ 500 Hz)
+    // This runs @ 500 Hz with precise timing (outer loop every outer_loop_divisor cycles)
     bool waypoint_active = false;
     if (active_joint_controller != nullptr) {
       waypoint_active = active_joint_controller->executeWaypointMovement();
@@ -762,7 +792,7 @@ void core1_loop() {
         strcpy(shared_data_ext.message, "EMERGENCY STOP EXECUTED");
       }
 
-      Serial.println("EMERGENCY STOP EXECUTED");
+      SERIAL_COM_LN("EMERGENCY STOP EXECUTED");
       continue;
     }
 

@@ -4,8 +4,8 @@
  * 
  * This file contains the implementation of the cascade PID control system for
  * coordinated multi-DOF movements with:
- * - Outer loop (100 Hz): Joint-level PID control
- * - Inner loop (500 Hz): Motor-level PID control
+ * - Outer loop (joint PID): frequency derived from sampling_period via dynamic divider
+ * - Inner loop (motor PID): base frequency from sampling_period (500 Hz default)
  * - Smooth transitions between movements
  * - Position holding with continuous control
  * - Emergency stop handling
@@ -209,7 +209,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   if (verbose) {
     LOG_INFO("=== MULTI-DOF CASCADE MOTION ===");
     LOG_INFO("Double-loop cascade control active");
-    LOG_INFO("Outer loop: 100 Hz (joint PID)");
+    LOG_INFO("Outer loop: dynamic (joint PID)");
     LOG_INFO("Inner loop: 500 Hz (motor PID)");
     LOG_INFO("Active DOF: " + String(active_dof_count));
     for (int i = 0; i < active_dof_count; i++) {
@@ -248,7 +248,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   float theta_B_ref[MAX_DOFS] = {0};
 
   // Loop frequencies
-  // Compute dynamic divider to keep outer loop at ~100 Hz
+  // Compute dynamic divider to reduce outer loop rate relative to inner loop
   // sampling_period in μs: 2000μs→div=5, 3000μs→div=3, 5000μs→div=2
   const int OUTER_LOOP_DIV = max(1, (int)(10000 / sampling_period)); // Target: ~100Hz
 
@@ -274,7 +274,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
       error_msg += String(local_target_angles[dof_idx]) +
                    " (min: " + String(config.dofs[dof_idx].limits.min_angle);
       error_msg += ", max: " + String(config.dofs[dof_idx].limits.max_angle) + ")\n";
-      Serial.print(error_msg);
+      SERIAL_COM(error_msg);
       return MovementResult(MOVEMENT_ERROR, error_msg);
     }
 
@@ -283,7 +283,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
       String error_msg = "Error: Angle outside safety limits (equations) for DOF " +
                          String(dof_idx) + ": ";
       error_msg += String(local_target_angles[dof_idx]) + "°\n";
-      Serial.print(error_msg);
+      SERIAL_COM(error_msg);
       return MovementResult(MOVEMENT_ERROR, error_msg);
     }
   }
@@ -390,7 +390,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
     if (angle_diff > MAX_ANGLE_DIFFERENCE) {
       String error_msg = "Error: Difference between start angles too high for DOF " +
                          String(dof_idx) + ": " + String(angle_diff, 6) + "°\n";
-      Serial.print(error_msg);
+      SERIAL_COM(error_msg);
       return MovementResult(MOVEMENT_ERROR, error_msg);
     }
 
@@ -556,13 +556,13 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
   setOuterLoopSamplingPeriod(outer_loop_dt);
 
   if (verbose) {
-    Serial.println("Starting cascade control");
-    Serial.println("Sampling period: " + String((unsigned long)sampling_period) + " μs (" +
+    SERIAL_COM_LN("Starting cascade control");
+    SERIAL_COM_LN("Sampling period: " + String((unsigned long)sampling_period) + " μs (" +
                    String(sampling_period / 1000.0f, 1) + " ms)");
-    Serial.println("Inner loop frequency: " + String(1.0f / inner_loop_dt, 1) + " Hz");
-    Serial.println("Outer loop frequency: " + String(1.0f / outer_loop_dt, 1) + " Hz (every " +
+    SERIAL_COM_LN("Inner loop frequency: " + String(1.0f / inner_loop_dt, 1) + " Hz");
+    SERIAL_COM_LN("Outer loop frequency: " + String(1.0f / outer_loop_dt, 1) + " Hz (every " +
                    String(OUTER_LOOP_DIV) + " cycles)");
-    Serial.println("Estimated duration: " + String(common_stop_time, 2) + " s\n");
+    SERIAL_COM_LN("Estimated duration: " + String(common_stop_time, 2) + " s\n");
   }
 
   // === MAIN CONTROL LOOP ===
@@ -576,7 +576,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
     if (tcurr <= common_stop_time) {
 
-      // === OUTER LOOP (100 Hz) - JOINT CONTROL ===
+      // === OUTER LOOP (JOINT CONTROL) ===
       if ((cycle_count - 1) % OUTER_LOOP_DIV == 0) {
 
         SharedDofAngles dof_snapshot_loop;
@@ -588,7 +588,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           // Read current joint angle from shared state (updated by Core0)
           if (!dof_snapshot_loop.valid[dof_idx]) {
             stopAllMotors();
-            Serial.println("ERROR: Invalid joint encoder reading for DOF " + String(dof_idx));
+            LOG_ERROR("Invalid joint encoder reading for DOF " + String(dof_idx));
             return MovementResult(MOVEMENT_ERROR,
                                   "Error: Invalid joint encoder reading for DOF " +
                                       String(dof_idx) + "\n");
@@ -610,7 +610,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           String safety_message;
           if (!checkSafetyForDof(dof_idx, q_curr[dof_idx], safety_message, false)) {
             stopAllMotors();
-            Serial.println("SAFETY ERROR: " + safety_message);
+            SERIAL_COM_LN("SAFETY ERROR: " + safety_message);
             return MovementResult(MOVEMENT_ERROR, "SAFETY ERROR: " + safety_message + "\n");
           }
 
@@ -630,12 +630,12 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           float error = q_des[dof_idx] - q_curr[dof_idx];
 
           if (verbose && cycle_count % 500 == 0) { // Log every ~1 second
-            Serial.println("Outer loop DOF " + String(dof_idx) + ":");
-            Serial.println("  q_des=" + String(q_des[dof_idx], 2) +
+            SERIAL_COM_LN("Outer loop DOF " + String(dof_idx) + ":");
+            SERIAL_COM_LN("  q_des=" + String(q_des[dof_idx], 2) +
                            "° (avg: ago=" + String(degrees(q_des_agonist), 2) +
                            "°, ant=" + String(degrees(q_des_antagonist), 2) + "°)");
-            Serial.println("  q_curr=" + String(q_curr[dof_idx], 2) + "°");
-            Serial.println("  error=" + String(error, 2) +
+            SERIAL_COM_LN("  q_curr=" + String(q_curr[dof_idx], 2) + "°");
+            SERIAL_COM_LN("  error=" + String(error, 2) +
                            "°, delta_theta=" + String(delta_theta[dof_idx], 2) + "°");
           }
         }
@@ -665,7 +665,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
         if (!equations_ok) {
           stopAllMotors();
-          Serial.println(
+          SERIAL_COM_LN(
               "Error: Linear equations unavailable during cascade control for DOF " +
               String(dof_idx));
           return MovementResult(
@@ -776,27 +776,27 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
         }
 
         if (verbose && cycle_count % 2500 == 0) { // Log every ~5 seconds for inner loop
-          Serial.println("Inner loop DOF " + String(dof_idx) + ":");
-          Serial.println("  Theta_0(t): agonist=" + String(theta_0_agonist_t, 2) +
+          SERIAL_COM_LN("Inner loop DOF " + String(dof_idx) + ":");
+          SERIAL_COM_LN("  Theta_0(t): agonist=" + String(theta_0_agonist_t, 2) +
                          "°, antagonist=" + String(theta_0_antagonist_t, 2) + "°");
-          Serial.println("  Theta_0 motors: agonist=" + String(theta_0_agonist_motor, 2) +
+          SERIAL_COM_LN("  Theta_0 motors: agonist=" + String(theta_0_agonist_motor, 2) +
                          "°, antagonist=" + String(theta_0_antagonist_motor, 2) + "°");
-          Serial.print("  Delta_theta: " + String(delta_theta[dof_idx], 2) + "°");
+          SERIAL_COM("  Delta_theta: " + String(delta_theta[dof_idx], 2) + "°");
           if (cascade_value < 0.99f) {
-            Serial.print(" (scaled to " + String(cascade_value * delta_theta[dof_idx], 2) +
+            SERIAL_COM(" (scaled to " + String(cascade_value * delta_theta[dof_idx], 2) +
                          "° with influence=" + String(cascade_value, 2) + ")");
           }
-          Serial.println();
-          Serial.println(
+          SERIAL_COM_LN();
+          SERIAL_COM_LN(
               "  Cascade correction: agonist=+" +
               String(cascade_value * (0.5f * delta_theta[dof_idx] + 0.5f * stiffness_value), 2) +
               "°, antagonist=+" +
               String(cascade_value * (0.5f * delta_theta[dof_idx] - 0.5f * stiffness_value), 2) +
               "°");
-          Serial.println("  Agonist: ref=" + String(theta_A_ref[dof_idx], 2) +
+          SERIAL_COM_LN("  Agonist: ref=" + String(theta_A_ref[dof_idx], 2) +
                          "°, curr=" + String(theta_A_curr, 2) + "°, err=" + String(error_A, 2) +
                          "°, cmd=" + String(command_A, 1));
-          Serial.println("  Antagonist: ref=" + String(theta_B_ref[dof_idx], 2) +
+          SERIAL_COM_LN("  Antagonist: ref=" + String(theta_B_ref[dof_idx], 2) +
                          "°, curr=" + String(theta_B_curr, 2) + "°, err=" + String(error_B, 2) +
                          "°, cmd=" + String(command_B, 1));
         }
@@ -805,12 +805,12 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
       // === HOLDING PHASE ===
 
       if (verbose) {
-        Serial.println("\nStarting position holding phase with cascade control");
+        SERIAL_COM_LN("\nStarting position holding phase with cascade control");
       }
 
       // IMPORTANT: Signal movement completion BEFORE entering holding loop
       // This allows the host to proceed with next command while motors maintain position
-      Serial.println("RSP:MOVE_COMPLETE_HOLDING");
+      SERIAL_COM_LN("RSP:MOVE_COMPLETE_HOLDING");
       Serial.flush(); // Ensure message is sent immediately
 
       // Maintain position using cascade control
@@ -833,7 +833,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
             // Use shared_dof_angles (updated by Core0)
             if (!dof_snapshot_hold.valid[dof_idx]) {
               stopAllMotors();
-              Serial.println("ERROR: Encoder issue during hold");
+              LOG_ERROR("Encoder issue during hold");
               return MovementResult(MOVEMENT_ERROR, "Error: Encoder issue during hold\n");
             }
             q_curr[dof_idx] = dof_snapshot_hold.angles[dof_idx];
@@ -879,7 +879,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
           // Get mapping data
           if (!hasValidEquations(dof_idx)) {
             stopAllMotors();
-            Serial.println(
+            SERIAL_COM_LN(
                 "Error: Equation limits unavailable during hold for DOF " +
                 String(dof_idx));
             return MovementResult(
@@ -896,7 +896,7 @@ MovementResult JointController::moveMultiDOF_cascade(float *target_angles, uint8
 
           if (!equations_ok) {
             stopAllMotors();
-            Serial.println(
+            SERIAL_COM_LN(
                 "Error: Linear equations unavailable during hold for DOF " +
                 String(dof_idx));
             return MovementResult(

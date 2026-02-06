@@ -195,3 +195,99 @@ class SerialManager:
         Return the shared session logger instance.
         """
         return self.session_logger
+
+    def discover_joints(self, timeout_seconds: float = 4.0) -> Dict[str, str]:
+        """
+        Scan all available serial ports and discover which joints are connected.
+        
+        This method opens each serial port temporarily, listens for EVT:JOINT
+        messages, and builds a mapping of joint names to serial ports.
+        
+        Note: Call CAN identify_request before this to trigger controllers
+        to emit their identification.
+        
+        Args:
+            timeout_seconds: How long to listen for identification messages
+            
+        Returns:
+            Dict[str, str]: Mapping of joint_name (uppercase) -> serial_port
+        """
+        import serial
+        import time
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        discovered: Dict[str, str] = {}
+        ports = self.list_available_ports()
+        
+        logger.info(f"Starting joint discovery on {len(ports)} ports...")
+        
+        # Open all ports and collect data
+        connections = []
+        for port in ports:
+            try:
+                # Skip ports that might be problematic (Bluetooth, etc.)
+                if "Bluetooth" in port or "debug" in port.lower():
+                    continue
+                    
+                conn = serial.Serial(
+                    port=port,
+                    baudrate=115200,
+                    timeout=0.1,  # Short read timeout for polling
+                )
+                connections.append((port, conn))
+                logger.debug(f"Opened {port} for discovery")
+            except (serial.SerialException, OSError) as e:
+                logger.debug(f"Could not open {port}: {e}")
+                continue
+        
+        if not connections:
+            logger.warning("No serial ports available for discovery")
+            return discovered
+        
+        # Listen for EVT:JOINT messages
+        start_time = time.time()
+        buffers = {port: "" for port, _ in connections}
+        
+        while time.time() - start_time < timeout_seconds:
+            for port, conn in connections:
+                try:
+                    if conn.in_waiting > 0:
+                        data = conn.read(conn.in_waiting).decode('utf-8', errors='ignore')
+                        buffers[port] += data
+                        
+                        # Process complete lines
+                        while '\n' in buffers[port]:
+                            line, buffers[port] = buffers[port].split('\n', 1)
+                            line = line.strip()
+                            
+                            # Look for EVT:JOINT message
+                            if line.startswith("EVT:JOINT "):
+                                parts = line[10:].split()  # Skip "EVT:JOINT "
+                                if len(parts) >= 2:
+                                    joint_id = parts[0]
+                                    joint_name = parts[1].upper()
+                                    
+                                    if joint_name not in discovered:
+                                        discovered[joint_name] = port
+                                        logger.info(f"Discovered {joint_name} (ID={joint_id}) on {port}")
+                except Exception as e:
+                    logger.debug(f"Error reading {port}: {e}")
+            
+            time.sleep(0.05)  # Small delay to avoid busy-waiting
+        
+        # Close all temporary connections
+        for port, conn in connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        
+        logger.info(f"Discovery complete: found {len(discovered)} joint(s)")
+        
+        # Update internal mapping with discovered joints
+        with self._lock:
+            for joint_name, port in discovered.items():
+                self._joint_to_port[joint_name] = port
+        
+        return discovered

@@ -6,8 +6,8 @@
  * It implements a sophisticated cascade control architecture with:
  * 
  * ARCHITECTURE:
- * - Outer loop (100 Hz): Position control per DOF using joint encoders
- * - Inner loop (500 Hz): Torque control per motor using motor encoders
+ * - Outer loop: Position control per DOF using joint encoders (frequency configurable)
+ * - Inner loop: Torque control per motor using motor encoders (500 Hz default)
  * - Agonist-antagonist muscle pairs per DOF (tendon-driven actuation)
  * 
  * KEY FEATURES:
@@ -142,7 +142,7 @@ private:
 
   // Outer loop PID configuration constants
   static constexpr float DEFAULT_OUTER_LOOP_TAU        = 0.02f;  // Derivative filter time constant (20ms)
-  static constexpr float DEFAULT_OUTER_LOOP_TS         = 0.01f;  // Default sampling period (10ms = 100Hz)
+  static constexpr float DEFAULT_OUTER_LOOP_TS         = 0.01f;  // Initial sampling period (updated at runtime)
   static constexpr float DEFAULT_MAX_DELTA_THETA       = 30.0f;  // Maximum correction in degrees
 
   // Encoder read tracking to detect SPI spikes
@@ -348,8 +348,8 @@ public:
    * @brief Coordinated multi‑DOF movement with double‑loop cascade control
    *
    * Implements a cascade control with:
-   * - Outer loop (100 Hz): joint PID to compute delta_theta
-   * - Inner loop (500 Hz): motor PID to follow references
+   * - Outer loop (joint PID): frequency derived from sampling_period via dynamic divider
+   * - Inner loop (motor PID): follows motor references
    *
    * CONTROL STRUCTURE:
    * 1. The outer PID computes delta_theta from joint error (q_des - q_curr)
@@ -670,7 +670,7 @@ public:
    * waypoint consumption instead of pre-generated trajectory arrays.
    * 
    * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
-   * - Outer loop @ 100 Hz (every 5 cycles)
+   * - Outer loop runs every outer_loop_divisor cycles (default 1 = 500 Hz)
    * - Inner loop @ 500 Hz (every cycle)
    * - Linear interpolation between waypoints
    * - Hold position when buffer empty

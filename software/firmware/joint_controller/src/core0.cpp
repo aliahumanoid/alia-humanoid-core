@@ -81,12 +81,12 @@ void flushMovementSamples() {
   int dof_counts[MAX_DOFS] = {0};
   int total_samples = movement_sample_queue.element_count;
   
-  Serial.println("DBG: flushMovementSamples() - queue has " + String(total_samples) + " samples");
+  LOG_DEBUG("flushMovementSamples() - queue has " + String(total_samples) + " samples");
   
   // Simple approach: just send everything in queue order
   // The Python parser will organize by DOF
   if (total_samples > 0) {
-    Serial.println("EVT:MOVEMENT_SAMPLE_HEADER(" + String(movement_sample_joint_id) + "," + String(2) + ")");
+    SERIAL_COM_LN("EVT:MOVEMENT_SAMPLE_HEADER(" + String(movement_sample_joint_id) + "," + String(2) + ")");
     Serial.flush();  // Force immediate send
     delay(50);  // Wait for buffer to drain
     
@@ -97,17 +97,17 @@ void flushMovementSamples() {
     while (queue_try_remove(&movement_sample_queue, &sample)) {
       
       // Send sample immediately
-      Serial.print("EVT:DOF" + String(sample.dof) + "_SAMPLE(");
-      Serial.print(String(sample.index) + ",");
-      Serial.print(String(sample.joint_target, 4) + ",");
-      Serial.print(String(sample.joint_actual, 4) + ",");
-      Serial.print(String(sample.motor_agonist_curr, 4) + ",");
-      Serial.print(String(sample.motor_antagonist_curr, 4) + ",");
-      Serial.print(String(sample.motor_agonist_ref, 4) + ",");
-      Serial.print(String(sample.motor_antagonist_ref, 4) + ",");
-      Serial.print(String(sample.torque_agonist, 4) + ",");
-      Serial.print(String(sample.torque_antagonist, 4));
-      Serial.println(")");
+      SERIAL_COM("EVT:DOF" + String(sample.dof) + "_SAMPLE(");
+      SERIAL_COM(String(sample.index) + ",");
+      SERIAL_COM(String(sample.joint_target, 4) + ",");
+      SERIAL_COM(String(sample.joint_actual, 4) + ",");
+      SERIAL_COM(String(sample.motor_agonist_curr, 4) + ",");
+      SERIAL_COM(String(sample.motor_antagonist_curr, 4) + ",");
+      SERIAL_COM(String(sample.motor_agonist_ref, 4) + ",");
+      SERIAL_COM(String(sample.motor_antagonist_ref, 4) + ",");
+      SERIAL_COM(String(sample.torque_agonist, 4) + ",");
+      SERIAL_COM(String(sample.torque_antagonist, 4));
+      SERIAL_COM_LN(")");
       
       sent_count++;
       
@@ -120,10 +120,10 @@ void flushMovementSamples() {
     
     Serial.flush();
     delay(50);
-    Serial.println("EVT:MOVEMENT_SAMPLES_END");
+    SERIAL_COM_LN("EVT:MOVEMENT_SAMPLES_END");
     Serial.flush();
     
-    Serial.println("DBG: Sent " + String(sent_count) + " samples");
+    LOG_DEBUG("Sent " + String(sent_count) + " samples");
   }
 
   if (movement_sample_overflow) {
@@ -189,7 +189,8 @@ void flushMovementSamples() {
  * 
  * NOTE: Encoder reading is throttled to ~500Hz (every 2ms) to reduce SPI bus stress
  * and avoid "Synchronization sequence not found" errors. The control loops run at
- * 100Hz (outer) / 500Hz (inner), so 500Hz encoder updates are sufficient.
+ * 500Hz (inner), with the outer loop running every outer_loop_divisor cycles, so
+ * 500Hz encoder updates are sufficient.
  * 
  * DIRECT ENCODER READING: Uses DirectEncoders class to read MT6835 sensors
  * directly via SPI0, without intermediate encoder Pico.
@@ -308,6 +309,29 @@ void core0_main_loop() {
   // NOTE: CAN polling has been moved to Core1 to avoid SPI1 conflicts
   // Core1 now handles all CAN communication (Host + Motor)
 
+#pragma region Joint Identification Broadcast
+  // Periodic EVT:JOINT emission when identification broadcast is active
+  if (identify_broadcast_active) {
+    uint32_t now = millis();
+    
+    // Check if broadcast duration has expired
+    if (now - identify_broadcast_start_ms >= IDENTIFY_BROADCAST_DURATION_MS) {
+      identify_broadcast_active = false;
+      LOG_INFO("[IDENTIFY] Broadcast ended");
+    } 
+    // Check if it's time to emit
+    else if (now - identify_broadcast_last_emit_ms >= IDENTIFY_BROADCAST_INTERVAL_MS) {
+      identify_broadcast_last_emit_ms = now;
+      
+      // Emit joint identification event
+      SERIAL_COM("EVT:JOINT ");
+      SERIAL_COM(ACTIVE_JOINT);
+      SERIAL_COM(" ");
+      SERIAL_COM_LN(ACTIVE_JOINT_CONFIG.name);
+    }
+  }
+#pragma endregion
+
 #pragma region Receive SerialData
   // check for incoming serial data:
   if (Serial.available() > 0) {
@@ -324,7 +348,7 @@ void core0_main_loop() {
       }
     } else if (strlen(command) > 0) {
       // print the value of the incoming byte:
-      Serial.println(command);
+      SERIAL_COM_LN(command);
 
       // Check if command has correct prefix
       if (strncmp(command, "CMD:", 4) == 0) {
@@ -344,10 +368,10 @@ void core0_main_loop() {
                 // Get joint status
                 if (active_joint_controller != nullptr) {
                   bool ready = active_joint_controller->isSystemReadyForMovement();
-                  Serial.println("RSP:STATUS(" + String(ACTIVE_JOINT) + "," +
+                  SERIAL_COM_LN("RSP:STATUS(" + String(ACTIVE_JOINT) + "," +
                                  (ready ? "READY" : "NOT_READY") + ")");
                 } else {
-                  Serial.println("RSP:ERROR: Controller not initialized");
+                  SERIAL_COM_LN("RSP:ERROR: Controller not initialized");
                 }
                 break;
               }
@@ -355,7 +379,7 @@ void core0_main_loop() {
               case CMD_STOP: {
                 // Emergency stop - forward to Core1
                 emergency_stop_requested = true;
-                Serial.println("RSP:STOP");
+                SERIAL_COM_LN("RSP:STOP");
                 break;
               }
             }
@@ -378,14 +402,14 @@ void core0_main_loop() {
 
               // If the command targets a specific joint, verify it is the active joint
               if (parsed_cmd.joint_id != 0 && parsed_cmd.joint_id != ACTIVE_JOINT) {
-                Serial.println("RSP:ERROR: Command targeted to joint " + String(parsed_cmd.joint_id) +
+                SERIAL_COM_LN("RSP:ERROR: Command targeted to joint " + String(parsed_cmd.joint_id) +
                                ", but this device controls joint " + String(ACTIVE_JOINT));
               } else {
                 // Set the joint ID to the active one (if it was 0 or already correct)
                 parsed_cmd.joint_id = ACTIVE_JOINT;
 
                 if (parsed_cmd.command == CMD_UNKNOWN) {
-                  Serial.println("RSP:ERROR: Unsupported command: " +
+                  SERIAL_COM_LN("RSP:ERROR: Unsupported command: " +
                                  String(parsed_cmd.original_command));
                 } else {
                   // Debug command execution
@@ -442,17 +466,17 @@ void core0_main_loop() {
                         if (motor_index == 1 || motor_index == 2) {
                           float kp, ki, kd, tau;
                           if (active_joint_controller->getPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
-                            Serial.println("EVT:PID:" + String(parsed_cmd.dof_index) + ":" + String(motor_index) + ":" +
+                            SERIAL_COM_LN("EVT:PID:" + String(parsed_cmd.dof_index) + ":" + String(motor_index) + ":" +
                                            String(kp, 6) + ":" + String(ki, 6) + ":" +
                                            String(kd, 6) + ":" + String(tau, 6));
                           } else {
-                            Serial.println("RSP:ERROR: Failed to get PID parameters");
+                            SERIAL_COM_LN("RSP:ERROR: Failed to get PID parameters");
                           }
                         } else {
-                          Serial.println("RSP:ERROR: Invalid or missing motor index (expected 1 or 2)");
+                          SERIAL_COM_LN("RSP:ERROR: Invalid or missing motor index (expected 1 or 2)");
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
                       handled_on_core0 = true;
                       break;
@@ -468,16 +492,16 @@ void core0_main_loop() {
                           float kd  = parsed_cmd.params[3];
                           float tau = parsed_cmd.params[4];
                           if (active_joint_controller->setPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
-                            Serial.println("RSP:PID_SET_OK(" + String(ACTIVE_JOINT) + "," +
+                            SERIAL_COM_LN("RSP:PID_SET_OK(" + String(ACTIVE_JOINT) + "," +
                                            String(parsed_cmd.dof_index) + "," + String(motor_index) + ")");
                           } else {
-                            Serial.println("RSP:ERROR: Failed to set PID parameters");
+                            SERIAL_COM_LN("RSP:ERROR: Failed to set PID parameters");
                           }
                         } else {
-                          Serial.println("RSP:ERROR: Invalid parameters (expected motor_index,kp,ki,kd,tau)");
+                          SERIAL_COM_LN("RSP:ERROR: Invalid parameters (expected motor_index,kp,ki,kd,tau)");
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
                       handled_on_core0 = true;
                       break;
@@ -490,14 +514,14 @@ void core0_main_loop() {
                         if (active_joint_controller->getOuterLoopParameters(parsed_cmd.dof_index, kp, ki, kd,
                                                                              stiffness_deg, cascade_influence)) {
                           // Format: EVT:PID_OUTER:<DOF>:<KP>:<KI>:<KD>:<STIFFNESS>:<CASCADE>
-                          Serial.println("EVT:PID_OUTER:" + String(parsed_cmd.dof_index) + ":" +
+                          SERIAL_COM_LN("EVT:PID_OUTER:" + String(parsed_cmd.dof_index) + ":" +
                                          String(kp, 6) + ":" + String(ki, 6) + ":" + String(kd, 6) + ":" +
                                          String(stiffness_deg, 6) + ":" + String(cascade_influence, 6));
                         } else {
-                          Serial.println("RSP:ERROR: Failed to get outer loop PID parameters");
+                          SERIAL_COM_LN("RSP:ERROR: Failed to get outer loop PID parameters");
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
                       handled_on_core0 = true;
                       break;
@@ -514,16 +538,16 @@ void core0_main_loop() {
                           float cascade_influence = parsed_cmd.params[4];
                           if (active_joint_controller->setOuterLoopParameters(parsed_cmd.dof_index, kp, ki, kd,
                                                                                stiffness_deg, cascade_influence)) {
-                            Serial.println("RSP:PID_OUTER_SET_OK(" + String(ACTIVE_JOINT) + "," +
+                            SERIAL_COM_LN("RSP:PID_OUTER_SET_OK(" + String(ACTIVE_JOINT) + "," +
                                            String(parsed_cmd.dof_index) + ")");
                           } else {
-                            Serial.println("RSP:ERROR: Failed to set outer loop PID parameters");
+                            SERIAL_COM_LN("RSP:ERROR: Failed to set outer loop PID parameters");
                           }
                         } else {
-                          Serial.println("RSP:ERROR: Invalid parameters (expected kp,ki,kd,stiffness,influence)");
+                          SERIAL_COM_LN("RSP:ERROR: Invalid parameters (expected kp,ki,kd,stiffness,influence)");
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized or invalid DOF");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized or invalid DOF");
                       }
                       handled_on_core0 = true;
                       break;
@@ -533,14 +557,14 @@ void core0_main_loop() {
                       // Save PID parameters to flash memory
                       if (active_joint_controller != nullptr) {
                         if (active_joint_controller->savePIDDataToFlash()) {
-                          Serial.println("RSP:PID_SAVED(" + String(ACTIVE_JOINT) + ")");
+                          SERIAL_COM_LN("RSP:PID_SAVED(" + String(ACTIVE_JOINT) + ")");
                           LOG_INFO("PID parameters saved to flash for joint " + String(ACTIVE_JOINT));
                         } else {
-                          Serial.println("RSP:ERROR: Failed to save PID parameters to flash");
+                          SERIAL_COM_LN("RSP:ERROR: Failed to save PID parameters to flash");
                           LOG_ERROR("Failed to save PID parameters for joint " + String(ACTIVE_JOINT));
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized");
                       }
                       handled_on_core0 = true;
                       break;
@@ -550,14 +574,14 @@ void core0_main_loop() {
                       // Load PID parameters from flash memory
                       if (active_joint_controller != nullptr) {
                         if (active_joint_controller->loadPIDDataFromFlash()) {
-                          Serial.println("RSP:PID_LOADED(" + String(ACTIVE_JOINT) + ")");
+                          SERIAL_COM_LN("RSP:PID_LOADED(" + String(ACTIVE_JOINT) + ")");
                           LOG_INFO("PID parameters loaded from flash for joint " + String(ACTIVE_JOINT));
                         } else {
-                          Serial.println("RSP:ERROR: Failed to load PID parameters from flash");
+                          SERIAL_COM_LN("RSP:ERROR: Failed to load PID parameters from flash");
                           LOG_ERROR("Failed to load PID parameters for joint " + String(ACTIVE_JOINT));
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized");
                       }
                       handled_on_core0 = true;
                       break;
@@ -567,13 +591,13 @@ void core0_main_loop() {
                       // Recalculate safe limits from current equations using updated algorithm
                       if (active_joint_controller != nullptr) {
                         if (active_joint_controller->recalculateSafeLimits()) {
-                          Serial.println("RSP:SAFE_LIMITS_RECALCULATED(" + String(ACTIVE_JOINT) + ")");
+                          SERIAL_COM_LN("RSP:SAFE_LIMITS_RECALCULATED(" + String(ACTIVE_JOINT) + ")");
                         } else {
-                          Serial.println("RSP:SAFE_LIMITS_RECALC_FAILED(" + String(ACTIVE_JOINT) + ")");
+                          SERIAL_COM_LN("RSP:SAFE_LIMITS_RECALC_FAILED(" + String(ACTIVE_JOINT) + ")");
                           LOG_ERROR("Failed to recalculate safe limits for joint " + String(ACTIVE_JOINT));
                         }
                       } else {
-                        Serial.println("RSP:ERROR: Controller not initialized");
+                        SERIAL_COM_LN("RSP:ERROR: Controller not initialized");
                       }
                       handled_on_core0 = true;
                       break;
@@ -608,7 +632,7 @@ void core0_main_loop() {
                       save_system_settings_data(system_settings);
                       system_settings_loaded = true;
                       
-                      Serial.println("RSP:AUTO_START_SET(" + String(ACTIVE_JOINT) + "):ENABLED=" + String(enable ? 1 : 0));
+                      SERIAL_COM_LN("RSP:AUTO_START_SET(" + String(ACTIVE_JOINT) + "):ENABLED=" + String(enable ? 1 : 0));
                       LOG_INFO("Auto-start " + String(enable ? "ENABLED" : "DISABLED") + " for joint " + String(ACTIVE_JOINT));
                       handled_on_core0 = true;
                       break;
@@ -616,7 +640,7 @@ void core0_main_loop() {
 
                     case CMD_GET_AUTO_START: {
                       // Query current auto-start setting
-                      Serial.println("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" + 
+                      SERIAL_COM_LN("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" + 
                                      String(system_settings.auto_start_enabled ? 1 : 0) +
                                      ":TORQUE=" + String(system_settings.auto_start_pretension, 1) +
                                      ":DURATION=" + String(system_settings.auto_start_duration));
@@ -640,7 +664,7 @@ void core0_main_loop() {
                       uint32_t startup_start_time = millis();
                       
                       if (active_joint_controller == nullptr) {
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_CONTROLLER");
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_CONTROLLER");
                         handled_on_core0 = true;
                         break;
                       }
@@ -654,7 +678,7 @@ void core0_main_loop() {
                         }
                       }
                       if (!equations_ok) {
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_EQUATIONS");
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_EQUATIONS");
                         LOG_ERROR("Startup sequence failed: run auto-mapping or load equations from flash first");
                         handled_on_core0 = true;
                         break;
@@ -670,7 +694,7 @@ void core0_main_loop() {
                       while (encoder_wait_ms < MAX_ENCODER_WAIT_MS) {
                         // Check global timeout
                         if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-                          Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
+                          SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
                           LOG_ERROR("Startup sequence timed out during encoder wait");
                           handled_on_core0 = true;
                           break;
@@ -692,7 +716,7 @@ void core0_main_loop() {
                       }
                       
                       if (!encoders_valid) {
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=ENCODER_TIMEOUT");
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=ENCODER_TIMEOUT");
                         LOG_ERROR("Startup sequence failed: encoder readings not valid after " + String(MAX_ENCODER_WAIT_MS) + "ms");
                         handled_on_core0 = true;
                         break;
@@ -776,13 +800,13 @@ void core0_main_loop() {
                       if (can_errors > 0) {
                         LOG_ERROR("Motor CAN communication failed: " + String(can_errors) + " motor(s) not responding");
                         LOG_ERROR("Check: 1) Motors powered on? 2) CAN bus connected? 3) Motor IDs correct?");
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=CAN_TIMEOUT:ERRORS=" + String(can_errors));
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=CAN_TIMEOUT:ERRORS=" + String(can_errors));
                         handled_on_core0 = true;
                         break;
                       }
                       
                       if (!motors_ok) {
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=MOTOR_ERROR");
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=MOTOR_ERROR");
                         LOG_ERROR("Startup sequence failed: motor access error");
                         handled_on_core0 = true;
                         break;
@@ -827,14 +851,14 @@ void core0_main_loop() {
                       }
                       
                       if (!positions_ok) {
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
                         LOG_ERROR("Startup sequence failed: joint position too far outside limits");
                         LOG_ERROR("Manually move joint to safe position before retrying");
                         handled_on_core0 = true;
                         break;
                       }
                       LOG_INFO("Position limits verified");
-                      Serial.println("EVT:STARTUP_POSITIONS_OK(" + String(ACTIVE_JOINT) + ")");
+                      SERIAL_COM_LN("EVT:STARTUP_POSITIONS_OK(" + String(ACTIVE_JOINT) + ")");
                       
                       // NOTE: Tendon tension will be checked inside recalculateMotorOffsets
                       // If tendons are slack, it will log a warning but continue
@@ -845,14 +869,14 @@ void core0_main_loop() {
                       
                       // Check global timeout before starting main sequence
                       if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
                         LOG_ERROR("Startup sequence timed out before recalc");
                         handled_on_core0 = true;
                         break;
                       }
                       
                       LOG_INFO("Starting startup sequence for joint " + String(ACTIVE_JOINT) + "...");
-                      Serial.println("EVT:STARTUP_BEGIN(" + String(ACTIVE_JOINT) + ")");
+                      SERIAL_COM_LN("EVT:STARTUP_BEGIN(" + String(ACTIVE_JOINT) + ")");
                       
                       // Run recalc_offset for each DOF
                       bool all_success = true;
@@ -862,13 +886,13 @@ void core0_main_loop() {
                         // Check global timeout
                         if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
                           LOG_ERROR("Startup sequence timed out at DOF " + String(dof));
-                          Serial.println("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
                           all_success = false;
                           break;
                         }
                         
                         LOG_INFO("Running recalc_offset for DOF " + String(dof) + "...");
-                        Serial.println("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+                        SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
                         
                         // Use custom parameters if specified, otherwise defaults
                         float pretension = system_settings.auto_start_pretension > 0 
@@ -880,13 +904,13 @@ void core0_main_loop() {
                         
                         if (!active_joint_controller->recalculateMotorOffsets(dof, pretension, duration)) {
                           LOG_ERROR("recalc_offset failed for DOF " + String(dof));
-                          Serial.println("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
+                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
                           all_success = false;
                           break;
                         }
                         
                         last_successful_dof = dof;
-                        Serial.println("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+                        SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
                       }
                       
                       // RECOVERY: If failed partway through, ensure all motors are stopped
@@ -895,12 +919,12 @@ void core0_main_loop() {
                         for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
                           active_joint_controller->stopDofMotors(dof);
                         }
-                        Serial.println("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
+                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
                         LOG_ERROR("Startup sequence failed - all motors stopped");
                       } else {
                         // Success - report completion with timing
                         uint32_t total_time_ms = millis() - startup_start_time;
-                        Serial.println("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
+                        SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
                         LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — system ready for waypoints");
                       }
                       
@@ -1023,7 +1047,7 @@ void core0_main_loop() {
         }        // Close the "else" block for SYNC command check (line 233)
       } else {  // Close the "if (CMD:)" block (line 198)
         // Command without correct prefix
-        Serial.println("RSP:ERROR: Commands must start with CMD: prefix");
+        SERIAL_COM_LN("RSP:ERROR: Commands must start with CMD: prefix");
       }
 
       // reset command buffer
@@ -1038,27 +1062,27 @@ void core0_main_loop() {
     // Process result based on flag
     switch (shared_data_ext.flag) {
     case CMD1_END_MOVE:
-      Serial.println("RSP:MOVE_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
+      SERIAL_COM_LN("RSP:MOVE_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.message) + ")");
       break;
 
     case CMD1_FAIL_MOVE:
-      Serial.println("RSP:MOVE_FAILED(" + String(shared_data_ext.joint_id) + "," +
+      SERIAL_COM_LN("RSP:MOVE_FAILED(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.message) + ")");
       break;
 
     case CMD1_END_ZERO:
-      Serial.println("RSP:ZERO_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
+      SERIAL_COM_LN("RSP:ZERO_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.dof_index) + ")");
       break;
 
     case CMD1_AUTO_MAP_PROGRESS:
-      Serial.println("RSP:AUTO_MAP_PROGRESS(" + String(shared_data_ext.joint_id) + "," +
+      SERIAL_COM_LN("RSP:AUTO_MAP_PROGRESS(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.message) + ")");
       break;
 
     case CMD1_AUTO_MAP_COMPLETE:
-      Serial.println("RSP:AUTO_MAP_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
+      SERIAL_COM_LN("RSP:AUTO_MAP_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.message) + ")");
       // Signal that mapping data is ready to be sent
       auto_mapping_data_ready_to_send = true;
@@ -1066,35 +1090,35 @@ void core0_main_loop() {
       // Check if Core1 requested a flash save for linear equations
       if (active_joint_controller != nullptr && active_joint_controller->isPendingFlashSave()) {
         // Print equation summary (safe to do from Core0)
-        Serial.println("=== LINEAR EQUATIONS SUMMARY ===");
+        SERIAL_COM_LN("=== LINEAR EQUATIONS SUMMARY ===");
         for (int dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
           DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
           if (eq != nullptr && eq->calculated) {
-            Serial.println("DOF " + String(dof) + ":");
-            Serial.println("  Agonist: y = " + String(eq->agonist.slope, 4) +
+            SERIAL_COM_LN("DOF " + String(dof) + ":");
+            SERIAL_COM_LN("  Agonist: y = " + String(eq->agonist.slope, 4) +
                            "*x + " + String(eq->agonist.intercept, 4) +
                            " (R²=" + String(eq->agonist.r_squared, 3) + ")");
-            Serial.println("  Antagonist: y = " + String(eq->antagonist.slope, 4) +
+            SERIAL_COM_LN("  Antagonist: y = " + String(eq->antagonist.slope, 4) +
                            "*x + " + String(eq->antagonist.intercept, 4) +
                            " (R²=" + String(eq->antagonist.r_squared, 3) + ")");
-            Serial.println("  Joint range: [" + String(eq->joint_safe_min, 1) + ", " +
+            SERIAL_COM_LN("  Joint range: [" + String(eq->joint_safe_min, 1) + ", " +
                            String(eq->joint_safe_max, 1) + "]°");
           }
         }
-        Serial.println("================================");
+        SERIAL_COM_LN("================================");
         
         // Save equations to flash (from Core0 - thread safe)
         if (active_joint_controller->saveLinearEquationsToFlash()) {
-          Serial.println("RSP:LINEAR_EQUATIONS_SAVED(" + String(shared_data_ext.joint_id) + ")");
+          SERIAL_COM_LN("RSP:LINEAR_EQUATIONS_SAVED(" + String(shared_data_ext.joint_id) + ")");
         } else {
-          Serial.println("RSP:LINEAR_EQUATIONS_SAVE_FAILED(" + String(shared_data_ext.joint_id) + ")");
+          SERIAL_COM_LN("RSP:LINEAR_EQUATIONS_SAVE_FAILED(" + String(shared_data_ext.joint_id) + ")");
         }
         active_joint_controller->clearPendingFlashSave();
       }
       break;
 
     default:
-      Serial.println("RSP:UNKNOWN_FLAG(" + String(shared_data_ext.flag) + ")");
+      SERIAL_COM_LN("RSP:UNKNOWN_FLAG(" + String(shared_data_ext.flag) + ")");
       break;
     }
 
@@ -1110,7 +1134,7 @@ void core0_main_loop() {
   if (measuring_data_ext.flag == 1 && !movement_in_progress) {
     uint8_t dof = measuring_data_ext.dof_index;
     if (dof < shared_dof_angles.dof_count && shared_dof_angles.valid[dof]) {
-      Serial.println("EVT:ANGLE(" + String(ACTIVE_JOINT) + "," + String(dof) + "," +
+      SERIAL_COM_LN("EVT:ANGLE(" + String(ACTIVE_JOINT) + "," + String(dof) + "," +
                      String(shared_dof_angles.angles[dof], 4) + ")");
     }
     delay(50); // Throttle streaming to ~20Hz
@@ -1170,7 +1194,7 @@ void core0_main_loop() {
         LOG_DEBUG("DOF Count: " + String(controller->getConfig().dof_count));
 
         // Send command with size and DOF count (according to MAPPING_DATA protocol)
-        Serial.println("EVT:MAPPING_DATA(" + String(reference_size) + "," +
+        SERIAL_COM_LN("EVT:MAPPING_DATA(" + String(reference_size) + "," +
                        String(controller->getConfig().dof_count) + ")");
 
         // Send data for each DOF with extended format
@@ -1199,7 +1223,7 @@ void core0_main_loop() {
             }
           }
 
-          Serial.println("EVT:" + line_data);
+          SERIAL_COM_LN("EVT:" + line_data);
         }
 
         // Mapping data is no longer saved to flash
@@ -1258,11 +1282,11 @@ void core0_main_loop() {
               char buffer[100];
               snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld", 
                        dof, shared_dof_angles.angles[dof], encoder_count);
-              Serial.println(buffer);
+              SERIAL_COM_LN(buffer);
             } else {
               char buffer[100];
               snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ERROR=Invalid encoder data", dof);
-              Serial.println(buffer);
+              SERIAL_COM_LN(buffer);
             }
           }
         } else {
@@ -1275,13 +1299,13 @@ void core0_main_loop() {
             char buffer[100];
             snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld",
                      encoder_test_dof_index, shared_dof_angles.angles[encoder_test_dof_index], encoder_count);
-            Serial.println(buffer);
+            SERIAL_COM_LN(buffer);
           } else {
-            Serial.println("EVT:ENCODER_DATA:ERROR=Invalid encoder data");
+            SERIAL_COM_LN("EVT:ENCODER_DATA:ERROR=Invalid encoder data");
           }
         }
       } else {
-        Serial.println("EVT:ENCODER_DATA:ERROR=Controller not found");
+        SERIAL_COM_LN("EVT:ENCODER_DATA:ERROR=Controller not found");
         encoder_test_active = false; // Disable test on error
       }
     }

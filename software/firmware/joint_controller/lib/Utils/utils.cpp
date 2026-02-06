@@ -416,44 +416,44 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
   flash_operation_in_progress = false;
 
   // Print confirmation with equation details
-  Serial.println("Linear equations saved to flash successfully!");
-  Serial.print("Joint type: ");
-  Serial.println(data.joint_type);
-  Serial.print("DOF count: ");
-  Serial.println(data.dof_count);
-  Serial.print("Motor count: ");
-  Serial.println(data.motor_count);
-  Serial.print("Data size: ");
-  Serial.print(data_size);
-  Serial.println(" bytes (ultra-compact!)");
+  SERIAL_COM_LN("Linear equations saved to flash successfully!");
+  SERIAL_COM("Joint type: ");
+  SERIAL_COM_LN(data.joint_type);
+  SERIAL_COM("DOF count: ");
+  SERIAL_COM_LN(data.dof_count);
+  SERIAL_COM("Motor count: ");
+  SERIAL_COM_LN(data.motor_count);
+  SERIAL_COM("Data size: ");
+  SERIAL_COM(data_size);
+  SERIAL_COM_LN(" bytes (ultra-compact!)");
 
   // Print summary of saved equations
   int valid_equations_count = 0;
   for (int dof = 0; dof < data.dof_count && dof < MAX_DOFS; dof++) {
     if (data.dof_equations[dof].calculated) {
-      Serial.println("DOF " + String(dof) + " equations saved:");
+      SERIAL_COM_LN("DOF " + String(dof) + " equations saved:");
       if (data.dof_equations[dof].agonist.valid) {
-        Serial.println("  Agonist: y = " + String(data.dof_equations[dof].agonist.slope, 4) +
+        SERIAL_COM_LN("  Agonist: y = " + String(data.dof_equations[dof].agonist.slope, 4) +
                        "*x + " + String(data.dof_equations[dof].agonist.intercept, 4) +
                        " (R^2=" + String(data.dof_equations[dof].agonist.r_squared, 3) + ")");
         valid_equations_count++;
       }
       if (data.dof_equations[dof].antagonist.valid) {
-        Serial.println("  Antagonist: y = " + String(data.dof_equations[dof].antagonist.slope, 4) +
+        SERIAL_COM_LN("  Antagonist: y = " + String(data.dof_equations[dof].antagonist.slope, 4) +
                        "*x + " + String(data.dof_equations[dof].antagonist.intercept, 4) +
                        " (R^2=" + String(data.dof_equations[dof].antagonist.r_squared, 3) + ")");
         valid_equations_count++;
       }
-      Serial.println("  Joint limits: [" + String(data.dof_equations[dof].joint_safe_min, 2) +
+      SERIAL_COM_LN("  Joint limits: [" + String(data.dof_equations[dof].joint_safe_min, 2) +
                      "°, " + String(data.dof_equations[dof].joint_safe_max, 2) + "°]");
-      Serial.println("  Agonist limits: [" + String(data.dof_equations[dof].agonist_safe_min, 2) +
+      SERIAL_COM_LN("  Agonist limits: [" + String(data.dof_equations[dof].agonist_safe_min, 2) +
                      "°, " + String(data.dof_equations[dof].agonist_safe_max, 2) + "°]");
-      Serial.println("  Antagonist limits: [" +
+      SERIAL_COM_LN("  Antagonist limits: [" +
                      String(data.dof_equations[dof].antagonist_safe_min, 2) + "°, " +
                      String(data.dof_equations[dof].antagonist_safe_max, 2) + "°]");
     }
   }
-  Serial.println("Saved " + String(valid_equations_count) + " valid linear equations");
+  SERIAL_COM_LN("Saved " + String(valid_equations_count) + " valid linear equations");
 }
 
 /**
@@ -469,34 +469,34 @@ bool load_linear_equations_data(struct LinearEquationsDeviceData *data) {
 
   // Further validate data
   if (data->dof_count == 0 || data->dof_count > MAX_DOFS || data->motor_count > MAX_MOTORS) {
-    Serial.println("Invalid linear equations data - DOF or motor count out of range!");
+    SERIAL_COM_LN("Invalid linear equations data - DOF or motor count out of range!");
     return false;
   }
 
-  Serial.println("Linear equations loaded successfully from flash!");
-  Serial.print("Joint type: ");
-  Serial.println(data->joint_type);
-  Serial.print("DOF count: ");
-  Serial.println(data->dof_count);
-  Serial.print("Motor count: ");
-  Serial.println(data->motor_count);
-  Serial.print("Saved timestamp: ");
-  Serial.println(data->timestamp);
+  SERIAL_COM_LN("Linear equations loaded successfully from flash!");
+  SERIAL_COM("Joint type: ");
+  SERIAL_COM_LN(data->joint_type);
+  SERIAL_COM("DOF count: ");
+  SERIAL_COM_LN(data->dof_count);
+  SERIAL_COM("Motor count: ");
+  SERIAL_COM_LN(data->motor_count);
+  SERIAL_COM("Saved timestamp: ");
+  SERIAL_COM_LN(data->timestamp);
 
   // Print loaded equations
   int valid_equations_count = 0;
   for (int dof = 0; dof < data->dof_count && dof < MAX_DOFS; dof++) {
     if (data->dof_equations[dof].calculated) {
-      Serial.println("DOF " + String(dof) + " equations loaded:");
+      SERIAL_COM_LN("DOF " + String(dof) + " equations loaded:");
       if (data->dof_equations[dof].agonist.valid) {
-        Serial.println("  Agonist: y = " + String(data->dof_equations[dof].agonist.slope, 4) +
+        SERIAL_COM_LN("  Agonist: y = " + String(data->dof_equations[dof].agonist.slope, 4) +
                        "*x + " + String(data->dof_equations[dof].agonist.intercept, 4) +
                        " (R^2=" + String(data->dof_equations[dof].agonist.r_squared, 3) +
                        ", MSE=" + String(data->dof_equations[dof].agonist.mse, 3) + ")");
         valid_equations_count++;
       }
       if (data->dof_equations[dof].antagonist.valid) {
-        Serial.println(
+        SERIAL_COM_LN(
             "  Antagonist: y = " + String(data->dof_equations[dof].antagonist.slope, 4) + "*x + " +
             String(data->dof_equations[dof].antagonist.intercept, 4) +
             " (R^2=" + String(data->dof_equations[dof].antagonist.r_squared, 3) +
@@ -505,7 +505,7 @@ bool load_linear_equations_data(struct LinearEquationsDeviceData *data) {
       }
     }
   }
-  Serial.println("Loaded " + String(valid_equations_count) + " valid linear equations");
+  SERIAL_COM_LN("Loaded " + String(valid_equations_count) + " valid linear equations");
 
   return true;
 }

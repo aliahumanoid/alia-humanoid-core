@@ -75,6 +75,10 @@ class SerialHandler:
 
         # Variable to track currently active joint (used to save mapping data)
         self.current_active_joint: Optional[str] = None
+        
+        # Joint identification from firmware (auto-detected at boot)
+        self.detected_joint_id: Optional[int] = None
+        self.detected_joint_name: Optional[str] = None
 
         # Stores the last joint for which encoder test was started
         self.last_encoder_test_joint: Optional[str] = None
@@ -255,6 +259,9 @@ class SerialHandler:
             elif actual_message.startswith(("KNEE", "ANKLE", "HIP")):
                 self.status_message.append(actual_message)
                 self.handle_joint_message(actual_message)
+            elif actual_message.startswith("JOINT "):
+                # Parse joint identification: "JOINT <id> <name>"
+                self._handle_joint_identification(actual_message)
             elif actual_message:
                 self.status_message.append(actual_message)
                 logger.info(f"Received EVT message: {actual_message}")
@@ -2564,6 +2571,43 @@ class SerialHandler:
             list: Array of movement data for each step
         """
         return self.sequence_movement_data
+
+    def _handle_joint_identification(self, message: str) -> None:
+        """
+        Handle joint identification event from firmware boot.
+        
+        Format: "JOINT <id> <name>"
+        Example: "JOINT 1 KNEE_RIGHT"
+        
+        Args:
+            message: The joint identification message (without EVT: prefix)
+        """
+        try:
+            parts = message.split()
+            if len(parts) >= 3:
+                joint_id = int(parts[1])
+                joint_name = parts[2]
+                
+                self.detected_joint_id = joint_id
+                self.detected_joint_name = joint_name
+                
+                logger.info(f"🔌 Joint identified on {self.serial_port}: ID={joint_id}, Name={joint_name}")
+                
+                # Emit socket event for UI auto-selection
+                if self.socketio:
+                    self.socketio.emit(
+                        "joint_detected",
+                        {
+                            "port": self.serial_port,
+                            "joint_id": joint_id,
+                            "joint_name": joint_name,
+                        },
+                        namespace="/movement",
+                    )
+            else:
+                logger.warning(f"Invalid JOINT message format: {message}")
+        except (ValueError, IndexError) as e:
+            logger.error(f"Error parsing JOINT message: {message}, error: {e}")
 
     def handle_joint_message(self, line: str) -> None:
         """

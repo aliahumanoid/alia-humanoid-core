@@ -2,14 +2,14 @@
 
 ## Overview
 
-The firmware enforces angle limit checks during movement execution to guarantee joint safety. Safety checks run at the outer control loop frequency (~100 Hz) within `moveMultiDOF_cascade`, validating joint and motor angles at each control cycle before computing new control outputs.
+The firmware enforces angle limit checks during movement execution to guarantee joint safety. Safety checks run at the outer control loop frequency within `moveMultiDOF_cascade`, validating joint and motor angles at each control cycle before computing new control outputs. The outer loop rate is derived from `sampling_period` via a dynamic divider (~100 Hz with default timings).
 
 ## Operation
 
 ### Execution Context
 
 Safety checks are performed within `moveMultiDOF_cascade` during movement execution:
-- At each outer control loop iteration (~100 Hz)
+- At each outer control loop iteration (rate derived from `sampling_period`)
 - After reading current joint angles
 - Before computing new PID outputs and motor torques
 - For all active DOFs in the movement
@@ -69,7 +69,7 @@ These messages trigger immediate movement termination and motor stop.
 
 ## Key Features
 
-- **Motion-integrated protection**: safety checks run at 100 Hz during movement execution
+- **Motion-integrated protection**: safety checks run at the outer loop rate during movement execution
 - **Triple‑layer defense**: operational limits → mapping limits → motor limits with tendon breakage detection
 - **Fail-safe behavior**: immediate stop and graceful error return on any violation
 - **Zero performance impact**: checks integrated into control loop, no separate monitoring overhead

@@ -125,6 +125,45 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             "mappings": serial_manager.get_joint_to_port_mapping(),
         })
 
+    @app.route('/discover_joints', methods=['POST'])
+    def discover_joints():
+        """
+        Trigger automatic joint discovery.
+        
+        1. Sends CAN identify request (if CAN connected)
+        2. Scans all serial ports for EVT:JOINT messages
+        3. Returns discovered joint-to-port mappings
+        """
+        discovered = {}
+        can_sent = False
+        
+        # Try to send CAN identify request if connected
+        if can_manager and can_manager.is_connected():
+            try:
+                can_manager.send_identify_request()
+                can_sent = True
+                # Wait a bit for controllers to start broadcasting
+                time.sleep(0.2)
+            except Exception as e:
+                current_app.logger.warning(f"Could not send CAN identify: {e}")
+        
+        # Scan serial ports for joint identification
+        try:
+            discovered = serial_manager.discover_joints(timeout_seconds=4.0)
+        except Exception as e:
+            current_app.logger.exception("Error during joint discovery")
+            return jsonify({
+                "status": "error",
+                "message": f"Discovery failed: {e}",
+            }), 500
+        
+        return jsonify({
+            "status": "success",
+            "can_request_sent": can_sent,
+            "discovered": discovered,
+            "mappings": serial_manager.get_joint_to_port_mapping(),
+        })
+
     @app.route('/can_interfaces', methods=['GET'])
     def list_can_interfaces():
         """
@@ -164,10 +203,23 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                     "value": json.dumps(config)  # Serialize config for later use
                 })
             
+            # Include current connection info if connected
+            connected_config = None
+            if can_manager and can_manager.is_connected():
+                current = can_manager._current_config
+                if current:
+                    # Create value matching the format used in interfaces list
+                    connected_config = json.dumps({
+                        "interface": current.get("interface"),
+                        "channel": current.get("channel")
+                    })
+            
             return jsonify({
                 "status": "success",
                 "interfaces": interfaces,
-                "count": len(interfaces)
+                "count": len(interfaces),
+                "connected": can_manager.is_connected() if can_manager else False,
+                "connected_config": connected_config
             })
         
         except Exception as e:

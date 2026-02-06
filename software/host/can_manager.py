@@ -72,6 +72,56 @@ class CanManager:
         # Last known encoder angles per joint (persists even when streaming stops)
         # Format: {joint_id: {"angles_deg": [...], "timestamp_ms": int, "timestamp": float}}
         self._last_encoder_angles: Dict[int, Dict[str, Any]] = {}
+        
+        # Configuration persistence
+        self._config_file = "can_config.json"
+
+    # ------------------------------------------------------------------
+    # Configuration persistence
+    # ------------------------------------------------------------------
+    def save_config(self) -> bool:
+        """
+        Save the current CAN configuration to a JSON file.
+        
+        Returns:
+            bool: True if saved successfully, False otherwise
+        """
+        if not self._current_config:
+            self.logger.warning("No CAN config to save")
+            return False
+        
+        try:
+            with open(self._config_file, 'w') as f:
+                json.dump(self._current_config, f, indent=2)
+            self.logger.info(f"CAN config saved to {self._config_file}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to save CAN config: {e}")
+            return False
+
+    def load_config(self) -> Optional[Dict[str, Any]]:
+        """
+        Load CAN configuration from file.
+        
+        Returns:
+            Optional[Dict[str, Any]]: Configuration dict or None if not found
+        """
+        try:
+            with open(self._config_file, 'r') as f:
+                config = json.load(f)
+            self.logger.info(f"Loaded CAN config from {self._config_file}: {config}")
+            return config
+        except FileNotFoundError:
+            self.logger.info("No saved CAN config found")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to load CAN config: {e}")
+            return None
+
+    def has_saved_config(self) -> bool:
+        """Check if a saved CAN configuration exists."""
+        import os
+        return os.path.exists(self._config_file)
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -146,6 +196,10 @@ class CanManager:
 
         self.logger.info("CAN bus ready: %s", self._current_config)
         self._log_can_info(f"CAN bus ready: {self._current_config}")
+        
+        # Save configuration for auto-reconnect on next startup
+        self.save_config()
+        
         return self._current_config
 
     def disconnect(self) -> None:
@@ -189,6 +243,19 @@ class CanManager:
         payload = bytes([reason_code & 0xFF]) + bytes(7)
         self._send_frame(0x000, payload, context=f"E-Stop reason={reason_code}")
         return {"reason": reason_code}
+
+    def send_identify_request(self) -> Dict[str, Any]:
+        """
+        Broadcast joint identification request to all controllers.
+        
+        Controllers will emit EVT:JOINT messages on their serial ports
+        periodically for 3 seconds after receiving this command.
+        """
+        self._ensure_connection()
+        payload = bytes(8)  # Empty payload, just the command ID matters
+        self._send_frame(0x008, payload, context="Joint identify request")
+        self._log_can_info("Joint identification broadcast requested")
+        return {"requested": True}
 
     def start_encoder_stream(self) -> Dict[str, Any]:
         """
@@ -782,6 +849,14 @@ class CanManager:
             self._handle_movement_metrics_frame2(data, message.timestamp, joint_id, dof)
             return
         
+        # Smoothness metrics data (0x460-0x46F) - oscillation/vibration metrics
+        if 0x460 <= arb_id <= 0x46F and len(data) >= 8:
+            offset = arb_id - 0x460
+            joint_id = offset // 3
+            dof = offset % 3
+            self._handle_smoothness_metrics_frame(data, message.timestamp, joint_id, dof)
+            return
+        
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -1046,6 +1121,48 @@ class CanManager:
                     pass
         else:
             self.logger.warning(f"Metrics frame 2 received without frame 1 for DOF {dof}")
+
+    def _handle_smoothness_metrics_frame(self, data: bytes, timestamp: float, joint_id: int, dof: int) -> None:
+        """
+        Decode smoothness metrics frame from CAN (0x460-0x46F).
+        
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t rms_error (° × 100)
+        - Bytes 2-3: int16_t jitter (° × 100)
+        - Byte 4: uint8_t oscillation_count
+        - Byte 5: uint8_t score_rms (0-100)
+        - Byte 6: uint8_t score_jitter (0-100)
+        - Byte 7: uint8_t score_smoothness (0-100)
+        """
+        rms_x100, jitter_x100, osc_count, score_rms, score_jitter, score_smooth = struct.unpack("<hhBBBB", data[:8])
+        
+        smoothness_metrics = {
+            "type": "smoothness_metrics",
+            "joint_id": joint_id,
+            "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
+            "dof": dof,
+            "rms_error_deg": rms_x100 / 100.0,
+            "jitter_deg": jitter_x100 / 100.0,
+            "oscillation_count": osc_count,
+            "score_rms": score_rms,
+            "score_jitter": score_jitter,
+            "score_smoothness": score_smooth,
+            "timestamp": timestamp,
+        }
+        
+        # Log smoothness metrics
+        self.logger.info(
+            f"Smoothness metrics DOF {dof}: rms={rms_x100/100.0:.2f}°({score_rms}), "
+            f"osc={osc_count}, jitter={jitter_x100/100.0:.3f}°({score_jitter}), "
+            f"smooth={score_smooth}/100"
+        )
+        
+        # Emit via SocketIO for UI display
+        if self.socketio:
+            try:
+                self.socketio.emit("smoothness_metrics", smoothness_metrics, namespace="/movement")
+            except Exception:
+                pass
 
     def _calculate_movement_score(self, metrics: dict) -> int:
         """
