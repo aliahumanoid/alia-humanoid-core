@@ -215,8 +215,14 @@ void setup() {
 #pragma region Init Serial_Interface/Motors
   // initialize serial communication at 115200 bits per second:
   Serial.begin(115200);
-  // wait for serial monitor to open:
-  delay(5000);
+  // Wait for USB CDC connection (up to 500ms, exit early if connected)
+  // Previously delay(5000) — reduced to avoid blocking hardware init
+  {
+    uint32_t t0 = millis();
+    while (!Serial && (millis() - t0 < 500)) {
+      // Yield to USB stack
+    }
+  }
 
   // Version handshake events
   SERIAL_COM_LN("EVT:FW:VERSION " FW_VERSION);
@@ -228,6 +234,13 @@ void setup() {
   SERIAL_COM(" ");
   SERIAL_COM_LN(ACTIVE_JOINT_CONFIG.name);
   SERIAL_COM_LN("EVT:READY");
+
+  // Start identification broadcast (reuses existing Core0 mechanism)
+  // Emits EVT:JOINT every 500ms for 3 seconds, so the host can discover
+  // this joint even if it connects after boot
+  identify_broadcast_active = true;
+  identify_broadcast_start_ms = millis();
+  identify_broadcast_last_emit_ms = 0;  // Force immediate first emit
 
   // Configure SPI1 - CANBUS
   SPI1.setRX(12);
