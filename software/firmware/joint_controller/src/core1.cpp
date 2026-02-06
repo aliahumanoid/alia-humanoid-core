@@ -564,9 +564,12 @@ void pollHostCan() {
     last_rx_log = millis();
   }
 
-  // Process up to 10 messages per poll to avoid blocking
+  // Process up to 3 messages per poll to limit jitter on the control loop.
+  // At 500Hz loop rate, 3 msgs/cycle = 1500 msgs/s throughput (well above
+  // the ~300 msgs/s needed for 100Hz waypoints × 3 DOFs).
+  // Remaining messages are picked up in the next cycle (2ms later).
   uint8_t msg_count = 0;
-  while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && msg_count < 10) {
+  while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && msg_count < 3) {
     unsigned long rx_id = 0;
     unsigned char len = 0;
     unsigned char buf[8] = {0};
