@@ -330,21 +330,21 @@ private:
 /**
  * @brief Diagnostic data from PID control loop
  * 
- * Updated by Core1 during waypoint execution.
- * Read by Core1 for CAN diagnostic streaming.
+ * Written AND read exclusively on Core1 (waypoint execution + CAN streaming).
+ * No cross-core access — volatile not needed on members.
  * All angles in degrees * 100 (int16_t for CAN efficiency).
  */
 struct PIDDiagnostics {
-  volatile int16_t target_deg_x100[3];    // Target angle per DOF (°×100)
-  volatile int16_t error_deg_x100[3];     // PID error per DOF (°×100)
-  volatile int16_t torque_A[3];           // Torque command agonist per DOF
-  volatile int16_t torque_B[3];           // Torque command antagonist per DOF
-  volatile uint32_t last_update_ms;       // Timestamp of last update
-  volatile bool valid;                    // Data valid flag
+  int16_t target_deg_x100[3];    // Target angle per DOF (°×100)
+  int16_t error_deg_x100[3];     // PID error per DOF (°×100)
+  int16_t torque_A[3];           // Torque command agonist per DOF
+  int16_t torque_B[3];           // Torque command antagonist per DOF
+  uint32_t last_update_ms;       // Timestamp of last update
+  bool valid;                    // Data valid flag
 };
 
-extern volatile PIDDiagnostics pid_diagnostics;
-extern volatile bool pid_diag_stream_active;  // Enable diagnostic streaming
+extern PIDDiagnostics pid_diagnostics;
+extern volatile bool pid_diag_stream_active;  // Cross-core: CAN sets, Core1 reads
 
 // ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)
@@ -353,20 +353,18 @@ extern volatile bool pid_diag_stream_active;  // Enable diagnostic streaming
 /**
  * @brief Cached motor angles from the control loop
  * 
- * Updated by the waypoint controller during each control cycle.
- * Used by checkMotorsInRange() to avoid redundant CAN reads which
- * were causing ~2ms delays per motor during safety checks.
- * 
- * This reduces safety check overhead from 4000µs to ~50µs.
+ * Written AND read exclusively on Core1 (waypoint execution + safety checks).
+ * No cross-core access — volatile not needed.
+ * Eliminates ~2ms CAN read delay per motor during safety checks.
  */
 struct CachedMotorAngles {
-    volatile float agonist[MAX_DOFS];      // Last read agonist angle per DOF (degrees)
-    volatile float antagonist[MAX_DOFS];   // Last read antagonist angle per DOF (degrees)
-    volatile bool valid[MAX_DOFS];          // True if angles have been read at least once
-    volatile uint32_t last_update_ms;       // Timestamp of last update
+    float agonist[MAX_DOFS];      // Last read agonist angle per DOF (degrees)
+    float antagonist[MAX_DOFS];   // Last read antagonist angle per DOF (degrees)
+    bool valid[MAX_DOFS];          // True if angles have been read at least once
+    uint32_t last_update_ms;       // Timestamp of last update
 };
 
-extern volatile CachedMotorAngles cached_motor_angles;
+extern CachedMotorAngles cached_motor_angles;
 
 // ============================================================================
 // MOVEMENT METRICS (for PID tuning evaluation)

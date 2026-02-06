@@ -48,12 +48,12 @@ const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
 
 // init program flag
 bool init_prg = true;
-// Flash operation synchronization flag
-volatile bool flash_operation_in_progress = false;
-// Movement in progress flag (Core1 sets during movement, Core0 pauses streaming)
-volatile bool movement_in_progress = false;
-// Host CAN polling suspend (Core0 sets during startup sequence to avoid SPI conflicts)
-volatile bool suspend_host_can_polling = false;
+// === CROSS-CORE FLAGS (volatile required — written by one core, read by the other) ===
+// On ARM Cortex-M33, aligned ≤32-bit reads/writes are naturally atomic.
+// volatile prevents compiler from caching values across loop iterations.
+volatile bool flash_operation_in_progress = false;  // Core0 writes, Core1 reads
+volatile bool movement_in_progress = false;         // Core1 writes, Core0 reads
+volatile bool suspend_host_can_polling = false;     // Core0 writes, Core1 reads
 // System settings (loaded from flash at boot)
 SystemSettingsData system_settings = {};
 bool system_settings_loaded = false;
@@ -120,12 +120,12 @@ const uint32_t IDENTIFY_BROADCAST_INTERVAL_MS = 500;   // Emit every 500ms
 volatile uint32_t identify_broadcast_last_emit_ms = 0;
 
 // PID diagnostics for tuning (updated by Core1 waypoint loop)
-volatile PIDDiagnostics pid_diagnostics = {0};
+PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
 
 // Cached motor angles (for safety checks without redundant CAN reads)
 // This eliminates the ~2ms delay per motor during periodic safety checks
-volatile CachedMotorAngles cached_motor_angles = {
+CachedMotorAngles cached_motor_angles = {
     .agonist = {0, 0, 0},
     .antagonist = {0, 0, 0},
     .valid = {false, false, false},
