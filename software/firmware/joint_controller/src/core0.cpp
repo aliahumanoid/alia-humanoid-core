@@ -79,7 +79,7 @@ void flushMovementSamples() {
 
   // Count samples per DOF first (without removing from queue)
   int dof_counts[MAX_DOFS] = {0};
-  int total_samples = movement_sample_queue.element_count;
+  int total_samples = queue_get_level(&movement_sample_queue);
   
   LOG_DEBUG("flushMovementSamples() - queue has " + String(total_samples) + " samples");
   
@@ -1178,30 +1178,31 @@ void core0_main_loop() {
         // Send data for each DOF with extended format
         // Format: {prefix}{dof_index}_{array_index}_{data}
         // Prefixes: a=joint, b=agonist, c=antagonist (according to MAPPING_DATA_PROTOCOL.md)
-        for (int i = 0; i < reference_size; i++) {
-          String line_data = "";
+        // Uses fixed stack buffer instead of String concatenation to avoid heap fragmentation
+        {
+          char line_buf[256];  // Fixed buffer — avoids hundreds of String allocs
+          int dof_count = controller->getConfig().dof_count;
 
-          for (int dof = 0; dof < controller->getConfig().dof_count; dof++) {
-            DofMappingData_t *mapping_data = controller->getMappingData(dof);
-            if (mapping_data != nullptr && mapping_data->flag == 1) {
-              // a = Joint angle for specified DOF
-              line_data += "a" + String(dof) + "_" + String(i) + "_" +
-                           String(mapping_data->joint_data[i]) + "|";
-              // b = Agonist motor angle for specified DOF
-              line_data += "b" + String(dof) + "_" + String(i) + "_" +
-                           String(mapping_data->agonist_data[i]) + "|";
-              // c = Antagonist motor angle for specified DOF
-              line_data += "c" + String(dof) + "_" + String(i) + "_" +
-                           String(mapping_data->antagonist_data[i]);
+          for (int i = 0; i < reference_size; i++) {
+            int pos = 0;
+            pos += snprintf(line_buf + pos, sizeof(line_buf) - pos, "EVT:");
 
-              // Add separator if this is not the last DOF
-              if (dof < controller->getConfig().dof_count - 1) {
-                line_data += "|";
+            for (int dof = 0; dof < dof_count; dof++) {
+              DofMappingData_t *mapping_data = controller->getMappingData(dof);
+              if (mapping_data != nullptr && mapping_data->flag == 1) {
+                pos += snprintf(line_buf + pos, sizeof(line_buf) - pos,
+                                "a%d_%d_%.4f|b%d_%d_%.4f|c%d_%d_%.4f",
+                                dof, i, mapping_data->joint_data[i],
+                                dof, i, mapping_data->agonist_data[i],
+                                dof, i, mapping_data->antagonist_data[i]);
+                if (dof < dof_count - 1) {
+                  pos += snprintf(line_buf + pos, sizeof(line_buf) - pos, "|");
+                }
               }
             }
-          }
 
-          SERIAL_COM_LN("EVT:" + line_data);
+            SERIAL_COM_LN(line_buf);
+          }
         }
 
         // Mapping data is no longer saved to flash
