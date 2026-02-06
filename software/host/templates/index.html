@@ -1841,14 +1841,11 @@
                         </div>
 
                         <!-- Layout for 1 DOF joints (KNEE) -->
-                        <div id="waypointInput1DOF" class="grid grid-cols-3 gap-3">
-                            <div>
-                                <label for="canWaypointDof" class="block text-xs font-medium text-gray-600">DOF</label>
-                                <select id="canWaypointDof"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm">
-                                    <option value="0">DOF 0</option>
-                                </select>
-                            </div>
+                        <div id="waypointInput1DOF" class="grid grid-cols-2 gap-3">
+                            <!-- DOF selector hidden (kept for JS compatibility, always value=0) -->
+                            <select id="canWaypointDof" class="hidden">
+                                <option value="0">DOF 0</option>
+                            </select>
                             <div>
                                 <label for="canWaypointAngle" class="block text-xs font-medium text-gray-600">Angle (°)</label>
                                 <input type="number" id="canWaypointAngle" value="45"

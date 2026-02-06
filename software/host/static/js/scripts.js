@@ -8331,5 +8331,10 @@ function updateDriftBadge(jointId, dof, status, errA, errB) {
 
     // Refresh the limits panel to show drift info
     updateTrajectoryLimitsPanel($("#jointSelect").val());
+    
+    // Also update the recalc badge in setup section (indication only, no auto-action)
+    if (status === 'DRIFT') {
+        updateRecalcBadge(jointId, dof, 'NEEDED', errA, errB);
+    }
 }
 
