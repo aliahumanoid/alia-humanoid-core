@@ -667,13 +667,19 @@ void core0_main_loop() {
                       // Manual startup sequence: recalc_offset for all DOFs, then enter HOLDING
                       // This simulates what auto-start does at boot
                       //
-                      // SAFETY CHECKS PERFORMED:
+                      // ARCHITECTURE: Core0 performs safety checks (no CAN access), then
+                      // delegates recalc_offset to Core1 via CMD_RECALC_OFFSET command buffer.
+                      // This ensures all Motor CAN access stays on Core1, preventing SPI1 conflicts.
+                      //
+                      // SAFETY CHECKS PERFORMED (Core0, no CAN):
                       // 1. Controller initialized
                       // 2. Linear equations loaded for all DOFs
                       // 3. Encoder readings valid (with timeout)
-                      // 4. CAN communication with motors working
+                      // 4. Joint positions within physical limits
                       // 5. Global timeout for entire sequence
-                      // 6. Recovery: stop all motors if any step fails
+                      // MOTOR OPERATIONS (delegated to Core1 via CMD_RECALC_OFFSET):
+                      // 6. Motor verification + offset recalculation per DOF
+                      // 7. Recovery: emergency stop if any step fails
                       
                       const uint32_t STARTUP_TIMEOUT_MS = 30000;  // 30 seconds max for entire sequence
                       uint32_t startup_start_time = millis();
@@ -738,106 +744,11 @@ void core0_main_loop() {
                       }
                       LOG_INFO("Encoder readings valid after " + String(encoder_wait_ms) + "ms");
                       
-                      // CRITICAL: Suspend Host CAN polling during startup to avoid SPI1 bus conflicts
-                      // Motor CAN and Host CAN share SPI1 with different CS pins
-                      LOG_INFO("Suspending Host CAN polling during startup...");
-                      suspend_host_can_polling = true;
-                      delay(10);  // Give Core1 time to exit any current CAN operation
+                      // NOTE: Motor CAN verification is performed implicitly by recalculateMotorOffsets
+                      // on Core1. If motors are unresponsive, recalcOffset will fail with detailed logs.
+                      // No direct Motor CAN access from Core0 — all SPI1 operations stay on Core1.
                       
-                      // SAFETY: Flush any stale messages from Host CAN before motor access
-                      // This prevents old EMERGENCY_STOP frames from triggering during startup
-                      {
-                        int flushed = 0;
-                        bool flushed_estop = false;
-                        unsigned long flush_start = millis();
-                        while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && (millis() - flush_start) < 50) {
-                          unsigned long rx_id;
-                          unsigned char len;
-                          unsigned char buf[8];
-                          CAN_HOST.readMsgBuf(&rx_id, &len, buf);
-                          if (rx_id == 0x000) {
-                            LOG_WARN("Flushed stale EMERGENCY_STOP from CAN_HOST buffer");
-                            flushed_estop = true;
-                          }
-                          flushed++;
-                        }
-                        if (flushed > 0) {
-                          LOG_INFO("Flushed " + String(flushed) + " stale CAN_HOST messages before motor check");
-                        }
-                        // Only clear e-stop flag if stale EMERGENCY_STOP frames were actually found.
-                        // Safe: suspend_host_can_polling is true, so Core1 won't set new flags.
-                        // Avoids clearing a real e-stop that arrived from another source (e.g. encoder error).
-                        if (flushed_estop) {
-                          emergency_stop_requested = false;
-                          LOG_INFO("Cleared stale emergency stop flag from flushed CAN frames");
-                        }
-                      }
-                      
-                      // SAFETY CHECK 3: Verify motors are accessible and responding
-                      LOG_INFO("Verifying motor access and CAN communication...");
-                      bool motors_ok = true;
-                      int can_errors = 0;
-                      
-                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-                        int motors_found = 0;
-                        
-                        // Find and verify motors for this DOF
-                        for (int m = 0; m < active_joint_controller->getConfig().motor_count; m++) {
-                          if (active_joint_controller->getConfig().motors[m].dof_index == dof) {
-                            LKM_Motor* motor = active_joint_controller->getMotor(m);
-                            if (motor == nullptr) {
-                              LOG_ERROR("DOF " + String(dof) + ": motor index " + String(m) + " is null");
-                              motors_ok = false;
-                              break;
-                            }
-                            motors_found++;
-                            
-                            // Try to read angle - verify CAN communication actually works
-                            MultiAngleData angle_data = motor->getMultiAngleSync(false);
-                            
-                            // Check if we got a valid response (not NaN)
-                            if (isnan(angle_data.angle)) {
-                              LOG_WARN("DOF " + String(dof) + " motor " + String(m) + 
-                                      " (ID=" + String(active_joint_controller->getConfig().motors[m].id) + 
-                                      "): CAN timeout - motor not responding");
-                              can_errors++;
-                            } else {
-                              LOG_DEBUG("DOF " + String(dof) + " motor " + String(m) + 
-                                       " (ID=" + String(active_joint_controller->getConfig().motors[m].id) + 
-                                       "): angle=" + String(angle_data.angle, 1) + "° (OK)");
-                            }
-                          }
-                        }
-                        
-                        if (!motors_ok) break;
-                        
-                        if (motors_found < 2) {
-                          LOG_ERROR("DOF " + String(dof) + ": expected 2 motors, found " + String(motors_found));
-                          motors_ok = false;
-                          break;
-                        }
-                      }
-                      
-                      // If CAN errors occurred, fail the startup
-                      if (can_errors > 0) {
-                        LOG_ERROR("Motor CAN communication failed: " + String(can_errors) + " motor(s) not responding");
-                        LOG_ERROR("Check: 1) Motors powered on? 2) CAN bus connected? 3) Motor IDs correct?");
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=CAN_TIMEOUT:ERRORS=" + String(can_errors));
-                        suspend_host_can_polling = false;
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      
-                      if (!motors_ok) {
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=MOTOR_ERROR");
-                        LOG_ERROR("Startup sequence failed: motor access error");
-                        suspend_host_can_polling = false;
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      LOG_INFO("Motor access verified - all motors responding");
-                      
-                      // SAFETY CHECK 4: Verify joint positions are within physical limits
+                      // SAFETY CHECK 3: Verify joint positions are within physical limits
                       // This prevents starting recalc when the joint is in an unsafe position
                       LOG_INFO("Checking joint position limits...");
                       bool positions_ok = true;
@@ -878,25 +789,19 @@ void core0_main_loop() {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
                         LOG_ERROR("Startup sequence failed: joint position too far outside limits");
                         LOG_ERROR("Manually move joint to safe position before retrying");
-                        suspend_host_can_polling = false;
                         handled_on_core0 = true;
                         break;
                       }
                       LOG_INFO("Position limits verified");
                       SERIAL_COM_LN("EVT:STARTUP_POSITIONS_OK(" + String(ACTIVE_JOINT) + ")");
                       
-                      // NOTE: Tendon tension will be checked inside recalculateMotorOffsets
+                      // NOTE: Tendon tension will be checked inside recalculateMotorOffsets (on Core1)
                       // If tendons are slack, it will log a warning but continue
-                      // The tension check applies pretension torque and verifies:
-                      // - Displacement 0.1°-10° indicates proper tension
-                      // - <0.1° means too stiff (possibly mechanical binding)
-                      // - >10° means too loose (tendons may be slack)
                       
                       // Check global timeout before starting main sequence
                       if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
                         LOG_ERROR("Startup sequence timed out before recalc");
-                        suspend_host_can_polling = false;
                         handled_on_core0 = true;
                         break;
                       }
@@ -904,7 +809,8 @@ void core0_main_loop() {
                       LOG_INFO("Starting startup sequence for joint " + String(ACTIVE_JOINT) + "...");
                       SERIAL_COM_LN("EVT:STARTUP_BEGIN(" + String(ACTIVE_JOINT) + ")");
                       
-                      // Run recalc_offset for each DOF
+                      // Dispatch CMD_RECALC_OFFSET to Core1 for each DOF sequentially
+                      // Core1 handles all Motor CAN operations (SPI1 stays single-core)
                       bool all_success = true;
                       uint8_t last_successful_dof = 0;
                       
@@ -917,46 +823,83 @@ void core0_main_loop() {
                           break;
                         }
                         
-                        LOG_INFO("Running recalc_offset for DOF " + String(dof) + "...");
+                        LOG_INFO("Running recalc_offset for DOF " + String(dof) + " (delegated to Core1)...");
                         SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
                         
-                        // Use custom parameters if specified, otherwise defaults
-                        float pretension = system_settings.auto_start_pretension > 0 
-                            ? system_settings.auto_start_pretension 
-                            : active_joint_controller->getConfig().dofs[dof].zero_mapping.recalc_offset_torque;
+                        // Use custom parameters if specified, otherwise let Core1 use config defaults
+                        int pretension = system_settings.auto_start_pretension > 0 
+                            ? (int)system_settings.auto_start_pretension 
+                            : 0;  // 0 = Core1 will use config defaults
                         int duration = system_settings.auto_start_duration > 0
                             ? system_settings.auto_start_duration
-                            : active_joint_controller->getConfig().dofs[dof].zero_mapping.recalc_offset_duration;
+                            : 0;  // 0 = Core1 will use config defaults
                         
-                        if (!active_joint_controller->recalculateMotorOffsets(dof, pretension, duration)) {
-                          LOG_ERROR("recalc_offset failed for DOF " + String(dof));
-                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
+                        // Clear shared_data_ext.flag before dispatching (ensure clean state)
+                        shared_data_ext.flag = 0;
+                        
+                        // Dispatch CMD_RECALC_OFFSET to Core1 via double-buffered command system
+                        int next_buf = (active_buffer + 1) % 2;
+                        while (buffer_ready[next_buf]) { sleep_us(100); }
+                        
+                        command_buffer[next_buf].joint_id = ACTIVE_JOINT;
+                        command_buffer[next_buf].dof_index = dof;
+                        command_buffer[next_buf].recalc_offset_torque = pretension;
+                        command_buffer[next_buf].recalc_offset_duration = duration;
+                        pending_command_type = CMD_RECALC_OFFSET;
+                        buffer_ready[next_buf] = true;
+                        active_buffer = next_buf;
+                        
+                        // Poll for Core1 completion while keeping encoders alive
+                        bool dof_timeout = false;
+                        while (shared_data_ext.flag == 0) {
+                          updateSharedDofAngles();
+                          
+                          if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+                            dof_timeout = true;
+                            emergency_stop_requested = true;
+                            break;
+                          }
+                          delay(10);
+                        }
+                        
+                        if (dof_timeout) {
+                          LOG_ERROR("Startup timed out waiting for Core1 recalc on DOF " + String(dof));
+                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+                          shared_data_ext.flag = 0;
                           all_success = false;
                           break;
                         }
                         
-                        last_successful_dof = dof;
-                        SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+                        // Process Core1 result
+                        if (shared_data_ext.flag == CMD1_END_MOVE) {
+                          last_successful_dof = dof;
+                          SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+                          LOG_INFO("DOF " + String(dof) + " recalc complete: " + String(shared_data_ext.message));
+                        } else {
+                          LOG_ERROR("recalc_offset failed for DOF " + String(dof) + ": " + String(shared_data_ext.message));
+                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
+                          all_success = false;
+                        }
+                        
+                        // Reset flag before next iteration
+                        shared_data_ext.flag = 0;
+                        
+                        if (!all_success) break;
                       }
                       
-                      // RECOVERY: If failed partway through, ensure all motors are stopped
+                      // RECOVERY: If failed partway through, request emergency stop
+                      // Core1 handles motor shutdown via its emergency stop handler
                       if (!all_success) {
-                        LOG_WARN("Startup failed - stopping all motors for safety");
-                        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-                          active_joint_controller->stopDofMotors(dof);
-                        }
+                        emergency_stop_requested = true;
+                        delay(50);  // Give Core1 time to process e-stop
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
-                        LOG_ERROR("Startup sequence failed - all motors stopped");
+                        LOG_ERROR("Startup sequence failed - emergency stop sent");
                       } else {
                         // Success - report completion with timing
                         uint32_t total_time_ms = millis() - startup_start_time;
                         SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
                         LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — system ready for waypoints");
                       }
-                      
-                      // Re-enable Host CAN polling now that startup sequence is complete
-                      suspend_host_can_polling = false;
-                      LOG_INFO("Host CAN polling resumed");
                       
                       handled_on_core0 = true;
                       break;
