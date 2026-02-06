@@ -238,13 +238,16 @@ void updateSharedDofAngles() {
   __atomic_fetch_add(&shared_dof_angles.seq, 1, __ATOMIC_ACQ_REL);
   
   for (uint8_t dof = 0; dof < dof_count; dof++) {
+    // Use encoder_channel from config (may differ from dof index depending on wiring)
+    uint8_t enc_ch = controller->getConfig().dofs[dof].encoder_channel;
+    
     // Check if this encoder had a valid read
-    bool is_valid = directEncoders.isEncoderConnected(dof) && 
-                    (directEncoders.getErrorCount(dof) == 0);
+    bool is_valid = directEncoders.isEncoderConnected(enc_ch) && 
+                    (directEncoders.getErrorCount(enc_ch) == 0);
     
     if (is_valid) {
       // Get angle directly from DirectEncoders (already in degrees with multi-turn)
-      float new_angle = directEncoders.getAngle(dof);
+      float new_angle = directEncoders.getAngle(enc_ch);
       
       // Reset error counter on successful read
       consecutive_errors[dof] = 0;
