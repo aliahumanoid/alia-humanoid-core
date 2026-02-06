@@ -721,6 +721,10 @@ $(document).ready(function() {
         const joint = $(this).val();
         updateSerialPortSelectUI(joint);
         
+        // Clear stale mapping data from previous joint immediately
+        // Prevents smart waypoint buttons from showing previous joint's data
+        automaticMappingData = null;
+        
         // Update CAN Motion Control panel (joint label + DOF options)
         updateCanMotionJoint();
         
@@ -3349,12 +3353,18 @@ function loadMemoryMappingData(jointName) {
             } else {
                 appendStatusMessage(`No mapping data available for ${jointName}`);
                 updateMappingDataInfo(`No data available for ${jointName}`);
+                // Regenerate smart buttons with config defaults (no mapping data)
+                generateSmartQuickButtons();
+                generateSmartWaypointButtons();
             }
         },
         error: function(xhr, status, error) {
             console.error("Error loading mapping data:", error); // Debug
             appendStatusMessage(`Error loading mapping data for ${jointName}`);
             updateMappingDataInfo('Error loading');
+            // Regenerate smart buttons with config defaults
+            generateSmartQuickButtons();
+            generateSmartWaypointButtons();
         }
     });
 }
