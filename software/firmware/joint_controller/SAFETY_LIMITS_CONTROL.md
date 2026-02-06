@@ -2,14 +2,14 @@
 
 ## Overview
 
-The firmware enforces angle limit checks during movement execution to guarantee joint safety. Safety checks run at the outer control loop frequency within `moveMultiDOF_cascade`, validating joint and motor angles at each control cycle before computing new control outputs. The outer loop rate is derived from `sampling_period` via a dynamic divider (~100 Hz with default timings).
+The firmware enforces angle limit checks during movement execution to guarantee joint safety. Safety checks run at the outer control loop frequency within `executeWaypointMovement`, validating joint and motor angles at each control cycle before computing new control outputs. The outer loop rate is configurable via `outer_loop_divisor` (default: 500 Hz).
 
 ## Operation
 
 ### Execution Context
 
-Safety checks are performed within `moveMultiDOF_cascade` during movement execution:
-- At each outer control loop iteration (rate derived from `sampling_period`)
+Safety checks are performed within `executeWaypointMovement` during waypoint-based movement:
+- At each outer control loop iteration (configurable via `outer_loop_divisor`)
 - After reading current joint angles
 - Before computing new PID outputs and motor torques
 - For all active DOFs in the movement
@@ -76,7 +76,7 @@ These messages trigger immediate movement termination and motor stop.
 
 ## Integration & Safety Notes
 
-- Safety checks are integrated into the movement control loop (`moveMultiDOF_cascade` in `JointController_Movement.cpp`)
+- Safety checks are integrated into the waypoint control loop (`executeWaypointMovement` in `JointController_Waypoint.cpp`)
 - Checks execute only during active movements when controller is initialized and encoders provide valid readings
 - Movement termination on violation prevents continued operation in unsafe conditions
 - Emergency stop (handled in `core1_loop`) provides independent safety mechanism with higher priority

@@ -693,7 +693,7 @@ void pollHostCan() {
  * - CMD_PRETENSION / CMD_PRETENSION_ALL: Apply tensioning torque
  * - CMD_RELEASE / CMD_RELEASE_ALL: Release tensioning torque
  * - CMD_SET_ZERO_CURRENT_POS: Set current position as zero
- * - CMD_MOVE_MULTI_DOF: Execute coordinated multi-DOF movement
+ * - CMD_MOVE_MULTI_DOF: (DEPRECATED - returns error, use waypoints via CAN)
  * - CMD_RECALC_OFFSET: Recalculate motor offset calibration
  * - CMD_START_AUTO_MAPPING: Start automatic joint calibration
  * - CMD_STOP_AUTO_MAPPING: Stop automatic joint calibration
@@ -703,10 +703,8 @@ void core1_loop() {
   // with core1 startup. Flash operations now use a simpler approach:
   // Core0 waits for Core1 to be in a safe state before flash write.
   
-  MovementResult last_movement_result; // To track last movement result
-
   // Timing for waypoint control (configurable via inner_loop_period_us)
-  // Default: 2000µs = 500Hz (same as moveMultiDOF_cascade)
+  // Default: 2000µs = 500Hz
   uint64_t next_time = 0; // Will be initialized on first waypoint
   bool timing_initialized = false;
 
@@ -782,7 +780,6 @@ void core1_loop() {
 
       // Reset flag
       emergency_stop_requested = false;
-      smooth_transition_active = false;
 
       LOG_INFO("Core1: Emergency stop flag cleared");
 
@@ -962,116 +959,14 @@ void core1_loop() {
       break;
 
     case CMD_MOVE_MULTI_DOF: {
-      // SAFETY CHECK: Ensure the system is ready for movement
-      if (!controller->isSystemReadyForMovement()) {
-        // Block movement if linear equations are unavailable or offsets are not calibrated
-        if (shared_data_ext.flag == 0) {
-          strcpy(
-              shared_data_ext.message,
-              "SAFETY ERROR: System not ready - missing linear equations or uncalibrated offsets");
-          shared_data_ext.flag = CMD1_FAIL_MOVE;
-        }
-        break;
+      // DEPRECATED: moveMultiDOF_cascade has been removed. Use waypoints via CAN instead.
+      LOG_WARN("CMD_MOVE_MULTI_DOF is deprecated - use waypoint control via CAN");
+      if (shared_data_ext.flag == 0) {
+        strcpy(shared_data_ext.message,
+               "CMD_MOVE_MULTI_DOF deprecated - use waypoint control via CAN");
+        shared_data_ext.flag = CMD1_FAIL_MOVE;
       }
-
-      // CRITICAL FIX: Wait for Core0 to reset flag before starting new movement
-      // This prevents race condition where flag is still set from previous movement
-      // Normal case: flag reset happens in < 1ms, timeout is just safety net
-      uint32_t wait_counter = 0;
-      const uint32_t MAX_WAIT_CYCLES = 500; // 50ms timeout (500 * 100µs)
-      while (shared_data_ext.flag != 0 && wait_counter < MAX_WAIT_CYCLES) {
-        sleep_us(100);
-        wait_counter++;
-      }
-
-      if (shared_data_ext.flag != 0) {
-        // Timeout: Core0 didn't reset flag in time - indicates serious issue
-        LOG_ERROR("Core0 flag reset timeout - forcing reset to prevent deadlock");
-        shared_data_ext.flag = 0;
-      }
-
-      // Determine whether this is a smooth transition move
-      bool is_smooth_transition =
-          (last_movement_result.exit_code == MOVEMENT_TRANSITION) || smooth_transition_active;
-
-      if (is_smooth_transition) {
-        LOG_INFO("SMOOTH TRANSITION ACTIVE - Motors already in motion");
-      }
-
-      // Execute the movement
-      MovementResult move_multi_result = controller->moveMultiDOF_cascade(
-          command_data_ext.target_angles, command_data_ext.active_dofs_mask,
-          command_data_ext.path_type, command_data_ext.sync_strategy, command_data_ext.speed,
-          command_data_ext.acceleration,
-          controller->getConfig()
-              .dofs[0]
-              .motion.path_steps,   // number of steps from first DOF configuration
-          controller->getConfig()
-              .dofs[0]
-              .motion.sampling_period, // sampling period from configuration
-          false,  
-          command_data_ext.torque > 0 ? command_data_ext.torque
-                                      : 1500, // maximum torque customizable
-          is_smooth_transition                // parameter to indicate smooth transition
-      );
-
-      // Prepare response data
-      shared_data_ext.joint_id  = joint_id;
-      shared_data_ext.dof_index = 0xFF; // Special value to indicate multi-DOF movement
-
-      // NEW HANDLING: Interpret movement exit code
-      switch (move_multi_result.exit_code) {
-      case MOVEMENT_COMPLETED:
-        // Movement completed successfully, position maintained
-        if (shared_data_ext.flag == 0) {
-          strcpy(shared_data_ext.message, "Movement completed successfully");
-          shared_data_ext.flag = CMD1_END_MOVE;
-        }
-        break;
-
-      case MOVEMENT_TRANSITION:
-        // SMOOTH TRANSITION: movement ended by transition, motors kept active
-        if (shared_data_ext.flag == 0) {
-          strcpy(shared_data_ext.message, "TRANSITION: Ready for seamless next movement");
-          shared_data_ext.flag =
-              CMD1_END_MOVE; // Signal completion to allow new command
-        }
-        // The motors remain active thanks to the code in moveMultiDOF
-        break;
-
-      case MOVEMENT_STOPPED:
-        // Movement stopped by STOP command
-        if (shared_data_ext.flag == 0) {
-          strcpy(shared_data_ext.message, "Movement stopped by STOP command");
-          shared_data_ext.flag = CMD1_END_MOVE;
-        }
-        break;
-
-      case MOVEMENT_CONTROL_COMMAND:
-        // Movement interrupted by joint control command
-        if (shared_data_ext.flag == 0) {
-          strcpy(shared_data_ext.message, "Movement interrupted by joint control command");
-          shared_data_ext.flag = CMD1_END_MOVE;
-        }
-        break;
-
-      case MOVEMENT_ERROR:
-      case MOVEMENT_SAFETY_STOP:
-      default:
-        // Error in movement or safety stop
-        if (shared_data_ext.flag == 0) {
-          strcpy(shared_data_ext.message, "Movement interrupted by error");
-          shared_data_ext.flag = CMD1_FAIL_MOVE;
-        }
-        break;
-      }
-
-      // Save result for future transitions
-      last_movement_result = move_multi_result;
-
-      // Update smooth transition flag
-      smooth_transition_active = (move_multi_result.exit_code == MOVEMENT_TRANSITION);
-    } break;  
+    } break;
 
     
     case CMD_RECALC_OFFSET:

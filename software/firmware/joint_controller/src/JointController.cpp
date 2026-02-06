@@ -26,61 +26,6 @@
 // === EXTERNAL VARIABLES FOR THE NEW COMMUNICATION SYSTEM ===
 // Note: emergency_stop_requested, buffer_ready, active_buffer, pending_command_type
 // are declared in main_common.h (included above)
-extern queue_t movement_sample_queue;
-extern volatile bool movement_sample_stream_active;
-extern volatile bool movement_sample_stream_done;
-extern volatile uint8_t movement_sample_joint_id;
-extern volatile bool movement_sample_overflow;
-extern uint16_t movement_sample_counters[MAX_DOFS];
-
-static inline void drainMovementSampleQueue() {
-  movement_sample_t tmp;
-  while (queue_try_remove(&movement_sample_queue, &tmp)) {
-  }
-}
-
-static inline void startMovementLogging(const JointConfig &cfg) {
-  drainMovementSampleQueue();
-  for (int i = 0; i < MAX_DOFS; ++i) {
-    movement_sample_counters[i] = 0;
-  }
-  movement_sample_joint_id      = cfg.joint_id;
-  movement_sample_stream_active = true;
-  movement_sample_stream_done   = false;
-  movement_sample_overflow      = false;
-}
-
-static inline void stopMovementLogging() {
-  movement_sample_stream_done   = true;
-  movement_sample_stream_active = false;
-}
-
-static inline void logMovementSample(uint8_t dof_index, float joint_target, float joint_actual,
-                                     float motor_agonist_curr, float motor_antagonist_curr,
-                                     float motor_agonist_ref, float motor_antagonist_ref,
-                                     float torque_agonist, float torque_antagonist) {
-  if (!movement_sample_stream_active) {
-    return;
-  }
-  if (dof_index >= MAX_DOFS) {
-    return;
-  }
-  movement_sample_t sample;
-  sample.dof                   = dof_index;
-  sample.index                 = movement_sample_counters[dof_index]++;
-  sample.joint_target          = joint_target;
-  sample.joint_actual          = joint_actual;
-  sample.motor_agonist_curr    = motor_agonist_curr;
-  sample.motor_antagonist_curr = motor_antagonist_curr;
-  sample.motor_agonist_ref     = motor_agonist_ref;
-  sample.motor_antagonist_ref  = motor_antagonist_ref;
-  sample.torque_agonist        = torque_agonist;
-  sample.torque_antagonist     = torque_antagonist;
-
-  if (!queue_try_add(&movement_sample_queue, &sample)) {
-    movement_sample_overflow = true;
-  }
-}
 
 // ============================================================================
 // CONSTRUCTOR & DESTRUCTOR

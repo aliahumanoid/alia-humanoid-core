@@ -2,8 +2,8 @@
  * @file JointController_Waypoint.cpp
  * @brief Waypoint-based trajectory execution with cascade control
  * 
- * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 and reuses the
- * exact same cascade control logic from moveMultiDOF_cascade.
+ * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 with cascade
+ * control (outer joint PID + inner motor PID) and continuous waypoint consumption.
  * 
  * Key features:
  * - Linear interpolation between waypoints (smoothness from waypoint density @ 50-100 Hz)
@@ -17,7 +17,7 @@
  * 
  * @see waypoint_buffer.h for buffer management
  * @see CAN_CONTROL_PROTOCOL.md section 5.2 for detailed specification
- * @see JointController_Movement.cpp::moveMultiDOF_cascade for reference implementation
+ * @see CAN_CONTROL_PROTOCOL.md for protocol specification
  */
 
 #include "JointController.h"
@@ -164,8 +164,8 @@ void getWaypointProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& ma
  * @brief Execute waypoint-based movement for all DOFs
  * 
  * This is the main entry point called from core1_loop() at 500 Hz.
- * Implements the same cascade control as moveMultiDOF_cascade but with
- * continuous waypoint consumption instead of pre-generated trajectory arrays.
+ * Implements cascade control (outer joint PID + inner motor PID) with
+ * continuous waypoint consumption for smooth trajectory execution.
  * 
  * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
  * - Outer loop runs every outer_loop_divisor cycles (default 1 = 500 Hz)
@@ -633,7 +633,7 @@ bool JointController::executeWaypointMovement() {
         od.window_start_ms = millis();
       }
 
-      // === RUNTIME SAFETY CHECK (same as moveMultiDOF_cascade) ===
+      // === RUNTIME SAFETY CHECK ===
       // Check joint limits, mapping limits, and optionally motor limits (tendon breakage)
       // - MOVING mode: check every outer loop cycle (default 500 Hz)
       // - HOLDING mode: check immediately on transition, then every 100 cycles (period depends on outer loop rate)
@@ -1005,7 +1005,7 @@ bool JointController::executeWaypointMovement() {
       delta_theta_smooth = delta_theta_prev[dof] + alpha * (delta_theta[dof] - delta_theta_prev[dof]);
     }
     
-    // Compute motor references using cascade control formula (same as moveMultiDOF_cascade)
+    // Compute motor references using cascade control formula
     // Apply low-speed scaling to delta_theta only (keep stiffness_ref unchanged)
     float cascade_delta = constrain(cascade_influence * cascade_scale_filtered[dof], 0.0f, 1.0f);
     float cascade_stiffness = constrain(cascade_influence, 0.0f, 1.0f);

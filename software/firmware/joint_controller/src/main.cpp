@@ -191,9 +191,6 @@ volatile uint8_t pending_command_type     = 0;
 // Separate emergency flag for extra safety (atomic for cross-core access)
 std::atomic<bool> emergency_stop_requested{false};
 
-// Smooth transition flag
-volatile bool smooth_transition_active = false;
-
 // Array of active controllers accessible from core1 (indices 1..6 for joints)
 JointController *active_controllers[7] = {nullptr}; // Index 0 not used
 

@@ -25,13 +25,13 @@
  * 4. Auto-mapping: Automatic calibration of motor-joint relationships
  * 
  * MOVEMENT COMMAND BEHAVIOR:
- * Movement commands implement an open-ended PID control:
- * - Phase 1: Trajectory-controlled motion towards the target
- * - Phase 2: INDEFINITE holding at target with PID engaged
+ * Waypoint-based control with open-ended PID:
+ * - Phase 1: Waypoint interpolation towards target positions
+ * - Phase 2: INDEFINITE holding at last target with PID engaged
  * 
  * The system leaves the holding phase ONLY when:
- * - STOP command is received
- * - A new movement command (CMD_MOVE_MULTI_DOF)
+ * - STOP / Emergency Stop command is received
+ * - New waypoints arrive via CAN
  * - Joint control commands (CMD_PRETENSION, CMD_RELEASE, etc.)
  * - Safety error (angle limits, invalid encoder, etc.)
  * 
@@ -345,42 +345,6 @@ public:
   // ==========================================================================
 
   /**
-   * @brief Coordinated multi‑DOF movement with double‑loop cascade control
-   *
-   * Implements a cascade control with:
-   * - Outer loop (joint PID): frequency derived from sampling_period via dynamic divider
-   * - Inner loop (motor PID): follows motor references
-   *
-   * CONTROL STRUCTURE:
-   * 1. The outer PID computes delta_theta from joint error (q_des - q_curr)
-   * 2. Motor references are computed as:
-   *    - theta_A_ref = theta_0 + 0.5 * delta_theta + 0.5 * stiffness_ref
-   *    - theta_B_ref = theta_0 + 0.5 * delta_theta - 0.5 * stiffness_ref
-   * 3. Inner PIDs control motors to follow these references
-   *
-   * ADVANTAGES:
-   * - Higher precision in joint control
-   * - Better tendon tension management
-   * - Automatic backlash compensation
-   *
-   * @param target_angles Array of target angles per DOF
-   * @param active_dofs_mask Mask of DOFs to move (bit 0 = DOF 0, etc.)
-   * @param path_type Path type (PATH_LINEAR, PATH_TRIG, PATH_QUAD)
-   * @param sync_strategy Synchronization strategy (0=none, 1=duration, 2=speed)
-   * @param max_speed Maximum speed in rad/s
-   * @param accel_time Acceleration time in seconds
-   * @param steps Number of steps for trajectory
-   * @param sampling_period Base sampling period in microseconds (for inner loop)
-   * @param verbose Verbose output flag
-   * @param max_torque Maximum torque in motor units
-   * @return MovementResult with exit code and message
-   */
-  MovementResult moveMultiDOF_cascade(float *target_angles, uint8_t active_dofs_mask, int path_type,
-                                      int sync_strategy, float max_speed, float accel_time,
-                                      int steps, uint64_t sampling_period, bool verbose,
-                                      int max_torque, bool smooth_transition = false);
-
-  /**
    * @brief Stop all motors
    */
   void stopAllMotors();
@@ -666,8 +630,8 @@ public:
    * @brief Execute waypoint-based movement for all DOFs
    * 
    * Main entry point for waypoint control. Call this from core1_loop() at 500 Hz.
-   * Implements the same cascade control as moveMultiDOF_cascade but with continuous
-   * waypoint consumption instead of pre-generated trajectory arrays.
+   * Implements cascade control (outer joint PID + inner motor PID) with continuous
+   * waypoint consumption for smooth trajectory execution.
    * 
    * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
    * - Outer loop runs every outer_loop_divisor cycles (default 1 = 500 Hz)
