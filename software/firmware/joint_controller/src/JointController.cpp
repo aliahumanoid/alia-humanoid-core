@@ -1265,25 +1265,19 @@ bool JointController::getPid(uint8_t dof_index, uint8_t motor_type, float &kp, f
     return false;
   }
 
-  // Find corresponding motor (1=agonist, 2=antagonist)
+  // Find corresponding motor using is_agonist flag (1=agonist, 2=antagonist)
+  bool want_agonist = (motor_type == 1);
   int motor_index = -1;
   for (int i = 0; i < config.motor_count; i++) {
-    if (config.motors[i].dof_index == dof_index) {
-      // The first motor found for this DOF is the agonist (1), the second is the antagonist (2)
-      if (motor_type == 1 && motor_index == -1) {
-        motor_index = i;
-        break;
-      } else if (motor_type == 2 && motor_index != -1) {
-        motor_index = i;
-        break;
-      } else if (motor_index == -1) {
-        motor_index = i;
-      }
+    if (config.motors[i].dof_index == dof_index && config.motors[i].is_agonist == want_agonist) {
+      motor_index = i;
+      break;
     }
   }
 
   if (motor_index == -1) {
-    LOG_ERROR("Motor not found in getPid");
+    LOG_ERROR("Motor not found in getPid (DOF=" + String(dof_index) +
+              ", type=" + String(motor_type) + ")");
     return false;
   }
 
@@ -1315,25 +1309,19 @@ bool JointController::setPid(uint8_t dof_index, uint8_t motor_type, float kp, fl
     return false;
   }
 
-  // Find corresponding motor (1=agonist, 2=antagonist)
+  // Find corresponding motor using is_agonist flag (1=agonist, 2=antagonist)
+  bool want_agonist = (motor_type == 1);
   int motor_index = -1;
   for (int i = 0; i < config.motor_count; i++) {
-    if (config.motors[i].dof_index == dof_index) {
-      // The first motor found for this DOF is the agonist (1), the second is the antagonist (2)
-      if (motor_type == 1 && motor_index == -1) {
-        motor_index = i;
-        break;
-      } else if (motor_type == 2 && motor_index != -1) {
-        motor_index = i;
-        break;
-      } else if (motor_index == -1) {
-        motor_index = i;
-      }
+    if (config.motors[i].dof_index == dof_index && config.motors[i].is_agonist == want_agonist) {
+      motor_index = i;
+      break;
     }
   }
 
   if (motor_index == -1) {
-    LOG_ERROR("Motor not found in setPid");
+    LOG_ERROR("Motor not found in setPid (DOF=" + String(dof_index) +
+              ", type=" + String(motor_type) + ")");
     return false;
   }
 

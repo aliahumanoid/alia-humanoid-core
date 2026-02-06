@@ -137,24 +137,24 @@ const JointConfig KNEE_RIGHT_CONFIG = {
                   .auto_mapping_invert_direction  = true // INVERTED LOGIC for Knee Right
 
               }}},
-    .motors = {{                     // Motor 0: extensor (agonist for DOF 0)
-                .id             = 2, // Sequential ID: 2 for agonist
+    .motors = {{                     // Motor 0: extensor (antagonist for DOF 0)
+                .id             = 2,
                 .dof_index      = 0,
                 .name           = "extensor",
                 .invert         = true,
-                .is_agonist     = false, // Agonist motor for extension
+                .is_agonist     = false, // Antagonist motor for extension
                 .max_torque     = 500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                    .ki  = PID_DEFAULT_INNER_KI,
                                    .kd  = PID_DEFAULT_INNER_KD,
                                    .tau = 0.005f}},
-               {                     // Motor 1: flexor (antagonist for DOF 0)
-                .id             = 1, // Sequential ID: 1 for antagonist
+               {                     // Motor 1: flexor (agonist for DOF 0)
+                .id             = 1,
                 .dof_index      = 0,
                 .name           = "flexor",
                 .invert         = true,
-                .is_agonist     = true, // Antagonist motor for flexion
+                .is_agonist     = true, // Agonist motor for flexion
                 .max_torque     = 500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
