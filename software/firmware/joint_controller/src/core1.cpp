@@ -1062,8 +1062,6 @@ void core1_loop() {
       // CAN Bus Diagnostic Test - Motor CAN only (Host CAN disabled)
       LOG_INFO("=== CAN BUS DIAGNOSTIC TEST ===");
       
-      extern MCP_CAN CAN;  // Motor CAN (J4)
-      
       bool all_ok = true;
       int motors_responding = 0;
       int motors_failed = 0;
@@ -1081,66 +1079,9 @@ void core1_loop() {
       // Test 1b: MCP2515 Loopback Test (internal, no bus needed)
       LOG_INFO("[DIAG] Step 1b: MCP2515 LOOPBACK Test");
       {
-        // Switch to loopback mode
-        if (CAN.setMode(MCP_LOOPBACK) == CAN_OK) {
-          LOG_INFO("[DIAG]   Loopback mode enabled");
-          
-          // Send a test message
-          unsigned char testData[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
-          unsigned long testId = 0x7FF;  // Use max standard ID
-          
-          byte sendResult = CAN.sendMsgBuf(testId, 0, 8, testData);
-          if (sendResult == CAN_OK) {
-            LOG_INFO("[DIAG]   TX in loopback: OK");
-            
-            // Wait for message to loop back
-            delay(10);
-            
-            // Try to receive the looped message
-            if (CAN.checkReceive() == CAN_MSGAVAIL) {
-              unsigned long rxId;
-              unsigned char rxLen;
-              unsigned char rxBuf[8];
-              
-              if (CAN.readMsgBuf(&rxId, &rxLen, rxBuf) == CAN_OK) {
-                // Verify received data matches sent data
-                bool dataMatch = (rxId == testId) && (rxLen == 8);
-                for (int i = 0; i < 8 && dataMatch; i++) {
-                  if (rxBuf[i] != testData[i]) dataMatch = false;
-                }
-                
-                if (dataMatch) {
-                  LOG_INFO("[DIAG]   ✓ LOOPBACK OK - SPI + MCP2515 working!");
-                  LOG_INFO("[DIAG]     Received ID=0x" + String(rxId, HEX) + 
-                           " Data=" + String(rxBuf[0], HEX) + "," + String(rxBuf[1], HEX) + 
-                           "," + String(rxBuf[2], HEX) + "," + String(rxBuf[3], HEX));
-                  loopback_ok = true;
-                } else {
-                  LOG_ERROR("[DIAG]   ✗ LOOPBACK DATA MISMATCH");
-                  LOG_ERROR("[DIAG]     Expected ID=0x7FF, got ID=0x" + String(rxId, HEX));
-                }
-              } else {
-                LOG_ERROR("[DIAG]   ✗ LOOPBACK RX read failed");
-              }
-            } else {
-              LOG_ERROR("[DIAG]   ✗ LOOPBACK RX: No message received");
-              LOG_ERROR("[DIAG]     MCP2515 internal issue or SPI problem");
-            }
-          } else {
-            LOG_ERROR("[DIAG]   ✗ LOOPBACK TX failed (code " + String(sendResult) + ")");
-          }
-          
-          // Return to normal mode for bus tests
-          if (CAN.setMode(MCP_NORMAL) == CAN_OK) {
-            LOG_INFO("[DIAG]   Returned to normal mode");
-          } else {
-            LOG_ERROR("[DIAG]   ✗ Failed to return to normal mode!");
-            all_ok = false;
-          }
-        } else {
-          LOG_ERROR("[DIAG]   ✗ Failed to enter loopback mode - SPI issue?");
-          all_ok = false;
-        }
+        const unsigned char testData[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
+        loopback_ok = can_loopback_test(CAN, "[DIAG] Motor CAN", 0x7FF, testData);
+        if (!loopback_ok) all_ok = false;
         delay(20);
       }
       

@@ -92,6 +92,10 @@ extern char command[100];
 // CAN bus controller for motor control (J4 CAN_Servo - SPI1)
 extern MCP_CAN CAN;
 
+// CAN loopback test utility (used by setup and CMD_CAN_DIAG)
+bool can_loopback_test(MCP_CAN &can, const char* label,
+                       unsigned long test_id, const unsigned char test_data[8]);
+
 // CAN bus controller for host commands (J5 CAN_Controller - SPI1 shared, different CS)
 extern MCP_CAN CAN_HOST;
 
