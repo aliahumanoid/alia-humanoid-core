@@ -307,6 +307,17 @@ void core0_main_loop() {
   }
 #pragma endregion
 
+  // LED mirrors motor power gate state (24V): ON = motors powered, OFF = power cut
+  // Rate-limited to ~2Hz to avoid unnecessary GPIO writes
+  {
+    static uint32_t last_led_update_ms = 0;
+    uint32_t now_ms = millis();
+    if (now_ms - last_led_update_ms >= 500) {
+      last_led_update_ms = now_ms;
+      digitalWrite(LED_BUILTIN, safety_is_motor_power_enabled() ? HIGH : LOW);
+    }
+  }
+
   // Update shared DOF angles from encoders (single read point for entire system)
   updateSharedDofAngles();
 
