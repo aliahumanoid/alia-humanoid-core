@@ -262,6 +262,39 @@ LKM_Motor *JointController::getMotor(uint8_t motor_index) {
 // MOTOR & PID CONTROL
 // ============================================================================
 
+// ============================================================================
+// SAFE SLEEP HELPER (watchdog kick + emergency stop check)
+// ============================================================================
+
+/**
+ * @brief Sleep with periodic watchdog kicks and emergency stop checks
+ *
+ * Replaces bare sleep_ms() in blocking motor operations to prevent
+ * external watchdog timeout (~1s on Rev B) and allow emergency stop
+ * processing during long operations like recalculateMotorOffsets.
+ *
+ * @param ms Total sleep duration in milliseconds
+ * @return true if sleep completed normally, false if interrupted by emergency stop
+ */
+static bool safeSleepMs(int ms) {
+  const int KICK_INTERVAL_MS = 50;  // Kick watchdog every 50ms (well within ~1s timeout)
+  int remaining = ms;
+
+  while (remaining > 0) {
+    int chunk = (remaining > KICK_INTERVAL_MS) ? KICK_INTERVAL_MS : remaining;
+    sleep_ms(chunk);
+    remaining -= chunk;
+
+    safety_watchdog_kick();
+
+    if (emergency_stop_requested) {
+      LOG_WARN("[SAFETY] Emergency stop detected during blocking operation");
+      return false;
+    }
+  }
+  return true;
+}
+
 // Pretension motors of a specific DOF
 bool JointController::pretension(uint8_t dof_index, int torque, int duration_ms) {
   if (dof_index >= config.dof_count) {
@@ -292,8 +325,11 @@ bool JointController::pretension(uint8_t dof_index, int torque, int duration_ms)
   LOG_INFO("Pretensioning parameters: index=" + String(dof_index) + " torque=" + String(torque) +
            " duration=" + String(duration_ms));
 
-  // Wait for specified duration
-  sleep_ms(duration_ms);
+  // Wait for specified duration (with watchdog kick + e-stop check)
+  if (!safeSleepMs(duration_ms)) {
+    stopDofMotors(dof_index);
+    return false;
+  }
 
   // Stop all motors of the DOF
   stopDofMotors(dof_index);
@@ -357,8 +393,11 @@ bool JointController::release(uint8_t dof_index, int torque, int duration_ms) {
   LOG_INFO("Releasing DOF: index=" + String(dof_index) + " torque=" + String(torque) +
            " duration=" + String(duration_ms));
 
-  // Wait for specified duration
-  sleep_ms(duration_ms);
+  // Wait for specified duration (with watchdog kick + e-stop check)
+  if (!safeSleepMs(duration_ms)) {
+    stopDofMotors(dof_index);
+    return false;
+  }
 
   // Stop all motors of the DOF
   stopDofMotors(dof_index);
@@ -865,7 +904,10 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
     antagonist_motor->setTorque(effective_antagonist_torque);
 
     // Wait for system to react (longer on retries to allow slack to be taken up)
-    sleep_ms(100 + (tension_attempt - 1) * 50);
+    if (!safeSleepMs(100 + (tension_attempt - 1) * 50)) {
+      stopDofMotors(dof_index);
+      return false;
+    }
 
     // Read angles under tension
     float tensioned_agonist_angle    = agonist_motor->getMultiAngleSync(false).angle;
@@ -951,7 +993,10 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   int elapsed_tension_ms = tension_attempt * 150;  // Approximate time spent in tension loop
   int remaining_pretension_ms = pretension_duration_ms - elapsed_tension_ms;
   if (remaining_pretension_ms > 0) {
-    sleep_ms(remaining_pretension_ms);
+    if (!safeSleepMs(remaining_pretension_ms)) {
+      stopDofMotors(dof_index);
+      return false;
+    }
   }
 
   // FIX: Maintain FULL pretension torque during measurement.
@@ -975,7 +1020,10 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   const int MAX_CONVERGENCE_TIME_MS = 5000;    // Maximum wait time (5 seconds for slack recovery)
   const int MIN_INITIAL_WAIT_MS = 200;         // Minimum initial wait before first check
   
-  sleep_ms(MIN_INITIAL_WAIT_MS);
+  if (!safeSleepMs(MIN_INITIAL_WAIT_MS)) {
+    stopDofMotors(dof_index);
+    return false;
+  }
   
   float prev_agonist = agonist_motor->getMultiAngleSync(false).angle;
   float prev_antagonist = antagonist_motor->getMultiAngleSync(false).angle;
@@ -989,7 +1037,10 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   LOG_INFO("Waiting for system convergence (max " + String(MAX_CONVERGENCE_TIME_MS) + "ms)...");
   
   while (total_wait_ms < MAX_CONVERGENCE_TIME_MS) {
-    sleep_ms(POLL_INTERVAL_MS);
+    if (!safeSleepMs(POLL_INTERVAL_MS)) {
+      stopDofMotors(dof_index);
+      return false;
+    }
     total_wait_ms += POLL_INTERVAL_MS;
     
     float curr_agonist = agonist_motor->getMultiAngleSync(false).angle;
@@ -1175,7 +1226,7 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   LOG_DEBUG("Method: LINEAR EQUATIONS (direct computation)");
 
   // DEBUG: Verify elastic effect after tension release
-  sleep_ms(300); // Wait for system to stabilize without tension
+  safeSleepMs(300); // Wait for system to stabilize without tension
 
   // Read angles again without tension
   float post_release_agonist_angle    = agonist_motor->getMultiAngleSync().angle;
