@@ -3575,9 +3575,7 @@ function renderMappingChart(mappingData) {
     });
     
     // Update mapping data info
-    const dofInfo = selectedDof === "ALL" ? 
-        `${dofsToShow.length} DOF (${dofsToShow.join(', ')})` : 
-        `DOF ${dofsToShow[0]}`;
+    const dofInfo = `${dofsToShow.length} DOF (${dofsToShow.join(', ')})`;
     
     updateMappingDataInfo(`${selectedJoint}: ${mappingData.total_points} points, ${dofInfo}`);
     
