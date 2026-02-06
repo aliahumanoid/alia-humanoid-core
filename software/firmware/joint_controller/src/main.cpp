@@ -236,6 +236,10 @@ void setup() {
   SPI1.begin();
   // Note: SPI speed is set in mcp_can library (see lib/mcp_can/mcp_can.cpp)
 
+  // Initialize hardware safety system (Rev B: watchdog + power gate)
+  // On Rev A: safe no-ops, motor power assumed always on
+  safety_init();
+
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
 
@@ -601,6 +605,11 @@ void setup() {
 
   queue_init(&movement_sample_queue, sizeof(MovementSample), 512);
   clearMovementSampleQueue();
+
+  // Enable motor power now that all systems are initialized
+  // Rev B: GP22 HIGH — motors can now receive commands
+  // Rev A: no-op (motors always powered)
+  safety_motor_power_enable();
 #pragma endregion
 }
 #pragma endregion

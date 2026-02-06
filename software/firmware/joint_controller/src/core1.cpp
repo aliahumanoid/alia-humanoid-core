@@ -721,6 +721,42 @@ void core1_loop() {
     // Motor CAN (J4) is handled by LKM_Motor during motor operations
     pollHostCan();
 
+    // === EMERGENCY STOP CHECK (immediately after CAN poll) ===
+    // Must run BEFORE any motor commands to ensure zero-delay stop
+    if (emergency_stop_requested) {
+      LOG_INFO("Core1: Emergency stop requested");
+
+      // Cut motor power at hardware level (Rev B: <10µs via MOSFET gate)
+      safety_motor_power_disable();
+
+      // Stop all motors via CAN (software stop — belt-and-suspenders with HW cutoff)
+      if (active_joint_controller != nullptr) {
+        active_joint_controller->stopAllMotors();
+        LOG_INFO("Core1: All motors stopped");
+        
+        // Clear all waypoint buffers to exit waypoint control loop
+        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+          waypoint_buffer_clear(dof);
+          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+        }
+        LOG_INFO("Core1: Waypoint buffers cleared");
+      }
+
+      // Reset flag
+      emergency_stop_requested = false;
+
+      LOG_INFO("Core1: Emergency stop flag cleared");
+
+      // Notify core0
+      if (shared_data_ext.flag == 0) {
+        shared_data_ext.flag = CMD1_END_MOVE;
+        strcpy(shared_data_ext.message, "EMERGENCY STOP EXECUTED");
+      }
+
+      SERIAL_COM_LN("EMERGENCY STOP EXECUTED");
+      continue;
+    }
+
     // === ENCODER STREAMING VIA CAN ===
     // Send encoder data at 200Hz if streaming is active
     // This reads from shared_dof_angles (updated by Core0)
@@ -760,38 +796,11 @@ void core1_loop() {
       timing_initialized = false;
     }
 
-    // === EMERGENCY STOP CHECK ===
-    if (emergency_stop_requested) {
-      LOG_INFO("Core1: Emergency stop requested");
-
-      // Stop all motors immediately
-      // No SPI1 conflicts possible - Core1 has exclusive CAN access
-      if (active_joint_controller != nullptr) {
-        active_joint_controller->stopAllMotors();
-        LOG_INFO("Core1: All motors stopped");
-        
-        // Clear all waypoint buffers to exit waypoint control loop
-        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-          waypoint_buffer_clear(dof);
-          waypoint_buffer_set_state(dof, WaypointState::IDLE);
-        }
-        LOG_INFO("Core1: Waypoint buffers cleared");
-      }
-
-      // Reset flag
-      emergency_stop_requested = false;
-
-      LOG_INFO("Core1: Emergency stop flag cleared");
-
-      // Notify core0
-      if (shared_data_ext.flag == 0) {
-        shared_data_ext.flag = CMD1_END_MOVE;
-        strcpy(shared_data_ext.message, "EMERGENCY STOP EXECUTED");
-      }
-
-      SERIAL_COM_LN("EMERGENCY STOP EXECUTED");
-      continue;
-    }
+    // === WATCHDOG KICK ===
+    // Must run every iteration to prove the control loop is alive.
+    // Rev B: kicks external MAX6369 (rate-limited internally to ~200ms)
+    // If this stops: external WDT cuts motor power after ~1s, internal WDT resets MCU.
+    safety_watchdog_kick();
 
     // ============================================================================
     // AUTO-MAPPING CONTINUOUS PROCESSING (MUST RUN BEFORE COMMAND CHECK!)
@@ -890,6 +899,10 @@ void core1_loop() {
       break;
 
     case CMD_PRETENSION: {
+      // Re-enable motor power if it was cut by emergency stop (Rev B HW gate)
+      if (!safety_is_motor_power_enabled()) {
+        safety_motor_power_enable();
+      }
       // Pretension the motors of the specific DOF
       // Check for inverted logic (e.g. Knee joint)
       bool invert = controller->getConfig().dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
@@ -904,6 +917,10 @@ void core1_loop() {
     }
 
     case CMD_PRETENSION_ALL:
+      // Re-enable motor power if it was cut by emergency stop (Rev B HW gate)
+      if (!safety_is_motor_power_enabled()) {
+        safety_motor_power_enable();
+      }
       // Pretension all DOFs of the joint
       // Note: This assumes all DOFs share the same logic or controller handles it.
       // Ideally iterate through DOFs, but for now relying on standard implementation.

@@ -39,6 +39,7 @@
 #include <commands.h> // Before global.h to avoid conflicts
 #include <config_presets.h>
 #include <shared_data.h>
+#include <safety_system.h>
 #include <waypoint_buffer.h>
 
 // Legacy support includes

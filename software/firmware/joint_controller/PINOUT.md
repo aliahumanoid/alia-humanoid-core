@@ -96,19 +96,26 @@ GP17 (was slave CS)  ──────────────────► G
 3. Both conditions (watchdog OK + software enable) required for power
 
 **Firmware Integration:**
+
+The safety system is implemented in `safety_system.h` / `safety_system.cpp`.
+Activate by adding `-DSAFETY_BOARD_REV_B` to `build_flags` in `platformio.ini`.
+
 ```cpp
-// In setup()
-pinMode(15, OUTPUT);  // WDT kick
-pinMode(22, OUTPUT);  // Safety enable
-digitalWrite(22, LOW); // Start disabled
+#include <safety_system.h>
 
-// In main loop (call every ~100ms)
-digitalWrite(15, HIGH);
-delayMicroseconds(10);
-digitalWrite(15, LOW);
+// In setup() — called automatically by main.cpp
+safety_init();                   // Configure GPIO, start disabled
+// ... (CAN, encoders, controller init) ...
+safety_motor_power_enable();     // Enable power after full init
 
-// Enable motor power when ready
-digitalWrite(22, HIGH);
+// In Core1 loop — called every iteration (rate-limited internally)
+safety_watchdog_kick();          // Kick external MAX6369 + internal RP2350 WDT
+
+// Emergency stop — immediate hardware cutoff
+safety_motor_power_disable();    // GP22 LOW → MOSFETs off in <10µs
+
+// Recovery after e-stop (e.g. on PRETENSION command)
+safety_motor_power_enable();     // Re-enable motor power
 ```
 
 **Safety Behavior:**
