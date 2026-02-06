@@ -113,6 +113,10 @@ let jointPhysicalLimits = {};
 // Joint configuration from joint_config.json
 let jointConfigData = null;
 
+// Firmware safe limits (from CMD_CHECK_OFFSETS → EVT:SAFE_LIMITS)
+// Keyed by "jointId_dof" e.g. "2_0" → {min: 5.5, max: 94.2}
+let firmwareSafeLimits = {};
+
 // Variables for intelligent status message scrolling
 let userScrolledUp = false; // Flag to track if user scrolled up
 let autoScrollEnabled = true; // Flag to enable/disable auto-scroll
@@ -569,6 +573,17 @@ $(document).ready(function() {
         if (data && data.status !== undefined) {
             console.log('Recalc status:', data);
             updateRecalcBadge(data.joint_id, data.dof, data.status, data.error_agonist, data.error_antagonist);
+        }
+    });
+
+    // Listener for firmware safe limits (from CMD_CHECK_OFFSETS)
+    socket.on('safe_limits', function(data) {
+        if (data && data.joint_id !== undefined && data.dof !== undefined) {
+            const key = `${data.joint_id}_${data.dof}`;
+            firmwareSafeLimits[key] = { min: data.min, max: data.max };
+            console.log(`Safe limits DOF ${data.dof}: [${data.min}, ${data.max}]`);
+            // Refresh the limits panel with new data
+            updateTrajectoryLimitsPanel($("#jointSelect").val());
         }
     });
 
@@ -2536,6 +2551,9 @@ function updateCanMotionJoint() {
     
     // Switch between 1DOF and 2DOF input layouts
     updateWaypointInputLayout();
+    
+    // Update movement limits panel
+    updateTrajectoryLimitsPanel(joint);
 }
 
 /**
@@ -2626,6 +2644,17 @@ function sendCanWaypointCommand() {
     if (Number.isNaN(angle)) {
         appendStatusMessage("⚠️ Enter a valid angle in degrees.");
         return;
+    }
+
+    // Validate angle against effective limits
+    const angleInput = document.getElementById('canWaypointAngle');
+    if (angleInput && angleInput.min !== '' && angleInput.max !== '') {
+        const limMin = parseFloat(angleInput.min);
+        const limMax = parseFloat(angleInput.max);
+        if (angle < limMin || angle > limMax) {
+            appendStatusMessage(`⚠️ Angle ${angle}° is outside safe range [${limMin.toFixed(1)}, ${limMax.toFixed(1)}] for DOF ${dofIndex}`);
+            return;
+        }
     }
 
     // Set interpolation mode before sending waypoint
@@ -4244,6 +4273,24 @@ function previewWaypointBatch() {
         if (Number.isNaN(targetAngle0) || Number.isNaN(targetAngle1)) {
             showWaypointPopup("Error", "<p class='text-red-500'>Enter valid angles for DOF0 and DOF1.</p>");
             return;
+        }
+        
+        // Validate angles against effective limits
+        const dof0Input = document.getElementById('canWaypointAngleDof0');
+        const dof1Input = document.getElementById('canWaypointAngleDof1');
+        if (dof0Input && dof0Input.min !== '' && dof0Input.max !== '') {
+            const lMin = parseFloat(dof0Input.min), lMax = parseFloat(dof0Input.max);
+            if (targetAngle0 < lMin || targetAngle0 > lMax) {
+                appendStatusMessage(`⚠️ DOF0 angle ${targetAngle0}° outside safe range [${lMin.toFixed(1)}, ${lMax.toFixed(1)}]`);
+                return;
+            }
+        }
+        if (dof1Input && dof1Input.min !== '' && dof1Input.max !== '') {
+            const lMin = parseFloat(dof1Input.min), lMax = parseFloat(dof1Input.max);
+            if (targetAngle1 < lMin || targetAngle1 > lMax) {
+                appendStatusMessage(`⚠️ DOF1 angle ${targetAngle1}° outside safe range [${lMin.toFixed(1)}, ${lMax.toFixed(1)}]`);
+                return;
+            }
         }
         
         // Get start angles
@@ -8014,6 +8061,136 @@ async function sendMultiWaypointSmoothCurveAsync() {
  */
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================================
+// TRAJECTORY LIMITS PANEL — Show movement limits per DOF
+// ============================================================================
+
+/**
+ * Update the trajectory limits panel with physical, mapping and firmware safe limits.
+ * Uses jointConfigData (already loaded) + firmwareSafeLimits (from CHECK_OFFSETS).
+ * Also sets min/max attributes on angle input fields.
+ */
+function updateTrajectoryLimitsPanel(jointName) {
+    const panel = document.getElementById('trajectoryLimitsPanel');
+    if (!panel) return;
+
+    if (!jointConfigData || !jointConfigData.joints) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    const configKey = jointName ? jointName.toLowerCase() : '';
+    const jointConfig = jointConfigData.joints[configKey];
+    if (!jointConfig || !jointConfig.dofs) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    const jointId = jointConfig.id;
+    const dofs = jointConfig.dofs;
+    let html = '';
+
+    // Collect the most restrictive limits per DOF for input validation
+    const effectiveLimits = [];
+
+    for (let i = 0; i < dofs.length; i++) {
+        const dof = dofs[i];
+        const dofName = (dof.name || `DOF ${i}`).replace(/_/g, ' ');
+        const physMin = dof.min_angle;
+        const physMax = dof.max_angle;
+        const mapMin = dof.auto_mapping_min_angle !== undefined ? dof.auto_mapping_min_angle : null;
+        const mapMax = dof.auto_mapping_max_angle !== undefined ? dof.auto_mapping_max_angle : null;
+
+        // Firmware safe limits (may not be available yet)
+        const safeKey = `${jointId}_${i}`;
+        const safeLimits = firmwareSafeLimits[safeKey] || null;
+
+        // Determine effective (most restrictive) limits for input validation
+        let effMin = physMin;
+        let effMax = physMax;
+        if (mapMin !== null) effMin = Math.max(effMin, mapMin);
+        if (mapMax !== null) effMax = Math.min(effMax, mapMax);
+        if (safeLimits) {
+            effMin = Math.max(effMin, safeLimits.min);
+            effMax = Math.min(effMax, safeLimits.max);
+        }
+        effectiveLimits.push({ min: effMin, max: effMax });
+
+        // Build compact row for this DOF
+        html += `<div class="mb-1 ${i > 0 ? 'mt-1.5 pt-1.5 border-t border-gray-100' : ''}">`;
+        html += `<span class="font-semibold text-gray-700">DOF ${i}</span> <span class="text-gray-400">(${dofName})</span>`;
+        html += `<div class="grid grid-cols-3 gap-x-3 mt-0.5">`;
+
+        // Physical limits
+        html += `<div><span class="text-gray-400">Physical:</span> <span class="font-mono">${physMin.toFixed(1)} .. ${physMax.toFixed(1)}</span></div>`;
+
+        // Mapping limits
+        if (mapMin !== null && mapMax !== null) {
+            html += `<div><span class="text-blue-400">Mapping:</span> <span class="font-mono text-blue-600">${mapMin.toFixed(1)} .. ${mapMax.toFixed(1)}</span></div>`;
+        } else {
+            html += `<div><span class="text-gray-300">Mapping: n/a</span></div>`;
+        }
+
+        // Firmware safe limits
+        if (safeLimits) {
+            html += `<div><span class="text-green-500">Safe:</span> <span class="font-mono text-green-700 font-semibold">${safeLimits.min.toFixed(1)} .. ${safeLimits.max.toFixed(1)}</span></div>`;
+        } else {
+            html += `<div><span class="text-gray-300">Safe: <i>Check Offsets</i></span></div>`;
+        }
+
+        html += `</div></div>`;
+    }
+
+    panel.innerHTML = html;
+    panel.classList.remove('hidden');
+
+    // Apply effective limits to angle input fields
+    applyAngleLimitsToInputs(dofs.length, effectiveLimits);
+}
+
+/**
+ * Set min/max attributes on waypoint angle inputs and sinusoid fields.
+ */
+function applyAngleLimitsToInputs(dofCount, effectiveLimits) {
+    if (effectiveLimits.length === 0) return;
+
+    // Single DOF input
+    const singleAngle = document.getElementById('canWaypointAngle');
+    if (singleAngle && effectiveLimits[0]) {
+        singleAngle.min = effectiveLimits[0].min;
+        singleAngle.max = effectiveLimits[0].max;
+        singleAngle.title = `Range: ${effectiveLimits[0].min.toFixed(1)} .. ${effectiveLimits[0].max.toFixed(1)}`;
+    }
+
+    // Dual DOF inputs
+    const dof0Input = document.getElementById('canWaypointAngleDof0');
+    if (dof0Input && effectiveLimits[0]) {
+        dof0Input.min = effectiveLimits[0].min;
+        dof0Input.max = effectiveLimits[0].max;
+        dof0Input.title = `Range: ${effectiveLimits[0].min.toFixed(1)} .. ${effectiveLimits[0].max.toFixed(1)}`;
+    }
+    const dof1Input = document.getElementById('canWaypointAngleDof1');
+    if (dof1Input && effectiveLimits.length > 1 && effectiveLimits[1]) {
+        dof1Input.min = effectiveLimits[1].min;
+        dof1Input.max = effectiveLimits[1].max;
+        dof1Input.title = `Range: ${effectiveLimits[1].min.toFixed(1)} .. ${effectiveLimits[1].max.toFixed(1)}`;
+    }
+
+    // Sinusoid inputs per DOF
+    for (let i = 0; i < Math.min(3, effectiveLimits.length); i++) {
+        const minInput = document.getElementById(`sinusoidDof${i}Min`);
+        const maxInput = document.getElementById(`sinusoidDof${i}Max`);
+        if (minInput) {
+            minInput.min = effectiveLimits[i].min;
+            minInput.max = effectiveLimits[i].max;
+        }
+        if (maxInput) {
+            maxInput.min = effectiveLimits[i].min;
+            maxInput.max = effectiveLimits[i].max;
+        }
+    }
 }
 
 // ============================================================================

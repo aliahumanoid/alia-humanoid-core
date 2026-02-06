@@ -257,6 +257,9 @@ class SerialHandler:
             elif actual_message.startswith("RECALC_STATUS("):
                 # Parse offset validation result: RECALC_STATUS(joint_id,dof,status,err_a,err_b)
                 self._handle_recalc_status(actual_message)
+            elif actual_message.startswith("SAFE_LIMITS("):
+                # Parse firmware safe limits: SAFE_LIMITS(joint_id,dof,min,max)
+                self._handle_safe_limits(actual_message)
             elif actual_message.startswith("JOINT "):
                 # Parse joint identification: "JOINT <id> <name>"
                 self._handle_joint_identification(actual_message)
@@ -352,6 +355,36 @@ class SerialHandler:
         else:
             logger.warning(f"Failed to parse RECALC_STATUS: {message}")
             self.status_message.append(message)
+
+    def _handle_safe_limits(self, message: str) -> None:
+        """Parse SAFE_LIMITS(joint_id,dof,min,max)"""
+        match = re.match(
+            r"SAFE_LIMITS\((\d+),(\d+),([-+]?\d*\.?\d+),([-+]?\d*\.?\d+)\)",
+            message,
+        )
+        if match:
+            joint_id = int(match.group(1))
+            dof = int(match.group(2))
+            safe_min = float(match.group(3))
+            safe_max = float(match.group(4))
+
+            logger.info(
+                f"Safe limits DOF {dof}: [{safe_min:.1f}, {safe_max:.1f}]"
+            )
+
+            if self.socketio:
+                self.socketio.emit(
+                    "safe_limits",
+                    {
+                        "joint_id": joint_id,
+                        "dof": dof,
+                        "min": safe_min,
+                        "max": safe_max,
+                    },
+                    namespace="/movement",
+                )
+        else:
+            logger.warning(f"Failed to parse SAFE_LIMITS: {message}")
 
     def handle_mapping_data(self, line: str, ser: serial.Serial) -> None:
         # MAPPING_DATA(total_points,dof_count) protocol

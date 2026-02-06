@@ -1229,6 +1229,17 @@ void core1_loop() {
         SERIAL_COM_LN(detail_buf);
       }
 
+      // Emit firmware safe limits per DOF (from linear equations, if available)
+      for (uint8_t dof = 0; dof < controller->getConfig().dof_count; dof++) {
+        DofLinearEquations *eq = controller->getLinearEquations(dof);
+        if (eq != nullptr && eq->calculated && eq->limits_valid) {
+          snprintf(detail_buf, sizeof(detail_buf),
+                   "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
+                   ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
+          SERIAL_COM_LN(detail_buf);
+        }
+      }
+
       // Summary result
       const char* summary = !has_any_data ? "NO_DATA" : (all_valid ? "ALL_VALID" : "RECALC_NEEDED");
       if (shared_data_ext.flag == 0) {
