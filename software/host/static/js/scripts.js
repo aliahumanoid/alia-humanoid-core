@@ -3926,6 +3926,13 @@ function generateSmartQuickButtons() {
         return;
     }
     
+    // Verify mapping data belongs to the currently selected joint
+    const dataJoint = automaticMappingData.joint_name;
+    if (dataJoint && dataJoint !== joint) {
+        generateDefaultQuickButtons(jointType, container);
+        return;
+    }
+    
     // Analyze mapping data to get actual ranges
     const mappingRanges = extractMappingRanges(automaticMappingData, jointType);
     
@@ -4547,12 +4554,23 @@ function generateSmartWaypointButtons() {
 
     // If no mapping data available, use defaults
     if (!automaticMappingData || !automaticMappingData.present_dofs) {
+        console.log(`[SmartWP] No mapping data for ${joint}, using defaults`);
+        generateDefaultWaypointButtons(jointType, container);
+        return;
+    }
+
+    // Verify mapping data belongs to the currently selected joint
+    // Prevents showing stale data from a previously selected joint
+    const dataJoint = automaticMappingData.joint_name;
+    if (dataJoint && dataJoint !== joint) {
+        console.log(`[SmartWP] Mapping data is for ${dataJoint}, not ${joint} — using defaults`);
         generateDefaultWaypointButtons(jointType, container);
         return;
     }
 
     const mappingRanges = extractMappingRanges(automaticMappingData, jointType);
     if (!mappingRanges) {
+        console.log(`[SmartWP] No valid mapping ranges for ${joint}, using defaults`);
         generateDefaultWaypointButtons(jointType, container);
         return;
     }
