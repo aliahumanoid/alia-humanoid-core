@@ -781,7 +781,7 @@ void core1_loop() {
     // Execute waypoint trajectory for all DOFs (if waypoints available)
     // This runs @ 500 Hz with precise timing (outer loop every outer_loop_divisor cycles)
     bool waypoint_active = false;
-    if (active_joint_controller != nullptr) {
+    if (active_joint_controller != nullptr && safety_is_motor_power_enabled()) {
       waypoint_active = active_joint_controller->executeWaypointMovement();
     }
 
@@ -898,6 +898,24 @@ void core1_loop() {
         shared_data_ext.flag = CMD1_FAIL_MOVE;
         strcpy(shared_data_ext.message, "ERROR: Controller not initialized");
       }
+      continue;
+    }
+
+    // Guard: reject motor-moving commands when power gate is disabled (after e-stop)
+    // Only PRETENSION can re-enable power. STOP, zero-setting and diagnostics always allowed.
+    if (!safety_is_motor_power_enabled() &&
+        command != CMD_STOP &&
+        command != CMD_PRETENSION &&
+        command != CMD_PRETENSION_ALL &&
+        command != CMD_SET_ZERO_CURRENT_POS &&
+        command != CMD_ZERO_MOTOR_ENCODERS &&
+        command != CMD_STOP_AUTO_MAPPING &&
+        command != CMD_CAN_DIAG) {
+      if (shared_data_ext.flag == 0) {
+        shared_data_ext.flag = CMD1_FAIL_MOVE;
+        strcpy(shared_data_ext.message, "ERROR: Motor power disabled. Send PRETENSION to recover.");
+      }
+      LOG_WARN("Command rejected: motor power disabled after emergency stop");
       continue;
     }
 
