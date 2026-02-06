@@ -260,6 +260,9 @@ class SerialHandler:
             elif actual_message.startswith("SAFE_LIMITS("):
                 # Parse firmware safe limits: SAFE_LIMITS(joint_id,dof,min,max)
                 self._handle_safe_limits(actual_message)
+            elif actual_message.startswith("OFFSET_DRIFT("):
+                # Parse offset drift check: OFFSET_DRIFT(joint_id,dof,status,err_a,err_b)
+                self._handle_offset_drift(actual_message)
             elif actual_message.startswith("JOINT "):
                 # Parse joint identification: "JOINT <id> <name>"
                 self._handle_joint_identification(actual_message)
@@ -385,6 +388,40 @@ class SerialHandler:
                 )
         else:
             logger.warning(f"Failed to parse SAFE_LIMITS: {message}")
+
+    def _handle_offset_drift(self, message: str) -> None:
+        """Parse OFFSET_DRIFT(joint_id,dof,status,err_agonist,err_antagonist)"""
+        match = re.match(
+            r"OFFSET_DRIFT\((\d+),(\d+),(OK|DRIFT),([-+]?\d*\.?\d+),([-+]?\d*\.?\d+)\)",
+            message,
+        )
+        if match:
+            joint_id = int(match.group(1))
+            dof = int(match.group(2))
+            status = match.group(3)
+            err_a = float(match.group(4))
+            err_b = float(match.group(5))
+
+            icon = "✅" if status == "OK" else "⚠️"
+            self.status_message.append(
+                f"{icon} DOF {dof} offset drift: {status} (err: {err_a:.1f}°/{err_b:.1f}°)"
+            )
+
+            if self.socketio:
+                self.socketio.emit(
+                    "offset_drift",
+                    {
+                        "joint_id": joint_id,
+                        "dof": dof,
+                        "status": status,
+                        "error_agonist": err_a,
+                        "error_antagonist": err_b,
+                    },
+                    namespace="/movement",
+                )
+        else:
+            logger.warning(f"Failed to parse OFFSET_DRIFT: {message}")
+            self.status_message.append(message)
 
     def handle_mapping_data(self, line: str, ser: serial.Serial) -> None:
         # MAPPING_DATA(total_points,dof_count) protocol

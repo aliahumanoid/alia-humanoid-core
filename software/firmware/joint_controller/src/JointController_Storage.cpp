@@ -515,6 +515,45 @@ JointController::OffsetValidationResult JointController::validateSavedOffsets(ui
   return result;
 }
 
+JointController::OffsetValidationResult JointController::checkOffsetDriftFromCache(uint8_t dof_index) {
+  OffsetValidationResult result = {false, 0.0f, 0.0f, false};
+
+  if (dof_index >= config.dof_count) return result;
+
+  // Need valid equations to calculate expected angles
+  if (!hasValidEquations(dof_index)) return result;
+
+  // Need valid cached motor angles (updated every control cycle by executeWaypointMovement)
+  if (!cached_motor_angles.valid[dof_index]) return result;
+
+  // Need valid joint encoder reading
+  if (!shared_dof_angles.valid[dof_index]) return result;
+
+  result.has_saved_data = true;  // We have live data to compare
+
+  float joint_angle = shared_dof_angles.angles[dof_index];
+
+  // Calculate expected motor angles from linear equations
+  float expected_agonist, expected_antagonist;
+  if (!calculateMotorAnglesWithEquations(dof_index, joint_angle, joint_angle,
+                                          expected_agonist, expected_antagonist)) {
+    return result;
+  }
+
+  // Cached motor angles are already calibrated (offset applied by the control loop)
+  float actual_agonist = cached_motor_angles.agonist[dof_index];
+  float actual_antagonist = cached_motor_angles.antagonist[dof_index];
+
+  result.error_agonist_deg = fabs(actual_agonist - expected_agonist);
+  result.error_antagonist_deg = fabs(actual_antagonist - expected_antagonist);
+
+  const float DRIFT_THRESHOLD = 2.0f;
+  result.valid = (result.error_agonist_deg < DRIFT_THRESHOLD &&
+                  result.error_antagonist_deg < DRIFT_THRESHOLD);
+
+  return result;
+}
+
 // Recalculate safe limits based on current equations and physical limits
 bool JointController::recalculateSafeLimits() {
   LOG_INFO("Recalculating safe limits from current equations...");

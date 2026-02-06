@@ -615,6 +615,18 @@ public:
   OffsetValidationResult validateSavedOffsets(uint8_t dof_index);
 
   /**
+   * @brief Check offset drift using cached motor angles (zero CAN overhead)
+   * 
+   * Uses cached_motor_angles (already read by control loop) and current
+   * encoder offsets to detect if motor offsets have drifted since calibration.
+   * Called once when entering HOLDING after a movement.
+   * 
+   * @param dof_index DOF to check
+   * @return Validation result — valid=true means no drift detected
+   */
+  OffsetValidationResult checkOffsetDriftFromCache(uint8_t dof_index);
+
+  /**
    * @brief Check whether auto‑mapping is active
    * @return true if auto‑mapping is active
    */

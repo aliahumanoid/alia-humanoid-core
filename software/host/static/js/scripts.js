@@ -587,6 +587,14 @@ $(document).ready(function() {
         }
     });
 
+    // Listener for offset drift detection (one-shot on HOLDING entry)
+    socket.on('offset_drift', function(data) {
+        if (data && data.status !== undefined) {
+            console.log('Offset drift:', data);
+            updateDriftBadge(data.joint_id, data.dof, data.status, data.error_agonist, data.error_antagonist);
+        }
+    });
+
     // Listener for PID diagnostics data (target/error)
     // Temporary storage for combining pid_diag and pid_torque into single records
     let pendingPidRecord = null;
@@ -8192,7 +8200,20 @@ function renderTrajectoryLimitsHTML(jointName, jointConfig) {
             html += `<div><span class="text-gray-300">FW: --</span></div>`;
         }
 
-        html += `</div></div>`;
+        html += `</div>`;
+
+        // Drift indicator (shown after HOLDING entry, one-shot)
+        const driftKey = `${jointId}_${i}`;
+        const drift = driftStatuses[driftKey];
+        if (drift) {
+            if (drift.status === 'DRIFT') {
+                html += `<div class="mt-0.5 text-yellow-600 font-semibold">Drift: ${drift.errA.toFixed(1)}° / ${drift.errB.toFixed(1)}°</div>`;
+            } else {
+                html += `<div class="mt-0.5 text-green-600">Drift: none (${drift.errA.toFixed(1)}° / ${drift.errB.toFixed(1)}°)</div>`;
+            }
+        }
+
+        html += `</div>`;
     }
 
     panel.innerHTML = html;
@@ -8291,5 +8312,24 @@ function updateRecalcBadge(jointId, dof, status, errA, errB) {
         badge.textContent = 'No Saved Data';
         badge.className = 'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700';
     }
+}
+
+// ============================================================================
+// OFFSET DRIFT DETECTION — Badge in Trajectory Control limits panel
+// ============================================================================
+
+// Track per-DOF drift status (keyed by "jointId_dof")
+let driftStatuses = {};
+
+/**
+ * Update the drift indicator in the trajectory limits panel.
+ * Called when firmware sends EVT:OFFSET_DRIFT on HOLDING entry.
+ */
+function updateDriftBadge(jointId, dof, status, errA, errB) {
+    const key = `${jointId}_${dof}`;
+    driftStatuses[key] = { status, errA, errB };
+
+    // Refresh the limits panel to show drift info
+    updateTrajectoryLimitsPanel($("#jointSelect").val());
 }
 
