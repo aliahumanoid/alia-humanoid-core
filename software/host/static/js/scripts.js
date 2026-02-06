@@ -3582,10 +3582,9 @@ function renderMappingChart(mappingData) {
     updateMappingDataInfo(`${selectedJoint}: ${mappingData.total_points} points, ${dofInfo}`);
     
     // Regenerate smart buttons after loading new mapping data
-    setTimeout(() => {
-        generateSmartQuickButtons();
-        generateSmartWaypointButtons();
-    }, 100);
+    // Called synchronously — automaticMappingData is already set and enriched above
+    generateSmartQuickButtons();
+    generateSmartWaypointButtons();
     
     appendStatusMessage(`Displayed mapping charts for ${selectedJoint}: ${dofInfo}`);
 }
