@@ -906,10 +906,12 @@ void core0_main_loop() {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
                         LOG_ERROR("Startup sequence failed - emergency stop sent");
                       } else {
-                        // Success - report completion with timing
+                        // Success — each DOF already entered HOLDING immediately after its
+                        // recalc_offset completed (done by CMD_RECALC_OFFSET handler in Core1).
+                        // Pretension → PID handoff is seamless with zero torque gap.
                         uint32_t total_time_ms = millis() - startup_start_time;
                         SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
-                        LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — system ready for waypoints");
+                        LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — all DOFs holding position");
                       }
                       
                       handled_on_core0 = true;

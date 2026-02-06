@@ -1015,6 +1015,27 @@ void core1_loop() {
               command_data_ext.recalc_offset_duration > 0
                   ? command_data_ext.recalc_offset_duration
                   : controller->getConfig().dofs[dof_index].zero_mapping.recalc_offset_duration)) {
+        // SUCCESS: Inject HOLDING waypoint immediately so PID takes over from
+        // pretension torque with zero gap. Motors are still under pretension —
+        // PID will seamlessly replace the torque on the next executeWaypointMovement cycle.
+        if (shared_dof_angles.valid[dof_index]) {
+          float hold_angle = shared_dof_angles.angles[dof_index];
+          uint32_t t_now_hold = millis();
+
+          waypoint_buffer_set_prev(dof_index, hold_angle, t_now_hold);
+
+          WaypointEntry hold_wp{};
+          hold_wp.dof_index = dof_index;
+          hold_wp.target_angle_deg = hold_angle;
+          hold_wp.t_arrival_ms = t_now_hold + 50;  // 50ms — PID takes over quickly
+          hold_wp.mode = 0;
+
+          waypoint_buffer_push(dof_index, hold_wp);
+          waypoint_buffer_set_state(dof_index, WaypointState::MOVING);
+
+          LOG_INFO("DOF " + String(dof_index) + " → HOLDING at " + String(hold_angle, 1) + "°");
+        }
+
         if (shared_data_ext.flag == 0) {
           strcpy(shared_data_ext.message, "Offsets recalculated successfully");
           shared_data_ext.flag = CMD1_END_MOVE;

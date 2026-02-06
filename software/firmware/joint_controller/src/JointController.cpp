@@ -1166,9 +1166,6 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Use a higher threshold for inversion/eversion (DOF 1) due to greater elasticity
   float ERROR_THRESHOLD = 2.0f; // Standard threshold for other DOFs
 
-  // NOW stop motors after verification
-  stopDofMotors(dof_index);
-
   if (agonist_error > ERROR_THRESHOLD || antagonist_error > ERROR_THRESHOLD) {
     LOG_WARN("Residual error after offset calibration");
     LOG_DEBUG(String("Agonist error: ") + String(agonist_error));
@@ -1192,6 +1189,8 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
               String((antagonist_error / fabs(expected_antagonist_angle)) * 100, 1) + "%");
     LOG_DEBUG("====================================");
 
+    // Stop motors on failure only
+    stopDofMotors(dof_index);
     return false;
   }
 
@@ -1225,24 +1224,10 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Method used
   LOG_DEBUG("Method: LINEAR EQUATIONS (direct computation)");
 
-  // DEBUG: Verify elastic effect after tension release
-  safeSleepMs(300); // Wait for system to stabilize without tension
-
-  // Read angles again without tension
-  float post_release_agonist_angle    = agonist_motor->getMultiAngleSync().angle;
-  float post_release_antagonist_angle = antagonist_motor->getMultiAngleSync().angle;
-
-  LOG_DEBUG("\n=== TENSION RELEASE EFFECT ===");
-  LOG_DEBUG("Agonist angle under tension: " + String(verified_agonist_angle) + "°");
-  LOG_DEBUG("Agonist angle after release: " + String(post_release_agonist_angle) + "°");
-  LOG_DEBUG(
-      "Difference: " + String(fabs(post_release_agonist_angle - verified_agonist_angle), 2) + "°");
-
-  LOG_DEBUG("Antagonist angle under tension: " + String(verified_antagonist_angle) + "°");
-  LOG_DEBUG("Antagonist angle after release: " + String(post_release_antagonist_angle) + "°");
-  LOG_DEBUG("Difference: " +
-              String(fabs(post_release_antagonist_angle - verified_antagonist_angle), 2) + "°");
-  LOG_DEBUG("==================================");
+  // NOTE: Motors are intentionally NOT stopped here.
+  // Pretension torque keeps tendons taut until the PID controller takes over
+  // via HOLDING waypoint injection (done by CMD_RECALC_OFFSET handler in core1.cpp).
+  // This eliminates the zero-torque gap that caused gravity drift.
 
   // Set flag that offsets have been calibrated for this DOF
   motor_offsets_calibrated[dof_index] = true;
