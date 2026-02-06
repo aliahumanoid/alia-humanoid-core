@@ -120,11 +120,8 @@ struct OscillationDetector {
 };
 static OscillationDetector osc_detector[MAX_DOFS];
 
-// Oscillation detection parameters (tunable)
-static const uint32_t OSC_WINDOW_MS = 500;           // Time window to count sign changes
-static const uint8_t OSC_MIN_SIGN_CHANGES = 4;       // Min sign changes to trigger (4 = 2 full oscillations)
-static const float OSC_MIN_AMPLITUDE_DEG = 3.0f;     // Min oscillation amplitude to be considered dangerous
-static const float OSC_MIN_ERROR_TO_CHECK = 1.0f;    // Don't check if error is very small
+// Oscillation detection parameters — now configurable via volatile globals (main.cpp)
+// Defaults: osc_window_ms=500, osc_min_sign_changes=4, osc_min_amplitude_deg=3.0, osc_min_error_to_check=1.0
 
 static bool wp_first_read[MAX_DOFS] = {true, true, true};
 static CANErrorTracker wp_canErrorTracker;
@@ -568,7 +565,7 @@ bool JointController::executeWaypointMovement() {
       // An oscillation is detected when:
       // 1. Error changes sign frequently (multiple times in short window)
       // 2. Oscillation amplitude exceeds threshold
-      if (is_moving && abs_error > OSC_MIN_ERROR_TO_CHECK) {
+      if (is_moving && abs_error > osc_min_error_to_check) {
         OscillationDetector &od = osc_detector[dof];
         uint32_t now_ms = millis();
         
@@ -576,7 +573,7 @@ bool JointController::executeWaypointMovement() {
         int8_t error_sign = (error > 0.1f) ? 1 : ((error < -0.1f) ? -1 : 0);
         
         // Reset window if expired
-        if (now_ms - od.window_start_ms > OSC_WINDOW_MS) {
+        if (now_ms - od.window_start_ms > osc_window_ms) {
           od.window_start_ms = now_ms;
           od.sign_change_count = 0;
           od.max_error_in_window = abs_error;
@@ -599,15 +596,15 @@ bool JointController::executeWaypointMovement() {
         
         // Check if oscillation is dangerous
         if (!od.oscillation_detected && 
-            od.sign_change_count >= OSC_MIN_SIGN_CHANGES && 
-            osc_amplitude >= OSC_MIN_AMPLITUDE_DEG) {
+            od.sign_change_count >= osc_min_sign_changes && 
+            osc_amplitude >= osc_min_amplitude_deg) {
           
           LOG_ERROR("[OSCILLATION SAFETY] DOF " + String(dof) + 
                     " DANGEROUS OSCILLATION DETECTED!");
           LOG_ERROR("  Sign changes: " + String(od.sign_change_count) + 
                     " in " + String(now_ms - od.window_start_ms) + "ms");
           LOG_ERROR("  Amplitude: " + String(osc_amplitude, 1) + 
-                    "° (threshold: " + String(OSC_MIN_AMPLITUDE_DEG, 1) + "°)");
+                    "° (threshold: " + String(osc_min_amplitude_deg, 1) + "°)");
           
           // Trigger emergency stop
           od.oscillation_detected = true;
@@ -629,7 +626,7 @@ bool JointController::executeWaypointMovement() {
       } else {
         // Reset oscillation detector when not in danger zone
         OscillationDetector &od = osc_detector[dof];
-        if (od.oscillation_detected && abs_error < OSC_MIN_ERROR_TO_CHECK * 0.5f) {
+        if (od.oscillation_detected && abs_error < osc_min_error_to_check * 0.5f) {
           od.oscillation_detected = false; // Allow re-detection after recovery
         }
         od.sign_change_count = 0;

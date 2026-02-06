@@ -67,6 +67,11 @@ volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold 
 volatile uint16_t can_error_window_ms = 50;      // 50ms window (default)
 volatile uint8_t can_error_threshold = 5;         // 5 errors in window = emergency stop
 volatile float can_motor_jump_threshold_dps = 10000.0f;  // 10000°/s → 20° per cycle @ 500Hz (~1.4× motor max)
+// Oscillation detection: safety feature that detects dangerous oscillations and triggers emergency stop
+volatile uint16_t osc_window_ms = 500;              // Time window to count error sign changes (default: 500ms)
+volatile uint8_t osc_min_sign_changes = 4;           // Min sign changes to trigger (4 = 2 full oscillations)
+volatile float osc_min_amplitude_deg = 3.0f;         // Min oscillation amplitude to be considered dangerous (°)
+volatile float osc_min_error_to_check = 1.0f;        // Don't check oscillation if error below this (°)
 // Compliance control (deflection/stall, anti-slack, soft hold)
 volatile float expected_velocity_deadband_deg_s = 1.0f;
 volatile float hold_error_threshold_deg = 6.0f;
