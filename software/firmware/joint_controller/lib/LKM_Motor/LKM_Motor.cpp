@@ -12,8 +12,7 @@
 // GLOBAL VARIABLES
 // ===================================================================
 
-// Maximum torque limit (can be modified at runtime via setMaxTorque)
-int16_t _maxTorque = 2048;
+// Note: _maxTorque moved to LKM_Motor class member (was global, shared by all instances)
 
 // ===================================================================
 // CONSTRUCTOR & INITIALIZATION
@@ -27,6 +26,7 @@ LKM_Motor::LKM_Motor(MCP_CAN *canInterface, unsigned int motorID, float reductio
   _can           = canInterface;
   _motorID       = motorID;
   _reductionGear = reductionGear;
+  _maxTorque     = 2048;  // Default, overridden by setMaxTorque()
   invertEncoder  = invert;
   offsetEncoder  = 0.0;
 }

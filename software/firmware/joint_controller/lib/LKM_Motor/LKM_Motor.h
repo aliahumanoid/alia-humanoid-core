@@ -547,6 +547,7 @@ private:
   MCP_CAN *_can;            ///< Pointer to CAN interface
   unsigned int _motorID;    ///< Motor CAN ID (1-32)
   float _reductionGear;     ///< Reduction ratio (e.g. 10.0 for 10:1)
+  int16_t _maxTorque;       ///< Per-instance torque limit (default 2048)
 };
 
 #endif // LKM_MOTOR_H
