@@ -823,6 +823,7 @@ void core0_main_loop() {
                         LOG_ERROR("Motor CAN communication failed: " + String(can_errors) + " motor(s) not responding");
                         LOG_ERROR("Check: 1) Motors powered on? 2) CAN bus connected? 3) Motor IDs correct?");
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=CAN_TIMEOUT:ERRORS=" + String(can_errors));
+                        suspend_host_can_polling = false;
                         handled_on_core0 = true;
                         break;
                       }
@@ -830,6 +831,7 @@ void core0_main_loop() {
                       if (!motors_ok) {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=MOTOR_ERROR");
                         LOG_ERROR("Startup sequence failed: motor access error");
+                        suspend_host_can_polling = false;
                         handled_on_core0 = true;
                         break;
                       }
@@ -876,6 +878,7 @@ void core0_main_loop() {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
                         LOG_ERROR("Startup sequence failed: joint position too far outside limits");
                         LOG_ERROR("Manually move joint to safe position before retrying");
+                        suspend_host_can_polling = false;
                         handled_on_core0 = true;
                         break;
                       }
@@ -893,6 +896,7 @@ void core0_main_loop() {
                       if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
                         LOG_ERROR("Startup sequence timed out before recalc");
+                        suspend_host_can_polling = false;
                         handled_on_core0 = true;
                         break;
                       }
