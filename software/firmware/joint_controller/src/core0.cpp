@@ -86,7 +86,8 @@ void flushMovementSamples() {
   // Simple approach: just send everything in queue order
   // The Python parser will organize by DOF
   if (total_samples > 0) {
-    SERIAL_COM_LN("EVT:MOVEMENT_SAMPLE_HEADER(" + String(movement_sample_joint_id) + "," + String(2) + ")");
+    uint8_t dof_count = (active_joint_controller != nullptr) ? active_joint_controller->getConfig().dof_count : 0;
+    SERIAL_COM_LN("EVT:MOVEMENT_SAMPLE_HEADER(" + String(movement_sample_joint_id) + "," + String(dof_count) + ")");
     Serial.flush();  // Force immediate send
     delay(50);  // Wait for buffer to drain
     
