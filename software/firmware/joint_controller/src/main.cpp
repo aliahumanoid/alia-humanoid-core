@@ -215,6 +215,16 @@ uint8_t current_dof_index = 0;
 // Core1 loop (hardware operations) is implemented in core1.cpp
 // Both are declared in main_common.h and linked automatically by PlatformIO
 
+// Helper: blink LED with configurable pattern (reduces ~12s of boot delays to ~2s)
+static void led_blink(uint8_t count, uint16_t on_ms, uint16_t off_ms) {
+  for (uint8_t i = 0; i < count; i++) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(on_ms);
+    digitalWrite(LED_BUILTIN, LOW);
+    if (i < count - 1) delay(off_ms);  // No trailing delay on last blink
+  }
+}
+
 #pragma region Setup
 
 void setup() {
@@ -444,13 +454,8 @@ void setup() {
 
   LOG_INFO("Joint firmware starting!");
 
-  // blink the LED 10 times to signal the start of the program
-  for (int i = 0; i < 10; i++) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(100);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(100);
-  }
+  // Brief blink to signal firmware started
+  led_blink(2, 80, 80);
   LOG_INFO("Joint firmware started!");
 
   // Initialize direct encoder reading (MT6835 sensors via SPI0)
@@ -503,23 +508,13 @@ void setup() {
   active_joint_controller = new JointController(ACTIVE_JOINT_CONFIG, &CAN, &directEncoders);
   if (!active_joint_controller->init()) {
     LOG_ERROR("Failed to initialize controller for " + String(ACTIVE_JOINT_CONFIG.name) + "!");
-    // Blink LED quickly to signal an error
-    for (int i = 0; i < 20; i++) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(50);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(50);
-    }
+    // Rapid blinks to signal controller init error
+    led_blink(5, 50, 50);
   } else {
     DBG_PRINTLN("Controller for " + String(ACTIVE_JOINT_CONFIG.name) +
                 " initialized successfully.");
-    // Blink LED slowly to signal success
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(500);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(500);
-    }
+    // Single long blink to signal controller init success
+    led_blink(1, 300, 0);
   }
 
   // Register controller in global array for core1 access
@@ -531,23 +526,13 @@ void setup() {
   if (active_joint_controller->loadPIDDataFromFlash()) {
     LOG_INFO("PID parameters successfully loaded from flash!");
 
-    // Blink LED to signal successful PID load
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(300);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(300);
-    }
+    // Brief blink: PID loaded from flash
+    led_blink(2, 100, 100);
   } else {
     LOG_INFO("No PID parameters found in flash - applying default PID values (kp=" + String(PID_DEFAULT_INNER_KP, 2) + ", ki=" + String(PID_DEFAULT_INNER_KI, 2) + ", kd=" + String(PID_DEFAULT_INNER_KD, 2) + ")");
 
-    // Blink LED (medium) to show default config is used
-    for (int i = 0; i < 5; i++) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(150);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(150);
-    }
+    // Brief blink: using default PID
+    led_blink(1, 100, 0);
   }
 
   // Attempt to load linear equations from flash
@@ -558,28 +543,14 @@ void setup() {
     LOG_INFO("✓ System ready for autonomous control without Pi5");
     LOG_INFO("✓ Ultra-compact equations enable precise motion");
 
-    // Blink LED (special pattern) to signal equations loaded
-    for (int i = 0; i < 5; i++) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(100);
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(200);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(300);
-    }
+    // Brief blink: equations loaded from flash
+    led_blink(2, 100, 100);
   } else {
     LOG_INFO("No linear equations found in flash — auto-mapping required");
     LOG_INFO("Equations will be computed and saved automatically after the first auto-mapping");
 
-    // Blink LED to signal missing equations
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(100);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(100);
-    }
+    // Brief blink: no equations in flash
+    led_blink(1, 100, 0);
   }
 
   // SAFETY: Movement is controlled by isSystemReadyForMovement()
@@ -606,17 +577,8 @@ void setup() {
     LOG_INFO("Default system settings saved: auto_start=DISABLED");
   }
 
-  // Blink LED to signal test mode (different pattern)
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(100);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(100);
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(100);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(300);
-  }
+  // Setup complete: distinctive double-blink
+  led_blink(2, 150, 100);
   LOG_DEBUG("------------------------------------");
 
   // Allocate memory for shared data (use maximum number of motors)
