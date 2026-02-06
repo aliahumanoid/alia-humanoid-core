@@ -353,8 +353,8 @@ bool JointController::pretensionAll() {
   // Wait at the end for all DOFs using first DOF timeout (or 100ms as fallback)
   int final_timeout = (config.dof_count > 0) ? config.dofs[0].zero_mapping.pretension_timeout : 100;
 
-  // Wait at the end for all DOFs
-  sleep_ms(final_timeout);
+  // Wait at the end for all DOFs (with watchdog kick + e-stop check)
+  safeSleepMs(final_timeout);
 
   // Stop all motors
   stopAllMotors();
@@ -421,8 +421,8 @@ bool JointController::releaseAll() {
   // Wait at the end for all DOFs using first DOF timeout (or 100ms as fallback)
   int final_timeout = (config.dof_count > 0) ? config.dofs[0].zero_mapping.pretension_timeout : 100;
 
-  // Wait at the end for all DOFs
-  sleep_ms(final_timeout);
+  // Wait at the end for all DOFs (with watchdog kick + e-stop check)
+  safeSleepMs(final_timeout);
 
   // Stop all motors
   stopAllMotors();

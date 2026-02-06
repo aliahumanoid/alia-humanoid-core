@@ -756,6 +756,11 @@ void core0_main_loop() {
                       const float POSITION_HARD_MARGIN = 15.0f;  // Beyond 15° is hard error
                       
                       for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+                        if (!shared_dof_angles.valid[dof]) {
+                          LOG_ERROR("DOF " + String(dof) + " encoder invalid during position check");
+                          positions_ok = false;
+                          break;
+                        }
                         float current_angle = shared_dof_angles.angles[dof];
                         float phys_min = active_joint_controller->getConfig().dofs[dof].limits.min_angle;
                         float phys_max = active_joint_controller->getConfig().dofs[dof].limits.max_angle;
@@ -853,6 +858,12 @@ void core0_main_loop() {
                         bool dof_timeout = false;
                         while (shared_data_ext.flag == 0) {
                           updateSharedDofAngles();
+                          
+                          if (emergency_stop_requested) {
+                            LOG_WARN("Emergency stop detected during startup polling");
+                            dof_timeout = true;
+                            break;
+                          }
                           
                           if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
                             dof_timeout = true;
