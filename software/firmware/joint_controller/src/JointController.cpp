@@ -488,10 +488,9 @@ bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
     bool in_limits = (angle >= min_angle && angle <= max_angle);
 
     if (!in_limits) {
-      DBG_PRINTLN("WARNING: Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
-                  " outside safe limits derived from equations");
-      DBG_PRINTLN("  Allowed range: [" + String(min_angle, 2) + "°, " + String(max_angle, 2) +
-                  "°]");
+      LOG_WARN("Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
+               " outside safe limits [" + String(min_angle, 2) + "°, " +
+               String(max_angle, 2) + "°] (from equations)");
     }
 
     return in_limits;
@@ -505,10 +504,9 @@ bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
   bool in_limits = (angle >= joint_min && angle <= joint_max);
 
   if (!in_limits) {
-    DBG_PRINTLN("WARNING: Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
-                " outside conservative physical limits (equations unavailable)");
-    DBG_PRINTLN("  Conservative range: [" + String(joint_min, 2) + "°, " + String(joint_max, 2) +
-                "°]");
+    LOG_WARN("Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
+             " outside conservative limits [" + String(joint_min, 2) + "°, " +
+             String(joint_max, 2) + "°] (equations unavailable)");
   }
 
   return in_limits;
@@ -755,19 +753,19 @@ bool JointController::checkSafetyForAllDofs(String &violation_message, bool chec
 bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretension_torque,
                                               int pretension_duration_ms) {
   if (dof_index >= config.dof_count) {
-    DBG_PRINTLN("DOF index out of range in recalculateMotorOffsets");
+    LOG_ERROR("DOF index out of range in recalculateMotorOffsets");
     return false;
   }
 
   // DEBUG: Print detailed information about request
-  DBG_PRINTLN("=== DEBUG RECALC_OFFSET ===");
-  DBG_PRINTLN("Requested DOF: " + String(dof_index));
-  DBG_PRINTLN("DOF name: " + String(config.dofs[dof_index].name));
-  DBG_PRINTLN("Total motors in joint: " + String(config.motor_count));
+  LOG_DEBUG("=== DEBUG RECALC_OFFSET ===");
+  LOG_DEBUG("Requested DOF: " + String(dof_index));
+  LOG_DEBUG("DOF name: " + String(config.dofs[dof_index].name));
+  LOG_DEBUG("Total motors in joint: " + String(config.motor_count));
 
   // DEBUG: Print all motors and their DOFs
   for (int i = 0; i < config.motor_count; i++) {
-    DBG_PRINTLN("Motor " + String(i) + ": ID=" + String(config.motors[i].id) + ", DOF=" +
+    LOG_DEBUG("Motor " + String(i) + ": ID=" + String(config.motors[i].id) + ", DOF=" +
                 String(config.motors[i].dof_index) + ", Name=" + String(config.motors[i].name) +
                 ", Agonist=" + String(config.motors[i].is_agonist ? "YES" : "NO"));
   }
@@ -1146,60 +1144,35 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
     return false;
   }
 
-  DBG_PRINTLN("Offsets successfully recalculated for DOF " + String(dof_index));
-  DBG_PRINT("New agonist offset: ");
-  DBG_PRINTLN(new_agonist_offset);
-  DBG_PRINT("New antagonist offset: ");
-  DBG_PRINTLN(new_antagonist_offset);
-  DBG_PRINTLN("Residual agonist error: " + String(agonist_error) +
-              "° (limit: " + String(ERROR_THRESHOLD) + "°)");
-  DBG_PRINTLN("Residual antagonist error: " + String(antagonist_error) +
-              "° (limit: " + String(ERROR_THRESHOLD) + "°)");
+  LOG_DEBUG("Offsets successfully recalculated for DOF " + String(dof_index));
+  LOG_DEBUG("New agonist offset: " + String(new_agonist_offset));
+  LOG_DEBUG("New antagonist offset: " + String(new_antagonist_offset));
+  LOG_DEBUG("Residual agonist error: " + String(agonist_error) +
+            "° (limit: " + String(ERROR_THRESHOLD) + "°)");
+  LOG_DEBUG("Residual antagonist error: " + String(antagonist_error) +
+            "° (limit: " + String(ERROR_THRESHOLD) + "°)");
 
-  // Add calibration details
-  DBG_PRINTLN("\nCalibration details:");
-  DBG_PRINTLN("AGONIST:");
-  DBG_PRINT("  Current angle (raw): ");
-  DBG_PRINTLN(current_agonist_angle);
-  DBG_PRINT("  Expected angle: ");
-  DBG_PRINTLN(expected_agonist_angle);
-  DBG_PRINT("  Angle after calibration: ");
-  DBG_PRINTLN(verified_agonist_angle);
-  DBG_PRINT("  Final deviation: ");
-  DBG_PRINTLN(agonist_error);
+  // Calibration details
+  LOG_DEBUG("AGONIST: raw=" + String(current_agonist_angle) +
+            " expected=" + String(expected_agonist_angle) +
+            " calibrated=" + String(verified_agonist_angle) +
+            " deviation=" + String(agonist_error));
+  LOG_DEBUG("ANTAGONIST: raw=" + String(current_antagonist_angle) +
+            " expected=" + String(expected_antagonist_angle) +
+            " calibrated=" + String(verified_antagonist_angle) +
+            " deviation=" + String(antagonist_error));
+  LOG_DEBUG("Joint angle: " + String(current_joint_angle));
 
-  DBG_PRINTLN("ANTAGONIST:");
-  DBG_PRINT("  Current angle (raw): ");
-  DBG_PRINTLN(current_antagonist_angle);
-  DBG_PRINT("  Expected angle: ");
-  DBG_PRINTLN(expected_antagonist_angle);
-  DBG_PRINT("  Angle after calibration: ");
-  DBG_PRINTLN(verified_antagonist_angle);
-  DBG_PRINT("  Final deviation: ");
-  DBG_PRINTLN(antagonist_error);
+  // Tension and stability information
+  LOG_DEBUG("Tension: agonist_disp=" + String(agonist_displacement) +
+            " antagonist_disp=" + String(antagonist_displacement));
+  LOG_DEBUG("Stability: agonist=" + String(stability_agonist) +
+            " antagonist=" + String(stability_antagonist));
+  LOG_DEBUG("Tendon tension: " + String(tension_ok ? "OK" : "NOT OPTIMAL") +
+            ", System stability: " + String(is_stable ? "OK" : "NOT OPTIMAL"));
 
-  DBG_PRINT("\nJoint angle: ");
-  DBG_PRINTLN(current_joint_angle);
-
-  // Print tension and stability information
-  DBG_PRINTLN("\nTension and stability info:");
-  DBG_PRINT("  Initial agonist displacement: ");
-  DBG_PRINTLN(agonist_displacement);
-  DBG_PRINT("  Initial antagonist displacement: ");
-  DBG_PRINTLN(antagonist_displacement);
-  DBG_PRINT("  Agonist stability: ");
-  DBG_PRINTLN(stability_agonist);
-  DBG_PRINT("  Antagonist stability: ");
-  DBG_PRINTLN(stability_antagonist);
-  DBG_PRINT("  Tendon tension: ");
-  DBG_PRINTLN(tension_ok ? "OK" : "NOT OPTIMAL");
-  DBG_PRINT("  System stability: ");
-  DBG_PRINTLN(is_stable ? "OK" : "NOT OPTIMAL");
-
-  // Information about method used
-  DBG_PRINTLN("\nCalculation method info:");
-  DBG_PRINTLN("  Method used: LINEAR EQUATIONS");
-  DBG_PRINTLN("  Direct computation without interpolation");
+  // Method used
+  LOG_DEBUG("Method: LINEAR EQUATIONS (direct computation)");
 
   // DEBUG: Verify elastic effect after tension release
   sleep_ms(300); // Wait for system to stabilize without tension
@@ -1208,17 +1181,17 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   float post_release_agonist_angle    = agonist_motor->getMultiAngleSync().angle;
   float post_release_antagonist_angle = antagonist_motor->getMultiAngleSync().angle;
 
-  DBG_PRINTLN("\n=== TENSION RELEASE EFFECT ===");
-  DBG_PRINTLN("Agonist angle under tension: " + String(verified_agonist_angle) + "°");
-  DBG_PRINTLN("Agonist angle after release: " + String(post_release_agonist_angle) + "°");
-  DBG_PRINTLN(
+  LOG_DEBUG("\n=== TENSION RELEASE EFFECT ===");
+  LOG_DEBUG("Agonist angle under tension: " + String(verified_agonist_angle) + "°");
+  LOG_DEBUG("Agonist angle after release: " + String(post_release_agonist_angle) + "°");
+  LOG_DEBUG(
       "Difference: " + String(fabs(post_release_agonist_angle - verified_agonist_angle), 2) + "°");
 
-  DBG_PRINTLN("Antagonist angle under tension: " + String(verified_antagonist_angle) + "°");
-  DBG_PRINTLN("Antagonist angle after release: " + String(post_release_antagonist_angle) + "°");
-  DBG_PRINTLN("Difference: " +
+  LOG_DEBUG("Antagonist angle under tension: " + String(verified_antagonist_angle) + "°");
+  LOG_DEBUG("Antagonist angle after release: " + String(post_release_antagonist_angle) + "°");
+  LOG_DEBUG("Difference: " +
               String(fabs(post_release_antagonist_angle - verified_antagonist_angle), 2) + "°");
-  DBG_PRINTLN("==================================");
+  LOG_DEBUG("==================================");
 
   // Set flag that offsets have been calibrated for this DOF
   motor_offsets_calibrated[dof_index] = true;

@@ -446,8 +446,8 @@ void setup() {
     // Rapid blinks to signal controller init error
     led_blink(5, 50, 50);
   } else {
-    DBG_PRINTLN("Controller for " + String(ACTIVE_JOINT_CONFIG.name) +
-                " initialized successfully.");
+    LOG_INFO("Controller for " + String(ACTIVE_JOINT_CONFIG.name) +
+             " initialized successfully.");
     // Single long blink to signal controller init success
     led_blink(1, 300, 0);
   }

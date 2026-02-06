@@ -35,8 +35,7 @@ LKM_Motor::LKM_Motor(MCP_CAN *canInterface, unsigned int motorID, float reductio
  * Initialize motor (CAN bus must be already initialized)
  */
 void LKM_Motor::init() {
-  DBG_PRINT("LKM_Motor initialized with ID: ");
-  DBG_PRINTLN(_motorID);
+  LOG_DEBUG("LKM_Motor initialized with ID: " + String(_motorID));
 }
 
 // ===================================================================
@@ -470,10 +469,8 @@ bool LKM_Motor::sendIncrementAngle2Command(float angleIncrement, uint16_t maxSpe
   buf[6]                 = (uint8_t)((angleIncrementCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleIncrementCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINT("INC_ANGLE2 sent: angleIncrement=");
-    DBG_PRINT(angleIncrementCentesimi);
-    DBG_PRINT(" maxSpeed=");
-    DBG_PRINTLN(maxSpeed);
+    LOG_DEBUG("INC_ANGLE2 sent: angleIncrement=" + String(angleIncrementCentesimi) +
+              " maxSpeed=" + String(maxSpeed));
     return true;
   }
   LOG_ERROR("ERROR sending INC_ANGLE2.");
@@ -491,7 +488,7 @@ bool LKM_Motor::readPIDParameters() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x30, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("READ_PID command sent.");
+    LOG_DEBUG("READ_PID command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending READ_PID.");
@@ -507,7 +504,7 @@ bool LKM_Motor::writePIDParametersRAM(byte anglePidKp, byte anglePidKi, byte spe
   unsigned char buf[8]   = {0x31,       0,          anglePidKp, anglePidKi,
                             speedPidKp, speedPidKi, iqPidKp,    iqPidKi};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("WRITE_PID_RAM command sent.");
+    LOG_DEBUG("WRITE_PID_RAM command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending WRITE_PID_RAM.");
@@ -523,7 +520,7 @@ bool LKM_Motor::writePIDParametersROM(byte anglePidKp, byte anglePidKi, byte spe
   unsigned char buf[8]   = {0x32,       0,          anglePidKp, anglePidKi,
                             speedPidKp, speedPidKi, iqPidKp,    iqPidKi};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("WRITE_PID_ROM command sent.");
+    LOG_DEBUG("WRITE_PID_ROM command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending WRITE_PID_ROM.");
@@ -541,8 +538,7 @@ bool LKM_Motor::writeAccelerationRAM(int32_t acceleration) {
   buf[6]                 = (acceleration >> 16) & 0xFF;
   buf[7]                 = (acceleration >> 24) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINT("WRITE_ACCEL_RAM sent with value: ");
-    DBG_PRINTLN(acceleration);
+    LOG_DEBUG("WRITE_ACCEL_RAM sent with value: " + String(acceleration));
     return true;
   }
   LOG_ERROR("ERROR sending WRITE_ACCEL_RAM.");
@@ -560,7 +556,7 @@ bool LKM_Motor::readEncoder() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x90, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("READ_ENCODER command sent.");
+    LOG_DEBUG("READ_ENCODER command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending READ_ENCODER.");
@@ -576,8 +572,7 @@ bool LKM_Motor::setEncoderOffsetROM(uint16_t encoderOffset) {
   buf[6]                 = encoderOffset & 0xFF;
   buf[7]                 = (encoderOffset >> 8) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINT("SET_ENCODER_ROM sent with value: ");
-    DBG_PRINTLN(encoderOffset);
+    LOG_DEBUG("SET_ENCODER_ROM sent with value: " + String(encoderOffset));
     return true;
   }
   LOG_ERROR("ERROR sending SET_ENCODER_ROM.");
@@ -591,7 +586,7 @@ bool LKM_Motor::setCurrentPositionAsZeroROM() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x19, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("SET_ZERO_POS_ROM command sent.");
+    LOG_DEBUG("SET_ZERO_POS_ROM command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending SET_ZERO_POS_ROM.");
@@ -619,7 +614,7 @@ bool LKM_Motor::readSingleAngleLoop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x94, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("READ_SL_ANGLE command sent.");
+    LOG_DEBUG("READ_SL_ANGLE command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending READ_SL_ANGLE.");
@@ -633,7 +628,7 @@ bool LKM_Motor::clearAngleLoop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x95, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("CLEAR_ANGLE_LOOP command sent.");
+    LOG_DEBUG("CLEAR_ANGLE_LOOP command sent.");
     return true;
   }
   LOG_ERROR("ERROR sending CLEAR_ANGLE_LOOP.");
@@ -651,7 +646,7 @@ bool LKM_Motor::readMotorState2() {
   LOG_ERROR("ERROR sending READ_STATE2.");
     return false;
   }
-  DBG_PRINTLN("READ_STATE2 command sent.");
+  LOG_DEBUG("READ_STATE2 command sent.");
 
   unsigned long startTime = millis();
   while (millis() - startTime < 200) {
@@ -667,14 +662,10 @@ bool LKM_Motor::readMotorState2() {
           motorSpeed           = ((int16_t)rcvBuf[5] << 8) | rcvBuf[4];
           motorEncoderPosition = ((uint16_t)rcvBuf[7] << 8) | rcvBuf[6];
 
-          DBG_PRINT("READ_STATE2: Temp = ");
-          DBG_PRINT(motorTemperature2);
-          DBG_PRINT(" °C, Torque Current = ");
-          DBG_PRINT(motorTorqueCurrent);
-          DBG_PRINT(", Speed = ");
-          DBG_PRINT(motorSpeed);
-          DBG_PRINT(" dps, Encoder Pos = ");
-          DBG_PRINTLN(motorEncoderPosition);
+          LOG_DEBUG("READ_STATE2: Temp=" + String(motorTemperature2) +
+                    "°C TorqueCur=" + String(motorTorqueCurrent) +
+                    " Speed=" + String(motorSpeed) +
+                    "dps EncPos=" + String(motorEncoderPosition));
           return true;
         }
       }
@@ -695,7 +686,7 @@ bool LKM_Motor::readMotorState3() {
   LOG_ERROR("ERROR sending READ_STATE3.");
     return false;
   }
-  DBG_PRINTLN("READ_STATE3 command sent.");
+  LOG_DEBUG("READ_STATE3 command sent.");
 
   unsigned long startTime = millis();
   while (millis() - startTime < 200) {
@@ -711,14 +702,10 @@ bool LKM_Motor::readMotorState3() {
           phaseBCurrent     = ((int16_t)rcvBuf[5] << 8) | rcvBuf[4];
           phaseCCurrent     = ((int16_t)rcvBuf[7] << 8) | rcvBuf[6];
 
-          DBG_PRINT("READ_STATE3: Temp = ");
-          DBG_PRINT(motorTemperature3);
-          DBG_PRINT(" °C, Phase A = ");
-          DBG_PRINT(phaseACurrent);
-          DBG_PRINT(", Phase B = ");
-          DBG_PRINT(phaseBCurrent);
-          DBG_PRINT(", Phase C = ");
-          DBG_PRINTLN(phaseCCurrent);
+          LOG_DEBUG("READ_STATE3: Temp=" + String(motorTemperature3) +
+                    "°C PhaseA=" + String(phaseACurrent) +
+                    " PhaseB=" + String(phaseBCurrent) +
+                    " PhaseC=" + String(phaseCCurrent));
           return true;
         }
       }
@@ -749,7 +736,7 @@ bool LKM_Motor::sendMultiMotorTorqueCommand(MCP_CAN *can, int16_t iq1, int16_t i
   buf[7] = (iq4 >> 8) & 0xFF;
   // CAN ID for multi-motor commands is fixed at 0x280
   if (can->sendMsgBuf(0x280, 0, 8, buf) == CAN_OK) {
-    DBG_PRINTLN("MULTI_TORQUE command sent.");
+    LOG_DEBUG("MULTI_TORQUE command sent.");
     return true;
   }
   LOG_ERROR("Error sending MULTI_TORQUE.");
