@@ -785,6 +785,9 @@ void core1_loop() {
       waypoint_active = active_joint_controller->executeWaypointMovement();
     }
 
+    // Signal Core0 to suspend Serial streaming during active movement
+    movement_in_progress = waypoint_active;
+
     // === TIMING: Wait for next cycle (configurable frequency) ===
     // Default: 500Hz (inner_loop_period_us = 2000µs)
     // Only wait if waypoint control is active (to maintain precise timing)
