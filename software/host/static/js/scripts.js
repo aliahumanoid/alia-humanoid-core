@@ -745,15 +745,13 @@ $(document).ready(function() {
         updateOscillationDefaults(joint);
         
         // Automatically load mapping data for new joint
+        // Smart waypoint buttons are regenerated inside fetchMappingChartData's
+        // success callback (renderMappingChart → generateSmartWaypointButtons).
+        // No separate setTimeout needed — avoids race condition where buttons
+        // generated before mapping data arrives (showing previous joint's data).
         setTimeout(() => {
             fetchMappingChartData();
         }, 100);
-        
-        // Regenerate smart buttons for new joint
-        setTimeout(() => {
-            generateSmartQuickButtons();
-            generateSmartWaypointButtons();
-        }, 150); // Slightly longer delay to allow mapping data loading
         
         // Send command to select joint and load PIDs
         sendCommand('select-joint', { joint: joint });
@@ -3320,6 +3318,9 @@ function loadMemoryMappingData(jointName) {
     if (!jointPortMapping[jointName]) {
         appendStatusMessage(`ℹ️ No serial port associated with ${jointName}, cannot retrieve current data.`);
         updateMappingDataInfo(`No active data for ${jointName}`);
+        // Still regenerate smart buttons with config-based defaults (no mapping data)
+        generateSmartQuickButtons();
+        generateSmartWaypointButtons();
         return;
     }
 
