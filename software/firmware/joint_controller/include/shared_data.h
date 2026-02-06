@@ -185,7 +185,7 @@ struct AutoMapPoint_t {
  * Used exclusively during auto-mapping operations on core1.
  */
 struct AutoMappingState_t {
-  bool active;                       // Whether auto mapping is active
+  volatile bool active;              // Whether auto mapping is active (volatile: polled in core1 loop)
   float target_angles[MAX_DOFS];     // Target angles for current position
   float min_angles[MAX_DOFS];        // Min angles per DOF
   float max_angles[MAX_DOFS];        // Max angles per DOF
