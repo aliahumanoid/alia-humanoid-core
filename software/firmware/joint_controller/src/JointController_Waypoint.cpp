@@ -2,8 +2,8 @@
  * @file JointController_Waypoint.cpp
  * @brief Waypoint-based trajectory execution with cascade control
  * 
- * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 and reuses the
- * exact same cascade control logic from moveMultiDOF_cascade.
+ * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 with cascade
+ * control (outer joint PID + inner motor PID) and continuous waypoint consumption.
  * 
  * Key features:
  * - Linear interpolation between waypoints (smoothness from waypoint density @ 50-100 Hz)
@@ -11,13 +11,13 @@
  * - State management: IDLE → MOVING → HOLDING
  * - Cascade control architecture:
  *   * SAMPLING_PERIOD = 2000 µs (2 ms) → 500 Hz
- *   * Outer PID @ 100 Hz (joint-level, computes delta_theta)
+ *   * Outer PID runs every outer_loop_divisor cycles (default 1 = 500 Hz)
  *   * Inner PID @ 500 Hz (motor-level, computes torque commands)
  *   * theta_ref = theta_0 + cascade_correction
  * 
  * @see waypoint_buffer.h for buffer management
  * @see CAN_CONTROL_PROTOCOL.md section 5.2 for detailed specification
- * @see JointController_Movement.cpp::moveMultiDOF_cascade for reference implementation
+ * @see CAN_CONTROL_PROTOCOL.md for protocol specification
  */
 
 #include "JointController.h"
@@ -407,7 +407,7 @@ bool JointController::executeWaypointMovement() {
             
             // Notify host that trajectory was aborted due to stall
             // Host should stop sending waypoints and handle the situation
-            Serial.println("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
+            SERIAL_COM_LN("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
           }
         }
       } else {
@@ -534,7 +534,7 @@ bool JointController::executeWaypointMovement() {
           pid_reset_needed[dof] = true;
           
           // Notify host via serial
-          Serial.println("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
+          SERIAL_COM_LN("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
                         ":AMPLITUDE=" + String(osc_amplitude, 1) +
                         ":SIGN_CHANGES=" + String(od.sign_change_count));
           
@@ -550,10 +550,10 @@ bool JointController::executeWaypointMovement() {
         od.window_start_ms = millis();
       }
 
-      // === RUNTIME SAFETY CHECK (same as moveMultiDOF_cascade) ===
+      // === RUNTIME SAFETY CHECK ===
       // Check joint limits, mapping limits, and optionally motor limits (tendon breakage)
-      // - MOVING mode: check every cycle (100 Hz) for immediate detection
-      // - HOLDING mode: check immediately on transition, then every 100 cycles (~1 second)
+      // - MOVING mode: check every outer loop cycle (default 500 Hz)
+      // - HOLDING mode: check immediately on transition, then every 10 cycles (period depends on outer loop rate)
       
       // Determine current state based on waypoint buffer
       bool is_holding = !has_waypoints; // If no waypoints, we're holding position
@@ -573,7 +573,7 @@ bool JointController::executeWaypointMovement() {
           LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
           
           // Send structured message for UI display
-          Serial.println("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
+          SERIAL_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
           
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
