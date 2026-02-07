@@ -1224,10 +1224,8 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Method used
   LOG_DEBUG("Method: LINEAR EQUATIONS (direct computation)");
 
-  // NOTE: Motors are intentionally NOT stopped here.
-  // Pretension torque keeps tendons taut until the PID controller takes over
-  // via HOLDING waypoint injection (done by CMD_RECALC_OFFSET handler in core1.cpp).
-  // This eliminates the zero-torque gap that caused gravity drift.
+  // Stop motors after successful calibration
+  stopDofMotors(dof_index);
 
   // Set flag that offsets have been calibrated for this DOF
   motor_offsets_calibrated[dof_index] = true;

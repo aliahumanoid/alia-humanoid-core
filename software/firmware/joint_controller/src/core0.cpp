@@ -906,36 +906,11 @@ void core0_main_loop() {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
                         LOG_ERROR("Startup sequence failed - emergency stop sent");
                       } else {
-                        // Success — inject HOLDING waypoints for all DOFs.
-                        // Motors are still under pretension torque from recalcOffset (not stopped).
-                        // Safe to push from Core0: Core1 is idle (no commands, no waypoints active).
-                        // PID takes over from pretension on next executeWaypointMovement cycle.
-                        uint32_t t_now_hold = millis();
-                        uint8_t dof_count_hold = active_joint_controller->getConfig().dof_count;
-                        
-                        for (uint8_t dof = 0; dof < dof_count_hold; dof++) {
-                          if (shared_dof_angles.valid[dof]) {
-                            float current_angle = shared_dof_angles.angles[dof];
-                            
-                            waypoint_buffer_set_prev(dof, current_angle, t_now_hold);
-                            
-                            WaypointEntry hold_wp{};
-                            hold_wp.dof_index = dof;
-                            hold_wp.target_angle_deg = current_angle;
-                            hold_wp.t_arrival_ms = t_now_hold + 100;
-                            hold_wp.mode = 0;
-                            
-                            waypoint_buffer_push(dof, hold_wp);
-                            waypoint_buffer_set_state(dof, WaypointState::MOVING);
-                            
-                            LOG_INFO("DOF " + String(dof) + " entering HOLDING at " + 
-                                     String(current_angle, 1) + "°");
-                          }
-                        }
-                        
+                        // Success — motors stopped by recalcOffset, system ready for waypoints.
+                        // NOTE: No automatic HOLDING — user can send waypoints via UI when ready.
                         uint32_t total_time_ms = millis() - startup_start_time;
                         SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
-                        LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — holding position");
+                        LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — ready for waypoints");
                       }
                       
                       handled_on_core0 = true;
