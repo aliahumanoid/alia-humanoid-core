@@ -300,9 +300,10 @@ class SerialManager:
         
         logger.info(f"Discovery complete: found {len(discovered)} joint(s)")
         
-        # Update internal mapping with discovered joints
-        with self._lock:
-            for joint_name, port in discovered.items():
-                self._joint_to_port[joint_name] = port
+        # Assign ports to joints — this creates SerialHandler instances and
+        # starts listener threads so that serial communication is active
+        for joint_name, port in discovered.items():
+            self.assign_port_to_joint(joint_name, port)
+            logger.info(f"Serial handler started for {joint_name} on {port}")
         
         return discovered
