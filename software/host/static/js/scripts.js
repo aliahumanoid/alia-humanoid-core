@@ -1909,7 +1909,10 @@ function sendCommand(command, additionalData = {}) {
     $.ajax({
         url: "/command", method: "POST", data: JSON.stringify(data), contentType: "application/json; charset=utf-8", dataType: "json",
         success: function(response) { appendStatusMessage(response.message); },
-        error: function(xhr, status, error) { appendStatusMessage(`Error sending ${command}: ${error}`); }
+        error: function(xhr, status, error) {
+            const serverMsg = xhr.responseJSON?.message || error;
+            appendStatusMessage(`Error sending ${command}: ${serverMsg}`);
+        }
     });
 }
 
