@@ -301,8 +301,12 @@ void core0_main_loop() {
 
 #pragma region Init Core1 and SharedData
   // Start the second core if it is not already running
+  // Using 8KB stack (default is 4KB) to prevent stack overflow in
+  // executeWaypointMovement() which has large stack frame from cascade control,
+  // metrics tracking, compliance detection, and String-based LOG_INFO calls.
+  static uint32_t core1_stack[2048];  // 8KB (2048 × 4 bytes)
   if (init_prg) {
-    multicore_launch_core1(core1_loop);
+    multicore_launch_core1_with_stack(core1_loop, core1_stack, sizeof(core1_stack));
     init_prg = false;
   }
 #pragma endregion

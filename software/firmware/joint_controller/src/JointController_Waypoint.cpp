@@ -2,8 +2,8 @@
  * @file JointController_Waypoint.cpp
  * @brief Waypoint-based trajectory execution with cascade control
  * 
- * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 with cascade
- * control (outer joint PID + inner motor PID) and continuous waypoint consumption.
+ * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 and reuses the
+ * exact same cascade control logic from moveMultiDOF_cascade.
  * 
  * Key features:
  * - Linear interpolation between waypoints (smoothness from waypoint density @ 50-100 Hz)
@@ -11,13 +11,13 @@
  * - State management: IDLE → MOVING → HOLDING
  * - Cascade control architecture:
  *   * SAMPLING_PERIOD = 2000 µs (2 ms) → 500 Hz
- *   * Outer PID runs every outer_loop_divisor cycles (default 1 = 500 Hz)
+ *   * Outer PID @ 100 Hz (joint-level, computes delta_theta)
  *   * Inner PID @ 500 Hz (motor-level, computes torque commands)
  *   * theta_ref = theta_0 + cascade_correction
  * 
  * @see waypoint_buffer.h for buffer management
  * @see CAN_CONTROL_PROTOCOL.md section 5.2 for detailed specification
- * @see CAN_CONTROL_PROTOCOL.md for protocol specification
+ * @see JointController_Movement.cpp::moveMultiDOF_cascade for reference implementation
  */
 
 #include "JointController.h"
@@ -55,43 +55,6 @@ static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 // where we are in the current outer loop period. This eliminates vibrations caused
 // by discontinuous reference changes while maintaining cascade control benefits.
 
-// === CASCADE INFLUENCE SCALING (low-speed damping) ===
-static bool cascade_scale_initialized = false;
-static float cascade_scale_filtered[MAX_DOFS] = {0};
-static const float CASCADE_SCALE_MIN = 0.6f;
-static const float CASCADE_SCALE_MAX = 1.0f;
-static const float CASCADE_SPEED_LOW_DEG_S = 6.0f;
-static const float CASCADE_SPEED_HIGH_DEG_S = 15.0f;
-static const float CASCADE_SCALE_RAMP_TAU_S = 0.30f;
-
-static inline float smoothstep(float t) {
-  t = constrain(t, 0.0f, 1.0f);
-  return t * t * (3.0f - 2.0f * t);
-}
-
-#if CONTROLLER_DEBUG
-struct WaypointMicroProfile {
-  uint32_t accum_dof_us = 0;
-  uint32_t accum_outer_us = 0;
-  uint32_t accum_eq_us = 0;
-  uint32_t accum_can_us = 0;
-  uint32_t accum_pid_us = 0;
-  uint32_t accum_safety_us = 0;
-  uint32_t max_dof_us = 0;
-  uint32_t max_outer_us = 0;
-  uint32_t max_eq_us = 0;
-  uint32_t max_can_us = 0;
-  uint32_t max_pid_us = 0;
-  uint32_t max_safety_us = 0;
-  uint32_t samples = 0;
-  uint32_t safety_samples = 0;
-  uint32_t last_log_ms = 0;
-};
-static WaypointMicroProfile wp_micro_profile;
-static const uint32_t WP_MICRO_LOG_INTERVAL_MS = 2000;
-static const uint16_t WP_MICRO_MIN_SAMPLES = 50;
-#endif
-
 // Safety check counter (for periodic motor checks in HOLDING mode)
 static uint16_t safety_check_counter = 0;
 
@@ -104,8 +67,6 @@ static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 // === CAN ERROR TRACKING (file scope for reset on new movement) ===
 static float wp_last_theta_A[MAX_DOFS] = {0};
 static float wp_last_theta_B[MAX_DOFS] = {0};
-// Consecutive invalid CAN read counter — triggers emergency stop when sustained
-static uint8_t wp_consecutive_invalid[MAX_DOFS] = {0};
 
 // === OSCILLATION DETECTION (safety feature) ===
 // Detects dangerous oscillations (e.g., from too-high stiffness) and triggers emergency stop
@@ -120,8 +81,11 @@ struct OscillationDetector {
 };
 static OscillationDetector osc_detector[MAX_DOFS];
 
-// Oscillation detection parameters — now configurable via volatile globals (main.cpp)
-// Defaults: osc_window_ms=500, osc_min_sign_changes=4, osc_min_amplitude_deg=3.0, osc_min_error_to_check=1.0
+// Oscillation detection parameters (tunable)
+static const uint32_t OSC_WINDOW_MS = 500;           // Time window to count sign changes
+static const uint8_t OSC_MIN_SIGN_CHANGES = 4;       // Min sign changes to trigger (4 = 2 full oscillations)
+static const float OSC_MIN_AMPLITUDE_DEG = 3.0f;     // Min oscillation amplitude to be considered dangerous
+static const float OSC_MIN_ERROR_TO_CHECK = 1.0f;    // Don't check if error is very small
 
 static bool wp_first_read[MAX_DOFS] = {true, true, true};
 static CANErrorTracker wp_canErrorTracker;
@@ -163,11 +127,11 @@ void getWaypointProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& ma
  * @brief Execute waypoint-based movement for all DOFs
  * 
  * This is the main entry point called from core1_loop() at 500 Hz.
- * Implements cascade control (outer joint PID + inner motor PID) with
- * continuous waypoint consumption for smooth trajectory execution.
+ * Implements the same cascade control as moveMultiDOF_cascade but with
+ * continuous waypoint consumption instead of pre-generated trajectory arrays.
  * 
  * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
- * - Outer loop runs every outer_loop_divisor cycles (default 1 = 500 Hz)
+ * - Outer loop @ 100 Hz (every 5 cycles)
  * - Inner loop @ 500 Hz (every cycle)
  * - Linear interpolation between waypoints
  * - Hold position when buffer empty
@@ -191,17 +155,6 @@ bool JointController::executeWaypointMovement() {
   SharedDofAngles dof_snapshot;
   readSharedDofAnglesSnapshot(dof_snapshot);
   const SharedDofAngles &dof_data = dof_snapshot;
-
-  // === OUTER LOOP SCHEDULING ===
-  uint8_t effective_divisor = (outer_loop_divisor < 1) ? 1 : outer_loop_divisor;
-  const bool outer_cycle_due = ((cycle_count - 1) % effective_divisor) == 0;
-
-  if (!cascade_scale_initialized) {
-    for (uint8_t i = 0; i < config.dof_count; i++) {
-      cascade_scale_filtered[i] = 1.0f;
-    }
-    cascade_scale_initialized = true;
-  }
   
   // Process each DOF independently
   for (uint8_t dof = 0; dof < config.dof_count; dof++) {
@@ -215,13 +168,8 @@ bool JointController::executeWaypointMovement() {
       prev_dof_state[dof] = WaypointState::IDLE;
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
-      cascade_scale_filtered[dof] = 1.0f;
       continue; // Skip this DOF entirely
     }
-
-#if CONTROLLER_DEBUG
-    uint32_t dof_start_us = time_us_32();
-#endif
     
     // === RESET PID STATE when transitioning to MOVING ===
     // Reset ONLY on IDLE → MOVING (new sequence starting from stopped state)
@@ -236,12 +184,10 @@ bool JointController::executeWaypointMovement() {
       resetOuterPID(dof);
       delta_theta[dof] = 0.0f;
       pid_reset_needed[dof] = false;
-      cascade_scale_filtered[dof] = 1.0f;
 
       // Clear CAN error history for this DOF to prevent old errors from triggering false stops
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
-      wp_consecutive_invalid[dof] = 0;  // Reset invalid read counter
 
       LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (IDLE → MOVING)");
     }
@@ -299,11 +245,8 @@ bool JointController::executeWaypointMovement() {
     
     // === OUTER LOOP (Joint PID) ===
     // Execute outer loop every N inner cycles (configurable via outer_loop_divisor)
-    if (outer_cycle_due) {
-
-#if CONTROLLER_DEBUG
-      uint32_t outer_start_us = time_us_32();
-#endif
+    // Default: 500Hz / 1 = 500Hz (same as inner loop for reduced vibrations)
+    if ((cycle_count - 1) % outer_loop_divisor == 0) {
       
       float q_des = 0.0f;
       float expected_velocity_deg_s = 0.0f;
@@ -332,8 +275,6 @@ bool JointController::executeWaypointMovement() {
           progress = constrain(progress, 0.0f, 1.0f);
           expected_velocity_deg_s = (target_angle - prev_angle) * 1000.0f / time_total;
         }
-        
-        // expected_velocity_deg_s is used for low-speed scaling below
         
         // NOTE: Trajectory diagnostic logging removed to reduce serial overhead
         // Only errors > 5° are logged (see below)
@@ -396,30 +337,6 @@ bool JointController::executeWaypointMovement() {
 
       bool expected_holding = fabs(expected_velocity_deg_s) <= expected_velocity_deadband_deg_s;
       bool compliance_should_activate = false;
-
-      // === CASCADE INFLUENCE SCALING (low-speed damping) ===
-      float outer_loop_dt = effective_divisor * inner_loop_period_us / 1000000.0f;
-      float cascade_scale_target = 1.0f;
-      if (!expected_holding) {
-        float speed_abs = fabs(expected_velocity_deg_s);
-        float t = 0.0f;
-        if (speed_abs <= CASCADE_SPEED_LOW_DEG_S) {
-          t = 0.0f;
-        } else if (speed_abs >= CASCADE_SPEED_HIGH_DEG_S) {
-          t = 1.0f;
-        } else {
-          t = (speed_abs - CASCADE_SPEED_LOW_DEG_S) /
-              (CASCADE_SPEED_HIGH_DEG_S - CASCADE_SPEED_LOW_DEG_S);
-        }
-        t = smoothstep(t);
-        cascade_scale_target = CASCADE_SCALE_MIN +
-                               t * (CASCADE_SCALE_MAX - CASCADE_SCALE_MIN);
-      }
-      float scale_alpha = outer_loop_dt / (CASCADE_SCALE_RAMP_TAU_S + outer_loop_dt);
-      cascade_scale_filtered[dof] +=
-          scale_alpha * (cascade_scale_target - cascade_scale_filtered[dof]);
-      cascade_scale_filtered[dof] =
-          constrain(cascade_scale_filtered[dof], CASCADE_SCALE_MIN, CASCADE_SCALE_MAX);
 
       if (!cs.compliance_active) {
         if (expected_holding) {
@@ -490,7 +407,7 @@ bool JointController::executeWaypointMovement() {
             
             // Notify host that trajectory was aborted due to stall
             // Host should stop sending waypoints and handle the situation
-            SERIAL_COM_LN("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
+            Serial.println("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
           }
         }
       } else {
@@ -565,7 +482,7 @@ bool JointController::executeWaypointMovement() {
       // An oscillation is detected when:
       // 1. Error changes sign frequently (multiple times in short window)
       // 2. Oscillation amplitude exceeds threshold
-      if (is_moving && abs_error > osc_min_error_to_check) {
+      if (is_moving && abs_error > OSC_MIN_ERROR_TO_CHECK) {
         OscillationDetector &od = osc_detector[dof];
         uint32_t now_ms = millis();
         
@@ -573,7 +490,7 @@ bool JointController::executeWaypointMovement() {
         int8_t error_sign = (error > 0.1f) ? 1 : ((error < -0.1f) ? -1 : 0);
         
         // Reset window if expired
-        if (now_ms - od.window_start_ms > osc_window_ms) {
+        if (now_ms - od.window_start_ms > OSC_WINDOW_MS) {
           od.window_start_ms = now_ms;
           od.sign_change_count = 0;
           od.max_error_in_window = abs_error;
@@ -596,15 +513,15 @@ bool JointController::executeWaypointMovement() {
         
         // Check if oscillation is dangerous
         if (!od.oscillation_detected && 
-            od.sign_change_count >= osc_min_sign_changes && 
-            osc_amplitude >= osc_min_amplitude_deg) {
+            od.sign_change_count >= OSC_MIN_SIGN_CHANGES && 
+            osc_amplitude >= OSC_MIN_AMPLITUDE_DEG) {
           
           LOG_ERROR("[OSCILLATION SAFETY] DOF " + String(dof) + 
                     " DANGEROUS OSCILLATION DETECTED!");
           LOG_ERROR("  Sign changes: " + String(od.sign_change_count) + 
                     " in " + String(now_ms - od.window_start_ms) + "ms");
           LOG_ERROR("  Amplitude: " + String(osc_amplitude, 1) + 
-                    "° (threshold: " + String(osc_min_amplitude_deg, 1) + "°)");
+                    "° (threshold: " + String(OSC_MIN_AMPLITUDE_DEG, 1) + "°)");
           
           // Trigger emergency stop
           od.oscillation_detected = true;
@@ -617,7 +534,7 @@ bool JointController::executeWaypointMovement() {
           pid_reset_needed[dof] = true;
           
           // Notify host via serial
-          SERIAL_COM_LN("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
+          Serial.println("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
                         ":AMPLITUDE=" + String(osc_amplitude, 1) +
                         ":SIGN_CHANGES=" + String(od.sign_change_count));
           
@@ -626,17 +543,17 @@ bool JointController::executeWaypointMovement() {
       } else {
         // Reset oscillation detector when not in danger zone
         OscillationDetector &od = osc_detector[dof];
-        if (od.oscillation_detected && abs_error < osc_min_error_to_check * 0.5f) {
+        if (od.oscillation_detected && abs_error < OSC_MIN_ERROR_TO_CHECK * 0.5f) {
           od.oscillation_detected = false; // Allow re-detection after recovery
         }
         od.sign_change_count = 0;
         od.window_start_ms = millis();
       }
 
-      // === RUNTIME SAFETY CHECK ===
+      // === RUNTIME SAFETY CHECK (same as moveMultiDOF_cascade) ===
       // Check joint limits, mapping limits, and optionally motor limits (tendon breakage)
-      // - MOVING mode: check every outer loop cycle (default 500 Hz)
-      // - HOLDING mode: check immediately on transition, then every 100 cycles (period depends on outer loop rate)
+      // - MOVING mode: check every cycle (100 Hz) for immediate detection
+      // - HOLDING mode: check immediately on transition, then every 100 cycles (~1 second)
       
       // Determine current state based on waypoint buffer
       bool is_holding = !has_waypoints; // If no waypoints, we're holding position
@@ -656,7 +573,7 @@ bool JointController::executeWaypointMovement() {
           LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
           
           // Send structured message for UI display
-          SERIAL_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
+          Serial.println("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
           
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
@@ -698,27 +615,18 @@ bool JointController::executeWaypointMovement() {
                      "°, dir=" + String(mt.movement_direction, 0) + ")");
             LOG_INFO("  sse=" + String(m.sse_x100 / 100.0f, 2) + 
                      "° (samples=" + String(mt.sse_sample_count) + ")");
-            LOG_INFO("  [SMOOTHNESS] rms=" + String(m.rms_error_x100 / 100.0f, 2) + 
-                     "°(" + String(m.score_rms) + ") osc=" + String(m.oscillation_count) + 
-                     "(" + String(m.score_oscillation) + ") jit=" + String(m.jitter_x100 / 100.0f, 3) + 
-                     "°(" + String(m.score_jitter) + ")");
-            LOG_INFO("  [SCORE] smoothness=" + String(m.score_smoothness) + "/100 (n=" + 
-                     String(mt.moving_sample_count) + " samples)");
           }
         }
       }
       
       // Determine if we should check safety:
-      // - Always check joint limits in MOVING mode (every outer loop cycle; default 500 Hz)
-      // - Check periodically in HOLDING mode (every 10 cycles; period depends on outer loop rate)
+      // - Always check joint limits in MOVING mode (every outer loop cycle = 100 Hz)
+      // - Check periodically in HOLDING mode (every 10 cycles = ~100ms at 100Hz)
       // NOTE: We do NOT check immediately when entering HOLDING because motors may still be settling
       // Reduced from 20 cycles (200ms) to 10 cycles (100ms) for faster detection during manual push
       bool should_check_safety = has_waypoints || (is_holding && safety_check_counter >= 10);
       
       if (should_check_safety) {
-#if CONTROLLER_DEBUG
-        uint32_t safety_start_us = time_us_32();
-#endif
         String safety_message;
         // Check motors (tendon breakage) only in HOLDING mode periodically
         // NOT immediately when entering HOLDING - motors need time to settle
@@ -728,18 +636,7 @@ bool JointController::executeWaypointMovement() {
         // String concatenation + Serial.print was causing ~2ms overhead per call,
         // which exceeded the 2ms cycle budget and caused control loop jitter.
         
-        bool safety_ok = checkSafetyForDof(dof, q_curr, safety_message, check_motors);
-#if CONTROLLER_DEBUG
-        {
-          uint32_t safety_dt = time_us_32() - safety_start_us;
-          wp_micro_profile.accum_safety_us += safety_dt;
-          wp_micro_profile.safety_samples++;
-          if (safety_dt > wp_micro_profile.max_safety_us) {
-            wp_micro_profile.max_safety_us = safety_dt;
-          }
-        }
-#endif
-        if (!safety_ok) {
+        if (!checkSafetyForDof(dof, q_curr, safety_message, check_motors)) {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
           LOG_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
@@ -764,6 +661,7 @@ bool JointController::executeWaypointMovement() {
       // The PID controller needs the correct Ts for proper integral/derivative scaling
       // Only update when it changes (avoid overhead on every cycle)
       static float last_outer_loop_dt = 0.0f;
+      float outer_loop_dt = outer_loop_divisor * inner_loop_period_us / 1000000.0f;
       if (outer_loop_dt != last_outer_loop_dt) {
         setOuterLoopSamplingPeriod(outer_loop_dt);
         last_outer_loop_dt = outer_loop_dt;
@@ -799,30 +697,6 @@ bool JointController::executeWaypointMovement() {
           // Track maximum error
           if (abs_error > mt.max_error_deg) {
             mt.max_error_deg = abs_error;
-          }
-          
-          // === OSCILLATION/SMOOTHNESS TRACKING (during MOVING only) ===
-          // These metrics quantify vibrations and tracking quality
-          if (!is_holding) {
-            // RMS error: accumulate squared error
-            mt.error_sum_sq += error * error;
-            mt.moving_sample_count++;
-            
-            // Zero-crossings: count sign changes in error (indicates oscillations)
-            float current_sign = (error > 0.01f) ? 1.0f : ((error < -0.01f) ? -1.0f : 0.0f);
-            if (mt.prev_error_valid && mt.prev_error_sign != 0.0f && current_sign != 0.0f &&
-                current_sign != mt.prev_error_sign) {
-              mt.zero_crossings++;
-            }
-            mt.prev_error_sign = current_sign;
-            
-            // Jitter: accumulate squared derivative of error (high = rapid vibrations)
-            if (mt.prev_error_valid) {
-              float error_deriv = error - mt.prev_error_deg;
-              mt.error_deriv_sum_sq += error_deriv * error_deriv;
-            }
-            mt.prev_error_deg = error;
-            mt.prev_error_valid = true;
           }
           
           // Rise time: detect when we first reach 90% of target
@@ -873,16 +747,6 @@ bool JointController::executeWaypointMovement() {
           }
         }  // End of: if (now >= mt.movement_start_ms)
       }
-
-#if CONTROLLER_DEBUG
-      {
-        uint32_t outer_dt = time_us_32() - outer_start_us;
-        wp_micro_profile.accum_outer_us += outer_dt;
-        if (outer_dt > wp_micro_profile.max_outer_us) {
-          wp_micro_profile.max_outer_us = outer_dt;
-        }
-      }
-#endif
     }
     
     // === INNER LOOP @ 500 Hz (Motor Control) ===
@@ -956,20 +820,8 @@ bool JointController::executeWaypointMovement() {
     
     // Compute theta_0 for motors using linear equations
     float theta_0_agonist_motor, theta_0_antagonist_motor;
-#if CONTROLLER_DEBUG
-    uint32_t eq_start_us = time_us_32();
-#endif
     bool equations_ok = calculateMotorAnglesWithEquations(dof, theta_0_joint, theta_0_joint,
                                                           theta_0_agonist_motor, theta_0_antagonist_motor);
-#if CONTROLLER_DEBUG
-    {
-      uint32_t eq_dt = time_us_32() - eq_start_us;
-      wp_micro_profile.accum_eq_us += eq_dt;
-      if (eq_dt > wp_micro_profile.max_eq_us) {
-        wp_micro_profile.max_eq_us = eq_dt;
-      }
-    }
-#endif
     
     if (!equations_ok) {
       // No linear equations, cannot control this DOF
@@ -994,27 +846,22 @@ bool JointController::executeWaypointMovement() {
     // between the previous and current delta_theta values based on where we are in the
     // outer loop period. When divisor = 1, alpha = 1.0 so no interpolation occurs.
     float delta_theta_smooth;
-    if (effective_divisor <= 1) {
+    if (outer_loop_divisor <= 1) {
       // No interpolation needed (outer and inner at same frequency)
       delta_theta_smooth = delta_theta[dof];
     } else {
       // Interpolate: cycle_in_outer goes from 0 to (divisor-1)
       // alpha goes from 1/divisor to 1.0 (we use new value immediately, blend out old)
-      int cycle_in_outer = (cycle_count - 1) % effective_divisor;
-      float alpha = (float)(cycle_in_outer + 1) / (float)effective_divisor;
+      int cycle_in_outer = (cycle_count - 1) % outer_loop_divisor;
+      float alpha = (float)(cycle_in_outer + 1) / (float)outer_loop_divisor;
       delta_theta_smooth = delta_theta_prev[dof] + alpha * (delta_theta[dof] - delta_theta_prev[dof]);
     }
     
-    // Compute motor references using cascade control formula
-    // Apply low-speed scaling to delta_theta only (keep stiffness_ref unchanged)
-    float cascade_delta = constrain(cascade_influence * cascade_scale_filtered[dof], 0.0f, 1.0f);
-    float cascade_stiffness = constrain(cascade_influence, 0.0f, 1.0f);
-    float theta_A_ref = theta_0_agonist_motor +
-                        (0.5f * delta_theta_smooth * cascade_delta) +
-                        (0.5f * stiffness_ref * cascade_stiffness);
-    float theta_B_ref = theta_0_antagonist_motor +
-                        (0.5f * delta_theta_smooth * cascade_delta) -
-                        (0.5f * stiffness_ref * cascade_stiffness);
+    // Compute motor references using cascade control formula (same as moveMultiDOF_cascade)
+    float theta_A_ref = theta_0_agonist_motor + 
+                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref);
+    float theta_B_ref = theta_0_antagonist_motor + 
+                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
 
     // === ANTI-SLACK CLAMP (active during compliance) ===
     if (anti_slack_enabled && compliance_state[dof].compliance_active) {
@@ -1059,46 +906,42 @@ bool JointController::executeWaypointMovement() {
           }
         }
       }
-
     }
     
     // Read current motor angles
-#if CONTROLLER_DEBUG
-    uint32_t can_start_us = time_us_32();
-#endif
     MultiAngleData data_A = agonist->getMultiAngleSync();
     MultiAngleData data_B = antagonist->getMultiAngleSync();
-#if CONTROLLER_DEBUG
-    {
-      uint32_t can_dt = time_us_32() - can_start_us;
-      wp_micro_profile.accum_can_us += can_dt;
-      if (can_dt > wp_micro_profile.max_can_us) {
-        wp_micro_profile.max_can_us = can_dt;
-      }
-    }
-#endif
     float theta_A_curr = data_A.angle;
     float theta_B_curr = data_B.angle;
     
     // === SANITY CHECK: Detect obviously invalid readings ===
-    // Values outside ±100000° are clearly garbage (CAN corruption, NaN)
+    // Values outside ±100000° are clearly garbage (CAN corruption)
     bool invalid_A = (theta_A_curr < -100000.0f || theta_A_curr > 100000.0f || isnan(theta_A_curr));
     bool invalid_B = (theta_B_curr < -100000.0f || theta_B_curr > 100000.0f || isnan(theta_B_curr));
     
-    // === DIAGNOSTIC: Detect suspicious motor angle jumps ===
-    // Check for sudden large jumps (possible CAN corruption)
+    if (invalid_A || invalid_B) {
+      static uint32_t last_invalid_log = 0;
+      if (millis() - last_invalid_log > 100) { // Log max every 100ms
+        LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ: A=" + 
+                  String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
+        last_invalid_log = millis();
+      }
+      // Skip this cycle entirely - don't send any torque command
+      continue;
+    }
+    
+    // === DIAGNOSTIC: Detect suspicious motor readings ===
+    // Check for sudden large jumps in motor angle (possible CAN corruption)
     // Uses time-window based detection via shared CANErrorTracker (main_common.h)
     // Variables are at file scope (wp_last_theta_A/B, wp_first_read, wp_canErrorTracker)
-    bool jump_detected = false;
-    if (!wp_first_read[dof] && !invalid_A && !invalid_B) {
+    // so they can be reset when a new waypoint sequence starts
+
+    if (!wp_first_read[dof]) {
       float jump_A = fabs(theta_A_curr - wp_last_theta_A[dof]);
       float jump_B = fabs(theta_B_curr - wp_last_theta_B[dof]);
 
-      // Threshold adapts to loop rate: max_speed_dps * dt_seconds
-      // Default: 15000°/s * 0.002s = 30° per cycle @ 500Hz
-      float max_jump_per_cycle = can_motor_jump_threshold_dps * inner_loop_period_us / 1000000.0f;
-      if (jump_A > max_jump_per_cycle || jump_B > max_jump_per_cycle) {
-        jump_detected = true;
+      // If motor angle jumped more than 30° in one cycle (2ms), something is wrong
+      if (jump_A > 30.0f || jump_B > 30.0f) {
         wp_canErrorTracker.recordError(dof);
         uint8_t recent_errors = wp_canErrorTracker.countRecentErrors(dof);
 
@@ -1118,61 +961,18 @@ bool JointController::executeWaypointMovement() {
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
           wp_canErrorTracker.clearErrors(dof);
           wp_first_read[dof] = true;
-          wp_consecutive_invalid[dof] = 0;
           continue;
         }
-      }
-    }
-    
-    // === FALLBACK LOGIC: Use last-known-good values on bad reads ===
-    // Instead of skipping the control cycle (which leaves motors uncontrolled),
-    // substitute with last valid reading so PID keeps running.
-    // Emergency stop triggers after sustained failures.
-    if (invalid_A || invalid_B || jump_detected) {
-      if (wp_first_read[dof]) {
-        // No previous good value to fall back to — must skip
-        static uint32_t last_invalid_log = 0;
-        if (millis() - last_invalid_log > 100) {
-          LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ on first read, skipping");
-          last_invalid_log = millis();
-        }
+
+        // Skip this cycle to avoid sending bad commands, use last known good values
         continue;
       }
-
-      // Fallback: use last known good motor angles
-      theta_A_curr = wp_last_theta_A[dof];
-      theta_B_curr = wp_last_theta_B[dof];
-      wp_consecutive_invalid[dof]++;
-
-      if (invalid_A || invalid_B) {
-        wp_canErrorTracker.recordError(dof);
-        static uint32_t last_invalid_log = 0;
-        if (millis() - last_invalid_log > 100) {
-          LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ (consecutive=" + 
-                    String(wp_consecutive_invalid[dof]) + "), using last-known-good");
-          last_invalid_log = millis();
-        }
-      }
-
-      // Emergency stop after sustained invalid reads (threshold from system config)
-      if (wp_consecutive_invalid[dof] >= can_error_threshold) {
-        LOG_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(wp_consecutive_invalid[dof]) +
-                  " consecutive invalid CAN reads, EMERGENCY STOP!");
-        stopAllMotors();
-        waypoint_buffer_clear(dof);
-        waypoint_buffer_set_state(dof, WaypointState::IDLE);
-        wp_canErrorTracker.clearErrors(dof);
-        wp_first_read[dof] = true;
-        wp_consecutive_invalid[dof] = 0;
-        continue;
-      }
-    } else {
-      // Valid reading — update last-known-good cache, reset consecutive counter
-      wp_last_theta_A[dof] = theta_A_curr;
-      wp_last_theta_B[dof] = theta_B_curr;
-      wp_first_read[dof] = false;
-      wp_consecutive_invalid[dof] = 0;
+      // Good reading - no need to reset anything, old errors expire naturally
     }
+
+    wp_last_theta_A[dof] = theta_A_curr;
+    wp_last_theta_B[dof] = theta_B_curr;
+    wp_first_read[dof] = false;
     
     // === UPDATE MOTOR ANGLE CACHE ===
     // This cache is used by checkMotorsInRange() to avoid redundant CAN reads
@@ -1183,20 +983,8 @@ bool JointController::executeWaypointMovement() {
     cached_motor_angles.last_update_ms = millis();
     
     // Inner PID for motors (compute torque commands)
-#if CONTROLLER_DEBUG
-    uint32_t pid_start_us = time_us_32();
-#endif
     float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_curr);
-#if CONTROLLER_DEBUG
-    {
-      uint32_t pid_dt = time_us_32() - pid_start_us;
-      wp_micro_profile.accum_pid_us += pid_dt;
-      if (pid_dt > wp_micro_profile.max_pid_us) {
-        wp_micro_profile.max_pid_us = pid_dt;
-      }
-    }
-#endif
     
     // NOTE: Co-contraction is achieved through stiffness_ref parameter in cascade control
     // theta_A_ref = theta_0 + 0.5*delta_theta + 0.5*stiffness_ref
@@ -1331,71 +1119,15 @@ bool JointController::executeWaypointMovement() {
         }
       }
     }
-
-#if CONTROLLER_DEBUG
-    {
-      uint32_t dof_dt = time_us_32() - dof_start_us;
-      wp_micro_profile.accum_dof_us += dof_dt;
-      if (dof_dt > wp_micro_profile.max_dof_us) {
-        wp_micro_profile.max_dof_us = dof_dt;
-      }
-      wp_micro_profile.samples++;
-    }
-#endif
   }
   
   // Mark diagnostics as valid after processing all DOFs
   pid_diagnostics.last_update_ms = millis();
   pid_diagnostics.valid = true;
-
-#if CONTROLLER_DEBUG
-  if (wp_micro_profile.samples >= WP_MICRO_MIN_SAMPLES) {
-    uint32_t now_ms = millis();
-    if (wp_micro_profile.last_log_ms == 0) {
-      wp_micro_profile.last_log_ms = now_ms;
-    }
-    if (now_ms - wp_micro_profile.last_log_ms >= WP_MICRO_LOG_INTERVAL_MS) {
-      float inv = 1.0f / (float)wp_micro_profile.samples;
-      float safety_inv = (wp_micro_profile.safety_samples > 0)
-                             ? (1.0f / (float)wp_micro_profile.safety_samples)
-                             : 0.0f;
-      LOG_INFO_F("[WP PROF] avg_us dof=%.1f outer=%.1f eq=%.1f can=%.1f pid=%.1f safety=%.1f | max_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu safety=%lu | samples=%lu safety_samples=%lu",
-                 wp_micro_profile.accum_dof_us * inv,
-                 wp_micro_profile.accum_outer_us * inv,
-                 wp_micro_profile.accum_eq_us * inv,
-                 wp_micro_profile.accum_can_us * inv,
-                 wp_micro_profile.accum_pid_us * inv,
-                 wp_micro_profile.accum_safety_us * safety_inv,
-                 (unsigned long)wp_micro_profile.max_dof_us,
-                 (unsigned long)wp_micro_profile.max_outer_us,
-                 (unsigned long)wp_micro_profile.max_eq_us,
-                 (unsigned long)wp_micro_profile.max_can_us,
-                 (unsigned long)wp_micro_profile.max_pid_us,
-                 (unsigned long)wp_micro_profile.max_safety_us,
-                 (unsigned long)wp_micro_profile.samples,
-                 (unsigned long)wp_micro_profile.safety_samples);
-      wp_micro_profile.accum_dof_us = 0;
-      wp_micro_profile.accum_outer_us = 0;
-      wp_micro_profile.accum_eq_us = 0;
-      wp_micro_profile.accum_can_us = 0;
-      wp_micro_profile.accum_pid_us = 0;
-      wp_micro_profile.accum_safety_us = 0;
-      wp_micro_profile.max_dof_us = 0;
-      wp_micro_profile.max_outer_us = 0;
-      wp_micro_profile.max_eq_us = 0;
-      wp_micro_profile.max_can_us = 0;
-      wp_micro_profile.max_pid_us = 0;
-      wp_micro_profile.max_safety_us = 0;
-      wp_micro_profile.samples = 0;
-      wp_micro_profile.safety_samples = 0;
-      wp_micro_profile.last_log_ms = now_ms;
-    }
-  }
-#endif
   
   // Reset safety check counter after processing all DOFs
   // This ensures all DOFs in HOLDING mode are checked in the same cycle
-  // Using 10 cycles; time depends on outer loop rate (~20ms at 500Hz)
+  // Using 10 cycles = ~100ms at 100Hz outer loop rate
   if (safety_check_counter >= 10) {
     safety_check_counter = 0;
   }
