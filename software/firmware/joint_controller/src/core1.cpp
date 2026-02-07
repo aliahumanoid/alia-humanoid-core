@@ -530,7 +530,11 @@ void checkAndSendMetrics() {
       
       // One-shot offset drift check when entering HOLDING
       // Uses cached motor angles (updated every control cycle) — zero CAN overhead
-      if (active_joint_controller != nullptr && cached_motor_angles.valid[dof]) {
+      // NOTE: Only runs if NOT immediately after a startup-triggered HOLDING
+      // (first HOLDING after startup has no meaningful cached data yet)
+      if (active_joint_controller != nullptr && cached_motor_angles.valid[dof] &&
+          cached_motor_angles.last_update_ms > 0 &&
+          (millis() - cached_motor_angles.last_update_ms) < 500) {
         JointController::OffsetValidationResult vr = active_joint_controller->checkOffsetDriftFromCache(dof);
         if (vr.has_saved_data) {
           const float DRIFT_WARN_THRESHOLD = 2.0f;  // degrees
@@ -543,12 +547,6 @@ void checkAndSendMetrics() {
                    drift_detected ? "DRIFT" : "OK",
                    vr.error_agonist_deg, vr.error_antagonist_deg);
           SERIAL_COM_LN(buf);
-          
-          if (drift_detected) {
-            LOG_WARN("Offset drift detected on DOF " + String(dof) +
-                     ": agon=" + String(vr.error_agonist_deg, 1) +
-                     "° antag=" + String(vr.error_antagonist_deg, 1) + "°");
-          }
         }
       }
     }
