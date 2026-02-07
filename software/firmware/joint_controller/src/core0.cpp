@@ -906,8 +906,14 @@ void core0_main_loop() {
                         SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
                         LOG_ERROR("Startup sequence failed - emergency stop sent");
                       } else {
-                        // Success — motors stopped by recalcOffset, system ready for waypoints.
-                        // NOTE: No automatic HOLDING — user can send waypoints via UI when ready.
+                        // Save motor offsets to flash (the CMD1_END_MOVE flag was consumed
+                        // inside the startup loop, so the regular save trigger won't fire)
+                        if (active_joint_controller->isPendingOffsetsSave()) {
+                          active_joint_controller->saveMotorOffsetsToFlash();
+                          active_joint_controller->clearPendingOffsetsSave();
+                          LOG_INFO("Motor offsets saved to flash after startup");
+                        }
+                        
                         uint32_t total_time_ms = millis() - startup_start_time;
                         SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
                         LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — ready for waypoints");
