@@ -222,7 +222,22 @@ class SerialManager:
         
         logger.info(f"Starting joint discovery on {len(ports)} ports...")
         
-        # Open all ports and collect data
+        # First, check handlers already running — they have detected_joint_name
+        # from EVT:JOINT events. This handles ports that can't be reopened.
+        with self._lock:
+            for port, handler in self._handlers_by_port.items():
+                if handler and handler.detected_joint_name:
+                    joint_upper = handler.detected_joint_name.upper()
+                    discovered[joint_upper] = port
+                    # Also ensure port mapping is correct
+                    self._joint_to_port[joint_upper] = port
+                    logger.info(f"Discovery: {joint_upper} already active on {port}")
+        
+        if discovered:
+            logger.info(f"Found {len(discovered)} joint(s) from active handlers")
+            return discovered
+        
+        # If no active handlers with detected joints, try opening ports directly
         connections = []
         for port in ports:
             try:
