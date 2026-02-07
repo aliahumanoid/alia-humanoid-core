@@ -776,8 +776,10 @@ void core1_loop() {
     sendPIDDiagStreamData();
     
     // === MOVEMENT METRICS VIA CAN ===
-    // Send performance metrics when a movement completes (enters HOLDING)
-    checkAndSendMetrics();
+    // DISABLED: CAN_HOST.sendMsgBuf on SPI1 conflicts with Motor CAN reads
+    // in the same Core1 cycle, causing SPI1 deadlock during HOLDING.
+    // TODO: serialize Host CAN sends to avoid SPI1 bus conflict with Motor CAN.
+    // checkAndSendMetrics();
 
     // === WAYPOINT-BASED MOVEMENT ===
     // Execute waypoint trajectory for all DOFs (if waypoints available)
