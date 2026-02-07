@@ -155,6 +155,10 @@ bool JointController::executeWaypointMovement() {
   SharedDofAngles dof_snapshot;
   readSharedDofAnglesSnapshot(dof_snapshot);
   const SharedDofAngles &dof_data = dof_snapshot;
+
+  // === OUTER LOOP SCHEDULING ===
+  uint8_t effective_divisor = (outer_loop_divisor < 1) ? 1 : outer_loop_divisor;
+  const bool outer_cycle_due = ((cycle_count - 1) % effective_divisor) == 0;
   
   // Process each DOF independently
   for (uint8_t dof = 0; dof < config.dof_count; dof++) {
@@ -245,8 +249,7 @@ bool JointController::executeWaypointMovement() {
     
     // === OUTER LOOP (Joint PID) ===
     // Execute outer loop every N inner cycles (configurable via outer_loop_divisor)
-    // Default: 500Hz / 1 = 500Hz (same as inner loop for reduced vibrations)
-    if ((cycle_count - 1) % outer_loop_divisor == 0) {
+    if (outer_cycle_due) {
       
       float q_des = 0.0f;
       float expected_velocity_deg_s = 0.0f;
@@ -661,7 +664,7 @@ bool JointController::executeWaypointMovement() {
       // The PID controller needs the correct Ts for proper integral/derivative scaling
       // Only update when it changes (avoid overhead on every cycle)
       static float last_outer_loop_dt = 0.0f;
-      float outer_loop_dt = outer_loop_divisor * inner_loop_period_us / 1000000.0f;
+      float outer_loop_dt = effective_divisor * inner_loop_period_us / 1000000.0f;
       if (outer_loop_dt != last_outer_loop_dt) {
         setOuterLoopSamplingPeriod(outer_loop_dt);
         last_outer_loop_dt = outer_loop_dt;
@@ -846,14 +849,14 @@ bool JointController::executeWaypointMovement() {
     // between the previous and current delta_theta values based on where we are in the
     // outer loop period. When divisor = 1, alpha = 1.0 so no interpolation occurs.
     float delta_theta_smooth;
-    if (outer_loop_divisor <= 1) {
+    if (effective_divisor <= 1) {
       // No interpolation needed (outer and inner at same frequency)
       delta_theta_smooth = delta_theta[dof];
     } else {
       // Interpolate: cycle_in_outer goes from 0 to (divisor-1)
       // alpha goes from 1/divisor to 1.0 (we use new value immediately, blend out old)
-      int cycle_in_outer = (cycle_count - 1) % outer_loop_divisor;
-      float alpha = (float)(cycle_in_outer + 1) / (float)outer_loop_divisor;
+      int cycle_in_outer = (cycle_count - 1) % effective_divisor;
+      float alpha = (float)(cycle_in_outer + 1) / (float)effective_divisor;
       delta_theta_smooth = delta_theta_prev[dof] + alpha * (delta_theta[dof] - delta_theta_prev[dof]);
     }
     
