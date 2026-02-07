@@ -2076,18 +2076,32 @@ function discoverJoints() {
                 // Update local mapping
                 jointPortMapping = response.mappings || {};
                 
-                // Update UI
-                updateSerialPortSelectUI($("#jointSelect").val());
+                // Auto-select the first discovered joint in the dropdown
+                const firstJoint = Object.keys(discovered)[0];
+                const currentJoint = $("#jointSelect").val();
+                
+                if (firstJoint && firstJoint !== currentJoint) {
+                    $("#jointSelect").val(firstJoint).trigger('change');
+                    appendStatusMessage(`Auto-selected ${firstJoint} (discovered on ${discovered[firstJoint]})`);
+                } else {
+                    // Same joint — just update serial port UI
+                    updateSerialPortSelectUI(currentJoint);
+                }
+                
+                // Load PID and configuration for discovered joint
+                setTimeout(() => {
+                    sendCommand('select-joint', { joint: firstJoint || currentJoint });
+                }, 200);
                 
                 // Build discovery message
-                let msg = `✅ Discovery complete: found ${count} joint(s):\n`;
+                let msg = `Discovery complete: found ${count} joint(s):\n`;
                 for (const [joint, port] of Object.entries(discovered)) {
                     msg += `  - ${joint} → ${port}\n`;
                 }
                 appendStatusMessage(msg);
                 
                 if (response.can_request_sent) {
-                    appendStatusMessage('📡 CAN identify request was sent to all controllers');
+                    appendStatusMessage('CAN identify request was sent to all controllers');
                 }
             } else {
                 appendStatusMessage('⚠️ No joints discovered. Make sure controllers are connected and CAN bus is active.');
