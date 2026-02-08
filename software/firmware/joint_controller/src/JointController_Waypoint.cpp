@@ -55,6 +55,29 @@ static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 // where we are in the current outer loop period. This eliminates vibrations caused
 // by discontinuous reference changes while maintaining cascade control benefits.
 
+#if CONTROLLER_DEBUG
+struct WaypointMicroProfile {
+  uint32_t accum_dof_us = 0;
+  uint32_t accum_outer_us = 0;
+  uint32_t accum_eq_us = 0;
+  uint32_t accum_can_us = 0;
+  uint32_t accum_pid_us = 0;
+  uint32_t accum_safety_us = 0;
+  uint32_t max_dof_us = 0;
+  uint32_t max_outer_us = 0;
+  uint32_t max_eq_us = 0;
+  uint32_t max_can_us = 0;
+  uint32_t max_pid_us = 0;
+  uint32_t max_safety_us = 0;
+  uint32_t samples = 0;
+  uint32_t safety_samples = 0;
+  uint32_t last_log_ms = 0;
+};
+static WaypointMicroProfile wp_micro_profile;
+static const uint32_t WP_MICRO_LOG_INTERVAL_MS = 2000;
+static const uint16_t WP_MICRO_MIN_SAMPLES = 50;
+#endif
+
 // Safety check counter (for periodic motor checks in HOLDING mode)
 static uint16_t safety_check_counter = 0;
 
@@ -174,6 +197,10 @@ bool JointController::executeWaypointMovement() {
       velocity_filtered[dof] = 0.0f;
       continue; // Skip this DOF entirely
     }
+
+#if CONTROLLER_DEBUG
+    uint32_t dof_start_us = time_us_32();
+#endif
     
     // === RESET PID STATE when transitioning to MOVING ===
     // Reset ONLY on IDLE → MOVING (new sequence starting from stopped state)
@@ -250,6 +277,10 @@ bool JointController::executeWaypointMovement() {
     // === OUTER LOOP (Joint PID) ===
     // Execute outer loop every N inner cycles (configurable via outer_loop_divisor)
     if (outer_cycle_due) {
+
+#if CONTROLLER_DEBUG
+      uint32_t outer_start_us = time_us_32();
+#endif
       
       float q_des = 0.0f;
       float expected_velocity_deg_s = 0.0f;
@@ -630,6 +661,9 @@ bool JointController::executeWaypointMovement() {
       bool should_check_safety = has_waypoints || (is_holding && safety_check_counter >= 10);
       
       if (should_check_safety) {
+#if CONTROLLER_DEBUG
+        uint32_t safety_start_us = time_us_32();
+#endif
         String safety_message;
         // Check motors (tendon breakage) only in HOLDING mode periodically
         // NOT immediately when entering HOLDING - motors need time to settle
@@ -639,7 +673,18 @@ bool JointController::executeWaypointMovement() {
         // String concatenation + Serial.print was causing ~2ms overhead per call,
         // which exceeded the 2ms cycle budget and caused control loop jitter.
         
-        if (!checkSafetyForDof(dof, q_curr, safety_message, check_motors)) {
+        bool safety_ok = checkSafetyForDof(dof, q_curr, safety_message, check_motors);
+#if CONTROLLER_DEBUG
+        {
+          uint32_t safety_dt = time_us_32() - safety_start_us;
+          wp_micro_profile.accum_safety_us += safety_dt;
+          wp_micro_profile.safety_samples++;
+          if (safety_dt > wp_micro_profile.max_safety_us) {
+            wp_micro_profile.max_safety_us = safety_dt;
+          }
+        }
+#endif
+        if (!safety_ok) {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
           LOG_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
@@ -750,6 +795,16 @@ bool JointController::executeWaypointMovement() {
           }
         }  // End of: if (now >= mt.movement_start_ms)
       }
+
+#if CONTROLLER_DEBUG
+      {
+        uint32_t outer_dt = time_us_32() - outer_start_us;
+        wp_micro_profile.accum_outer_us += outer_dt;
+        if (outer_dt > wp_micro_profile.max_outer_us) {
+          wp_micro_profile.max_outer_us = outer_dt;
+        }
+      }
+#endif
     }
     
     // === INNER LOOP @ 500 Hz (Motor Control) ===
@@ -823,8 +878,20 @@ bool JointController::executeWaypointMovement() {
     
     // Compute theta_0 for motors using linear equations
     float theta_0_agonist_motor, theta_0_antagonist_motor;
+#if CONTROLLER_DEBUG
+    uint32_t eq_start_us = time_us_32();
+#endif
     bool equations_ok = calculateMotorAnglesWithEquations(dof, theta_0_joint, theta_0_joint,
                                                           theta_0_agonist_motor, theta_0_antagonist_motor);
+#if CONTROLLER_DEBUG
+    {
+      uint32_t eq_dt = time_us_32() - eq_start_us;
+      wp_micro_profile.accum_eq_us += eq_dt;
+      if (eq_dt > wp_micro_profile.max_eq_us) {
+        wp_micro_profile.max_eq_us = eq_dt;
+      }
+    }
+#endif
     
     if (!equations_ok) {
       // No linear equations, cannot control this DOF
@@ -912,8 +979,20 @@ bool JointController::executeWaypointMovement() {
     }
     
     // Read current motor angles
+#if CONTROLLER_DEBUG
+    uint32_t can_start_us = time_us_32();
+#endif
     MultiAngleData data_A = agonist->getMultiAngleSync();
     MultiAngleData data_B = antagonist->getMultiAngleSync();
+#if CONTROLLER_DEBUG
+    {
+      uint32_t can_dt = time_us_32() - can_start_us;
+      wp_micro_profile.accum_can_us += can_dt;
+      if (can_dt > wp_micro_profile.max_can_us) {
+        wp_micro_profile.max_can_us = can_dt;
+      }
+    }
+#endif
     float theta_A_curr = data_A.angle;
     float theta_B_curr = data_B.angle;
     
@@ -986,8 +1065,20 @@ bool JointController::executeWaypointMovement() {
     cached_motor_angles.last_update_ms = millis();
     
     // Inner PID for motors (compute torque commands)
+#if CONTROLLER_DEBUG
+    uint32_t pid_start_us = time_us_32();
+#endif
     float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_curr);
+#if CONTROLLER_DEBUG
+    {
+      uint32_t pid_dt = time_us_32() - pid_start_us;
+      wp_micro_profile.accum_pid_us += pid_dt;
+      if (pid_dt > wp_micro_profile.max_pid_us) {
+        wp_micro_profile.max_pid_us = pid_dt;
+      }
+    }
+#endif
     
     // NOTE: Co-contraction is achieved through stiffness_ref parameter in cascade control
     // theta_A_ref = theta_0 + 0.5*delta_theta + 0.5*stiffness_ref
@@ -1122,8 +1213,19 @@ bool JointController::executeWaypointMovement() {
         }
       }
     }
+
+#if CONTROLLER_DEBUG
+    {
+      uint32_t dof_dt = time_us_32() - dof_start_us;
+      wp_micro_profile.accum_dof_us += dof_dt;
+      if (dof_dt > wp_micro_profile.max_dof_us) {
+        wp_micro_profile.max_dof_us = dof_dt;
+      }
+      wp_micro_profile.samples++;
+    }
+#endif
   }
-  
+
   // Mark diagnostics as valid after processing all DOFs
   pid_diagnostics.last_update_ms = millis();
   pid_diagnostics.valid = true;
@@ -1167,6 +1269,11 @@ bool JointController::executeWaypointMovement() {
       cycle_time_us_max = 0;
     }
   }
+  
+  // NOTE: Micro-profiling log output DISABLED — LOG_INFO_F from Core1
+  // causes cross-core Serial deadlock with Core0 USB CDC operations.
+  // Timing data still collected in wp_micro_profile for future use
+  // (e.g., read via CAN diagnostic command instead of Serial).
   
   return any_movement;
 }
