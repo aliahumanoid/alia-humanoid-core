@@ -91,6 +91,12 @@ volatile float min_tension_torque = 20.0f;
 volatile uint16_t soft_hold_ramp_down_ms = 600;   // Torque release ramp (ms)
 volatile uint16_t soft_hold_ramp_up_ms = 800;     // Torque recovery ramp (ms)
 volatile bool soft_hold_enabled = true;
+volatile bool cascade_speed_scaling_enabled = false;  // OFF by default (experimental)
+volatile float cascade_min_factor = 0.3f;
+volatile float cascade_speed_low = 3.0f;    // deg/s
+volatile float cascade_speed_high = 15.0f;  // deg/s
+volatile bool motor_ema_enabled = false;     // OFF by default (experimental)
+volatile float motor_ema_alpha = 0.5f;       // EMA alpha (1.0=passthrough, 0.1=heavy filter)
 volatile ComplianceRecoveryPolicy recovery_policy = RECOVERY_STAY_AT_CURRENT;
 volatile uint16_t recovery_ramp_back_ms = 1000;
 ComplianceState compliance_state[MAX_DOFS] = {};

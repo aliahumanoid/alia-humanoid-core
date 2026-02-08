@@ -129,14 +129,16 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
     def discover_joints():
         """
         Trigger automatic joint discovery.
-        
+
         1. Sends CAN identify request (if CAN connected)
         2. Scans all serial ports for EVT:JOINT messages
-        3. Returns discovered joint-to-port mappings
+        3. Retries once if first scan finds nothing (CAN identify triggers 3s broadcast)
+        4. Sends time sync automatically after successful discovery
         """
         discovered = {}
         can_sent = False
-        
+        time_synced = False
+
         # Try to send CAN identify request if connected
         if can_manager and can_manager.is_connected():
             try:
@@ -146,7 +148,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 time.sleep(0.2)
             except Exception as e:
                 current_app.logger.warning(f"Could not send CAN identify: {e}")
-        
+
         # Scan serial ports for joint identification
         try:
             discovered = serial_manager.discover_joints(timeout_seconds=4.0)
@@ -156,10 +158,30 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "status": "error",
                 "message": f"Discovery failed: {e}",
             }), 500
-        
+
+        # Retry once if nothing found and CAN identify was sent
+        # (firmware re-broadcasts EVT:JOINT for 3s after receiving 0x008)
+        if not discovered and can_sent:
+            current_app.logger.info("Discovery: no joints found, retrying (CAN identify was sent)...")
+            time.sleep(1.0)
+            try:
+                discovered = serial_manager.discover_joints(timeout_seconds=3.0)
+            except Exception as e:
+                current_app.logger.warning(f"Discovery retry failed: {e}")
+
+        # Auto-send time sync after successful discovery
+        if discovered and can_manager and can_manager.is_connected():
+            try:
+                can_manager.send_time_sync()
+                time_synced = True
+                current_app.logger.info("Discovery: auto time sync sent")
+            except Exception as e:
+                current_app.logger.warning(f"Auto time sync after discovery failed: {e}")
+
         return jsonify({
             "status": "success",
             "can_request_sent": can_sent,
+            "time_synced": time_synced,
             "discovered": discovered,
             "mappings": serial_manager.get_joint_to_port_mapping(),
         })
@@ -1240,6 +1262,18 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 # Query current auto-start setting
                 handler.send_new_command(joint, 'ALL', COMMANDS['GET_AUTO_START'])
                 message = "Auto-start status requested"
+            elif cmd == "cascade-speed-scaling":
+                # Set velocity-dependent stiffness scaling + EMA filter parameters
+                enabled = int(data.get('enabled', 1))
+                min_factor = float(data.get('min_factor', 0.3))
+                speed_low = float(data.get('speed_low', 3.0))
+                speed_high = float(data.get('speed_high', 15.0))
+                ema_enabled = int(data.get('ema_enabled', 1))
+                ema_alpha = float(data.get('ema_alpha', 0.5))
+                params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
+                          f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}")
+                handler.send_new_command(joint, 'ALL', params)
+                message = f"Velocity tuning: stiff_en={enabled} min={min_factor} ema_en={ema_enabled} ema_a={ema_alpha}"
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')

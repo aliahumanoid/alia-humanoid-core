@@ -1917,6 +1917,51 @@ function sendCommand(command, additionalData = {}) {
 }
 
 /**
+ * Send velocity tuning parameters (stiffness scaling + EMA filter) to firmware.
+ */
+function sendCascadeSpeedScaling() {
+    const enabled = document.getElementById('cascadeSpeedScalingEnabled').checked ? 1 : 0;
+    const minFactor = parseFloat(document.getElementById('cascadeMinFactor').value) || 0.3;
+    const speedLow = parseFloat(document.getElementById('cascadeSpeedLow').value) || 3.0;
+    const speedHigh = parseFloat(document.getElementById('cascadeSpeedHigh').value) || 15.0;
+    const emaEnabled = document.getElementById('motorEmaEnabled').checked ? 1 : 0;
+    const emaAlpha = parseFloat(document.getElementById('motorEmaAlpha').value) || 0.5;
+
+    // Update display labels
+    const lowDisp = document.getElementById('cascadeSpeedLowDisplay');
+    const highDisp = document.getElementById('cascadeSpeedHighDisplay');
+    const minDisp = document.getElementById('cascadeMinFactorDisplay');
+    if (lowDisp) lowDisp.textContent = speedLow.toFixed(1);
+    if (highDisp) highDisp.textContent = speedHigh.toFixed(1);
+    if (minDisp) minDisp.textContent = minFactor.toFixed(2);
+
+    sendCommand('cascade-speed-scaling', {
+        enabled: enabled,
+        min_factor: minFactor,
+        speed_low: speedLow,
+        speed_high: speedHigh,
+        ema_enabled: emaEnabled,
+        ema_alpha: emaAlpha
+    });
+}
+
+/**
+ * Update the EMA cutoff frequency display based on current alpha value.
+ */
+function updateEmaCutoffDisplay() {
+    const alpha = parseFloat(document.getElementById('motorEmaAlpha').value) || 0.5;
+    const disp = document.getElementById('emaCutoffDisplay');
+    if (!disp) return;
+    if (alpha >= 1.0) {
+        disp.textContent = 'no filter';
+    } else {
+        // Approximate EMA cutoff: fc = alpha / (2*pi*Ts*(1-alpha)), Ts=0.002
+        const fc = alpha / (2 * Math.PI * 0.002 * (1 - alpha));
+        disp.textContent = `≈${Math.round(fc)} Hz cutoff`;
+    }
+}
+
+/**
  * Sends pretension command for a specific DOF
  * @param {string|number} dofValue - DOF index ('0', '1', '2') or 'ALL'
  */
@@ -2100,8 +2145,8 @@ function discoverJoints() {
                 }
                 appendStatusMessage(msg);
                 
-                if (response.can_request_sent) {
-                    appendStatusMessage('CAN identify request was sent to all controllers');
+                if (response.time_synced) {
+                    appendStatusMessage('🕐 Time sync sent to all controllers');
                 }
             } else {
                 appendStatusMessage('⚠️ No joints discovered. Make sure controllers are connected and CAN bus is active.');

@@ -49,6 +49,10 @@ extern volatile uint8_t outer_loop_divisor;     // Outer loop divisor
 static float delta_theta[MAX_DOFS] = {0};           // Current outer PID output (target)
 static float delta_theta_prev[MAX_DOFS] = {0};      // Previous outer PID output (for interpolation)
 static float velocity_filtered[MAX_DOFS] = {0};     // Filtered joint velocity (deg/s)
+static float expected_velocity_cache[MAX_DOFS] = {0}; // Cached expected velocity for inner loop stiffness scaling
+static float theta_A_ema[MAX_DOFS] = {0};            // EMA-filtered motor A angle
+static float theta_B_ema[MAX_DOFS] = {0};            // EMA-filtered motor B angle
+static bool ema_initialized[MAX_DOFS] = {false};     // EMA initialization flag
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 // When outer_loop_divisor > 1, delta_theta changes every N cycles creating "steps".
 // To smooth this, we interpolate between delta_theta_prev and delta_theta based on
@@ -195,6 +199,8 @@ bool JointController::executeWaypointMovement() {
       prev_dof_state[dof] = WaypointState::IDLE;
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
+      expected_velocity_cache[dof] = 0.0f;
+      ema_initialized[dof] = false;
       continue; // Skip this DOF entirely
     }
 
@@ -724,7 +730,10 @@ bool JointController::executeWaypointMovement() {
       if (outer_pid) {
         // Save previous value for interpolation (smooth transitions when divisor > 1)
         delta_theta_prev[dof] = delta_theta[dof];
-        
+
+        // Cache expected velocity for inner loop stiffness scaling
+        expected_velocity_cache[dof] = expected_velocity_deg_s;
+
         // Normal PID control - compute delta_theta
         delta_theta[dof] = outer_pid->control(q_des, q_curr);
       }
@@ -927,11 +936,30 @@ bool JointController::executeWaypointMovement() {
       delta_theta_smooth = delta_theta_prev[dof] + alpha * (delta_theta[dof] - delta_theta_prev[dof]);
     }
     
-    // Compute motor references using cascade control formula (same as moveMultiDOF_cascade)
-    float theta_A_ref = theta_0_agonist_motor + 
-                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref);
-    float theta_B_ref = theta_0_antagonist_motor + 
-                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
+    // === VELOCITY-DEPENDENT STIFFNESS SCALING ===
+    // At low speeds, reduce co-contraction (stiffness) to avoid tendon-fighting oscillations.
+    // delta_theta (tracking) stays at full cascade_influence for position accuracy.
+    float stiffness_eff = stiffness_ref;
+    if (cascade_speed_scaling_enabled) {
+      float speed = fabs(expected_velocity_cache[dof]);
+      float stiffness_factor;
+      if (speed <= cascade_speed_low) {
+        stiffness_factor = cascade_min_factor;
+      } else if (speed >= cascade_speed_high) {
+        stiffness_factor = 1.0f;
+      } else {
+        stiffness_factor = cascade_min_factor + (1.0f - cascade_min_factor) *
+                          (speed - cascade_speed_low) / (cascade_speed_high - cascade_speed_low);
+      }
+      stiffness_eff = stiffness_ref * stiffness_factor;
+    }
+
+    // Compute motor references using cascade control formula
+    // delta_theta at full cascade, stiffness scaled by velocity
+    float theta_A_ref = theta_0_agonist_motor +
+                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_eff);
+    float theta_B_ref = theta_0_antagonist_motor +
+                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_eff);
 
     // === ANTI-SLACK CLAMP (active during compliance) ===
     if (anti_slack_enabled && compliance_state[dof].compliance_active) {
@@ -1064,13 +1092,32 @@ bool JointController::executeWaypointMovement() {
     cached_motor_angles.antagonist[dof] = theta_B_curr;
     cached_motor_angles.valid[dof] = true;
     cached_motor_angles.last_update_ms = millis();
-    
+
+    // === EMA FILTER ON MOTOR ANGLES ===
+    // Smooth encoder noise before inner PID to reduce derivative-amplified oscillations.
+    // alpha=1.0 → passthrough, alpha=0.5 → moderate, alpha=0.1 → heavy filtering.
+    float theta_A_pid = theta_A_curr;
+    float theta_B_pid = theta_B_curr;
+    if (motor_ema_enabled && motor_ema_alpha < 1.0f) {
+      float a = motor_ema_alpha;
+      if (!ema_initialized[dof]) {
+        theta_A_ema[dof] = theta_A_curr;
+        theta_B_ema[dof] = theta_B_curr;
+        ema_initialized[dof] = true;
+      } else {
+        theta_A_ema[dof] = a * theta_A_curr + (1.0f - a) * theta_A_ema[dof];
+        theta_B_ema[dof] = a * theta_B_curr + (1.0f - a) * theta_B_ema[dof];
+      }
+      theta_A_pid = theta_A_ema[dof];
+      theta_B_pid = theta_B_ema[dof];
+    }
+
     // Inner PID for motors (compute torque commands)
 #if CONTROLLER_DEBUG
     uint32_t pid_start_us = time_us_32();
 #endif
-    float command_A = pid_agonist->control(theta_A_ref, theta_A_curr);
-    float command_B = pid_antagonist->control(theta_B_ref, theta_B_curr);
+    float command_A = pid_agonist->control(theta_A_ref, theta_A_pid);
+    float command_B = pid_antagonist->control(theta_B_ref, theta_B_pid);
 #if CONTROLLER_DEBUG
     {
       uint32_t pid_dt = time_us_32() - pid_start_us;

@@ -703,10 +703,63 @@ void core0_main_loop() {
 
                     case CMD_GET_AUTO_START: {
                       // Query current auto-start setting
-                      SERIAL_COM_LN("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" + 
+                      SERIAL_COM_LN("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" +
                                      String(system_settings.auto_start_enabled ? 1 : 0) +
                                      ":TORQUE=" + String(system_settings.auto_start_pretension, 1) +
                                      ":DURATION=" + String(system_settings.auto_start_duration));
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    case CMD_CASCADE_SPEED_SCALING: {
+                      // Set velocity-dependent stiffness scaling parameters
+                      // Format: JOINT:DOF:CASCADE_SPEED_SCALING:ENABLED=1:MIN=0.3:LOW=3.0:HIGH=15.0
+                      const char* cmd_str = parsed_cmd.original_command;
+
+                      char *en_str = strstr(cmd_str, "ENABLED=");
+                      if (en_str != nullptr) {
+                        cascade_speed_scaling_enabled = (atoi(en_str + 8) != 0);
+                      }
+                      char *min_str = strstr(cmd_str, "MIN=");
+                      if (min_str != nullptr) {
+                        float val = atof(min_str + 4);
+                        if (val >= 0.0f && val <= 1.0f) cascade_min_factor = val;
+                      }
+                      char *low_str = strstr(cmd_str, "LOW=");
+                      if (low_str != nullptr) {
+                        float val = atof(low_str + 4);
+                        if (val >= 0.0f && val <= 100.0f) cascade_speed_low = val;
+                      }
+                      char *high_str = strstr(cmd_str, "HIGH=");
+                      if (high_str != nullptr) {
+                        float val = atof(high_str + 5);
+                        if (val >= 0.0f && val <= 100.0f) cascade_speed_high = val;
+                      }
+
+                      // EMA filter parameters (optional, in same command)
+                      char *ema_en_str = strstr(cmd_str, "EMA_EN=");
+                      if (ema_en_str != nullptr) {
+                        motor_ema_enabled = (atoi(ema_en_str + 7) != 0);
+                      }
+                      char *ema_a_str = strstr(cmd_str, "EMA_ALPHA=");
+                      if (ema_a_str != nullptr) {
+                        float val = atof(ema_a_str + 10);
+                        if (val >= 0.05f && val <= 1.0f) motor_ema_alpha = val;
+                      }
+
+                      SERIAL_COM_LN("RSP:CASCADE_SPEED_SCALING:ENABLED=" +
+                                     String(cascade_speed_scaling_enabled ? 1 : 0) +
+                                     ":MIN=" + String(cascade_min_factor, 2) +
+                                     ":LOW=" + String(cascade_speed_low, 1) +
+                                     ":HIGH=" + String(cascade_speed_high, 1) +
+                                     ":EMA_EN=" + String(motor_ema_enabled ? 1 : 0) +
+                                     ":EMA_ALPHA=" + String(motor_ema_alpha, 2));
+                      LOG_INFO("[CASCADE] Speed scaling: en=" + String(cascade_speed_scaling_enabled) +
+                               " min=" + String(cascade_min_factor, 2) +
+                               " low=" + String(cascade_speed_low, 1) +
+                               " high=" + String(cascade_speed_high, 1) +
+                               " ema_en=" + String(motor_ema_enabled) +
+                               " ema_a=" + String(motor_ema_alpha, 2));
                       handled_on_core0 = true;
                       break;
                     }

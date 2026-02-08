@@ -226,6 +226,16 @@ extern volatile uint16_t soft_hold_ramp_down_ms;         // Ramp time entering c
 extern volatile uint16_t soft_hold_ramp_up_ms;           // Ramp time leaving compliance
 extern volatile bool soft_hold_enabled;                  // Enable soft hold
 
+// Velocity-dependent stiffness scaling (reduces co-contraction at low speeds)
+extern volatile bool cascade_speed_scaling_enabled;      // Enable velocity-based stiffness scaling
+extern volatile float cascade_min_factor;                // Minimum stiffness factor at low speed (0.0-1.0)
+extern volatile float cascade_speed_low;                 // Below this speed (deg/s): use min factor
+extern volatile float cascade_speed_high;                // Above this speed (deg/s): full stiffness
+
+// Motor angle EMA filter (smooths encoder noise before inner PID)
+extern volatile bool motor_ema_enabled;                  // Enable EMA filter on motor angles
+extern volatile float motor_ema_alpha;                   // EMA alpha (1.0=no filter, 0.1=heavy filter)
+
 // Recovery parameters
 extern volatile ComplianceRecoveryPolicy recovery_policy;
 extern volatile uint16_t recovery_ramp_back_ms;          // For RECOVERY_RAMP_BACK
