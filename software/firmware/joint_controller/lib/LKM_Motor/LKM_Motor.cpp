@@ -35,7 +35,7 @@ LKM_Motor::LKM_Motor(MCP_CAN *canInterface, unsigned int motorID, float reductio
  * Initialize motor (CAN bus must be already initialized)
  */
 void LKM_Motor::init() {
-  LOG_DEBUG("LKM_Motor initialized with ID: " + String(_motorID));
+  LOG_C1_DEBUG("LKM_Motor initialized with ID: " + String(_motorID));
 }
 
 // ===================================================================
@@ -81,10 +81,10 @@ bool LKM_Motor::motorOn() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x88, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO("Command: Motor ON sent.");
+    LOG_C1_INFO("Command: Motor ON sent.");
     return true;
   }
-  LOG_ERROR("Error sending Motor ON.");
+  LOG_C1_ERROR("Error sending Motor ON.");
   return false;
 }
 
@@ -95,10 +95,10 @@ bool LKM_Motor::motorOff() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x80, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO("Command: Motor OFF sent.");
+    LOG_C1_INFO("Command: Motor OFF sent.");
     return true;
   }
-  LOG_ERROR("Error sending Motor OFF.");
+  LOG_C1_ERROR("Error sending Motor OFF.");
   return false;
 }
 
@@ -109,10 +109,10 @@ bool LKM_Motor::motorStop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x81, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO("Command: Motor STOP sent.");
+    LOG_C1_INFO("Command: Motor STOP sent.");
     return true;
   }
-  LOG_ERROR("Error sending Motor STOP.");
+  LOG_C1_ERROR("Error sending Motor STOP.");
   return false;
 }
 
@@ -131,10 +131,10 @@ bool LKM_Motor::setSpeed(float speed) {
   buf[6]                 = (speedCentesimi >> 16) & 0xFF;
   buf[7]                 = (speedCentesimi >> 24) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO(String("SET_SPEED sent with value: ") + String(speedCentesimi));
+    LOG_C1_INFO(String("SET_SPEED sent with value: ") + String(speedCentesimi));
     return true;
   }
-  LOG_ERROR("Error sending SET_SPEED.");
+  LOG_C1_ERROR("Error sending SET_SPEED.");
   return false;
 }
 
@@ -163,10 +163,10 @@ bool LKM_Motor::setTorque(int torque) {
   buf[5]                 = (torque >> 8) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
     // Optional debug: Serial.print("SET_TORQUE sent with value (limited): ");
-    // SERIAL_COM_LN(torque);
+    // SERIAL_C1_COM_LN(torque);
     return true;
   }
-  LOG_ERROR("Error sending SET_TORQUE.");
+  LOG_C1_ERROR("Error sending SET_TORQUE.");
   return false;
 }
 
@@ -186,7 +186,7 @@ void LKM_Motor::setMaxTorque(int16_t maxTorque) {
  */
 void LKM_Motor::zeroEncoderOffset() {
   offsetEncoder = -getMultiAngleSync(false).angle;
-  LOG_INFO(String("Encoder offset set to: ") + String(offsetEncoder));
+  LOG_C1_INFO(String("Encoder offset set to: ") + String(offsetEncoder));
 }
 
 /**
@@ -194,7 +194,7 @@ void LKM_Motor::zeroEncoderOffset() {
  */
 void LKM_Motor::nonzeroEncoderOffset(float actual_angle) {
   offsetEncoder = actual_angle - getMultiAngleSync(false).angle;
-  LOG_INFO(String("Encoder offset set to: ") + String(offsetEncoder));
+  LOG_C1_INFO(String("Encoder offset set to: ") + String(offsetEncoder));
 }
 
 /**
@@ -205,10 +205,10 @@ bool LKM_Motor::motorStopSync(int timeout_ms) {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x81, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) != CAN_OK) {
-    LOG_ERROR("Error sending Motor STOP.");
+    LOG_C1_ERROR("Error sending Motor STOP.");
     return false;
   }
-  LOG_INFO("Command: Motor STOP sent.");
+  LOG_C1_INFO("Command: Motor STOP sent.");
 
   // Wait for motor to stop (poll speed until below threshold)
   unsigned long startTime   = millis();
@@ -231,7 +231,7 @@ bool LKM_Motor::motorStopSync(int timeout_ms) {
 
             // Check if speed is below threshold
             if (abs(currentSpeed) < SPEED_THRESHOLD) {
-              LOG_INFO("Motor successfully stopped.");
+              LOG_C1_INFO("Motor successfully stopped.");
               return true;
             }
           }
@@ -241,7 +241,7 @@ bool LKM_Motor::motorStopSync(int timeout_ms) {
     delay(10); // Pause between polls
   }
 
-  LOG_WARN("Timeout: motor may not have fully stopped.");
+  LOG_C1_WARN("Timeout: motor may not have fully stopped.");
   return false;
 }
 
@@ -258,10 +258,10 @@ bool LKM_Motor::readMotorState() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x9A, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) != CAN_OK) {
-    LOG_ERROR("Error sending READ_STATE.");
+    LOG_C1_ERROR("Error sending READ_STATE.");
     return false;
   }
-  LOG_INFO("READ_STATE command sent.");
+  LOG_C1_INFO("READ_STATE command sent.");
 
   unsigned long startTime = millis();
   while (millis() - startTime < 200) {
@@ -277,14 +277,14 @@ bool LKM_Motor::readMotorState() {
           motorVoltage        = voltageRaw / 10.0;
           motorErrorState     = rcvBuf[7];
 
-          LOG_DEBUG(String("READ_STATE: Temp=") + String(motorTemperature) + " °C, Voltage=" +
+          LOG_C1_DEBUG(String("READ_STATE: Temp=") + String(motorTemperature) + " °C, Voltage=" +
                     String(motorVoltage) + " V, Errors=" + String(motorErrorState, BIN));
           return true;
         }
       }
     }
   }
-  LOG_WARN("Timeout: no response from READ_STATE.");
+  LOG_C1_WARN("Timeout: no response from READ_STATE.");
   return false;
 }
 
@@ -295,10 +295,10 @@ bool LKM_Motor::clearMotorErrors() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x9B, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO("CLEAR_ERRORS command sent.");
+    LOG_C1_INFO("CLEAR_ERRORS command sent.");
     return true;
   }
-  LOG_ERROR("Error sending CLEAR_ERRORS.");
+  LOG_C1_ERROR("Error sending CLEAR_ERRORS.");
   return false;
 }
 
@@ -309,10 +309,10 @@ bool LKM_Motor::readAcceleration() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x33, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO("READ_ACCELERATION command sent.");
+    LOG_C1_INFO("READ_ACCELERATION command sent.");
     return true;
   }
-  LOG_ERROR("Error sending READ_ACCELERATION.");
+  LOG_C1_ERROR("Error sending READ_ACCELERATION.");
   return false;
 }
 
@@ -343,10 +343,10 @@ bool LKM_Motor::sendMultiLoopAngle1Command(float angleControl) {
   buf[6]                 = (uint8_t)((angleControlCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleControlCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO(String("ML_ANGLE1 sent: angleControl=") + String(angleControlCentesimi));
+    LOG_C1_INFO(String("ML_ANGLE1 sent: angleControl=") + String(angleControlCentesimi));
     return true;
   }
-  LOG_ERROR("Error sending ML_ANGLE1.");
+  LOG_C1_ERROR("Error sending ML_ANGLE1.");
   return false;
 }
 
@@ -367,11 +367,11 @@ bool LKM_Motor::sendMultiLoopAngle2Command(float angleControl, uint16_t maxSpeed
   buf[6]                 = (uint8_t)((angleControlCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleControlCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO(String("ML_ANGLE2 sent: angleControl=") + String(angleControlCentesimi) +
+    LOG_C1_INFO(String("ML_ANGLE2 sent: angleControl=") + String(angleControlCentesimi) +
              " maxSpeed=" + String(maxSpeed));
     return true;
   }
-  LOG_ERROR("Error sending ML_ANGLE2.");
+  LOG_C1_ERROR("Error sending ML_ANGLE2.");
   return false;
 }
 
@@ -393,11 +393,11 @@ bool LKM_Motor::sendSingleLoopAngle1Command(uint8_t spinDirection, float angleCo
   buf[6]                 = (uint8_t)((angleControlCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleControlCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO(String("SL_ANGLE1 sent: spinDirection=") + String(spinDirection) +
+    LOG_C1_INFO(String("SL_ANGLE1 sent: spinDirection=") + String(spinDirection) +
              " angleControl=" + String(angleControlCentesimi));
     return true;
   }
-  LOG_ERROR("Error sending SL_ANGLE1.");
+  LOG_C1_ERROR("Error sending SL_ANGLE1.");
   return false;
 }
 
@@ -422,11 +422,11 @@ bool LKM_Motor::sendSingleLoopAngle2Command(uint8_t spinDirection, uint16_t maxS
   buf[6]                 = (uint8_t)((angleControlCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleControlCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO(String("SL_ANGLE2 sent: spinDirection=") + String(spinDirection) +
+    LOG_C1_INFO(String("SL_ANGLE2 sent: spinDirection=") + String(spinDirection) +
              " maxSpeed=" + String(maxSpeed) + " angleControl=" + String(angleControlCentesimi));
     return true;
   }
-  LOG_ERROR("Error sending SL_ANGLE2.");
+  LOG_C1_ERROR("Error sending SL_ANGLE2.");
   return false;
 }
 
@@ -445,10 +445,10 @@ bool LKM_Motor::sendIncrementAngle1Command(float angleIncrement) {
   buf[6]                 = (uint8_t)((angleIncrementCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleIncrementCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_INFO(String("INC_ANGLE1 sent: angleIncrement=") + String(angleIncrementCentesimi));
+    LOG_C1_INFO(String("INC_ANGLE1 sent: angleIncrement=") + String(angleIncrementCentesimi));
     return true;
   }
-  LOG_ERROR("ERROR sending INC_ANGLE1.");
+  LOG_C1_ERROR("ERROR sending INC_ANGLE1.");
   return false;
 }
 
@@ -469,11 +469,11 @@ bool LKM_Motor::sendIncrementAngle2Command(float angleIncrement, uint16_t maxSpe
   buf[6]                 = (uint8_t)((angleIncrementCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleIncrementCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("INC_ANGLE2 sent: angleIncrement=" + String(angleIncrementCentesimi) +
+    LOG_C1_DEBUG("INC_ANGLE2 sent: angleIncrement=" + String(angleIncrementCentesimi) +
               " maxSpeed=" + String(maxSpeed));
     return true;
   }
-  LOG_ERROR("ERROR sending INC_ANGLE2.");
+  LOG_C1_ERROR("ERROR sending INC_ANGLE2.");
   return false;
 }
 
@@ -488,10 +488,10 @@ bool LKM_Motor::readPIDParameters() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x30, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("READ_PID command sent.");
+    LOG_C1_DEBUG("READ_PID command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending READ_PID.");
+  LOG_C1_ERROR("ERROR sending READ_PID.");
   return false;
 }
 
@@ -504,10 +504,10 @@ bool LKM_Motor::writePIDParametersRAM(byte anglePidKp, byte anglePidKi, byte spe
   unsigned char buf[8]   = {0x31,       0,          anglePidKp, anglePidKi,
                             speedPidKp, speedPidKi, iqPidKp,    iqPidKi};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("WRITE_PID_RAM command sent.");
+    LOG_C1_DEBUG("WRITE_PID_RAM command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending WRITE_PID_RAM.");
+  LOG_C1_ERROR("ERROR sending WRITE_PID_RAM.");
   return false;
 }
 
@@ -520,10 +520,10 @@ bool LKM_Motor::writePIDParametersROM(byte anglePidKp, byte anglePidKi, byte spe
   unsigned char buf[8]   = {0x32,       0,          anglePidKp, anglePidKi,
                             speedPidKp, speedPidKi, iqPidKp,    iqPidKi};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("WRITE_PID_ROM command sent.");
+    LOG_C1_DEBUG("WRITE_PID_ROM command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending WRITE_PID_ROM.");
+  LOG_C1_ERROR("ERROR sending WRITE_PID_ROM.");
   return false;
 }
 
@@ -538,10 +538,10 @@ bool LKM_Motor::writeAccelerationRAM(int32_t acceleration) {
   buf[6]                 = (acceleration >> 16) & 0xFF;
   buf[7]                 = (acceleration >> 24) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("WRITE_ACCEL_RAM sent with value: " + String(acceleration));
+    LOG_C1_DEBUG("WRITE_ACCEL_RAM sent with value: " + String(acceleration));
     return true;
   }
-  LOG_ERROR("ERROR sending WRITE_ACCEL_RAM.");
+  LOG_C1_ERROR("ERROR sending WRITE_ACCEL_RAM.");
   return false;
 }
 
@@ -556,10 +556,10 @@ bool LKM_Motor::readEncoder() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x90, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("READ_ENCODER command sent.");
+    LOG_C1_DEBUG("READ_ENCODER command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending READ_ENCODER.");
+  LOG_C1_ERROR("ERROR sending READ_ENCODER.");
   return false;
 }
 
@@ -572,10 +572,10 @@ bool LKM_Motor::setEncoderOffsetROM(uint16_t encoderOffset) {
   buf[6]                 = encoderOffset & 0xFF;
   buf[7]                 = (encoderOffset >> 8) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("SET_ENCODER_ROM sent with value: " + String(encoderOffset));
+    LOG_C1_DEBUG("SET_ENCODER_ROM sent with value: " + String(encoderOffset));
     return true;
   }
-  LOG_ERROR("ERROR sending SET_ENCODER_ROM.");
+  LOG_C1_ERROR("ERROR sending SET_ENCODER_ROM.");
   return false;
 }
 
@@ -586,10 +586,10 @@ bool LKM_Motor::setCurrentPositionAsZeroROM() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x19, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("SET_ZERO_POS_ROM command sent.");
+    LOG_C1_DEBUG("SET_ZERO_POS_ROM command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending SET_ZERO_POS_ROM.");
+  LOG_C1_ERROR("ERROR sending SET_ZERO_POS_ROM.");
   return false;
 }
 
@@ -600,10 +600,10 @@ bool LKM_Motor::readMultiAngleLoop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x92, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-  LOG_INFO("READ_ML_ANGLE command sent.");
+  LOG_C1_INFO("READ_ML_ANGLE command sent.");
     return true;
   }
-  LOG_ERROR("Error sending READ_ML_ANGLE.");
+  LOG_C1_ERROR("Error sending READ_ML_ANGLE.");
   return false;
 }
 
@@ -614,10 +614,10 @@ bool LKM_Motor::readSingleAngleLoop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x94, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("READ_SL_ANGLE command sent.");
+    LOG_C1_DEBUG("READ_SL_ANGLE command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending READ_SL_ANGLE.");
+  LOG_C1_ERROR("ERROR sending READ_SL_ANGLE.");
   return false;
 }
 
@@ -628,10 +628,10 @@ bool LKM_Motor::clearAngleLoop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x95, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("CLEAR_ANGLE_LOOP command sent.");
+    LOG_C1_DEBUG("CLEAR_ANGLE_LOOP command sent.");
     return true;
   }
-  LOG_ERROR("ERROR sending CLEAR_ANGLE_LOOP.");
+  LOG_C1_ERROR("ERROR sending CLEAR_ANGLE_LOOP.");
   return false;
 }
 
@@ -643,10 +643,10 @@ bool LKM_Motor::readMotorState2() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x9C, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) != CAN_OK) {
-  LOG_ERROR("ERROR sending READ_STATE2.");
+  LOG_C1_ERROR("ERROR sending READ_STATE2.");
     return false;
   }
-  LOG_DEBUG("READ_STATE2 command sent.");
+  LOG_C1_DEBUG("READ_STATE2 command sent.");
 
   unsigned long startTime = millis();
   while (millis() - startTime < 200) {
@@ -662,7 +662,7 @@ bool LKM_Motor::readMotorState2() {
           motorSpeed           = ((int16_t)rcvBuf[5] << 8) | rcvBuf[4];
           motorEncoderPosition = ((uint16_t)rcvBuf[7] << 8) | rcvBuf[6];
 
-          LOG_DEBUG("READ_STATE2: Temp=" + String(motorTemperature2) +
+          LOG_C1_DEBUG("READ_STATE2: Temp=" + String(motorTemperature2) +
                     "°C TorqueCur=" + String(motorTorqueCurrent) +
                     " Speed=" + String(motorSpeed) +
                     "dps EncPos=" + String(motorEncoderPosition));
@@ -671,7 +671,7 @@ bool LKM_Motor::readMotorState2() {
       }
     }
   }
-  LOG_WARN("Timeout: no response from READ_STATE2.");
+  LOG_C1_WARN("Timeout: no response from READ_STATE2.");
   return false;
 }
 
@@ -683,10 +683,10 @@ bool LKM_Motor::readMotorState3() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x9D, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) != CAN_OK) {
-  LOG_ERROR("ERROR sending READ_STATE3.");
+  LOG_C1_ERROR("ERROR sending READ_STATE3.");
     return false;
   }
-  LOG_DEBUG("READ_STATE3 command sent.");
+  LOG_C1_DEBUG("READ_STATE3 command sent.");
 
   unsigned long startTime = millis();
   while (millis() - startTime < 200) {
@@ -702,7 +702,7 @@ bool LKM_Motor::readMotorState3() {
           phaseBCurrent     = ((int16_t)rcvBuf[5] << 8) | rcvBuf[4];
           phaseCCurrent     = ((int16_t)rcvBuf[7] << 8) | rcvBuf[6];
 
-          LOG_DEBUG("READ_STATE3: Temp=" + String(motorTemperature3) +
+          LOG_C1_DEBUG("READ_STATE3: Temp=" + String(motorTemperature3) +
                     "°C PhaseA=" + String(phaseACurrent) +
                     " PhaseB=" + String(phaseBCurrent) +
                     " PhaseC=" + String(phaseCCurrent));
@@ -711,7 +711,7 @@ bool LKM_Motor::readMotorState3() {
       }
     }
   }
-  LOG_WARN("Timeout: no response from READ_STATE3.");
+  LOG_C1_WARN("Timeout: no response from READ_STATE3.");
   return false;
 }
 
@@ -736,10 +736,10 @@ bool LKM_Motor::sendMultiMotorTorqueCommand(MCP_CAN *can, int16_t iq1, int16_t i
   buf[7] = (iq4 >> 8) & 0xFF;
   // CAN ID for multi-motor commands is fixed at 0x280
   if (can->sendMsgBuf(0x280, 0, 8, buf) == CAN_OK) {
-    LOG_DEBUG("MULTI_TORQUE command sent.");
+    LOG_C1_DEBUG("MULTI_TORQUE command sent.");
     return true;
   }
-  LOG_ERROR("Error sending MULTI_TORQUE.");
+  LOG_C1_ERROR("Error sending MULTI_TORQUE.");
   return false;
 }
 
@@ -757,7 +757,7 @@ uint16_t LKM_Motor::getEncoderRawSync() {
   unsigned char cmd[8]   = {0x90, 0, 0, 0, 0, 0, 0, 0};
 
   if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
-    LOG_ERROR("ERROR sending READ_ENCODER (raw).");
+    LOG_C1_ERROR("ERROR sending READ_ENCODER (raw).");
     return rawEncoder;
   }
 
@@ -778,7 +778,7 @@ uint16_t LKM_Motor::getEncoderRawSync() {
       }
     }
   }
-  LOG_WARN("Timeout: no response from READ_ENCODER (raw).");
+  LOG_C1_WARN("Timeout: no response from READ_ENCODER (raw).");
   return rawEncoder;
 }
 
@@ -794,7 +794,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
   unsigned char cmd[8]   = {0x94, 0, 0, 0, 0, 0, 0, 0};
 
   if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
-    LOG_ERROR("ERROR sending READ_SL_ANGLE.");
+    LOG_C1_ERROR("ERROR sending READ_SL_ANGLE.");
     return data;
   }
 
@@ -823,7 +823,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
       }
     }
   }
-  LOG_WARN("Timeout: no response from READ_SL_ANGLE.");
+  LOG_C1_WARN("Timeout: no response from READ_SL_ANGLE.");
   return data;
 }
 
@@ -867,7 +867,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   if (flushed >= 3) {
     static uint32_t last_flush_log = 0;
     if (millis() - last_flush_log > 10000) {
-      LOG_WARN("[CAN] Flushed " + String(flushed) + " stale messages before motor " + String(_motorID) + " read");
+      LOG_C1_WARN("[CAN] Flushed " + String(flushed) + " stale messages before motor " + String(_motorID) + " read");
       last_flush_log = millis();
     }
   }
@@ -878,7 +878,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   for (int retry = 0; retry < MAX_RETRIES; retry++) {
     if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
       if (retry == MAX_RETRIES - 1) {
-        LOG_ERROR("ERROR sending READ_ML_ANGLE (after " + String(MAX_RETRIES) + " retries).");
+        LOG_C1_ERROR("ERROR sending READ_ML_ANGLE (after " + String(MAX_RETRIES) + " retries).");
       }
       delayMicroseconds(100);  // Brief pause before retry
       continue;
@@ -923,6 +923,6 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   }
   
   // All retries failed
-  LOG_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
+  LOG_C1_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
   return data;  // Returns NAN angle to indicate error
 }

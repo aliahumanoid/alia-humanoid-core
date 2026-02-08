@@ -125,3 +125,69 @@
       LOG_PRINTF("DBG: ", fmt, ##__VA_ARGS__);                                         \
     }                                                                                  \
   } while (0)
+
+// ================================
+// CORE1-SAFE LOGGING (via lock-free queue)
+// ================================
+// Serial.print from Core1 causes USB CDC cross-core deadlock on RP2350.
+// All Core1 logging goes through a lock-free queue; Core0 drains and prints.
+// If the queue is full, the message is silently dropped (non-blocking).
+//
+// Usage (same as LOG_* but with C1 prefix):
+//   LOG_C1_INFO("Motor started for DOF " + String(dof));
+//   LOG_C1_INFO_F("Motor %d started", dof);
+//   SERIAL_C1_COM_LN("EVT:HOLDING_TARGET:DOF=0:ANGLE=45.00");
+
+// Log levels
+#define C1_LOG_LEVEL_ERROR 0
+#define C1_LOG_LEVEL_WARN  1
+#define C1_LOG_LEVEL_INFO  2
+#define C1_LOG_LEVEL_DEBUG 3
+#define C1_LOG_LEVEL_COM   4  // Protocol messages (EVT:, RSP:) — no prefix
+
+// Function to push a log message to Core1 queue (implemented in core0.cpp)
+// Non-blocking: drops message silently if queue is full.
+void core1LogPush(uint8_t level, const char* msg);
+
+// Internal: push a String message
+#define _LOG_C1_PUSH(lvl, _c1_msg)                                                     \
+  do {                                                                                 \
+    String _c1_str(_c1_msg);                                                           \
+    core1LogPush((lvl), _c1_str.c_str());                                              \
+  } while (0)
+
+// Internal: push a printf-formatted message
+#define _LOG_C1_PUSH_F(lvl, fmt, ...)                                                  \
+  do {                                                                                 \
+    char _c1_buf[120];                                                                 \
+    snprintf(_c1_buf, sizeof(_c1_buf), fmt, ##__VA_ARGS__);                            \
+    core1LogPush((lvl), _c1_buf);                                                      \
+  } while (0)
+
+// String-based Core1 logging
+#define LOG_C1_ERROR(msg) _LOG_C1_PUSH(C1_LOG_LEVEL_ERROR, msg)
+
+#define LOG_C1_WARN(msg)                                                               \
+  do { if (LOG_LEVEL >= 1) _LOG_C1_PUSH(C1_LOG_LEVEL_WARN, msg); } while (0)
+
+#define LOG_C1_INFO(msg)                                                               \
+  do { if (LOG_LEVEL >= 2) _LOG_C1_PUSH(C1_LOG_LEVEL_INFO, msg); } while (0)
+
+#define LOG_C1_DEBUG(msg)                                                               \
+  do { if (LOG_LEVEL >= 3) _LOG_C1_PUSH(C1_LOG_LEVEL_DEBUG, msg); } while (0)
+
+// Printf-style Core1 logging
+#define LOG_C1_ERROR_F(fmt, ...) _LOG_C1_PUSH_F(C1_LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
+
+#define LOG_C1_WARN_F(fmt, ...)                                                        \
+  do { if (LOG_LEVEL >= 1) _LOG_C1_PUSH_F(C1_LOG_LEVEL_WARN, fmt, ##__VA_ARGS__); } while (0)
+
+#define LOG_C1_INFO_F(fmt, ...)                                                        \
+  do { if (LOG_LEVEL >= 2) _LOG_C1_PUSH_F(C1_LOG_LEVEL_INFO, fmt, ##__VA_ARGS__); } while (0)
+
+#define LOG_C1_DEBUG_F(fmt, ...)                                                       \
+  do { if (LOG_LEVEL >= 3) _LOG_C1_PUSH_F(C1_LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__); } while (0)
+
+// Protocol messages from Core1 (EVT:, RSP:, etc.) — printed without prefix
+#define SERIAL_C1_COM_LN(msg) _LOG_C1_PUSH(C1_LOG_LEVEL_COM, msg)
+#define SERIAL_C1_COM(msg) _LOG_C1_PUSH(C1_LOG_LEVEL_COM, msg)

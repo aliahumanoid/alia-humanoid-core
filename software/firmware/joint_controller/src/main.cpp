@@ -171,6 +171,7 @@ JointController *active_joint_controller = nullptr;
 using MovementSample = movement_sample_t;
 
 queue_t movement_sample_queue;
+queue_t core1_log_queue;
 volatile bool movement_sample_stream_active = false;
 volatile bool movement_sample_stream_done   = false;
 volatile uint8_t movement_sample_joint_id   = 0;
@@ -328,6 +329,10 @@ void setup() {
   SPI1.setSCK(10);
   SPI1.begin();
   // Note: SPI speed is set in mcp_can library (see lib/mcp_can/mcp_can.cpp)
+
+  // Core1 log queue: MUST be initialized before any LOG_C1_* calls
+  // (safety_init uses LOG_C1_INFO, so queue must exist first)
+  queue_init(&core1_log_queue, sizeof(Core1LogEntry), CORE1_LOG_QUEUE_DEPTH);
 
   // Initialize hardware safety system (Rev B: watchdog + power gate)
   // On Rev A: safe no-ops, motor power assumed always on
@@ -542,6 +547,8 @@ void setup() {
 
   queue_init(&movement_sample_queue, sizeof(MovementSample), 512);
   clearMovementSampleQueue();
+
+  // Core1 log queue already initialized early in setup (before safety_init)
 
   // Enable motor power now that all systems are initialized
   // Rev B: GP22 HIGH — motors can now receive commands

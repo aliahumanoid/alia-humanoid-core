@@ -220,7 +220,7 @@ bool JointController::executeWaypointMovement() {
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
 
-      LOG_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (IDLE → MOVING)");
+      LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (IDLE → MOVING)");
     }
     
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
@@ -243,7 +243,7 @@ bool JointController::executeWaypointMovement() {
         float start_angle = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
         // Pass the first waypoint's arrival time so duration is measured from actual movement start
         metrics_tracker[dof].reset(start_angle, first_wp.target_angle_deg, first_wp.t_arrival_ms);
-        LOG_DEBUG("[Metrics] DOF " + String(dof) + " tracking started: " + 
+        LOG_C1_DEBUG("[Metrics] DOF " + String(dof) + " tracking started: " + 
                   String(start_angle, 2) + "° → " + String(first_wp.target_angle_deg, 2) + 
                   "° (t_arrival=" + String(first_wp.t_arrival_ms) + ")");
       }
@@ -267,7 +267,7 @@ bool JointController::executeWaypointMovement() {
           // No more waypoints - this was the LAST waypoint
           // prev_angle is now set to this waypoint's target
           float final_target = waypoint_buffer_prev_angle(dof);
-          LOG_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " + 
+          LOG_C1_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " + 
                     String(next_waypoint.target_angle_deg, 2) + "° → prev_angle=" + 
                     String(final_target, 2) + "°");
         }
@@ -320,7 +320,7 @@ bool JointController::executeWaypointMovement() {
           if (tracking_error > 5.0f && dof == 0) {
             static uint32_t last_error_log = 0;
             if (millis() - last_error_log > 500) { // Max 1 log per 500ms
-              LOG_WARN("[TRAJ] DOF" + String(dof) + " LARGE ERROR: " + 
+              LOG_C1_WARN("[TRAJ] DOF" + String(dof) + " LARGE ERROR: " + 
                        String(tracking_error, 1) + "° (tgt=" + String(target_angle, 1) + 
                        " cur=" + String(q_curr_now, 1) + ")");
               last_error_log = millis();
@@ -348,7 +348,7 @@ bool JointController::executeWaypointMovement() {
       
       // Read current angle from shared state (updated by Core0)
       if (!dof_data.valid[dof]) {
-        LOG_WARN("[Waypoint] Invalid encoder reading for DOF " + String(dof));
+        LOG_C1_WARN("[Waypoint] Invalid encoder reading for DOF " + String(dof));
         continue;
       }
       float q_curr = dof_data.angles[dof];
@@ -416,7 +416,7 @@ bool JointController::executeWaypointMovement() {
           cs.move_candidate_start_ms = 0;
 
           const char *mode_label = expected_holding ? "HOLDING" : "MOVING";
-          LOG_INFO("[Compliance] DOF " + String(dof) + " ACTIVE mode=" + String(mode_label) +
+          LOG_C1_INFO("[Compliance] DOF " + String(dof) + " ACTIVE mode=" + String(mode_label) +
                    " err=" + String(error, 2) + "deg exp_v=" + String(expected_velocity_deg_s, 2) +
                    "deg/s act_v=" + String(velocity_filtered[dof], 2) + "deg/s");
 
@@ -436,12 +436,12 @@ bool JointController::executeWaypointMovement() {
             error = 0.0f;
             abs_error = 0.0f;
 
-            LOG_INFO("[Compliance] DOF " + String(dof) + 
+            LOG_C1_INFO("[Compliance] DOF " + String(dof) + 
                      " STALL->HOLDING: trajectory aborted, holding at " + String(q_curr, 2) + "deg");
             
             // Notify host that trajectory was aborted due to stall
             // Host should stop sending waypoints and handle the situation
-            SERIAL_COM_LN("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
+            SERIAL_C1_COM_LN("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
           }
         }
       } else {
@@ -468,7 +468,7 @@ bool JointController::executeWaypointMovement() {
           if (compliance_should_release) {
             String reason = release_by_error && release_by_velocity ? "HOLD_ERR+VEL"
                             : (release_by_velocity ? "HOLD_VEL" : "HOLD_ERR");
-            LOG_INFO("[Compliance] DOF " + String(dof) + " RELEASE reason=" + reason +
+            LOG_C1_INFO("[Compliance] DOF " + String(dof) + " RELEASE reason=" + reason +
                      " err=" + String(error, 2) + "deg exp_v=" + String(expected_velocity_deg_s, 2) +
                      "deg/s act_v=" + String(velocity_filtered[dof], 2) + "deg/s");
           }
@@ -480,7 +480,7 @@ bool JointController::executeWaypointMovement() {
             compliance_should_release = true;
             String reason = release_by_error && release_by_velocity ? "MOVE_ERR+VEL"
                             : (release_by_velocity ? "MOVE_VEL" : "MOVE_ERR");
-            LOG_INFO("[Compliance] DOF " + String(dof) + " RELEASE reason=" + reason +
+            LOG_C1_INFO("[Compliance] DOF " + String(dof) + " RELEASE reason=" + reason +
                      " err=" + String(error, 2) + "deg exp_v=" + String(expected_velocity_deg_s, 2) +
                      "deg/s act_v=" + String(velocity_filtered[dof], 2) + "deg/s");
           }
@@ -550,11 +550,11 @@ bool JointController::executeWaypointMovement() {
             od.sign_change_count >= OSC_MIN_SIGN_CHANGES && 
             osc_amplitude >= OSC_MIN_AMPLITUDE_DEG) {
           
-          LOG_ERROR("[OSCILLATION SAFETY] DOF " + String(dof) + 
+          LOG_C1_ERROR("[OSCILLATION SAFETY] DOF " + String(dof) + 
                     " DANGEROUS OSCILLATION DETECTED!");
-          LOG_ERROR("  Sign changes: " + String(od.sign_change_count) + 
+          LOG_C1_ERROR("  Sign changes: " + String(od.sign_change_count) + 
                     " in " + String(now_ms - od.window_start_ms) + "ms");
-          LOG_ERROR("  Amplitude: " + String(osc_amplitude, 1) + 
+          LOG_C1_ERROR("  Amplitude: " + String(osc_amplitude, 1) + 
                     "° (threshold: " + String(OSC_MIN_AMPLITUDE_DEG, 1) + "°)");
           
           // Trigger emergency stop
@@ -568,7 +568,7 @@ bool JointController::executeWaypointMovement() {
           pid_reset_needed[dof] = true;
           
           // Notify host via serial
-          SERIAL_COM_LN("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
+          SERIAL_C1_COM_LN("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
                         ":AMPLITUDE=" + String(osc_amplitude, 1) +
                         ":SIGN_CHANGES=" + String(od.sign_change_count));
           
@@ -604,10 +604,10 @@ bool JointController::executeWaypointMovement() {
         if (just_entered_holding) {
           // Get the holding target for this DOF
           float holding_target = waypoint_buffer_prev_angle(dof);
-          LOG_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
+          LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
           
           // Send structured message for UI display
-          SERIAL_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
+          SERIAL_C1_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
           
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
@@ -636,18 +636,18 @@ bool JointController::executeWaypointMovement() {
             mt.tracking_active = false;
             
             // Detailed logging for debugging
-            LOG_INFO("[Metrics] DOF " + String(dof) + " FINAL:");
-            LOG_INFO("  start=" + String(mt.start_angle_deg, 2) + 
+            LOG_C1_INFO("[Metrics] DOF " + String(dof) + " FINAL:");
+            LOG_C1_INFO("  start=" + String(mt.start_angle_deg, 2) + 
                      "° → target=" + String(metrics_target, 2) + 
                      "° (orig=" + String(original_target, 2) + "°)");
-            LOG_INFO("  rise=" + String(m.rise_time_ms) + "ms (90%=" + 
+            LOG_C1_INFO("  rise=" + String(m.rise_time_ms) + "ms (90%=" + 
                      String(mt.reached_90_percent ? "yes" : "no") + ")");
-            LOG_INFO("  settle=" + String(m.settling_time_ms) + "ms, max_err=" + 
+            LOG_C1_INFO("  settle=" + String(m.settling_time_ms) + "ms, max_err=" + 
                      String(mt.max_error_deg, 2) + "°");
-            LOG_INFO("  overshoot=" + String(m.overshoot_x100 / 100.0f, 1) + 
+            LOG_C1_INFO("  overshoot=" + String(m.overshoot_x100 / 100.0f, 1) + 
                      "% (max=" + String(mt.max_overshoot_deg, 2) + 
                      "°, dir=" + String(mt.movement_direction, 0) + ")");
-            LOG_INFO("  sse=" + String(m.sse_x100 / 100.0f, 2) + 
+            LOG_C1_INFO("  sse=" + String(m.sse_x100 / 100.0f, 2) + 
                      "° (samples=" + String(mt.sse_sample_count) + ")");
           }
         }
@@ -687,7 +687,7 @@ bool JointController::executeWaypointMovement() {
         if (!safety_ok) {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
-          LOG_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
+          LOG_C1_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
           
           // Reset waypoint state to IDLE for this DOF
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
@@ -897,7 +897,7 @@ bool JointController::executeWaypointMovement() {
       // No linear equations, cannot control this DOF
       static uint32_t last_warn_time = 0;
       if (millis() - last_warn_time > 5000) {
-        LOG_WARN("[Waypoint] DOF " + String(dof) + " has no linear equations, cannot move");
+        LOG_C1_WARN("[Waypoint] DOF " + String(dof) + " has no linear equations, cannot move");
         last_warn_time = millis();
       }
       continue;
@@ -967,7 +967,7 @@ bool JointController::executeWaypointMovement() {
         if (clamped) {
           uint32_t now_ms = millis();
           if (now_ms - last_anti_slack_log_ms[dof] > 500) {
-            LOG_INFO("[AntiSlack] DOF " + String(dof) +
+            LOG_C1_INFO("[AntiSlack] DOF " + String(dof) +
                      " Aref=" + String(theta_A_ref, 2) +
                      " Bref=" + String(theta_B_ref, 2) +
                      " expA=" + String(expected_A, 2) +
@@ -1004,7 +1004,7 @@ bool JointController::executeWaypointMovement() {
     if (invalid_A || invalid_B) {
       static uint32_t last_invalid_log = 0;
       if (millis() - last_invalid_log > 100) { // Log max every 100ms
-        LOG_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ: A=" + 
+        LOG_C1_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ: A=" + 
                   String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
         last_invalid_log = millis();
       }
@@ -1027,16 +1027,16 @@ bool JointController::executeWaypointMovement() {
         wp_canErrorTracker.recordError(dof);
         uint8_t recent_errors = wp_canErrorTracker.countRecentErrors(dof);
 
-        LOG_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
+        LOG_C1_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
                   String(recent_errors) + " errors in " + String(can_error_window_ms) + "ms)!");
-        LOG_ERROR("  Agonist: " + String(wp_last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) +
+        LOG_C1_ERROR("  Agonist: " + String(wp_last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) +
                   " (jump=" + String(jump_A, 2) + "°)");
-        LOG_ERROR("  Antagonist: " + String(wp_last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) +
+        LOG_C1_ERROR("  Antagonist: " + String(wp_last_theta_B[dof], 2) + " → " + String(theta_B_curr, 2) +
                   " (jump=" + String(jump_B, 2) + "°)");
 
         // Trigger emergency stop if too many errors within time window
         if (wp_canErrorTracker.shouldStop(dof)) {
-          LOG_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
+          LOG_C1_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
                     " CAN errors in " + String(can_error_window_ms) + "ms, EMERGENCY STOP!");
           stopAllMotors();
           waypoint_buffer_clear(dof);
@@ -1107,7 +1107,7 @@ bool JointController::executeWaypointMovement() {
         cs.torque_ratio_current = target_ratio;
       }
 
-      LOG_INFO("[Compliance] DOF " + String(dof) + " torque_ratio " +
+      LOG_C1_INFO("[Compliance] DOF " + String(dof) + " torque_ratio " +
                String(cs.torque_ratio_start, 2) + " -> " + String(target_ratio, 2) +
                " ramp=" + String(ramp_ms) + "ms");
     }
@@ -1174,10 +1174,10 @@ bool JointController::executeWaypointMovement() {
         fabs(command_B) >= max_torque_B_effective * 0.95f) {
       static uint32_t last_torque_warn = 0;
       if (millis() - last_torque_warn > 500) { // Log max every 500ms
-        LOG_WARN("[Waypoint DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
+        LOG_C1_WARN("[Waypoint DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
                  " B=" + String(command_B, 0) + " (max=" + String(max_torque_A_effective, 0) + ")");
-        LOG_WARN("  refs: A=" + String(theta_A_ref, 2) + " B=" + String(theta_B_ref, 2));
-        LOG_WARN("  curr: A=" + String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
+        LOG_C1_WARN("  refs: A=" + String(theta_A_ref, 2) + " B=" + String(theta_B_ref, 2));
+        LOG_C1_WARN("  curr: A=" + String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
         last_torque_warn = millis();
       }
     }
@@ -1259,7 +1259,7 @@ bool JointController::executeWaypointMovement() {
       
       // Only log if we exceeded the budget during this period
       if (cycle_time_us_max > inner_loop_period_us) {
-        LOG_WARN("[PROFILING] OVER BUDGET! last=" + String(cycle_time_us_last) + "µs, " +
+        LOG_C1_WARN("[PROFILING] OVER BUDGET! last=" + String(cycle_time_us_last) + "µs, " +
                  "avg=" + String(cycle_time_us_avg) + "µs, " +
                  "max=" + String(cycle_time_us_max) + "µs " +
                  "(budget=" + String(inner_loop_period_us) + "µs)");

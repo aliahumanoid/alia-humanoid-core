@@ -138,6 +138,47 @@ void flushMovementSamples() {
 }
 
 // ============================================================================
+// CORE1 LOG QUEUE DRAIN (print Core1 messages safely from Core0)
+// ============================================================================
+
+/**
+ * @brief Push a log message to the Core1 log queue (non-blocking)
+ * 
+ * Safe to call from any core. If queue is full, message is dropped silently.
+ * Called by LOG_C1_* macros defined in debug.h.
+ */
+void core1LogPush(uint8_t level, const char* msg) {
+  Core1LogEntry entry;
+  entry.level = level;
+  strncpy(entry.msg, msg, CORE1_LOG_MSG_SIZE - 1);
+  entry.msg[CORE1_LOG_MSG_SIZE - 1] = '\0';
+  queue_try_add(&core1_log_queue, &entry);
+}
+
+/**
+ * @brief Drain Core1 log queue and print messages to Serial
+ * 
+ * Core1 cannot safely call Serial.print (USB CDC deadlock on RP2350).
+ * Instead, Core1 pushes log entries to a lock-free queue, and Core0
+ * drains up to 4 entries per cycle to avoid blocking its own loop.
+ */
+void drainCore1LogQueue() {
+  static const char* const prefixes[] = {"ERROR: ", "WARN: ", "INFO: ", "DBG: ", ""};
+  Core1LogEntry entry;
+  uint8_t count = 0;
+  while (count < 4 && queue_try_remove(&core1_log_queue, &entry)) {
+    if (SERIAL_CONNECTED()) {
+      uint8_t lvl = entry.level;
+      if (lvl > C1_LOG_LEVEL_COM) lvl = C1_LOG_LEVEL_COM;
+      const char* prefix = prefixes[lvl];
+      if (prefix[0] != '\0') Serial.print(prefix);
+      Serial.println(entry.msg);
+    }
+    count++;
+  }
+}
+
+// ============================================================================
 // NOTE: CAN polling has been moved to Core1 (see core1.cpp)
 // Core1 now handles ALL CAN communication (Host + Motor) to avoid SPI1 conflicts
 // ============================================================================
@@ -324,6 +365,9 @@ void core0_main_loop() {
 
   // Update shared DOF angles from encoders (single read point for entire system)
   updateSharedDofAngles();
+
+  // Drain Core1 log queue — print queued messages safely from Core0
+  drainCore1LogQueue();
 
   // NOTE: CAN polling has been moved to Core1 to avoid SPI1 conflicts
   // Core1 now handles all CAN communication (Host + Motor)

@@ -23,14 +23,14 @@
 
 // Load only PID parameters from flash (new lightweight system)
 bool JointController::loadPIDDataFromFlash() {
-  LOG_INFO("Loading PID parameters from flash...");
+  LOG_C1_INFO("Loading PID parameters from flash...");
 
   // Reset PIDs to default values before attempting load
   applyDefaultPidTunings(false);
 
   PIDOnlyDeviceData pid_data;
   if (!load_pid_only_data(&pid_data)) {
-    LOG_INFO("No PID data found in flash — using default values (kp=" +
+    LOG_C1_INFO("No PID data found in flash — using default values (kp=" +
              String(DEFAULT_INNER_LOOP_KP, 2) + ", ki=" + String(DEFAULT_INNER_LOOP_KI, 2) +
              ", kd=" + String(DEFAULT_INNER_LOOP_KD, 2) + ")");
     return false;
@@ -38,28 +38,28 @@ bool JointController::loadPIDDataFromFlash() {
 
   // Verify joint type matches
   if (pid_data.joint_type != config.joint_id) {
-    LOG_WARN("Joint type in flash (" + String(pid_data.joint_type) +
+    LOG_C1_WARN("Joint type in flash (" + String(pid_data.joint_type) +
              ") differs from configuration (" + String(config.joint_id) + ")");
     // Continue anyway, might be compatible
   }
 
   // Verify DOF and motor counts match
   if (pid_data.dof_count != config.dof_count) {
-    LOG_ERROR("DOF count in flash (" + String(pid_data.dof_count) +
+    LOG_C1_ERROR("DOF count in flash (" + String(pid_data.dof_count) +
               ") differs from configuration (" + String(config.dof_count) + ")");
-    LOG_INFO("Applying default PID values for safety");
+    LOG_C1_INFO("Applying default PID values for safety");
     return false;
   }
 
   if (pid_data.motor_count != config.motor_count) {
-    LOG_ERROR("Motor count in flash (" + String(pid_data.motor_count) +
+    LOG_C1_ERROR("Motor count in flash (" + String(pid_data.motor_count) +
               ") differs from configuration (" + String(config.motor_count) + ")");
-    LOG_INFO("Applying default PID values for safety");
+    LOG_C1_INFO("Applying default PID values for safety");
     return false;
   }
 
   // Load PID data for each motor with safety checks
-  LOG_INFO("Applying PID parameters from flash...");
+  LOG_C1_INFO("Applying PID parameters from flash...");
   bool pid_loading_enabled = true; // Flag to disable PID loading if necessary
 
   if (pid_loading_enabled) {
@@ -75,7 +75,7 @@ bool JointController::loadPIDDataFromFlash() {
           // Sanity checks on PID parameters
           if (isnan(kp) || isnan(ki) || isnan(kd) || kp < 0 || ki < 0 || kd < 0 || kp > 1000 ||
               ki > 1000 || kd > 1000) {
-            LOG_WARN("Invalid PID parameters for motor " + String(i) +
+            LOG_C1_WARN("Invalid PID parameters for motor " + String(i) +
                      " — using configuration parameters");
             continue; // Skip this motor and use original parameters
           }
@@ -86,17 +86,17 @@ bool JointController::loadPIDDataFromFlash() {
           // Apply PID parameters safely
           pid_controllers[i]->setTunings(kp, ki, kd, tau_original);
 
-          LOG_INFO("PID loaded for motor " + String(i) + ": kp=" + String(kp, 4) +
+          LOG_C1_INFO("PID loaded for motor " + String(i) + ": kp=" + String(kp, 4) +
                    ", ki=" + String(ki, 4) + ", kd=" + String(kd, 4) + ", tau=" +
                    String(tau_original, 4));
         }
       }
     }
   } else {
-    LOG_WARN("PID loading disabled - using configuration values");
+    LOG_C1_WARN("PID loading disabled - using configuration values");
   }
 
-  LOG_INFO("PID parameters loaded");
+  LOG_C1_INFO("PID parameters loaded");
 
   // Load outer loop parameters
   for (int i = 0; i < config.dof_count && i < MAX_DOFS; i++) {
@@ -125,9 +125,9 @@ bool JointController::loadPIDDataFromFlash() {
     stiffness_ref_values[i]     = stiffness_deg;
     cascade_influence_values[i] = cascade;
 
-    LOG_INFO("Outer loop DOF " + String(i) + ": Kp=" + String(kp, 4) + ", Ki=" + String(ki, 4) +
+    LOG_C1_INFO("Outer loop DOF " + String(i) + ": Kp=" + String(kp, 4) + ", Ki=" + String(ki, 4) +
              ", Kd=" + String(kd, 4));
-    LOG_INFO("  Stiffness=" + String(stiffness_deg, 4) + " deg, cascade influence=" +
+    LOG_C1_INFO("  Stiffness=" + String(stiffness_deg, 4) + " deg, cascade influence=" +
              String(cascade * 100.0f, 1) + "%");
   }
 
@@ -136,7 +136,7 @@ bool JointController::loadPIDDataFromFlash() {
 
 // Save only PID parameters to flash (new lightweight system)
 bool JointController::savePIDDataToFlash() {
-  LOG_INFO("Saving PID parameters to flash...");
+  LOG_C1_INFO("Saving PID parameters to flash...");
 
   PIDOnlyDeviceData pid_data = {};
   pid_data.joint_type        = config.joint_id;
@@ -174,13 +174,13 @@ bool JointController::savePIDDataToFlash() {
   // Save to flash
   save_pid_only_data(pid_data);
 
-  LOG_INFO("PID parameters saved to flash");
+  LOG_C1_INFO("PID parameters saved to flash");
   return true;
 }
 
 // NEW: Save linear equations to flash
 bool JointController::saveLinearEquationsToFlash() {
-  LOG_INFO("Saving linear equations to flash...");
+  LOG_C1_INFO("Saving linear equations to flash...");
 
   LinearEquationsDeviceData equations_data = {};
   equations_data.joint_type                = config.joint_id;
@@ -249,42 +249,42 @@ bool JointController::saveLinearEquationsToFlash() {
   // Save to flash
   save_linear_equations_data(equations_data);
 
-  LOG_INFO("Linear equations saved to flash");
+  LOG_C1_INFO("Linear equations saved to flash");
   return true;
 }
 
 // NEW: Load linear equations from flash
 bool JointController::loadLinearEquationsFromFlash() {
-  LOG_INFO("Loading linear equations from flash...");
+  LOG_C1_INFO("Loading linear equations from flash...");
 
   LinearEquationsDeviceData equations_data;
   if (!load_linear_equations_data(&equations_data)) {
-    LOG_WARN("No linear equations found in flash - run auto-mapping");
+    LOG_C1_WARN("No linear equations found in flash - run auto-mapping");
     return false;
   }
 
   // Verify joint type matches
   if (equations_data.joint_type != config.joint_id) {
-    LOG_WARN("Joint type in flash (" + String(equations_data.joint_type) +
+    LOG_C1_WARN("Joint type in flash (" + String(equations_data.joint_type) +
              ") differs from configuration (" + String(config.joint_id) + ")");
     // Continue anyway, might be compatible
   }
 
   // Verify DOF and motor counts match
   if (equations_data.dof_count != config.dof_count) {
-    LOG_ERROR("DOF count in flash (" + String(equations_data.dof_count) +
+    LOG_C1_ERROR("DOF count in flash (" + String(equations_data.dof_count) +
               ") differs from configuration (" + String(config.dof_count) + ")");
     return false;
   }
 
   if (equations_data.motor_count != config.motor_count) {
-    LOG_ERROR("Motor count in flash (" + String(equations_data.motor_count) +
+    LOG_C1_ERROR("Motor count in flash (" + String(equations_data.motor_count) +
               ") differs from configuration (" + String(config.motor_count) + ")");
     return false;
   }
 
   // Load equations for each DOF
-  LOG_INFO("Loading linear equations from flash...");
+  LOG_C1_INFO("Loading linear equations from flash...");
   int loaded_equations_count = 0;
 
   for (int i = 0; i < config.dof_count && i < MAX_DOFS; i++) {
@@ -311,7 +311,7 @@ bool JointController::loadLinearEquationsFromFlash() {
         linear_equations[i].agonist.valid       = true;
         loaded_equations_count++;
 
-        LOG_INFO("DOF " + String(i) + " agonist: y = " +
+        LOG_C1_INFO("DOF " + String(i) + " agonist: y = " +
                  String(linear_equations[i].agonist.slope, 4) + "*x + " +
                  String(linear_equations[i].agonist.intercept, 4) + " (R^2=" +
                  String(linear_equations[i].agonist.r_squared, 3) + ")");
@@ -331,7 +331,7 @@ bool JointController::loadLinearEquationsFromFlash() {
         linear_equations[i].antagonist.valid       = true;
         loaded_equations_count++;
 
-        LOG_INFO("DOF " + String(i) + " antagonist: y = " +
+        LOG_C1_INFO("DOF " + String(i) + " antagonist: y = " +
                  String(linear_equations[i].antagonist.slope, 4) + "*x + " +
                  String(linear_equations[i].antagonist.intercept, 4) + " (R^2=" +
                  String(linear_equations[i].antagonist.r_squared, 3) + ")");
@@ -340,14 +340,14 @@ bool JointController::loadLinearEquationsFromFlash() {
       }
 
       if (linear_equations[i].limits_valid) {
-        LOG_INFO("  Joint limits: [" + String(linear_equations[i].joint_safe_min, 2) + " deg, " +
+        LOG_C1_INFO("  Joint limits: [" + String(linear_equations[i].joint_safe_min, 2) + " deg, " +
                  String(linear_equations[i].joint_safe_max, 2) + " deg]");
-        LOG_INFO("  Agonist limits: [" + String(linear_equations[i].agonist_safe_min, 2) + " deg, " +
+        LOG_C1_INFO("  Agonist limits: [" + String(linear_equations[i].agonist_safe_min, 2) + " deg, " +
                  String(linear_equations[i].agonist_safe_max, 2) + " deg]");
-        LOG_INFO("  Antagonist limits: [" + String(linear_equations[i].antagonist_safe_min, 2) +
+        LOG_C1_INFO("  Antagonist limits: [" + String(linear_equations[i].antagonist_safe_min, 2) +
                  " deg, " + String(linear_equations[i].antagonist_safe_max, 2) + " deg]");
       } else {
-        LOG_WARN("  Safety limits unavailable - rerun auto-mapping");
+        LOG_C1_WARN("  Safety limits unavailable - rerun auto-mapping");
       }
     } else {
       linear_equations[i].calculated       = false;
@@ -357,8 +357,8 @@ bool JointController::loadLinearEquationsFromFlash() {
     }
   }
 
-  LOG_INFO("Loaded " + String(loaded_equations_count) + " linear equations from flash");
-  LOG_INFO("Compact linear equations loaded - system ready for precise control");
+  LOG_C1_INFO("Loaded " + String(loaded_equations_count) + " linear equations from flash");
+  LOG_C1_INFO("Compact linear equations loaded - system ready for precise control");
 
   return loaded_equations_count > 0;
 }
@@ -368,7 +368,7 @@ bool JointController::loadLinearEquationsFromFlash() {
 // ============================================================================
 
 bool JointController::saveMotorOffsetsToFlash() {
-  LOG_INFO("Saving motor offsets to flash...");
+  LOG_C1_INFO("Saving motor offsets to flash...");
 
   MotorOffsetsDeviceData offsets_data = {};
   offsets_data.joint_type = config.joint_id;
@@ -383,26 +383,26 @@ bool JointController::saveMotorOffsetsToFlash() {
   }
 
   save_motor_offsets_data(offsets_data);
-  LOG_INFO("Motor offsets saved to flash");
+  LOG_C1_INFO("Motor offsets saved to flash");
   return true;
 }
 
 bool JointController::loadMotorOffsetsFromFlash() {
-  LOG_INFO("Loading motor offsets from flash...");
+  LOG_C1_INFO("Loading motor offsets from flash...");
 
   MotorOffsetsDeviceData offsets_data;
   if (!load_motor_offsets_data(&offsets_data)) {
-    LOG_INFO("No motor offsets found in flash");
+    LOG_C1_INFO("No motor offsets found in flash");
     return false;
   }
 
   if (offsets_data.joint_type != config.joint_id) {
-    LOG_WARN("Joint type mismatch in motor offsets flash data");
+    LOG_C1_WARN("Joint type mismatch in motor offsets flash data");
     return false;
   }
 
   if (offsets_data.dof_count != config.dof_count) {
-    LOG_ERROR("DOF count mismatch in motor offsets flash data");
+    LOG_C1_ERROR("DOF count mismatch in motor offsets flash data");
     return false;
   }
 
@@ -412,13 +412,13 @@ bool JointController::loadMotorOffsetsFromFlash() {
     _saved_offsets[i].joint_angle_at_calib  = offsets_data.dof_offsets[i].joint_angle_at_calib;
     _saved_offsets[i].valid                 = true;
 
-    LOG_INFO("DOF " + String(i) + " saved offsets: agon=" +
+    LOG_C1_INFO("DOF " + String(i) + " saved offsets: agon=" +
              String(_saved_offsets[i].agonist_offset, 2) + " antag=" +
              String(_saved_offsets[i].antagonist_offset, 2) + " joint=" +
              String(_saved_offsets[i].joint_angle_at_calib, 2) + "°");
   }
 
-  LOG_INFO("Motor offsets loaded from flash successfully");
+  LOG_C1_INFO("Motor offsets loaded from flash successfully");
   return true;
 }
 
@@ -429,14 +429,14 @@ JointController::OffsetValidationResult JointController::validateSavedOffsets(ui
 
   // Check if we have saved offsets for this DOF
   if (!_saved_offsets[dof_index].valid) {
-    LOG_INFO("No saved offsets for DOF " + String(dof_index));
+    LOG_C1_INFO("No saved offsets for DOF " + String(dof_index));
     return result;  // has_saved_data = false, valid = false
   }
   result.has_saved_data = true;
 
   // Check if linear equations are available (needed for expected angle calculation)
   if (!hasValidEquations(dof_index)) {
-    LOG_WARN("No linear equations for DOF " + String(dof_index) + " - cannot validate offsets");
+    LOG_C1_WARN("No linear equations for DOF " + String(dof_index) + " - cannot validate offsets");
     return result;
   }
 
@@ -455,7 +455,7 @@ JointController::OffsetValidationResult JointController::validateSavedOffsets(ui
   }
 
   if (agonist_motor == nullptr || antagonist_motor == nullptr) {
-    LOG_ERROR("Motors not found for DOF " + String(dof_index));
+    LOG_C1_ERROR("Motors not found for DOF " + String(dof_index));
     return result;
   }
 
@@ -464,13 +464,13 @@ JointController::OffsetValidationResult JointController::validateSavedOffsets(ui
   float raw_antagonist = antagonist_motor->getMultiAngleSync(false).angle;
 
   if (isnan(raw_agonist) || isnan(raw_antagonist)) {
-    LOG_ERROR("CAN timeout reading motors for DOF " + String(dof_index));
+    LOG_C1_ERROR("CAN timeout reading motors for DOF " + String(dof_index));
     return result;
   }
 
   // Read current joint angle (MT6835 absolute encoder - always valid)
   if (!shared_dof_angles.valid[dof_index]) {
-    LOG_ERROR("Encoder not valid for DOF " + String(dof_index));
+    LOG_C1_ERROR("Encoder not valid for DOF " + String(dof_index));
     return result;
   }
   float joint_angle = shared_dof_angles.angles[dof_index];
@@ -479,7 +479,7 @@ JointController::OffsetValidationResult JointController::validateSavedOffsets(ui
   float expected_agonist, expected_antagonist;
   if (!calculateMotorAnglesWithEquations(dof_index, joint_angle, joint_angle,
                                           expected_agonist, expected_antagonist)) {
-    LOG_ERROR("Failed to calculate expected angles for DOF " + String(dof_index));
+    LOG_C1_ERROR("Failed to calculate expected angles for DOF " + String(dof_index));
     return result;
   }
 
@@ -507,7 +507,7 @@ JointController::OffsetValidationResult JointController::validateSavedOffsets(ui
   result.valid = (result.error_agonist_deg < OFFSET_VALID_THRESHOLD &&
                   result.error_antagonist_deg < OFFSET_VALID_THRESHOLD);
 
-  LOG_INFO("DOF " + String(dof_index) + " offset validation: " +
+  LOG_C1_INFO("DOF " + String(dof_index) + " offset validation: " +
            String(result.valid ? "VALID" : "NEEDS RECALC") +
            " (agon_err=" + String(result.error_agonist_deg, 2) +
            "° antag_err=" + String(result.error_antagonist_deg, 2) + "°)");
@@ -556,14 +556,14 @@ JointController::OffsetValidationResult JointController::checkOffsetDriftFromCac
 
 // Recalculate safe limits based on current equations and physical limits
 bool JointController::recalculateSafeLimits() {
-  LOG_INFO("Recalculating safe limits from current equations...");
+  LOG_C1_INFO("Recalculating safe limits from current equations...");
   
   int recalculated_count = 0;
   
   for (int dof = 0; dof < config.dof_count; dof++) {
     if (!linear_equations[dof].calculated || !linear_equations[dof].agonist.valid || 
         !linear_equations[dof].antagonist.valid) {
-      LOG_WARN("DOF " + String(dof) + ": No valid equations - skipping");
+      LOG_C1_WARN("DOF " + String(dof) + ": No valid equations - skipping");
       continue;
     }
     
@@ -600,10 +600,10 @@ bool JointController::recalculateSafeLimits() {
       new_safe_max = physical_max;
     }
     
-    LOG_INFO("DOF " + String(dof) + ": Safe limits updated:");
-    LOG_INFO("  Old: [" + String(old_joint_min, 2) + "°, " + String(old_joint_max, 2) + "°]");
-    LOG_INFO("  New: [" + String(new_safe_min, 2) + "°, " + String(new_safe_max, 2) + "°]");
-    LOG_INFO("  Physical: [" + String(physical_min, 2) + "°, " + String(physical_max, 2) + "°]");
+    LOG_C1_INFO("DOF " + String(dof) + ": Safe limits updated:");
+    LOG_C1_INFO("  Old: [" + String(old_joint_min, 2) + "°, " + String(old_joint_max, 2) + "°]");
+    LOG_C1_INFO("  New: [" + String(new_safe_min, 2) + "°, " + String(new_safe_max, 2) + "°]");
+    LOG_C1_INFO("  Physical: [" + String(physical_min, 2) + "°, " + String(physical_max, 2) + "°]");
     
     linear_equations[dof].joint_safe_min = new_safe_min;
     linear_equations[dof].joint_safe_max = new_safe_max;
@@ -613,17 +613,17 @@ bool JointController::recalculateSafeLimits() {
   }
   
   if (recalculated_count == 0) {
-    LOG_ERROR("No equations available to recalculate limits");
+    LOG_C1_ERROR("No equations available to recalculate limits");
     return false;
   }
   
   // Save updated equations to flash
-  LOG_INFO("Saving recalculated limits to flash...");
+  LOG_C1_INFO("Saving recalculated limits to flash...");
   if (saveLinearEquationsToFlash()) {
-    LOG_INFO("Safe limits recalculated and saved successfully!");
+    LOG_C1_INFO("Safe limits recalculated and saved successfully!");
     return true;
   } else {
-    LOG_ERROR("Failed to save recalculated limits to flash");
+    LOG_C1_ERROR("Failed to save recalculated limits to flash");
     return false;
   }
 }

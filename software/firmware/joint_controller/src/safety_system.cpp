@@ -50,10 +50,10 @@ void safety_init() {
   digitalWrite(PIN_SAFETY_WDT_KICK, LOW);
   _last_wdt_kick_ms = millis();
 
-  LOG_INFO("[SAFETY] Rev B hardware safety initialized (GP15=WDT, GP22=EN)");
-  LOG_INFO("[SAFETY] Motor power DISABLED — call safety_motor_power_enable() when ready");
+  LOG_C1_INFO("[SAFETY] Rev B hardware safety initialized (GP15=WDT, GP22=EN)");
+  LOG_C1_INFO("[SAFETY] Motor power DISABLED — call safety_motor_power_enable() when ready");
 #else
-  LOG_INFO("[SAFETY] Rev A hardware — external safety system not available");
+  LOG_C1_INFO("[SAFETY] Rev A hardware — external safety system not available");
   _motor_power_enabled = true; // Rev A has no gate, motors are always powered
 #endif
 
@@ -61,10 +61,10 @@ void safety_init() {
 #ifdef SAFETY_ENABLE_INTERNAL_WDT
   // Enable hardware watchdog with automatic reboot on timeout
   watchdog_enable(SAFETY_INTERNAL_WDT_TIMEOUT_MS, true);
-  LOG_INFO("[SAFETY] RP2350 internal watchdog enabled (timeout=" +
+  LOG_C1_INFO("[SAFETY] RP2350 internal watchdog enabled (timeout=" +
            String(SAFETY_INTERNAL_WDT_TIMEOUT_MS) + "ms)");
 #else
-  LOG_INFO("[SAFETY] RP2350 internal watchdog disabled (define SAFETY_ENABLE_INTERNAL_WDT to enable)");
+  LOG_C1_INFO("[SAFETY] RP2350 internal watchdog disabled (define SAFETY_ENABLE_INTERNAL_WDT to enable)");
 #endif
 
   _safety_initialized = true;
@@ -74,7 +74,7 @@ void safety_motor_power_enable() {
 #ifdef SAFETY_BOARD_REV_B
   digitalWrite(PIN_SAFETY_ENABLE, HIGH);
   _motor_power_enabled = true;
-  LOG_INFO("[SAFETY] Motor power ENABLED (GP22 HIGH)");
+  LOG_C1_INFO("[SAFETY] Motor power ENABLED (GP22 HIGH)");
 #else
   _motor_power_enabled = true;
 #endif
@@ -84,7 +84,7 @@ void safety_motor_power_disable() {
 #ifdef SAFETY_BOARD_REV_B
   digitalWrite(PIN_SAFETY_ENABLE, LOW);
   _motor_power_enabled = false;
-  LOG_INFO("[SAFETY] Motor power DISABLED (GP22 LOW)");
+  LOG_C1_INFO("[SAFETY] Motor power DISABLED (GP22 LOW)");
 #else
   _motor_power_enabled = false;
 #endif

@@ -696,6 +696,25 @@ inline void readSharedDofAnglesSnapshot(SharedDofAngles &out) {
 }
 
 // ============================================================================
+// CORE1 LOG QUEUE (lock-free Core1 → Core0 logging)
+// ============================================================================
+// Serial.print from Core1 causes USB CDC cross-core deadlock on RP2350.
+// All Core1 logging goes through this lock-free queue; Core0 drains and prints.
+
+#define CORE1_LOG_MSG_SIZE 120   // Max message length (including null terminator)
+#define CORE1_LOG_QUEUE_DEPTH 32 // Number of entries (~4KB total)
+
+struct Core1LogEntry {
+  uint8_t level;                    // 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG, 4=COM (protocol)
+  char msg[CORE1_LOG_MSG_SIZE];     // Null-terminated message
+};
+
+extern queue_t core1_log_queue;
+
+// Drain Core1 log queue and print to Serial (called from Core0 main loop)
+void drainCore1LogQueue();
+
+// ============================================================================
 // INTER-CORE COMMUNICATION (CORE0 <-> CORE1)
 // ============================================================================
 

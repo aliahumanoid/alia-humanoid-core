@@ -136,7 +136,7 @@ bool isClockSynced() {
  */
 void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
   if (len < 8) {
-    LOG_WARN("[CAN] Time Sync frame too short (" + String(len) + " bytes)");
+    LOG_C1_WARN("[CAN] Time Sync frame too short (" + String(len) + " bytes)");
     return;
   }
 
@@ -149,7 +149,7 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
   sync_local_ms = t_local;
   clock_synced = true;
 
-  LOG_INFO("[CAN] Time sync: host=" + String(t_host_ms) + " local=" + String(t_local) + " (synced)");
+  LOG_C1_INFO("[CAN] Time sync: host=" + String(t_host_ms) + " local=" + String(t_local) + " (synced)");
 }
 
 /**
@@ -184,24 +184,24 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   }
   
   if (len < 8) {
-    LOG_WARN("[CAN] Multi-DOF Waypoint frame too short (" + String(len) + " bytes)");
+    LOG_C1_WARN("[CAN] Multi-DOF Waypoint frame too short (" + String(len) + " bytes)");
     return;
   }
 
   if (!clock_synced) {
-    LOG_WARN("[CAN] Multi-DOF Waypoint dropped: clock not synchronized");
+    LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: clock not synchronized");
     return;
   }
   
   // SAFETY: Require minimum uptime before accepting waypoints
   if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
-    LOG_WARN("[CAN] Multi-DOF Waypoint dropped: system startup");
+    LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: system startup");
     return;
   }
   
   // SAFETY: Verify system is ready for movement
   if (active_joint_controller != nullptr && !active_joint_controller->isSystemReadyForMovement()) {
-    LOG_ERROR("[CAN] Multi-DOF Waypoint REJECTED: System not ready - run recalcOffset first!");
+    LOG_C1_ERROR("[CAN] Multi-DOF Waypoint REJECTED: System not ready - run recalcOffset first!");
     return;
   }
 
@@ -269,7 +269,7 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
         if (!active_joint_controller->checkWaypointSafety(dof, current_angle, 
                                                           entry.target_angle_deg, entry.t_arrival_ms, 
                                                           t_now, safety_violation)) {
-          LOG_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) + ": " + safety_violation);
+          LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) + ": " + safety_violation);
           emergency_stop_requested = true;
           return;
         }
@@ -278,7 +278,7 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
         waypoint_buffer_set_state(dof, WaypointState::MOVING);
         
         if (is_first_waypoint) {
-          LOG_DEBUG("[CAN] DOF " + String(dof) + " IDLE → MOVING (multi-DOF)");
+          LOG_C1_DEBUG("[CAN] DOF " + String(dof) + " IDLE → MOVING (multi-DOF)");
         }
       }
     }
@@ -287,7 +287,7 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     if (waypoint_buffer_push(dof, entry)) {
       queued_count++;
     } else {
-      LOG_WARN("[CAN] Multi-DOF buffer full for DOF " + String(dof));
+      LOG_C1_WARN("[CAN] Multi-DOF buffer full for DOF " + String(dof));
     }
   }
   
@@ -295,7 +295,7 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   static uint16_t multi_dof_log_counter = 0;
   multi_dof_log_counter++;
   if (multi_dof_log_counter >= 50) {
-    LOG_INFO("[CAN] Multi-DOF: " + String(queued_count) + " DOFs queued, t_offset=" + 
+    LOG_C1_INFO("[CAN] Multi-DOF: " + String(queued_count) + " DOFs queued, t_offset=" + 
              String(multi_wp.t_offset_ms) + "ms, t_arrival=" + String(t_arrival_local));
     multi_dof_log_counter = 0;
   }
@@ -373,7 +373,7 @@ void sendEncoderStreamData() {
   if (millis() - last_debug_log > 10000) {
     // Only log if there were errors - silence is golden for normal operation
     if (error_count > 0) {
-      LOG_WARN("[CAN] Encoder stream: " + String(error_count) + "/" + String(frame_count) + " errors");
+      LOG_C1_WARN("[CAN] Encoder stream: " + String(error_count) + "/" + String(frame_count) + " errors");
     }
     frame_count = 0;
     error_count = 0;
@@ -515,7 +515,7 @@ void sendMovementMetrics(uint8_t dof) {
   // Clear the ready flag
   metrics_ready[dof] = false;
   
-  LOG_INFO("[CAN] Metrics sent for DOF " + String(dof) + ": rise=" + String(m.rise_time_ms) + 
+  LOG_C1_INFO("[CAN] Metrics sent for DOF " + String(dof) + ": rise=" + String(m.rise_time_ms) + 
            "ms, settle=" + String(m.settling_time_ms) + "ms, smooth=" + String(m.score_smoothness) + "/100");
 }
 
@@ -565,7 +565,7 @@ void pollHostCan() {
   static uint32_t rx_count = 0;
   rx_count++;
   if (millis() - last_rx_log > 30000) {
-    LOG_DEBUG("[CAN_HOST] " + String(rx_count) + " messages received in 30s");
+    LOG_C1_DEBUG("[CAN_HOST] " + String(rx_count) + " messages received in 30s");
     rx_count = 0;
     last_rx_log = millis();
   }
@@ -589,7 +589,7 @@ void pollHostCan() {
     if (rx_id == CAN_ID_TIME_SYNC) {
       handleTimeSyncFrame(buf, len);
     } else if (rx_id == CAN_ID_EMERGENCY_STOP) {
-      LOG_WARN("[CAN_HOST] RX EMERGENCY_STOP frame");
+      LOG_C1_WARN("[CAN_HOST] RX EMERGENCY_STOP frame");
       emergency_stop_requested = true;
     } else if (rx_id == CAN_ID_ENCODER_STREAM_CTRL) {
       // Encoder streaming control: byte 0 = 0x01 start, 0x00 stop
@@ -599,9 +599,9 @@ void pollHostCan() {
         if (start) {
           // Reset timer to ensure immediate first send
           encoder_stream_last_send_us = time_us_32() - ENCODER_STREAM_INTERVAL_US - 1;
-          LOG_INFO("[CAN_HOST] Encoder streaming STARTED @ 50Hz");
+          LOG_C1_INFO("[CAN_HOST] Encoder streaming STARTED @ 50Hz");
         } else {
-          LOG_INFO("[CAN_HOST] Encoder streaming STOPPED");
+          LOG_C1_INFO("[CAN_HOST] Encoder streaming STOPPED");
         }
       }
     } else if (rx_id == CAN_ID_PID_DIAG_CTRL) {
@@ -611,9 +611,9 @@ void pollHostCan() {
         pid_diag_stream_active = start;
         if (start) {
           uint32_t freq_hz = 1000000 / pid_diag_interval_us;
-          LOG_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ " + String(freq_hz) + "Hz");
+          LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ " + String(freq_hz) + "Hz");
         } else {
-          LOG_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
+          LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
         }
       }
     } else if (rx_id == CAN_ID_INTERPOLATION_MODE) {
@@ -623,9 +623,9 @@ void pollHostCan() {
         if (mode <= INTERPOLATION_COSINE) {
           waypoint_interpolation_mode = mode;
           const char* mode_name = (mode == INTERPOLATION_LINEAR) ? "LINEAR (step)" : "COSINE (smooth)";
-          LOG_INFO("[CAN_HOST] Interpolation mode set to: " + String(mode_name));
+          LOG_C1_INFO("[CAN_HOST] Interpolation mode set to: " + String(mode_name));
         } else {
-          LOG_WARN("[CAN_HOST] Invalid interpolation mode: " + String(mode));
+          LOG_C1_WARN("[CAN_HOST] Invalid interpolation mode: " + String(mode));
         }
       }
     } else if (rx_id == CAN_ID_LOOP_FREQUENCY) {
@@ -644,10 +644,10 @@ void pollHostCan() {
           
           float inner_freq = 1000000.0f / new_inner_period;
           float outer_freq = inner_freq / new_outer_div;
-          LOG_INFO("[CAN_HOST] Loop frequencies updated: inner=" + String(inner_freq, 1) + 
+          LOG_C1_INFO("[CAN_HOST] Loop frequencies updated: inner=" + String(inner_freq, 1) + 
                    "Hz, outer=" + String(outer_freq, 1) + "Hz");
         } else {
-          LOG_WARN("[CAN_HOST] Invalid loop frequency: inner_period=" + String(new_inner_period) + 
+          LOG_C1_WARN("[CAN_HOST] Invalid loop frequency: inner_period=" + String(new_inner_period) + 
                    "µs, outer_div=" + String(new_outer_div));
         }
       }
@@ -660,10 +660,10 @@ void pollHostCan() {
         // Validate: 10-200 Hz
         if (freq_hz >= 10 && freq_hz <= 200) {
           pid_diag_interval_us = 1000000 / freq_hz;
-          LOG_INFO("[CAN_HOST] PID diagnostics frequency set to: " + String(freq_hz) + 
+          LOG_C1_INFO("[CAN_HOST] PID diagnostics frequency set to: " + String(freq_hz) + 
                    "Hz (" + String(pid_diag_interval_us / 1000) + "ms)");
         } else {
-          LOG_WARN("[CAN_HOST] Invalid PID diag frequency: " + String(freq_hz) + 
+          LOG_C1_WARN("[CAN_HOST] Invalid PID diag frequency: " + String(freq_hz) + 
                    "Hz (valid: 10-200Hz)");
         }
       }
@@ -673,7 +673,7 @@ void pollHostCan() {
       identify_broadcast_active = true;
       identify_broadcast_start_ms = millis();
       identify_broadcast_last_emit_ms = 0;  // Force immediate first emit
-      LOG_INFO("[CAN_HOST] Joint identification broadcast STARTED (3s)");
+      LOG_C1_INFO("[CAN_HOST] Joint identification broadcast STARTED (3s)");
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
@@ -733,7 +733,7 @@ void core1_loop() {
     // === EMERGENCY STOP CHECK (immediately after CAN poll) ===
     // Must run BEFORE any motor commands to ensure zero-delay stop
     if (emergency_stop_requested) {
-      LOG_INFO("Core1: Emergency stop requested");
+      LOG_C1_INFO("Core1: Emergency stop requested");
 
       // Cut motor power at hardware level (Rev B: <10µs via MOSFET gate)
       safety_motor_power_disable();
@@ -741,20 +741,20 @@ void core1_loop() {
       // Stop all motors via CAN (software stop — belt-and-suspenders with HW cutoff)
       if (active_joint_controller != nullptr) {
         active_joint_controller->stopAllMotors();
-        LOG_INFO("Core1: All motors stopped");
+        LOG_C1_INFO("Core1: All motors stopped");
         
         // Clear all waypoint buffers to exit waypoint control loop
         for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
           waypoint_buffer_clear(dof);
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
         }
-        LOG_INFO("Core1: Waypoint buffers cleared");
+        LOG_C1_INFO("Core1: Waypoint buffers cleared");
       }
 
       // Reset flag
       emergency_stop_requested = false;
 
-      LOG_INFO("Core1: Emergency stop flag cleared");
+      LOG_C1_INFO("Core1: Emergency stop flag cleared");
 
       // Notify core0
       if (shared_data_ext.flag == 0) {
@@ -762,7 +762,7 @@ void core1_loop() {
         strcpy(shared_data_ext.message, "EMERGENCY STOP EXECUTED");
       }
 
-      SERIAL_COM_LN("EMERGENCY STOP EXECUTED");
+      SERIAL_C1_COM_LN("EMERGENCY STOP EXECUTED");
       continue;
     }
 
@@ -889,7 +889,7 @@ void core1_loop() {
         shared_data_ext.flag = CMD1_FAIL_MOVE;
         strcpy(shared_data_ext.message, "ERROR: Command targeted to a different joint");
         // print joint id
-        LOG_ERROR("Command targeted to a different joint: " + String(joint_id));
+        LOG_C1_ERROR("Command targeted to a different joint: " + String(joint_id));
       }
       continue;
     }
@@ -920,7 +920,7 @@ void core1_loop() {
         shared_data_ext.flag = CMD1_FAIL_MOVE;
         strcpy(shared_data_ext.message, "ERROR: Motor power disabled. Send PRETENSION to recover.");
       }
-      LOG_WARN("Command rejected: motor power disabled after emergency stop");
+      LOG_C1_WARN("Command rejected: motor power disabled after emergency stop");
       continue;
     }
 
@@ -1005,7 +1005,7 @@ void core1_loop() {
           }
         }
       }
-      LOG_DEBUG_F("Motor encoders zeroed for DOF %d", dof_index);
+      LOG_C1_DEBUG_F("Motor encoders zeroed for DOF %d", dof_index);
       break;
 
     case CMD_RECALC_OFFSET:
@@ -1067,7 +1067,7 @@ void core1_loop() {
 
     case CMD_CAN_DIAG: {
       // CAN Bus Diagnostic Test - Motor CAN only (Host CAN disabled)
-      LOG_INFO("=== CAN BUS DIAGNOSTIC TEST ===");
+      LOG_C1_INFO("=== CAN BUS DIAGNOSTIC TEST ===");
       
       bool all_ok = true;
       int motors_responding = 0;
@@ -1076,15 +1076,15 @@ void core1_loop() {
       bool loopback_ok = false;
       
       // Test 1: MCP2515 SPI communication
-      LOG_INFO("[DIAG] Step 1: MCP2515 SPI Check");
-      LOG_INFO("[DIAG] Motor CAN (J4): CS=GP9, INT=GP13");
-      LOG_INFO("[DIAG] Host CAN (J5): DISABLED for debugging");
+      LOG_C1_INFO("[DIAG] Step 1: MCP2515 SPI Check");
+      LOG_C1_INFO("[DIAG] Motor CAN (J4): CS=GP9, INT=GP13");
+      LOG_C1_INFO("[DIAG] Host CAN (J5): DISABLED for debugging");
       
       // Check CS pin state
-      LOG_INFO("[DIAG] CS pin GP9 state: " + String(digitalRead(9)));
+      LOG_C1_INFO("[DIAG] CS pin GP9 state: " + String(digitalRead(9)));
       
       // Test 1b: MCP2515 Loopback Test (internal, no bus needed)
-      LOG_INFO("[DIAG] Step 1b: MCP2515 LOOPBACK Test");
+      LOG_C1_INFO("[DIAG] Step 1b: MCP2515 LOOPBACK Test");
       {
         const unsigned char testData[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
         loopback_ok = can_loopback_test(CAN, "[DIAG] Motor CAN", 0x7FF, testData);
@@ -1093,28 +1093,28 @@ void core1_loop() {
       }
       
       // Test 2: Raw CAN TX test (requires bus connection)
-      LOG_INFO("[DIAG] Step 2: CAN Bus TX Test (Motor ID 1)");
+      LOG_C1_INFO("[DIAG] Step 2: CAN Bus TX Test (Motor ID 1)");
       {
         unsigned char testCmd[8] = {0x9C, 0, 0, 0, 0, 0, 0, 0};  // READ_STATUS
         unsigned long testId = 0x141;  // Motor ID 1
         
-        LOG_INFO("[DIAG] Sending to CAN ID 0x" + String(testId, HEX) + "...");
+        LOG_C1_INFO("[DIAG] Sending to CAN ID 0x" + String(testId, HEX) + "...");
         
         byte sendResult = CAN.sendMsgBuf(testId, 0, 8, testCmd);
         if (sendResult == CAN_OK) {
-          LOG_INFO("[DIAG]   ✓ CAN TX OK - ACK received from bus");
+          LOG_C1_INFO("[DIAG]   ✓ CAN TX OK - ACK received from bus");
         } else if (sendResult == CAN_SENDMSGTIMEOUT) {
-          LOG_ERROR("[DIAG]   ✗ CAN TX TIMEOUT (code " + String(sendResult) + ")");
-          LOG_ERROR("[DIAG]     NO ACK = no device responding on CAN bus");
+          LOG_C1_ERROR("[DIAG]   ✗ CAN TX TIMEOUT (code " + String(sendResult) + ")");
+          LOG_C1_ERROR("[DIAG]     NO ACK = no device responding on CAN bus");
           send_errors++;
           all_ok = false;
         } else if (sendResult == CAN_GETTXBFTIMEOUT) {
-          LOG_ERROR("[DIAG]   ✗ CAN TX BUFFER TIMEOUT (code " + String(sendResult) + ")");
-          LOG_ERROR("[DIAG]     MCP2515 TX buffer busy - SPI issue?");
+          LOG_C1_ERROR("[DIAG]   ✗ CAN TX BUFFER TIMEOUT (code " + String(sendResult) + ")");
+          LOG_C1_ERROR("[DIAG]     MCP2515 TX buffer busy - SPI issue?");
           send_errors++;
           all_ok = false;
         } else {
-          LOG_ERROR("[DIAG]   ✗ CAN TX ERROR code: " + String(sendResult));
+          LOG_C1_ERROR("[DIAG]   ✗ CAN TX ERROR code: " + String(sendResult));
           send_errors++;
           all_ok = false;
         }
@@ -1122,51 +1122,51 @@ void core1_loop() {
       }
       
       // Test 3: Try second motor
-      LOG_INFO("[DIAG] Step 3: CAN Bus TX Test (Motor ID 2)");
+      LOG_C1_INFO("[DIAG] Step 3: CAN Bus TX Test (Motor ID 2)");
       {
         unsigned char testCmd[8] = {0x9C, 0, 0, 0, 0, 0, 0, 0};
         unsigned long testId = 0x142;  // Motor ID 2
         
-        LOG_INFO("[DIAG] Sending to CAN ID 0x" + String(testId, HEX) + "...");
+        LOG_C1_INFO("[DIAG] Sending to CAN ID 0x" + String(testId, HEX) + "...");
         
         byte sendResult = CAN.sendMsgBuf(testId, 0, 8, testCmd);
         if (sendResult == CAN_OK) {
-          LOG_INFO("[DIAG]   ✓ CAN TX OK");
+          LOG_C1_INFO("[DIAG]   ✓ CAN TX OK");
         } else {
-          LOG_ERROR("[DIAG]   ✗ CAN TX ERROR code: " + String(sendResult));
+          LOG_C1_ERROR("[DIAG]   ✗ CAN TX ERROR code: " + String(sendResult));
           send_errors++;
         }
         delay(20);
       }
       
       // Test 4: Motor angle read via LKM_Motor
-      LOG_INFO("[DIAG] Step 4: Motor Communication Test");
+      LOG_C1_INFO("[DIAG] Step 4: Motor Communication Test");
       
       if (controller != nullptr) {
         const JointConfig& cfg = controller->getConfig();
-        LOG_INFO("[DIAG] Testing " + String(cfg.motor_count) + " motors for: " + String(cfg.name));
+        LOG_C1_INFO("[DIAG] Testing " + String(cfg.motor_count) + " motors for: " + String(cfg.name));
         
         for (uint8_t m = 0; m < cfg.motor_count; m++) {
           uint8_t motor_id = cfg.motors[m].id;
           String motor_name = String(cfg.motors[m].name);
           
-          LOG_INFO("[DIAG] Motor " + String(m) + " (ID=" + String(motor_id) + ", " + motor_name + ")");
+          LOG_C1_INFO("[DIAG] Motor " + String(m) + " (ID=" + String(motor_id) + ", " + motor_name + ")");
           
           LKM_Motor* motor = controller->getMotor(m);
           if (motor != nullptr) {
             LKM_Motor::MultiAngleData data = motor->getMultiAngleSync(false);
             
             if (data.waitTime > 0) {
-              LOG_INFO("[DIAG]   ✓ Response in " + String(data.waitTime) + "µs: " + 
+              LOG_C1_INFO("[DIAG]   ✓ Response in " + String(data.waitTime) + "µs: " + 
                        String(data.angle, 2) + "°");
               motors_responding++;
             } else {
-              LOG_ERROR("[DIAG]   ✗ NO RESPONSE (waitTime=0)");
+              LOG_C1_ERROR("[DIAG]   ✗ NO RESPONSE (waitTime=0)");
               motors_failed++;
               all_ok = false;
             }
           } else {
-            LOG_ERROR("[DIAG]   ✗ Motor object NULL");
+            LOG_C1_ERROR("[DIAG]   ✗ Motor object NULL");
             motors_failed++;
             all_ok = false;
           }
@@ -1175,33 +1175,33 @@ void core1_loop() {
       }
       
       // Summary
-      LOG_INFO("[DIAG] === SUMMARY ===");
-      LOG_INFO("[DIAG] Loopback test: " + String(loopback_ok ? "PASS" : "FAIL"));
-      LOG_INFO("[DIAG] TX errors: " + String(send_errors));
-      LOG_INFO("[DIAG] Motors: " + String(motors_responding) + "/" + 
+      LOG_C1_INFO("[DIAG] === SUMMARY ===");
+      LOG_C1_INFO("[DIAG] Loopback test: " + String(loopback_ok ? "PASS" : "FAIL"));
+      LOG_C1_INFO("[DIAG] TX errors: " + String(send_errors));
+      LOG_C1_INFO("[DIAG] Motors: " + String(motors_responding) + "/" + 
                String(motors_responding + motors_failed) + " responding");
       
       if (all_ok && motors_responding > 0) {
-        LOG_INFO("[DIAG] ✓ CAN TESTS PASSED");
+        LOG_C1_INFO("[DIAG] ✓ CAN TESTS PASSED");
         snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
                  "CAN OK: %d motors", motors_responding);
         shared_data_ext.flag = CMD1_END_MOVE;
       } else {
-        LOG_ERROR("[DIAG] ✗ CAN TESTS FAILED");
+        LOG_C1_ERROR("[DIAG] ✗ CAN TESTS FAILED");
         if (!loopback_ok) {
-          LOG_ERROR("[DIAG] → LOOPBACK FAILED = SPI or MCP2515 issue");
-          LOG_ERROR("[DIAG]   Check SPI wiring: SCK(GP10), MOSI(GP11), MISO(GP12), CS(GP9)");
+          LOG_C1_ERROR("[DIAG] → LOOPBACK FAILED = SPI or MCP2515 issue");
+          LOG_C1_ERROR("[DIAG]   Check SPI wiring: SCK(GP10), MOSI(GP11), MISO(GP12), CS(GP9)");
         } else if (send_errors > 0) {
-          LOG_ERROR("[DIAG] → LOOPBACK OK but TX FAILED = Transceiver or bus issue");
-          LOG_ERROR("[DIAG]   1. CAN transceiver powered? (5V or 3.3V)");
-          LOG_ERROR("[DIAG]   2. TXCAN/RXCAN pins connected?");
-          LOG_ERROR("[DIAG]   3. CAN_H/CAN_L to bus?");
-          LOG_ERROR("[DIAG]   4. Termination 120Ω present?");
-          LOG_ERROR("[DIAG]   5. Other device on bus powered?");
+          LOG_C1_ERROR("[DIAG] → LOOPBACK OK but TX FAILED = Transceiver or bus issue");
+          LOG_C1_ERROR("[DIAG]   1. CAN transceiver powered? (5V or 3.3V)");
+          LOG_C1_ERROR("[DIAG]   2. TXCAN/RXCAN pins connected?");
+          LOG_C1_ERROR("[DIAG]   3. CAN_H/CAN_L to bus?");
+          LOG_C1_ERROR("[DIAG]   4. Termination 120Ω present?");
+          LOG_C1_ERROR("[DIAG]   5. Other device on bus powered?");
         } else {
-          LOG_ERROR("[DIAG] → TX OK but motors not responding");
-          LOG_ERROR("[DIAG]   1. Motor IDs correct?");
-          LOG_ERROR("[DIAG]   2. Motors in error state?");
+          LOG_C1_ERROR("[DIAG] → TX OK but motors not responding");
+          LOG_C1_ERROR("[DIAG]   1. Motor IDs correct?");
+          LOG_C1_ERROR("[DIAG]   2. Motors in error state?");
         }
         snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
                  "CAN FAIL: LB=%s TX_ERR=%d M=%d/%d", 
@@ -1210,7 +1210,7 @@ void core1_loop() {
         shared_data_ext.flag = CMD1_FAIL_MOVE;
       }
       
-      LOG_INFO("=== END CAN DIAGNOSTIC ===");
+      LOG_C1_INFO("=== END CAN DIAGNOSTIC ===");
     } break;
 
     case CMD_CHECK_OFFSETS: {
@@ -1232,7 +1232,7 @@ void core1_loop() {
                  "EVT:RECALC_STATUS(%d,%d,%s,%.2f,%.2f)",
                  ACTIVE_JOINT, dof, status_str,
                  vr.error_agonist_deg, vr.error_antagonist_deg);
-        SERIAL_COM_LN(detail_buf);
+        SERIAL_C1_COM_LN(detail_buf);
       }
 
       // Emit firmware safe limits per DOF (from linear equations, if available)
@@ -1242,7 +1242,7 @@ void core1_loop() {
           snprintf(detail_buf, sizeof(detail_buf),
                    "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
                    ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
-          SERIAL_COM_LN(detail_buf);
+          SERIAL_C1_COM_LN(detail_buf);
         }
       }
 

@@ -34,12 +34,12 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
                                        float tensioning_torque, float *steps, int settle_time_ms) {
   // Validate input parameters
   if (config.dof_count == 0) {
-    LOG_ERROR("No DOF configured for this joint");
+    LOG_C1_ERROR("No DOF configured for this joint");
     return false;
   }
 
   if (config.motor_count == 0) {
-    LOG_ERROR("No motors configured for this joint");
+    LOG_C1_ERROR("No motors configured for this joint");
     return false;
   }
 
@@ -60,7 +60,7 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
     }
 
     if (motor_count_for_dof < 2 || !has_agonist || !has_antagonist) {
-      LOG_ERROR("DOF " + String(i) + " does not have correctly configured agonist/antagonist motors");
+      LOG_C1_ERROR("DOF " + String(i) + " does not have correctly configured agonist/antagonist motors");
       return false;
     }
   }
@@ -68,11 +68,11 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
   // Reset counters before starting
   auto_mapping_state.consecutive_encoder_errors = 0;
   auto_mapping_state.last_valid_reading         = millis();
-  LOG_DEBUG("Initializing auto mapping counters");
+  LOG_C1_DEBUG("Initializing auto mapping counters");
 
   // Verify if auto‑mapping is already active
   if (auto_mapping_state.active) {
-    LOG_ERROR("Auto mapping already in progress");
+    LOG_C1_ERROR("Auto mapping already in progress");
     return false;
   }
 
@@ -88,7 +88,7 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
     memset(dof_mappings[i].antagonist_data, 0, sizeof(dof_mappings[i].antagonist_data));
     memset(dof_mappings[i].joint_data, 0, sizeof(dof_mappings[i].joint_data));
   }
-  LOG_DEBUG("DofMappingData_t structures reset for new mapping");
+  LOG_C1_DEBUG("DofMappingData_t structures reset for new mapping");
 
   // Set first_call flag to ensure array initialization
   auto_mapping_state.first_call = true;
@@ -114,7 +114,7 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
   float motor_speed       = config.dofs[0].zero_mapping.auto_mapping_speed;
   float resistance_torque = config.dofs[0].zero_mapping.auto_mapping_resistance_torque;
 
-  LOG_INFO("Starting auto mapping - DOF: " + String(auto_mapping_state.dof_count) +
+  LOG_C1_INFO("Starting auto mapping - DOF: " + String(auto_mapping_state.dof_count) +
            ", motors: " + String(auto_mapping_state.motor_count) +
            ", tensioning torque: " + String(applied_tensioning_torque) +
            ", motor speed: " + String(motor_speed) + " deg/s" +
@@ -130,14 +130,14 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
 
     // Verify that mapping limits are within joint's general limits
     if (auto_mapping_state.min_angles[i] < config.dofs[i].limits.min_angle) {
-      LOG_WARN("auto_mapping_min_angle (" + String(auto_mapping_state.min_angles[i]) +
+      LOG_C1_WARN("auto_mapping_min_angle (" + String(auto_mapping_state.min_angles[i]) +
                ") is below joint min limit (" + String(config.dofs[i].limits.min_angle) +
                ") for DOF " + String(i) + ". Using joint limit.");
       auto_mapping_state.min_angles[i] = config.dofs[i].limits.min_angle;
     }
 
     if (auto_mapping_state.max_angles[i] > config.dofs[i].limits.max_angle) {
-      LOG_WARN("auto_mapping_max_angle (" + String(auto_mapping_state.max_angles[i]) +
+      LOG_C1_WARN("auto_mapping_max_angle (" + String(auto_mapping_state.max_angles[i]) +
                ") is above joint max limit (" + String(config.dofs[i].limits.max_angle) +
                ") for DOF " + String(i) + ". Using joint limit.");
       auto_mapping_state.max_angles[i] = config.dofs[i].limits.max_angle;
@@ -164,16 +164,16 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
 
     // Verify total number of points does not exceed memory capacity
     if (auto_mapping_state.total_points > MAX_MAPPING_DATA_SIZE) {
-      LOG_ERROR("Total number of points (" + String(auto_mapping_state.total_points) +
+      LOG_C1_ERROR("Total number of points (" + String(auto_mapping_state.total_points) +
                 ") exceeds maximum capacity (" + String(MAX_MAPPING_DATA_SIZE) + ")");
-      LOG_WARN("Reduce mapping step or angle range");
+      LOG_C1_WARN("Reduce mapping step or angle range");
       return false;
     }
 
     // Start from minimum angle
     auto_mapping_state.target_angles[i] = auto_mapping_state.min_angles[i];
 
-    LOG_DEBUG("DOF " + String(i) + ": mapping range [" + String(auto_mapping_state.min_angles[i]) +
+    LOG_C1_DEBUG("DOF " + String(i) + ": mapping range [" + String(auto_mapping_state.min_angles[i]) +
               ", " + String(auto_mapping_state.max_angles[i]) + "] (joint limits: [" +
               String(config.dofs[i].limits.min_angle) + ", " +
               String(config.dofs[i].limits.max_angle) + "]) step " +
@@ -199,15 +199,15 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
   }
 
   // Stop all motors before starting for safety
-  LOG_INFO("Stopping all motors before starting auto mapping");
+  LOG_C1_INFO("Stopping all motors before starting auto mapping");
   stopAllMotors();
   sleep_ms(500); // Brief pause to ensure motors stop completely
 
   // Apply initial torques to all motors
-  LOG_INFO("Applying initial torques for auto mapping");
+  LOG_C1_INFO("Applying initial torques for auto mapping");
   for (int i = 0; i < auto_mapping_state.motor_count; i++) {
     motors[i]->setTorque(auto_mapping_state.applied_torques[i]);
-    LOG_DEBUG("  Motor " + String(i) + ": torque " +
+    LOG_C1_DEBUG("  Motor " + String(i) + ": torque " +
               String(auto_mapping_state.applied_torques[i]));
   }
 
@@ -215,7 +215,7 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
   auto_mapping_state.active = true;
 
   // Print mapping info
-  LOG_INFO("Auto mapping started — Total points: " + String(auto_mapping_state.total_points) +
+  LOG_C1_INFO("Auto mapping started — Total points: " + String(auto_mapping_state.total_points) +
            ", settle time: " + String(auto_mapping_state.settle_time_ms) + "ms");
 
   return true;
@@ -224,13 +224,13 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
 // Move to next mapping point
 bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_state) {
   // Print detailed information about current point and transition to next
-  LOG_DEBUG("\n----------------------------------------------------------");
-  LOG_DEBUG("MAPPING POINT CHANGE — Current point: " + String(auto_mapping_state.current_point));
-  LOG_DEBUG("Current position:");
+  LOG_C1_DEBUG("\n----------------------------------------------------------");
+  LOG_C1_DEBUG("MAPPING POINT CHANGE — Current point: " + String(auto_mapping_state.current_point));
+  LOG_C1_DEBUG("Current position:");
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
     // Use shared_dof_angles (updated by Core0)
     float current_angle = shared_dof_angles.valid[i] ? shared_dof_angles.angles[i] : 0.0f;
-    LOG_DEBUG("  DOF " + String(i) + ": " + String(current_angle, 2) +
+    LOG_C1_DEBUG("  DOF " + String(i) + ": " + String(current_angle, 2) +
               "° (target was: " + String(auto_mapping_state.target_angles[i], 2) + "°)");
   }
 
@@ -238,7 +238,7 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
 
   // Pause before proceeding to next point
   const int TRANSITION_DELAY_MS = 2000; // 2 seconds pause
-  LOG_DEBUG("Waiting " + String(TRANSITION_DELAY_MS) + "ms before proceeding...");
+  LOG_C1_DEBUG("Waiting " + String(TRANSITION_DELAY_MS) + "ms before proceeding...");
   sleep_ms(TRANSITION_DELAY_MS);
 
   // Multidimensional increment, like nested counters
@@ -249,9 +249,9 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
     // If we haven't exceeded the maximum for this DOF, we've found the next point
     if (auto_mapping_state.target_angles[i] <= auto_mapping_state.max_angles[i]) {
       // Target updated, continue with new point
-      LOG_DEBUG("New target:");
+      LOG_C1_DEBUG("New target:");
       for (int j = 0; j < auto_mapping_state.dof_count; j++) {
-        LOG_DEBUG("  DOF " + String(j) + ": " + String(auto_mapping_state.target_angles[j], 2) +
+        LOG_C1_DEBUG("  DOF " + String(j) + ": " + String(auto_mapping_state.target_angles[j], 2) +
                   "°");
       }
 
@@ -263,24 +263,24 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
         auto_mapping_state.debug_counter[k]            = 0;
         auto_mapping_state.dof_reach_logged[k]         = false;
       }
-      LOG_DEBUG("Explicit reset of movement flags for all DOFs");
+      LOG_C1_DEBUG("Explicit reset of movement flags for all DOFs");
 
       // Also reset global timeout counter
       auto_mapping_state.last_valid_reading = millis();
 
-      LOG_DEBUG("----------------------------------------------------------\n");
+      LOG_C1_DEBUG("----------------------------------------------------------\n");
       return true;
     }
 
     // Reset this DOF to minimum and move to next DOF
     auto_mapping_state.target_angles[i] = auto_mapping_state.min_angles[i];
-    LOG_DEBUG("Reset DOF " + String(i) + " to minimum: " +
+    LOG_C1_DEBUG("Reset DOF " + String(i) + " to minimum: " +
               String(auto_mapping_state.min_angles[i], 2) + "°");
   }
 
   // If we get here, we've completed all DOFs
-  LOG_INFO("All points explored");
-  LOG_DEBUG("----------------------------------------------------------\n");
+  LOG_C1_INFO("All points explored");
+  LOG_C1_DEBUG("----------------------------------------------------------\n");
   return false;
 }
 
@@ -288,7 +288,7 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
 bool JointController::acquireCurrentPoint(AutoMappingState_t &auto_mapping_state) {
   // Verify that there's space in the array to save the point
   if (auto_mapping_state.acquired_points_count >= MAX_MAPPING_DATA_SIZE) {
-    LOG_ERROR("Acquired points array full");
+    LOG_C1_ERROR("Acquired points array full");
     return false;
   }
 
@@ -298,7 +298,7 @@ bool JointController::acquireCurrentPoint(AutoMappingState_t &auto_mapping_state
   // Acquire DOF angles from shared state (updated by Core0)
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
     if (!shared_dof_angles.valid[i]) {
-      LOG_ERROR("Acquisition failed — invalid encoder reading for DOF " + String(i));
+      LOG_C1_ERROR("Acquisition failed — invalid encoder reading for DOF " + String(i));
       return false;
     }
     auto_mapping_state.last_sample.dof_angles[i] = shared_dof_angles.angles[i];
@@ -335,13 +335,13 @@ bool JointController::acquireCurrentPoint(AutoMappingState_t &auto_mapping_state
   }
   point_data += "]";
 
-  LOG_DEBUG(point_data);
+  LOG_C1_DEBUG(point_data);
 
   // Calculate and print progress
   float progress =
       (float)auto_mapping_state.current_point / auto_mapping_state.total_points * 100.0f;
   if (auto_mapping_state.current_point % 10 == 0 || (int)progress % 5 == 0) {
-    LOG_INFO("AUTO_MAP_PROGRESS:" + String(progress, 1) + "% - " +
+    LOG_C1_INFO("AUTO_MAP_PROGRESS:" + String(progress, 1) + "% - " +
              String(auto_mapping_state.current_point) + "/" +
              String(auto_mapping_state.total_points) + " points");
   }
@@ -384,7 +384,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
   for (int i = 0; i < auto_mapping_state.dof_count; i++) {
     // Get current DOF angle from shared state (updated by Core0)
     if (!shared_dof_angles.valid[i]) {
-      LOG_ERROR("Invalid encoder reading for DOF " + String(i));
+      LOG_C1_ERROR("Invalid encoder reading for DOF " + String(i));
       continue;
     }
     float current_angle = shared_dof_angles.angles[i];
@@ -418,7 +418,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
 
     // Verify that both motors were found
     if (agonist_index == -1 || antagonist_index == -1) {
-    LOG_ERROR("Agonist or antagonist motors not found for DOF " + String(i));
+    LOG_C1_ERROR("Agonist or antagonist motors not found for DOF " + String(i));
       continue;
     }
 
@@ -439,21 +439,21 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
       auto_mapping_state.previous_angle[i] = current_angle;
 
       // Debug to see actual values
-      SERIAL_COM("DOF ");
-      SERIAL_COM(i);
-      SERIAL_COM(": initial_error=");
-      SERIAL_COM(auto_mapping_state.initial_error[i]);
-      SERIAL_COM(", angle_change=");
-      SERIAL_COM(angle_change);
-      SERIAL_COM(", current=");
-      SERIAL_COM(current_angle);
-      SERIAL_COM(", product=");
-      SERIAL_COM_LN(angle_change * auto_mapping_state.initial_error[i]);
+      SERIAL_C1_COM("DOF ");
+      SERIAL_C1_COM(i);
+      SERIAL_C1_COM(": initial_error=");
+      SERIAL_C1_COM(auto_mapping_state.initial_error[i]);
+      SERIAL_C1_COM(", angle_change=");
+      SERIAL_C1_COM(angle_change);
+      SERIAL_C1_COM(", current=");
+      SERIAL_C1_COM(current_angle);
+      SERIAL_C1_COM(", product=");
+      SERIAL_C1_COM_LN(angle_change * auto_mapping_state.initial_error[i]);
 
       // Verify we haven't exceeded DOF limits
       if (!isAngleInLimits(i, current_angle)) {
-        LOG_ERROR("Angle out of limits for DOF " + String(i));
-        LOG_DEBUG(String("Angle: ") + String(current_angle) + ", Min: " +
+        LOG_C1_ERROR("Angle out of limits for DOF " + String(i));
+        LOG_C1_DEBUG(String("Angle: ") + String(current_angle) + ", Min: " +
                   String(config.dofs[i].limits.min_angle) + ", Max: " +
                   String(config.dofs[i].limits.max_angle));
 
@@ -478,7 +478,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
         // Logging and flag to avoid oscillations
         if (!auto_mapping_state.dof_reach_logged[i]) {
           auto_mapping_state.dof_reach_logged[i] = true;
-          LOG_INFO("DOF " + String(i) +
+          LOG_C1_INFO("DOF " + String(i) +
                    " reached target. Motors definitively stopped.");
         }
       }
@@ -548,7 +548,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
           auto_mapping_state.applied_torques[antagonist_index] = 0; // Speed, not torque
           auto_mapping_state.applied_torques[agonist_index]    = resistance_torque;
 
-          SERIAL_COM_LN("DOF " + String(i) + ": Changed direction, now " + 
+          SERIAL_C1_COM_LN("DOF " + String(i) + ": Changed direction, now " + 
                          (invert_logic ? "decreasing (inverted logic)" : "increasing") + " angle");
         } else {
           // We need to decrease DOF angle (target < current) [OR inverted logic]
@@ -570,7 +570,7 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
           auto_mapping_state.applied_torques[agonist_index]    = 0; // Speed, not torque
           auto_mapping_state.applied_torques[antagonist_index] = -resistance_torque;
 
-          SERIAL_COM_LN("DOF " + String(i) + ": Changed direction, now " + 
+          SERIAL_C1_COM_LN("DOF " + String(i) + ": Changed direction, now " + 
                          (invert_logic ? "increasing (inverted logic)" : "decreasing") + " angle");
         }
       }
@@ -579,17 +579,17 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
       auto_mapping_state.debug_counter[i]++;
       if (auto_mapping_state.debug_counter[i] >= 500000) {
         auto_mapping_state.debug_counter[i] = 0;
-        SERIAL_COM_LN("DOF " + String(i) + ": target=" + String(target_angle, 2) + ", current=" +
+        SERIAL_C1_COM_LN("DOF " + String(i) + ": target=" + String(target_angle, 2) + ", current=" +
                        String(current_angle, 2) + ", error=" + String(angle_error, 2));
 
         // Direction determines which values to print
         if (auto_mapping_state.last_direction[i] > 0) {
-          SERIAL_COM_LN("  Antagonist (motor " + String(antagonist_index) +
+          SERIAL_C1_COM_LN("  Antagonist (motor " + String(antagonist_index) +
                          ") moving at speed " + String(-motor_speed) +
                          ", Agonist (motor " + String(agonist_index) +
                          ") resisting with torque " + String(resistance_torque));
         } else {
-          SERIAL_COM_LN("  Agonist (motor " + String(agonist_index) +
+          SERIAL_C1_COM_LN("  Agonist (motor " + String(agonist_index) +
                          ") moving at speed " + String(motor_speed) +
                          ", Antagonist (motor " + String(antagonist_index) +
                          ") resisting with torque " + String(-resistance_torque));
@@ -640,7 +640,7 @@ bool JointController::stopAutoMapping(AutoMappingState_t &auto_mapping_state) {
   // Stop all motors
   stopAllMotors();
 
-  LOG_INFO("Auto mapping stopped manually");
+  LOG_C1_INFO("Auto mapping stopped manually");
 
   return true;
 }
@@ -650,7 +650,7 @@ void JointController::resetAutoMappingCounters(AutoMappingState_t &auto_mapping_
   // Reset counters in auto_mapping_state structure
   auto_mapping_state.consecutive_encoder_errors = 0;
   auto_mapping_state.last_valid_reading         = millis();
-  LOG_DEBUG("Auto mapping counters reset");
+  LOG_C1_DEBUG("Auto mapping counters reset");
 }
 
 // Update automatic mapping state
@@ -660,7 +660,7 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
   // Check if commands are incoming with new system
   if (emergency_stop_requested) {
     // Stop all motors immediately and abort mapping
-    LOG_ERROR("EMERGENCY STOP received during auto mapping — immediate abort");
+    LOG_C1_ERROR("EMERGENCY STOP received during auto mapping — immediate abort");
     stopAllMotors();
     auto_mapping_state.active = false;
     resetAutoMappingCounters(auto_mapping_state);
@@ -671,7 +671,7 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
     uint8_t cmd = pending_command_type;
     if (cmd == CMD_STOP || cmd == CMD_STOP_AUTO_MAPPING) {
       // Stop all motors immediately and abort mapping
-      LOG_WARN("STOP command received during auto mapping — immediate abort");
+      LOG_C1_WARN("STOP command received during auto mapping — immediate abort");
       stopAllMotors();
       auto_mapping_state.active = false;
       resetAutoMappingCounters(auto_mapping_state);
@@ -688,14 +688,14 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
   // Global safety timeout - abort if stuck for too long
   unsigned long time_diff = millis() - auto_mapping_state.last_valid_reading;
   if (time_diff > 5000) { // 5 seconds without valid readings
-    SERIAL_COM_LN("!!!!! SAFETY TIMEOUT TRIGGERED !!!!!");
-    LOG_ERROR("Safety timeout during auto mapping — aborting");
-    SERIAL_COM("Last valid timestamp: ");
-    SERIAL_COM_LN(auto_mapping_state.last_valid_reading);
-    SERIAL_COM("Current timestamp: ");
-    SERIAL_COM_LN(millis());
-    SERIAL_COM("Difference: ");
-    SERIAL_COM_LN(time_diff);
+    SERIAL_C1_COM_LN("!!!!! SAFETY TIMEOUT TRIGGERED !!!!!");
+    LOG_C1_ERROR("Safety timeout during auto mapping — aborting");
+    SERIAL_C1_COM("Last valid timestamp: ");
+    SERIAL_C1_COM_LN(auto_mapping_state.last_valid_reading);
+    SERIAL_C1_COM("Current timestamp: ");
+    SERIAL_C1_COM_LN(millis());
+    SERIAL_C1_COM("Difference: ");
+    SERIAL_C1_COM_LN(time_diff);
     stopAllMotors();
     auto_mapping_state.active = false;
     resetAutoMappingCounters(auto_mapping_state);
@@ -715,14 +715,14 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
 
         // If there are too many consecutive errors, abort
         if (auto_mapping_state.consecutive_encoder_errors > 10) {
-          LOG_ERROR("Too many consecutive encoder read errors — aborting auto mapping");
+          LOG_C1_ERROR("Too many consecutive encoder read errors — aborting auto mapping");
           stopAllMotors();
           auto_mapping_state.active = false;
           resetAutoMappingCounters(auto_mapping_state);
           return 3; // Error
         }
 
-        LOG_WARN("Encoder read error during position check, attempt " +
+        LOG_C1_WARN("Encoder read error during position check, attempt " +
                  String(auto_mapping_state.consecutive_encoder_errors) + "/10");
 
         // Continue to next cycle to give another chance
@@ -742,7 +742,7 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
         // Position reached - acquire point IMMEDIATELY without stopping
         // The actual angle is recorded (even if slightly different from target)
         // Linear regression works with any (motor_angle, joint_angle) pairs
-        LOG_INFO("Position reached for point " + String(auto_mapping_state.current_point) +
+        LOG_C1_INFO("Position reached for point " + String(auto_mapping_state.current_point) +
                  " - acquiring on-the-fly");
       } else {
         // Position not yet reached, apply necessary torques
@@ -788,14 +788,14 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
       // Error acquiring point
       auto_mapping_state.consecutive_encoder_errors++;
       if (auto_mapping_state.consecutive_encoder_errors > 5) {
-        LOG_ERROR("Too many consecutive errors acquiring point — aborting");
+        LOG_C1_ERROR("Too many consecutive errors acquiring point — aborting");
         stopAllMotors();
         auto_mapping_state.active = false;
         resetAutoMappingCounters(auto_mapping_state);
         return 3; // Error
       }
 
-      LOG_WARN("Point acquisition error, attempt " +
+      LOG_C1_WARN("Point acquisition error, attempt " +
                String(auto_mapping_state.consecutive_encoder_errors) + "/5");
 
       // Don't abort immediately, try again
