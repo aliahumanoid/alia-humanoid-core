@@ -1270,10 +1270,50 @@ bool JointController::executeWaypointMovement() {
     }
   }
   
-  // NOTE: Micro-profiling log output DISABLED — LOG_INFO_F from Core1
-  // causes cross-core Serial deadlock with Core0 USB CDC operations.
-  // Timing data still collected in wp_micro_profile for future use
-  // (e.g., read via CAN diagnostic command instead of Serial).
+#if CONTROLLER_DEBUG
+  if (wp_micro_profile.samples >= WP_MICRO_MIN_SAMPLES) {
+    uint32_t now_ms = millis();
+    if (wp_micro_profile.last_log_ms == 0) {
+      wp_micro_profile.last_log_ms = now_ms;
+    }
+    if (now_ms - wp_micro_profile.last_log_ms >= WP_MICRO_LOG_INTERVAL_MS) {
+      // Pre-compute averages as integers (avoids snprintf %f which uses ~1KB stack on ARM)
+      uint32_t n = wp_micro_profile.samples;
+      uint32_t sn = wp_micro_profile.safety_samples;
+      uint32_t avg_dof = wp_micro_profile.accum_dof_us / n;
+      uint32_t avg_outer = wp_micro_profile.accum_outer_us / n;
+      uint32_t avg_eq = wp_micro_profile.accum_eq_us / n;
+      uint32_t avg_can = wp_micro_profile.accum_can_us / n;
+      uint32_t avg_pid = wp_micro_profile.accum_pid_us / n;
+      uint32_t avg_safety = (sn > 0) ? wp_micro_profile.accum_safety_us / sn : 0;
+      // Split into 2 messages to keep buffer small
+      LOG_C1_INFO_F("[WP PROF] avg_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu safety=%lu",
+                 avg_dof, avg_outer, avg_eq, avg_can, avg_pid, avg_safety);
+      LOG_C1_INFO_F("[WP PROF] max_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu safety=%lu",
+                 (unsigned long)wp_micro_profile.max_dof_us,
+                 (unsigned long)wp_micro_profile.max_outer_us,
+                 (unsigned long)wp_micro_profile.max_eq_us,
+                 (unsigned long)wp_micro_profile.max_can_us,
+                 (unsigned long)wp_micro_profile.max_pid_us,
+                 (unsigned long)wp_micro_profile.max_safety_us);
+      wp_micro_profile.accum_dof_us = 0;
+      wp_micro_profile.accum_outer_us = 0;
+      wp_micro_profile.accum_eq_us = 0;
+      wp_micro_profile.accum_can_us = 0;
+      wp_micro_profile.accum_pid_us = 0;
+      wp_micro_profile.accum_safety_us = 0;
+      wp_micro_profile.max_dof_us = 0;
+      wp_micro_profile.max_outer_us = 0;
+      wp_micro_profile.max_eq_us = 0;
+      wp_micro_profile.max_can_us = 0;
+      wp_micro_profile.max_pid_us = 0;
+      wp_micro_profile.max_safety_us = 0;
+      wp_micro_profile.samples = 0;
+      wp_micro_profile.safety_samples = 0;
+      wp_micro_profile.last_log_ms = now_ms;
+    }
+  }
+#endif
   
   return any_movement;
 }
