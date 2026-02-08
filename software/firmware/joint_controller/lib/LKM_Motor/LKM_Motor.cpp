@@ -926,3 +926,117 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   LOG_C1_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
   return data;  // Returns NAN angle to indicate error
 }
+
+/**
+ * Pipelined dual-motor multi-loop angle read.
+ *
+ * Sends 0x92 to both motors back-to-back, then polls for both responses
+ * in a single loop. Both motors must share the same CAN bus instance.
+ */
+PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
+    LKM_Motor *motorA, LKM_Motor *motorB) {
+  PipelinedAngleData result;
+  result.dataA.angle    = NAN;
+  result.dataA.waitTime = 0;
+  result.dataB.angle    = NAN;
+  result.dataB.waitTime = 0;
+  result.totalTime      = 0;
+
+  MCP_CAN *can = motorA->_can;  // Shared bus
+  unsigned long idA = 0x140 + motorA->_motorID;
+  unsigned long idB = 0x140 + motorB->_motorID;
+  unsigned char cmd[8] = {0x92, 0, 0, 0, 0, 0, 0, 0};
+
+  unsigned long t0 = micros();
+
+  // --- Flush stale messages (single pass, shared bus) ---
+  int flushed = 0;
+  while (can->checkReceive() == CAN_MSGAVAIL && flushed < 5) {
+    unsigned long dummyId;
+    unsigned char dummyLen;
+    unsigned char dummyBuf[8];
+    can->readMsgBuf(&dummyId, &dummyLen, dummyBuf);
+    flushed++;
+  }
+  if (flushed >= 3) {
+    static uint32_t last_flush_log = 0;
+    if (millis() - last_flush_log > 10000) {
+      LOG_C1_WARN("[CAN PIPE] Flushed " + String(flushed) + " stale messages");
+      last_flush_log = millis();
+    }
+  }
+
+  const int MAX_RETRIES = 2;
+
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    // --- Send command to motor A (non-blocking) ---
+    if (can->sendMsgBufNoWait(idA, 0, 8, cmd) != CAN_OK) {
+      if (retry == MAX_RETRIES - 1) {
+        LOG_C1_ERROR("[CAN PIPE] Send failed motor A (id " + String(motorA->_motorID) + ") after retries");
+      }
+      delayMicroseconds(100);
+      continue;
+    }
+
+    // --- Send command to motor B (non-blocking, back-to-back) ---
+    if (can->sendMsgBufNoWait(idB, 0, 8, cmd) != CAN_OK) {
+      if (retry == MAX_RETRIES - 1) {
+        LOG_C1_ERROR("[CAN PIPE] Send failed motor B (id " + String(motorB->_motorID) + ") after retries");
+      }
+      delayMicroseconds(100);
+      continue;
+    }
+
+    // --- Single poll loop for both responses ---
+    bool gotA = false, gotB = false;
+
+    while (micros() - t0 < 2500) {  // 2.5ms timeout from function start
+      if (can->checkReceive() == CAN_MSGAVAIL) {
+        unsigned long canId;
+        unsigned char len;
+        unsigned char rcvBuf[8];
+        if (can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK && rcvBuf[0] == 0x92) {
+
+          auto parseAngle = [&](LKM_Motor *motor, MultiAngleData &data) {
+            data.waitTime = micros() - t0;
+            uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
+                            ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
+                            ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
+                            ((uint64_t)rcvBuf[1]);
+            int64_t motorAngle = ((int64_t)temp << 8) >> 8;
+            data.angle = (motorAngle / 100.0) / motor->_reductionGear;
+            data.angle = (data.angle - motor->offsetEncoder) * (motor->invertEncoder ? -1 : 1);
+          };
+
+          if (canId == idA && !gotA) {
+            parseAngle(motorA, result.dataA);
+            gotA = true;
+          } else if (canId == idB && !gotB) {
+            parseAngle(motorB, result.dataB);
+            gotB = true;
+          }
+
+          if (gotA && gotB) {
+            result.totalTime = micros() - t0;
+            return result;  // Both received
+          }
+        }
+      }
+    }
+
+    // Timeout — retry if attempts remain
+    if (retry < MAX_RETRIES - 1) {
+      delayMicroseconds(200);
+    }
+  }
+
+  // All retries failed
+  result.totalTime = micros() - t0;
+  static uint32_t last_pipe_timeout_log = 0;
+  if (millis() - last_pipe_timeout_log > 5000) {
+    LOG_C1_WARN("[CAN PIPE] Timeout: A=" + String(!isnan(result.dataA.angle) ? "OK" : "FAIL") +
+                " B=" + String(!isnan(result.dataB.angle) ? "OK" : "FAIL"));
+    last_pipe_timeout_log = millis();
+  }
+  return result;
+}

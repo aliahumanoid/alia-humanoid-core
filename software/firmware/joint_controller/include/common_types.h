@@ -12,6 +12,18 @@ struct MultiAngleData {
 };
 
 /**
+ * @brief Pipelined dual-motor angle read result
+ *
+ * Used by getMultiAnglePairPipelined() to return both motor angles
+ * from a single pipelined CAN transaction (send-send-wait).
+ */
+struct PipelinedAngleData {
+  MultiAngleData dataA;
+  MultiAngleData dataB;
+  unsigned long totalTime;  // Total pipeline duration in microseconds
+};
+
+/**
  * @brief Basic PID controller gains (3-term)
  * 
  * Generic 3-term PID gains used in flash storage structures

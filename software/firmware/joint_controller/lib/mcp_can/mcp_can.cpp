@@ -1170,8 +1170,43 @@ INT8U MCP_CAN::sendMsgBuf(INT32U id, INT8U len, INT8U *buf)
         
     setMsg(id, rtr, ext, len, buf);
     res = sendMsg();
-    
+
     return res;
+}
+
+/*********************************************************************************************************
+** Function name:           sendMsgNoWait
+** Descriptions:            Load TX buffer and trigger send, return immediately without waiting
+**                          for transmission to complete. Useful for pipelining multiple sends.
+*********************************************************************************************************/
+INT8U MCP_CAN::sendMsgNoWait()
+{
+    INT8U res, txbuf_n;
+    uint32_t uiTimeOut, temp;
+
+    temp = micros();
+    do {
+        res = mcp2515_getNextFreeTXBuf(&txbuf_n);
+        uiTimeOut = micros() - temp;
+    } while (res == MCP_ALLTXBUSY && (uiTimeOut < TIMEOUTVALUE));
+
+    if (uiTimeOut >= TIMEOUTVALUE)
+        return CAN_GETTXBFTIMEOUT;
+
+    mcp2515_write_canMsg(txbuf_n);
+    mcp2515_modifyRegister(txbuf_n - 1, MCP_TXB_TXREQ_M, MCP_TXB_TXREQ_M);
+
+    return CAN_OK;                                                      /* return immediately           */
+}
+
+/*********************************************************************************************************
+** Function name:           sendMsgBufNoWait
+** Descriptions:            Send message without waiting for TX complete (non-blocking)
+*********************************************************************************************************/
+INT8U MCP_CAN::sendMsgBufNoWait(INT32U id, INT8U ext, INT8U len, INT8U *buf)
+{
+    setMsg(id, 0, ext, len, buf);
+    return sendMsgNoWait();
 }
 
 /*********************************************************************************************************

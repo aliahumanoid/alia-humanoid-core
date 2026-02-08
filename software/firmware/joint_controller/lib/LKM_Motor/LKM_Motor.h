@@ -420,6 +420,19 @@ public:
    */
   uint16_t getEncoderRawSync();
 
+  /**
+   * @brief Read multi-loop angles from two motors in a single pipelined CAN transaction
+   * @param motorA Pointer to first motor (agonist)
+   * @param motorB Pointer to second motor (antagonist)
+   * @return PipelinedAngleData with both angles and total pipeline time
+   *
+   * Sends both 0x92 commands back-to-back, then polls for both responses
+   * in a single loop. Saves ~400-500µs vs two sequential getMultiAngleSync() calls.
+   * Both motors must share the same CAN bus.
+   */
+  static PipelinedAngleData getMultiAnglePairPipelined(
+      LKM_Motor *motorA, LKM_Motor *motorB);
+
   // ---------------------------------------------------------------
   // CALIBRATION & UTILITIES
   // ---------------------------------------------------------------

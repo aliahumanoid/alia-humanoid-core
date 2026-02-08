@@ -982,8 +982,9 @@ bool JointController::executeWaypointMovement() {
 #if CONTROLLER_DEBUG
     uint32_t can_start_us = time_us_32();
 #endif
-    MultiAngleData data_A = agonist->getMultiAngleSync();
-    MultiAngleData data_B = antagonist->getMultiAngleSync();
+    PipelinedAngleData pipelined = LKM_Motor::getMultiAnglePairPipelined(agonist, antagonist);
+    MultiAngleData data_A = pipelined.dataA;
+    MultiAngleData data_B = pipelined.dataB;
 #if CONTROLLER_DEBUG
     {
       uint32_t can_dt = time_us_32() - can_start_us;

@@ -1919,10 +1919,10 @@
                                     <i class="fas fa-brain mr-1"></i>Smart Waypoints
                                 </h4>
                                 <div class="flex items-center gap-2">
-                                    <button type="button" onclick="previewWaypointBatch()"
+                                    <button type="button" id="waypointViewBtn" onclick="previewWaypointBatch()"
                                             class="px-2 py-1 text-xs bg-blue-100 hover:bg-blue-200 text-blue-600 rounded border border-blue-300"
-                                            title="Preview waypoints (no send, no encoder required)">
-                                        <i class="fas fa-eye mr-1"></i>Preview
+                                            title="Preview waypoints or view last sent batch">
+                                        <i class="fas fa-eye mr-1"></i><span id="waypointViewBtnLabel">Preview</span>
                                     </button>
                                     <label class="inline-flex items-center cursor-pointer">
                                         <input type="checkbox" id="autoWaypointSendToggle" class="sr-only peer">

@@ -2843,6 +2843,7 @@ function sendMultiWaypointSmoothCurve() {
         if (response.status === 'success') {
             appendStatusMessage(`✅ Multi-WP batch sent: ${waypoints.length} waypoints [LINEAR interp]`);
             lastWaypointBatch.sent = true;
+            updateWaypointViewBtn();
         } else {
             appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
             waypointTrajectoryActive = false;  // Clear on error
@@ -4290,6 +4291,7 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         if (response.status === 'success') {
             appendStatusMessage(`✅ Dual-DOF batch sent: ${waypoints.length} waypoints`);
             lastWaypointBatch.sent = true;
+            updateWaypointViewBtn();
         } else {
             appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
             waypointTrajectoryActive = false;
@@ -4302,10 +4304,30 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
 }
 
 /**
- * Preview waypoint batch without sending - useful for debug without hardware.
- * Uses current input values (DOF, Angle, Time) and assumes start angle = 0 if no encoder.
+ * Update the waypoint view button label based on state.
+ * Shows "Last Batch" if a batch was sent, "Preview" otherwise.
+ */
+function updateWaypointViewBtn() {
+    const label = document.getElementById('waypointViewBtnLabel');
+    if (!label) return;
+    if (lastWaypointBatch.timestamp && lastWaypointBatch.sent) {
+        label.textContent = 'Last Batch';
+    } else {
+        label.textContent = 'Preview';
+    }
+}
+
+/**
+ * Preview waypoint batch - shows last sent batch if available, otherwise generates a new one.
+ * If a batch was already sent via auto-send, shows those waypoints (the actual trajectory).
+ * Otherwise generates a preview using current input values.
  */
 function previewWaypointBatch() {
+    // If we have a recently sent batch, show that instead of regenerating
+    if (lastWaypointBatch.timestamp && lastWaypointBatch.sent) {
+        showLastWaypointInfo();
+        return;
+    }
     const joint = $("#jointSelect").val() || "UNKNOWN";
     const dofCount = getJointDofCount(joint);
     const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
@@ -4418,6 +4440,7 @@ function previewWaypointBatch() {
         sent: false,
         startSource: startSource
     };
+    updateWaypointViewBtn();
 
     // Show the info popup immediately
     showLastWaypointInfo();
