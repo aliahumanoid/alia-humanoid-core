@@ -108,7 +108,7 @@ public:
   
   /**
    * @brief Reset PID internal state to zero
-   * 
+   *
    * Clears all error history and accumulated outputs.
    * Call this when:
    * - Starting a new control task
@@ -116,6 +116,32 @@ public:
    * - Recovering from a disturbance
    */
   void reset();
+
+  /**
+   * @brief Bumpless transfer: initialize PID state at current operating point
+   *
+   * Unlike reset() which zeros everything (causing derivative kick and
+   * proportional jump on the first control() call), this method pre-loads
+   * the internal state so that the first call to control() produces
+   * zero incremental change — only the integral term acts, proportionally
+   * to the current error.
+   *
+   * This is the standard "bumpless transfer" technique from control theory:
+   * - xprev[] filled with current measurement → D term = 0 on first cycle
+   * - eprev[] filled with current error → P increment = 0 on first cycle
+   * - uprev set to desired initial output → output continuity preserved
+   * - udfiltprev zeroed → derivative filter starts clean
+   *
+   * Use this when activating the controller on a process that is already
+   * at a known state (e.g., transitioning from open-loop to closed-loop
+   * while maintaining torque continuity).
+   *
+   * @param measurement Current process variable (sensor reading)
+   * @param setpoint Current desired value
+   * @param output Initial controller output (e.g., current torque command)
+   *               Use 0 if starting from no-load condition
+   */
+  void initializeState(float measurement, float setpoint, float output = 0);
 
   // ===================================================================
   // PARAMETER ACCESS
@@ -191,16 +217,20 @@ public:
   }
 
   /**
-   * @brief Update PID tuning parameters
-   * 
-   * Updates all PID gains and resets internal state for smooth transition.
-   * 
+   * @brief Update PID tuning parameters (bumpless — no state reset)
+   *
+   * Updates all gains and derivative filter time constant without touching
+   * internal state. In incremental PID form, this is inherently safe:
+   * the accumulated output (uprev) and measurement history (xprev/eprev)
+   * remain valid, and the new gains simply affect the next increment.
+   *
    * @param new_kp New proportional gain
    * @param new_ki New integral gain
    * @param new_kd New derivative gain
    * @param new_tau New derivative filter time constant (seconds)
-   * 
-   * @note Internal state is reset to prevent transients
+   *
+   * @note State is NOT reset. Call reset() or initializeState() separately
+   *       if you need to clear accumulated state (e.g., after a long idle period).
    */
   void setTunings(float new_kp, float new_ki, float new_kd, float new_tau);
 };

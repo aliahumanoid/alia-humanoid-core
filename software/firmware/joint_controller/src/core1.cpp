@@ -1129,8 +1129,9 @@ void core1_loop() {
               command_data_ext.recalc_offset_duration > 0
                   ? command_data_ext.recalc_offset_duration
                   : controller->getConfig().dofs[dof_index].zero_mapping.recalc_offset_duration)) {
-        // NOTE: Motors intentionally NOT stopped here — pretension torque maintained.
-        // Core0 will inject HOLDING waypoints after all DOFs complete.
+        // Motors intentionally NOT stopped — pretension torque maintained to prevent
+        // gravity-induced movement gap. Core0 injects HOLDING waypoints immediately
+        // after all DOFs complete, and PID bumpless transfer takes over seamlessly.
         if (shared_data_ext.flag == 0) {
           strcpy(shared_data_ext.message, "Offsets recalculated successfully");
           shared_data_ext.flag = CMD1_END_MOVE;

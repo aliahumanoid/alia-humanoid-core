@@ -95,6 +95,11 @@ static WaypointState prev_dof_state[MAX_DOFS] = {WaypointState::IDLE};
 // Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
 static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
 
+// Track if inner PID needs bumpless initialization (set in outer section, consumed in inner section)
+// This bridges the gap between the IDLE→MOVING detection (early in loop) and the inner PID
+// execution (later, after motor refs and CAN readings are available).
+static bool inner_pid_init_needed[MAX_DOFS] = {false};
+
 // === CAN ERROR TRACKING (file scope for reset on new movement) ===
 static float wp_last_theta_A[MAX_DOFS] = {0};
 static float wp_last_theta_B[MAX_DOFS] = {0};
@@ -200,6 +205,7 @@ bool JointController::executeWaypointMovement() {
     if (dof_state == WaypointState::IDLE) {
       // Mark PID reset needed for when this DOF becomes active
       pid_reset_needed[dof] = true;
+      inner_pid_init_needed[dof] = false;  // Clear any stale flag
       prev_dof_state[dof] = WaypointState::IDLE;
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
@@ -223,16 +229,27 @@ bool JointController::executeWaypointMovement() {
     bool should_reset = pid_reset_needed[dof] && just_started_from_idle;
     
     if (should_reset) {
-      // Reset outer loop PID controller (handles integral, derivative, and filter state)
-      resetOuterPID(dof);
+      // Bumpless transfer for outer loop PID controller:
+      // Initialize state at current joint angle so P and D terms start at zero.
+      // Since q_des ≈ q_curr for a HOLDING waypoint, error ≈ 0 and only the
+      // integral term will contribute a tiny correction on the first cycle.
+      float q_init = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
+      PID *outer_pid_init = getOuterPID(dof);
+      if (outer_pid_init) {
+        outer_pid_init->initializeState(q_init, q_init, 0.0f);
+      }
       delta_theta[dof] = 0.0f;
+      delta_theta_prev[dof] = 0.0f;
       pid_reset_needed[dof] = false;
+
+      // Flag inner PID for bumpless initialization (done later when motor data is available)
+      inner_pid_init_needed[dof] = true;
 
       // Clear CAN error history for this DOF to prevent old errors from triggering false stops
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
 
-      LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " PID + CAN error state reset (IDLE → MOVING)");
+      LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " bumpless init (IDLE → MOVING) at " + String(q_init, 1) + "°");
     }
     
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
@@ -1161,6 +1178,22 @@ bool JointController::executeWaypointMovement() {
         pid_agonist->setTau(tau_target);
         pid_antagonist->setTau(tau_target);
       }
+    }
+
+    // === BUMPLESS TRANSFER for inner PIDs on IDLE → MOVING ===
+    // Initialize inner PID state at current motor positions so the first control()
+    // call produces zero P and D terms, avoiding derivative kick and proportional jump.
+    // This is deferred from the IDLE→MOVING detection above because motor references
+    // (theta_A_ref, theta_B_ref) and CAN readings (theta_A_pid, theta_B_pid) are only
+    // available at this point in the loop.
+    if (inner_pid_init_needed[dof]) {
+      pid_agonist->initializeState(theta_A_pid, theta_A_ref, 0.0f);
+      pid_antagonist->initializeState(theta_B_pid, theta_B_ref, 0.0f);
+      inner_pid_init_needed[dof] = false;
+
+      LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " inner PID bumpless init:"
+                   " Aref=" + String(theta_A_ref, 1) + " Acurr=" + String(theta_A_pid, 1) +
+                   " Bref=" + String(theta_B_ref, 1) + " Bcurr=" + String(theta_B_pid, 1));
     }
 
     // Inner PID for motors (compute torque commands)
