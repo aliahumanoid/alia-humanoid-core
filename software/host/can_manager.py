@@ -257,6 +257,30 @@ class CanManager:
         self._log_can_info("Joint identification broadcast requested")
         return {"requested": True}
 
+    def send_startup_sequence(self, joint_name: str, torque: int = 0,
+                               duration: int = 0) -> Dict[str, Any]:
+        """
+        Send startup sequence command via CAN (0x009).
+
+        Triggers recalc_offset for all DOFs on the target joint controller,
+        then enters HOLDING state. Replaces serial CMD_STARTUP_SEQUENCE.
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            torque: Custom pretension torque (0 = use config default)
+            duration: Custom pretension duration ms (0 = use config default)
+
+        Returns:
+            Dict with request status
+        """
+        self._ensure_connection()
+        joint_id = self._resolve_joint_id(joint_name)
+        payload = struct.pack("<BBhh", joint_id, 0, torque, duration) + bytes(2)
+        self._send_frame(0x009, payload,
+                         context=f"Startup seq joint={joint_name} torque={torque} dur={duration}")
+        self._log_can_info(f"Startup sequence requested for {joint_name}")
+        return {"joint": joint_name, "requested": True}
+
     def start_encoder_stream(self) -> Dict[str, Any]:
         """
         Start encoder streaming via CAN at 200Hz.
@@ -875,6 +899,18 @@ class CanManager:
             self._handle_pid_outer_terms(data, message.timestamp, joint_id)
             return  # Don't log every frame
 
+        # Startup status events (0x490-0x49F) - startup sequence progress
+        if 0x490 <= arb_id <= 0x49F and len(data) >= 5:
+            joint_id = arb_id - 0x490
+            self._handle_startup_status(data, message.timestamp, joint_id)
+            return
+
+        # Joint announce / discovery (0x4A0-0x4AF) - joint identification via CAN
+        if 0x4A0 <= arb_id <= 0x4AF and len(data) >= 8:
+            joint_id = arb_id - 0x4A0
+            self._handle_joint_announce(data, message.timestamp, joint_id)
+            return
+
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -1281,6 +1317,118 @@ class CanManager:
             score += int(25 * (0.5 - sse) / 0.4)
         
         return min(100, max(0, score))
+
+    # ------------------------------------------------------------------
+    # Startup status handler (CAN 0x490 + joint_id)
+    # ------------------------------------------------------------------
+    def _handle_startup_status(self, data: bytes, timestamp: float, joint_id: int) -> None:
+        """
+        Decode startup status events from CAN (0x490-0x49F).
+
+        Frame format:
+            Byte 0: event_type (0=BEGIN, 1=DOF_READY, 2=DOF_FAILED, 3=COMPLETE, 4=FAILED)
+            Byte 1: dof_index
+            Byte 2: reason_code
+            Byte 3-4: elapsed_ms (uint16_t LE)
+        """
+        event_type = data[0]
+        dof_index = data[1]
+        reason_code = data[2]
+        elapsed_ms = struct.unpack_from("<H", data, 3)[0]
+
+        event_names = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAILED", 3: "COMPLETE", 4: "FAILED"}
+        reason_names = {0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
+                        4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT"}
+
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id}")
+        evt_name = event_names.get(event_type, f"UNKNOWN_{event_type}")
+        reason_name = reason_names.get(reason_code, f"CODE_{reason_code}")
+
+        payload = {
+            "joint": joint_name,
+            "joint_id": joint_id,
+            "event": evt_name,
+            "dof_index": dof_index,
+            "reason": reason_name,
+            "elapsed_ms": elapsed_ms,
+            "timestamp": timestamp,
+        }
+
+        self.logger.info(
+            f"Startup status [{joint_name}]: {evt_name} DOF={dof_index} "
+            f"reason={reason_name} elapsed={elapsed_ms}ms"
+        )
+
+        with self._lock:
+            self._status_messages.appendleft({"type": "startup_status", "data": payload})
+
+        if self.socketio:
+            try:
+                self.socketio.emit("startup_status", payload, namespace="/movement")
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Joint announce handler (CAN 0x4A0 + joint_id)
+    # ------------------------------------------------------------------
+    def _handle_joint_announce(self, data: bytes, timestamp: float, joint_id: int) -> None:
+        """
+        Decode joint announce frames from CAN (0x4A0-0x4AF).
+
+        Frame format:
+            Byte 0: joint_id
+            Byte 1: dof_count
+            Byte 2: motor_count
+            Byte 3: ready_flag (0x01 = ready for movement)
+            Byte 4: fw_version_major
+            Byte 5: fw_version_minor
+            Byte 6: fw_version_patch
+            Byte 7: clock_synced (0x01 = synced)
+        """
+        dof_count = data[1]
+        motor_count = data[2]
+        ready = bool(data[3])
+        fw_version = f"{data[4]}.{data[5]}.{data[6]}"
+        clock_synced = bool(data[7])
+
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id}")
+
+        payload = {
+            "joint": joint_name,
+            "joint_id": joint_id,
+            "dof_count": dof_count,
+            "motor_count": motor_count,
+            "ready": ready,
+            "fw_version": fw_version,
+            "clock_synced": clock_synced,
+            "timestamp": timestamp,
+            "source": "can",
+        }
+
+        self.logger.info(
+            f"Joint announce [{joint_name}] via CAN: {dof_count} DOFs, "
+            f"{motor_count} motors, ready={ready}, fw={fw_version}, synced={clock_synced}"
+        )
+
+        with self._lock:
+            # Store discovered joint info (can be queried via get_discovered_joints_can())
+            if not hasattr(self, '_discovered_joints_can'):
+                self._discovered_joints_can = {}
+            self._discovered_joints_can[joint_id] = payload
+            self._status_messages.appendleft({"type": "joint_announce", "data": payload})
+
+        if self.socketio:
+            try:
+                self.socketio.emit("joint_announce", payload, namespace="/")
+            except Exception:
+                pass
+
+    def get_discovered_joints_can(self) -> Dict[int, Dict[str, Any]]:
+        """Return joints discovered via CAN announce frames."""
+        with self._lock:
+            if not hasattr(self, '_discovered_joints_can'):
+                return {}
+            return dict(self._discovered_joints_can)
 
     # ------------------------------------------------------------------
     # Logging helpers

@@ -143,7 +143,7 @@ void flushMovementSamples() {
 
 /**
  * @brief Push a log message to the Core1 log queue (non-blocking)
- * 
+ *
  * Safe to call from any core. If queue is full, message is dropped silently.
  * Called by LOG_C1_* macros defined in debug.h.
  */
@@ -157,7 +157,7 @@ void core1LogPush(uint8_t level, const char* msg) {
 
 /**
  * @brief Drain Core1 log queue and print messages to Serial
- * 
+ *
  * Core1 cannot safely call Serial.print (USB CDC deadlock on RP2350).
  * Instead, Core1 pushes log entries to a lock-free queue, and Core0
  * drains up to 4 entries per cycle to avoid blocking its own loop.
@@ -181,6 +181,299 @@ void drainCore1LogQueue() {
 // ============================================================================
 // NOTE: CAN polling has been moved to Core1 (see core1.cpp)
 // Core1 now handles ALL CAN communication (Host + Motor) to avoid SPI1 conflicts
+// ============================================================================
+
+// ============================================================================
+// STARTUP SEQUENCE (shared by Serial CMD and CAN 0x009)
+// ============================================================================
+
+/**
+ * @brief Push a startup status event to the CAN event queue
+ *
+ * Core1 drains this queue and sends CAN frames (0x490 + joint_id).
+ * Non-blocking: drops event silently if queue is full.
+ */
+static void pushStartupEvent(uint8_t event_type, uint8_t dof_index,
+                              uint8_t reason_code, uint16_t elapsed_ms) {
+  StartupStatusEvent evt;
+  evt.event_type = event_type;
+  evt.dof_index = dof_index;
+  evt.reason_code = reason_code;
+  evt.elapsed_ms = elapsed_ms;
+  queue_try_add(&startup_event_queue, &evt);
+}
+
+// Startup event types
+#define STARTUP_EVT_BEGIN      0
+#define STARTUP_EVT_DOF_READY  1
+#define STARTUP_EVT_DOF_FAILED 2
+#define STARTUP_EVT_COMPLETE   3
+#define STARTUP_EVT_FAILED     4
+
+// Startup reason codes
+#define STARTUP_REASON_OK                0
+#define STARTUP_REASON_NO_CONTROLLER     1
+#define STARTUP_REASON_NO_EQUATIONS      2
+#define STARTUP_REASON_ENCODER_TIMEOUT   3
+#define STARTUP_REASON_POSITION_RANGE    4
+#define STARTUP_REASON_RECALC_ERROR      5
+#define STARTUP_REASON_GLOBAL_TIMEOUT    6
+
+/**
+ * @brief Execute startup sequence (recalc_offset for all DOFs, then HOLDING)
+ *
+ * This function is the shared implementation for:
+ * - Serial CMD_STARTUP_SEQUENCE
+ * - CAN 0x009 startup command
+ * - Auto-start at boot
+ *
+ * Architecture: Core0 performs safety checks (no CAN access), then delegates
+ * recalc_offset to Core1 via CMD_RECALC_OFFSET command buffer.
+ * All Motor CAN access stays on Core1, preventing SPI1 conflicts.
+ *
+ * @param custom_torque  Pretension torque override (0 = use config default)
+ * @param custom_duration  Pretension duration override (0 = use config default)
+ * @return true if startup completed successfully, false on failure
+ */
+static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duration) {
+  const uint32_t STARTUP_TIMEOUT_MS = 30000;
+  uint32_t startup_start_time = millis();
+
+  // SAFETY CHECK 0: Controller initialized
+  if (active_joint_controller == nullptr) {
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_CONTROLLER");
+    pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_NO_CONTROLLER,
+                     (uint16_t)(millis() - startup_start_time));
+    return false;
+  }
+
+  // SAFETY CHECK 1: Linear equations loaded for all DOFs
+  bool equations_ok = true;
+  for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+    if (!active_joint_controller->hasValidEquations(dof)) {
+      LOG_ERROR("DOF " + String(dof) + ": linear equations not available");
+      equations_ok = false;
+    }
+  }
+  if (!equations_ok) {
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_EQUATIONS");
+    LOG_ERROR("Startup sequence failed: run auto-mapping or load equations from flash first");
+    pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_NO_EQUATIONS,
+                     (uint16_t)(millis() - startup_start_time));
+    return false;
+  }
+
+  // SAFETY CHECK 2: Wait for encoder readings to be valid
+  LOG_INFO("Waiting for encoder readings to stabilize...");
+  const int MAX_ENCODER_WAIT_MS = 2000;
+  const int ENCODER_CHECK_INTERVAL_MS = 100;
+  int encoder_wait_ms = 0;
+  bool encoders_valid = false;
+
+  while (encoder_wait_ms < MAX_ENCODER_WAIT_MS) {
+    if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+      SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
+      LOG_ERROR("Startup sequence timed out during encoder wait");
+      pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_GLOBAL_TIMEOUT,
+                       (uint16_t)(millis() - startup_start_time));
+      return false;
+    }
+
+    bool all_valid = true;
+    for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+      if (!shared_dof_angles.valid[dof]) {
+        all_valid = false;
+        break;
+      }
+    }
+    if (all_valid) {
+      encoders_valid = true;
+      break;
+    }
+    delay(ENCODER_CHECK_INTERVAL_MS);
+    encoder_wait_ms += ENCODER_CHECK_INTERVAL_MS;
+  }
+
+  if (!encoders_valid) {
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=ENCODER_TIMEOUT");
+    LOG_ERROR("Startup sequence failed: encoder readings not valid after " + String(MAX_ENCODER_WAIT_MS) + "ms");
+    pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_ENCODER_TIMEOUT,
+                     (uint16_t)(millis() - startup_start_time));
+    return false;
+  }
+  LOG_INFO("Encoder readings valid after " + String(encoder_wait_ms) + "ms");
+
+  // SAFETY CHECK 3: Verify joint positions are within physical limits
+  LOG_INFO("Checking joint position limits...");
+  bool positions_ok = true;
+  const float POSITION_MARGIN = 5.0f;
+  const float POSITION_HARD_MARGIN = 15.0f;
+
+  for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+    if (!shared_dof_angles.valid[dof]) {
+      LOG_ERROR("DOF " + String(dof) + " encoder invalid during position check");
+      positions_ok = false;
+      break;
+    }
+    float current_angle = shared_dof_angles.angles[dof];
+    float phys_min = active_joint_controller->getConfig().dofs[dof].limits.min_angle;
+    float phys_max = active_joint_controller->getConfig().dofs[dof].limits.max_angle;
+
+    if (current_angle < (phys_min - POSITION_HARD_MARGIN) ||
+        current_angle > (phys_max + POSITION_HARD_MARGIN)) {
+      LOG_ERROR("DOF " + String(dof) + " position " + String(current_angle, 1) +
+                "° is FAR outside physical limits [" + String(phys_min, 1) +
+                ", " + String(phys_max, 1) + "]");
+      positions_ok = false;
+      break;
+    }
+
+    if (current_angle < (phys_min - POSITION_MARGIN) ||
+        current_angle > (phys_max + POSITION_MARGIN)) {
+      LOG_WARN("DOF " + String(dof) + " position " + String(current_angle, 1) +
+               "° is outside physical limits [" + String(phys_min, 1) +
+               ", " + String(phys_max, 1) + "] - proceeding with caution");
+    } else if (current_angle < phys_min || current_angle > phys_max) {
+      LOG_INFO("DOF " + String(dof) + " at " + String(current_angle, 1) +
+               "° (slightly outside limits, acceptable)");
+    } else {
+      LOG_INFO("DOF " + String(dof) + " at " + String(current_angle, 1) +
+               "° (within limits [" + String(phys_min, 1) + ", " + String(phys_max, 1) + "])");
+    }
+  }
+
+  if (!positions_ok) {
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
+    LOG_ERROR("Startup sequence failed: joint position too far outside limits");
+    LOG_ERROR("Manually move joint to safe position before retrying");
+    pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_POSITION_RANGE,
+                     (uint16_t)(millis() - startup_start_time));
+    return false;
+  }
+  LOG_INFO("Position limits verified");
+  SERIAL_COM_LN("EVT:STARTUP_POSITIONS_OK(" + String(ACTIVE_JOINT) + ")");
+
+  if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
+    LOG_ERROR("Startup sequence timed out before recalc");
+    pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_GLOBAL_TIMEOUT,
+                     (uint16_t)(millis() - startup_start_time));
+    return false;
+  }
+
+  LOG_INFO("Starting startup sequence for joint " + String(ACTIVE_JOINT) + "...");
+  SERIAL_COM_LN("EVT:STARTUP_BEGIN(" + String(ACTIVE_JOINT) + ")");
+  pushStartupEvent(STARTUP_EVT_BEGIN, 0, STARTUP_REASON_OK,
+                   (uint16_t)(millis() - startup_start_time));
+
+  // Dispatch CMD_RECALC_OFFSET to Core1 for each DOF sequentially
+  bool all_success = true;
+  uint8_t last_successful_dof = 0;
+
+  for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+    if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+      LOG_ERROR("Startup sequence timed out at DOF " + String(dof));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+      pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_GLOBAL_TIMEOUT,
+                       (uint16_t)(millis() - startup_start_time));
+      all_success = false;
+      break;
+    }
+
+    LOG_INFO("Running recalc_offset for DOF " + String(dof) + " (delegated to Core1)...");
+    SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+
+    int pretension = (custom_torque > 0) ? (int)custom_torque : 0;
+    int duration = (custom_duration > 0) ? (int)custom_duration : 0;
+
+    // Clear shared_data_ext.flag before dispatching
+    shared_data_ext.flag = 0;
+
+    // Dispatch CMD_RECALC_OFFSET to Core1 via double-buffered command system
+    int next_buf = (active_buffer + 1) % 2;
+    while (buffer_ready[next_buf]) { sleep_us(100); }
+
+    command_buffer[next_buf].joint_id = ACTIVE_JOINT;
+    command_buffer[next_buf].dof_index = dof;
+    command_buffer[next_buf].recalc_offset_torque = pretension;
+    command_buffer[next_buf].recalc_offset_duration = duration;
+    pending_command_type = CMD_RECALC_OFFSET;
+    buffer_ready[next_buf] = true;
+    active_buffer = next_buf;
+
+    // Poll for Core1 completion while keeping encoders alive
+    bool dof_timeout = false;
+    while (shared_data_ext.flag == 0) {
+      updateSharedDofAngles();
+
+      if (emergency_stop_requested) {
+        LOG_WARN("Emergency stop detected during startup polling");
+        dof_timeout = true;
+        break;
+      }
+
+      if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+        dof_timeout = true;
+        emergency_stop_requested = true;
+        break;
+      }
+      delay(10);
+    }
+
+    if (dof_timeout) {
+      LOG_ERROR("Startup timed out waiting for Core1 recalc on DOF " + String(dof));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+      pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_GLOBAL_TIMEOUT,
+                       (uint16_t)(millis() - startup_start_time));
+      shared_data_ext.flag = 0;
+      all_success = false;
+      break;
+    }
+
+    // Process Core1 result
+    if (shared_data_ext.flag == CMD1_END_MOVE) {
+      last_successful_dof = dof;
+      SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+      LOG_INFO("DOF " + String(dof) + " recalc complete: " + String(shared_data_ext.message));
+      pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
+                       (uint16_t)(millis() - startup_start_time));
+    } else {
+      LOG_ERROR("recalc_offset failed for DOF " + String(dof) + ": " + String(shared_data_ext.message));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
+      pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_RECALC_ERROR,
+                       (uint16_t)(millis() - startup_start_time));
+      all_success = false;
+    }
+
+    shared_data_ext.flag = 0;
+    if (!all_success) break;
+  }
+
+  // RECOVERY: If failed partway through, request emergency stop
+  if (!all_success) {
+    emergency_stop_requested = true;
+    delay(50);
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
+    LOG_ERROR("Startup sequence failed - emergency stop sent");
+    pushStartupEvent(STARTUP_EVT_FAILED, last_successful_dof, STARTUP_REASON_RECALC_ERROR,
+                     (uint16_t)(millis() - startup_start_time));
+    return false;
+  }
+
+  // Save motor offsets to flash
+  if (active_joint_controller->isPendingOffsetsSave()) {
+    active_joint_controller->saveMotorOffsetsToFlash();
+    active_joint_controller->clearPendingOffsetsSave();
+    LOG_INFO("Motor offsets saved to flash after startup");
+  }
+
+  uint32_t total_time_ms = millis() - startup_start_time;
+  SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
+  LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — ready for waypoints");
+  pushStartupEvent(STARTUP_EVT_COMPLETE, 0, STARTUP_REASON_OK, (uint16_t)total_time_ms);
+  return true;
+}
+
 // ============================================================================
 // CORE0 MAIN LOOP - Serial Communication & Command Dispatch
 // ============================================================================
@@ -392,6 +685,16 @@ void core0_main_loop() {
       SERIAL_COM(" ");
       SERIAL_COM_LN(ACTIVE_JOINT_CONFIG.name);
     }
+  }
+#pragma endregion
+
+#pragma region CAN Startup Sequence Poll
+  // Poll CAN-triggered startup sequence flag (set by Core1 on CAN 0x009 or auto-start)
+  if (can_startup_requested) {
+    can_startup_requested = false;
+    LOG_INFO("[CAN] Startup sequence requested: torque=" + String(can_startup_torque) +
+             " duration=" + String(can_startup_duration));
+    executeStartupSequence(can_startup_torque, can_startup_duration);
   }
 #pragma endregion
 
@@ -703,7 +1006,7 @@ void core0_main_loop() {
 
                     case CMD_GET_AUTO_START: {
                       // Query current auto-start setting
-                      SERIAL_COM_LN("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" +
+                      SERIAL_COM_LN("RSP:AUTO_START(" + String(ACTIVE_JOINT) + "):ENABLED=" + 
                                      String(system_settings.auto_start_enabled ? 1 : 0) +
                                      ":TORQUE=" + String(system_settings.auto_start_pretension, 1) +
                                      ":DURATION=" + String(system_settings.auto_start_duration));
@@ -809,261 +1112,13 @@ void core0_main_loop() {
                     }
 
                     case CMD_STARTUP_SEQUENCE: {
-                      // Manual startup sequence: recalc_offset for all DOFs, then enter HOLDING
-                      // This simulates what auto-start does at boot
-                      //
-                      // ARCHITECTURE: Core0 performs safety checks (no CAN access), then
-                      // delegates recalc_offset to Core1 via CMD_RECALC_OFFSET command buffer.
-                      // This ensures all Motor CAN access stays on Core1, preventing SPI1 conflicts.
-                      //
-                      // SAFETY CHECKS PERFORMED (Core0, no CAN):
-                      // 1. Controller initialized
-                      // 2. Linear equations loaded for all DOFs
-                      // 3. Encoder readings valid (with timeout)
-                      // 4. Joint positions within physical limits
-                      // 5. Global timeout for entire sequence
-                      // MOTOR OPERATIONS (delegated to Core1 via CMD_RECALC_OFFSET):
-                      // 6. Motor verification + offset recalculation per DOF
-                      // 7. Recovery: emergency stop if any step fails
-                      
-                      const uint32_t STARTUP_TIMEOUT_MS = 30000;  // 30 seconds max for entire sequence
-                      uint32_t startup_start_time = millis();
-                      
-                      if (active_joint_controller == nullptr) {
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_CONTROLLER");
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      
-                      // SAFETY CHECK 1: Verify linear equations are loaded (NOT offsets - that's what we're setting!)
-                      bool equations_ok = true;
-                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-                        if (!active_joint_controller->hasValidEquations(dof)) {
-                          LOG_ERROR("DOF " + String(dof) + ": linear equations not available");
-                          equations_ok = false;
-                        }
-                      }
-                      if (!equations_ok) {
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_EQUATIONS");
-                        LOG_ERROR("Startup sequence failed: run auto-mapping or load equations from flash first");
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      
-                      // SAFETY CHECK 2: Wait for encoder readings to be valid
-                      LOG_INFO("Waiting for encoder readings to stabilize...");
-                      const int MAX_ENCODER_WAIT_MS = 2000;
-                      const int ENCODER_CHECK_INTERVAL_MS = 100;
-                      int encoder_wait_ms = 0;
-                      bool encoders_valid = false;
-                      
-                      while (encoder_wait_ms < MAX_ENCODER_WAIT_MS) {
-                        // Check global timeout
-                        if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-                          SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
-                          LOG_ERROR("Startup sequence timed out during encoder wait");
-                          handled_on_core0 = true;
-                          break;
-                        }
-                        
-                        bool all_valid = true;
-                        for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-                          if (!shared_dof_angles.valid[dof]) {
-                            all_valid = false;
-                            break;
-                          }
-                        }
-                        if (all_valid) {
-                          encoders_valid = true;
-                          break;
-                        }
-                        delay(ENCODER_CHECK_INTERVAL_MS);
-                        encoder_wait_ms += ENCODER_CHECK_INTERVAL_MS;
-                      }
-                      
-                      if (!encoders_valid) {
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=ENCODER_TIMEOUT");
-                        LOG_ERROR("Startup sequence failed: encoder readings not valid after " + String(MAX_ENCODER_WAIT_MS) + "ms");
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      LOG_INFO("Encoder readings valid after " + String(encoder_wait_ms) + "ms");
-                      
-                      // NOTE: Motor CAN verification is performed implicitly by recalculateMotorOffsets
-                      // on Core1. If motors are unresponsive, recalcOffset will fail with detailed logs.
-                      // No direct Motor CAN access from Core0 — all SPI1 operations stay on Core1.
-                      
-                      // SAFETY CHECK 3: Verify joint positions are within physical limits
-                      // This prevents starting recalc when the joint is in an unsafe position
-                      LOG_INFO("Checking joint position limits...");
-                      bool positions_ok = true;
-                      const float POSITION_MARGIN = 5.0f;  // Allow 5° outside physical limits (warning)
-                      const float POSITION_HARD_MARGIN = 15.0f;  // Beyond 15° is hard error
-                      
-                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-                        if (!shared_dof_angles.valid[dof]) {
-                          LOG_ERROR("DOF " + String(dof) + " encoder invalid during position check");
-                          positions_ok = false;
-                          break;
-                        }
-                        float current_angle = shared_dof_angles.angles[dof];
-                        float phys_min = active_joint_controller->getConfig().dofs[dof].limits.min_angle;
-                        float phys_max = active_joint_controller->getConfig().dofs[dof].limits.max_angle;
-                        
-                        // Check if position is way outside limits (hard error)
-                        if (current_angle < (phys_min - POSITION_HARD_MARGIN) || 
-                            current_angle > (phys_max + POSITION_HARD_MARGIN)) {
-                          LOG_ERROR("DOF " + String(dof) + " position " + String(current_angle, 1) + 
-                                   "° is FAR outside physical limits [" + String(phys_min, 1) + 
-                                   ", " + String(phys_max, 1) + "]");
-                          positions_ok = false;
-                          break;
-                        }
-                        
-                        // Check if position is slightly outside limits (warning, but continue)
-                        if (current_angle < (phys_min - POSITION_MARGIN) || 
-                            current_angle > (phys_max + POSITION_MARGIN)) {
-                          LOG_WARN("DOF " + String(dof) + " position " + String(current_angle, 1) + 
-                                  "° is outside physical limits [" + String(phys_min, 1) + 
-                                  ", " + String(phys_max, 1) + "] - proceeding with caution");
-                        } else if (current_angle < phys_min || current_angle > phys_max) {
-                          LOG_INFO("DOF " + String(dof) + " at " + String(current_angle, 1) + 
-                                  "° (slightly outside limits, acceptable)");
-                        } else {
-                          LOG_INFO("DOF " + String(dof) + " at " + String(current_angle, 1) + 
-                                  "° (within limits [" + String(phys_min, 1) + ", " + String(phys_max, 1) + "])");
-                        }
-                      }
-                      
-                      if (!positions_ok) {
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=POSITION_OUT_OF_RANGE");
-                        LOG_ERROR("Startup sequence failed: joint position too far outside limits");
-                        LOG_ERROR("Manually move joint to safe position before retrying");
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      LOG_INFO("Position limits verified");
-                      SERIAL_COM_LN("EVT:STARTUP_POSITIONS_OK(" + String(ACTIVE_JOINT) + ")");
-                      
-                      // NOTE: Tendon tension will be checked inside recalculateMotorOffsets (on Core1)
-                      // If tendons are slack, it will log a warning but continue
-                      
-                      // Check global timeout before starting main sequence
-                      if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=GLOBAL_TIMEOUT");
-                        LOG_ERROR("Startup sequence timed out before recalc");
-                        handled_on_core0 = true;
-                        break;
-                      }
-                      
-                      LOG_INFO("Starting startup sequence for joint " + String(ACTIVE_JOINT) + "...");
-                      SERIAL_COM_LN("EVT:STARTUP_BEGIN(" + String(ACTIVE_JOINT) + ")");
-                      
-                      // Dispatch CMD_RECALC_OFFSET to Core1 for each DOF sequentially
-                      // Core1 handles all Motor CAN operations (SPI1 stays single-core)
-                      bool all_success = true;
-                      uint8_t last_successful_dof = 0;
-                      
-                      for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-                        // Check global timeout
-                        if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-                          LOG_ERROR("Startup sequence timed out at DOF " + String(dof));
-                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
-                          all_success = false;
-                          break;
-                        }
-                        
-                        LOG_INFO("Running recalc_offset for DOF " + String(dof) + " (delegated to Core1)...");
-                        SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
-                        
-                        // Use custom parameters if specified, otherwise let Core1 use config defaults
-                        int pretension = system_settings.auto_start_pretension > 0 
-                            ? (int)system_settings.auto_start_pretension 
-                            : 0;  // 0 = Core1 will use config defaults
-                        int duration = system_settings.auto_start_duration > 0
-                            ? system_settings.auto_start_duration
-                            : 0;  // 0 = Core1 will use config defaults
-                        
-                        // Clear shared_data_ext.flag before dispatching (ensure clean state)
-                        shared_data_ext.flag = 0;
-                        
-                        // Dispatch CMD_RECALC_OFFSET to Core1 via double-buffered command system
-                        int next_buf = (active_buffer + 1) % 2;
-                        while (buffer_ready[next_buf]) { sleep_us(100); }
-                        
-                        command_buffer[next_buf].joint_id = ACTIVE_JOINT;
-                        command_buffer[next_buf].dof_index = dof;
-                        command_buffer[next_buf].recalc_offset_torque = pretension;
-                        command_buffer[next_buf].recalc_offset_duration = duration;
-                        pending_command_type = CMD_RECALC_OFFSET;
-                        buffer_ready[next_buf] = true;
-                        active_buffer = next_buf;
-                        
-                        // Poll for Core1 completion while keeping encoders alive
-                        bool dof_timeout = false;
-                        while (shared_data_ext.flag == 0) {
-                          updateSharedDofAngles();
-                          
-                          if (emergency_stop_requested) {
-                            LOG_WARN("Emergency stop detected during startup polling");
-                            dof_timeout = true;
-                            break;
-                          }
-                          
-                          if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-                            dof_timeout = true;
-                            emergency_stop_requested = true;
-                            break;
-                          }
-                          delay(10);
-                        }
-                        
-                        if (dof_timeout) {
-                          LOG_ERROR("Startup timed out waiting for Core1 recalc on DOF " + String(dof));
-                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
-                          shared_data_ext.flag = 0;
-                          all_success = false;
-                          break;
-                        }
-                        
-                        // Process Core1 result
-                        if (shared_data_ext.flag == CMD1_END_MOVE) {
-                          last_successful_dof = dof;
-                          SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
-                          LOG_INFO("DOF " + String(dof) + " recalc complete: " + String(shared_data_ext.message));
-                        } else {
-                          LOG_ERROR("recalc_offset failed for DOF " + String(dof) + ": " + String(shared_data_ext.message));
-                          SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=RECALC");
-                          all_success = false;
-                        }
-                        
-                        // Reset flag before next iteration
-                        shared_data_ext.flag = 0;
-                        
-                        if (!all_success) break;
-                      }
-                      
-                      // RECOVERY: If failed partway through, request emergency stop
-                      // Core1 handles motor shutdown via its emergency stop handler
-                      if (!all_success) {
-                        emergency_stop_requested = true;
-                        delay(50);  // Give Core1 time to process e-stop
-                        SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
-                        LOG_ERROR("Startup sequence failed - emergency stop sent");
-                      } else {
-                        // Save motor offsets to flash (the CMD1_END_MOVE flag was consumed
-                        // inside the startup loop, so the regular save trigger won't fire)
-                        if (active_joint_controller->isPendingOffsetsSave()) {
-                          active_joint_controller->saveMotorOffsetsToFlash();
-                          active_joint_controller->clearPendingOffsetsSave();
-                          LOG_INFO("Motor offsets saved to flash after startup");
-                        }
-                        
-                        uint32_t total_time_ms = millis() - startup_start_time;
-                        SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
-                        LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — ready for waypoints");
-                      }
-                      
+                      // Manual startup sequence via Serial
+                      // Delegates to shared executeStartupSequence() (also used by CAN 0x009 and auto-start)
+                      int pretension = system_settings.auto_start_pretension > 0
+                          ? (int)system_settings.auto_start_pretension : 0;
+                      int duration = system_settings.auto_start_duration > 0
+                          ? system_settings.auto_start_duration : 0;
+                      executeStartupSequence(pretension, duration);
                       handled_on_core0 = true;
                       break;
                     }

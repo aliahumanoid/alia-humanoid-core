@@ -52,6 +52,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_LOOP_FREQUENCY 0x006       // Control loop frequencies (inner/outer)
 #define CAN_ID_PID_DIAG_FREQ 0x007        // PID diagnostics stream frequency
 #define CAN_ID_IDENTIFY_REQUEST 0x008     // Joint identification request (broadcast)
+#define CAN_ID_STARTUP_SEQUENCE 0x009     // Startup sequence command (Host → Controller)
 
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
@@ -67,6 +68,8 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SMOOTHNESS_METRICS 0x460   // Smoothness/oscillation metrics (per DOF)
 #define CAN_ID_PID_INNER_TERMS 0x470      // Inner PID P/I/D/FF breakdown (optional)
 #define CAN_ID_PID_OUTER_TERMS 0x480      // Outer PID P/I/D/output breakdown (optional)
+#define CAN_ID_STARTUP_STATUS 0x490       // Startup status events (Controller → Host)
+#define CAN_ID_JOINT_ANNOUNCE 0x4A0       // Joint announce/discovery (Controller → Host)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -713,11 +716,34 @@ void pollHostCan() {
       }
     } else if (rx_id == CAN_ID_IDENTIFY_REQUEST) {
       // Joint identification broadcast request
-      // All controllers start emitting EVT:JOINT on Serial periodically
+      // All controllers start emitting EVT:JOINT on Serial + CAN announce periodically
       identify_broadcast_active = true;
       identify_broadcast_start_ms = millis();
       identify_broadcast_last_emit_ms = 0;  // Force immediate first emit
+      identify_can_announce_last_ms = 0;     // Force immediate first CAN announce
       LOG_C1_INFO("[CAN_HOST] Joint identification broadcast STARTED (3s)");
+    } else if (rx_id == CAN_ID_STARTUP_SEQUENCE) {
+      // Startup sequence request via CAN (replaces serial CMD_STARTUP_SEQUENCE)
+      // Frame: [joint_id, reserved, torque_lo, torque_hi, duration_lo, duration_hi, 0, 0]
+      if (len >= 6) {
+        uint8_t joint_id = buf[0];
+        if (joint_id == ACTIVE_JOINT) {
+          int16_t torque = (int16_t)(buf[2] | (buf[3] << 8));
+          int16_t duration = (int16_t)(buf[4] | (buf[5] << 8));
+
+          // Set flags for Core0 to execute (startup runs on Core0)
+          can_startup_torque = torque;
+          can_startup_duration = duration;
+          can_startup_joint_id = joint_id;
+          can_startup_requested = true;
+
+          LOG_C1_INFO("[CAN_HOST] Startup sequence requested: torque=" + String(torque) +
+                      " duration=" + String(duration));
+        }
+        // Silently ignore if not for this joint
+      } else {
+        LOG_C1_WARN("[CAN_HOST] Startup sequence frame too short: " + String(len) + " bytes");
+      }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
@@ -824,6 +850,46 @@ void core1_loop() {
     // in the same Core1 cycle, causing SPI1 deadlock during HOLDING.
     // TODO: serialize Host CAN sends to avoid SPI1 bus conflict with Motor CAN.
     // checkAndSendMetrics();
+
+    // === CAN JOINT ANNOUNCE (Discovery) ===
+    // When identify broadcast is active, send announce frames on CAN HOST
+    // Core1 handles all CAN HOST I/O to avoid SPI1 conflicts with Core0
+    if (identify_broadcast_active) {
+      uint32_t now_ms = millis();
+      if (now_ms - identify_can_announce_last_ms >= IDENTIFY_BROADCAST_INTERVAL_MS) {
+        identify_can_announce_last_ms = now_ms;
+
+        uint8_t announce[8] = {0};
+        announce[0] = ACTIVE_JOINT;                    // joint_id
+        announce[1] = ACTIVE_JOINT_CONFIG.dof_count;   // DOF count
+        announce[2] = ACTIVE_JOINT_CONFIG.motor_count; // Motor count
+        announce[3] = (active_joint_controller != nullptr &&
+                       active_joint_controller->isSystemReadyForMovement()) ? 0x01 : 0x00;
+        // FW_VERSION is "X.Y.Z" string; extract major.minor.patch
+        announce[4] = (uint8_t)(FW_VERSION[0] - '0');
+        announce[5] = (uint8_t)(FW_VERSION[2] - '0');
+        announce[6] = (uint8_t)(FW_VERSION[4] - '0');
+        announce[7] = clock_synced ? 0x01 : 0x00;
+
+        CAN_HOST.sendMsgBuf(CAN_ID_JOINT_ANNOUNCE + ACTIVE_JOINT, 0, 8, announce);
+      }
+    }
+
+    // === STARTUP STATUS EVENTS VIA CAN ===
+    // Drain startup event queue (produced by Core0) and send as CAN frames
+    {
+      StartupStatusEvent evt;
+      while (queue_try_remove(&startup_event_queue, &evt)) {
+        uint8_t frame[8] = {0};
+        frame[0] = evt.event_type;
+        frame[1] = evt.dof_index;
+        frame[2] = evt.reason_code;
+        frame[3] = (uint8_t)(evt.elapsed_ms & 0xFF);
+        frame[4] = (uint8_t)((evt.elapsed_ms >> 8) & 0xFF);
+
+        CAN_HOST.sendMsgBuf(CAN_ID_STARTUP_STATUS + ACTIVE_JOINT, 0, 8, frame);
+      }
+    }
 
     // === WAYPOINT-BASED MOVEMENT ===
     // Execute waypoint trajectory for all DOFs (if waypoints available)

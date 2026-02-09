@@ -140,12 +140,31 @@ extern unsigned long last_encoder_test_time;
 extern volatile bool encoder_stream_can_active;
 extern volatile uint32_t encoder_stream_last_send_us;
 
-// Joint identification broadcast (triggered via CAN, emitted on Serial)
+// Joint identification broadcast (triggered via CAN, emitted on Serial + CAN)
 extern volatile bool identify_broadcast_active;
 extern volatile uint32_t identify_broadcast_start_ms;
 extern const uint32_t IDENTIFY_BROADCAST_DURATION_MS;
 extern const uint32_t IDENTIFY_BROADCAST_INTERVAL_MS;
 extern volatile uint32_t identify_broadcast_last_emit_ms;
+extern volatile uint32_t identify_can_announce_last_ms;  // CAN announce timing (Core1)
+
+// CAN-triggered startup sequence (Core1 sets flag, Core0 executes)
+extern volatile bool can_startup_requested;
+extern volatile uint8_t can_startup_joint_id;
+extern volatile int16_t can_startup_torque;    // 0 = use config default
+extern volatile int16_t can_startup_duration;  // 0 = use config default
+
+// Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
+struct StartupStatusEvent {
+  uint8_t event_type;   // 0=BEGIN, 1=DOF_READY, 2=DOF_FAILED, 3=COMPLETE, 4=FAILED
+  uint8_t dof_index;
+  uint8_t reason_code;  // 0=OK, 1=NO_CONTROLLER, 2=NO_EQUATIONS, 3=ENCODER_TIMEOUT,
+                        // 4=POSITION_OUT_OF_RANGE, 5=RECALC_ERROR, 6=GLOBAL_TIMEOUT
+  uint16_t elapsed_ms;
+};
+
+#define STARTUP_EVENT_QUEUE_DEPTH 8
+extern queue_t startup_event_queue;
 
 // ============================================================================
 // CONTROL LOOP TIMING (configurable)

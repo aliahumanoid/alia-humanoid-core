@@ -178,13 +178,54 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             except Exception as e:
                 current_app.logger.warning(f"Auto time sync after discovery failed: {e}")
 
+        # Also include joints discovered via CAN announce (0x4A0)
+        can_discovered = {}
+        if can_manager and can_manager.is_connected():
+            try:
+                can_discovered = can_manager.get_discovered_joints_can()
+            except Exception:
+                pass
+
         return jsonify({
             "status": "success",
             "can_request_sent": can_sent,
             "time_synced": time_synced,
             "discovered": discovered,
+            "can_discovered": {str(k): v for k, v in can_discovered.items()},
             "mappings": serial_manager.get_joint_to_port_mapping(),
         })
+
+    @app.route('/api/can/startup_sequence', methods=['POST'])
+    def can_startup_sequence():
+        """
+        Trigger startup sequence via CAN (0x009).
+
+        Sends startup command to a specific joint controller.
+        The controller will recalc offsets for all DOFs and enter HOLDING.
+        Progress events are received on CAN 0x490.
+
+        Request body:
+            joint: Joint name (e.g. "KNEE_RIGHT")
+            torque: Optional custom pretension torque (default: 0 = use config)
+            duration: Optional custom duration ms (default: 0 = use config)
+        """
+        if not can_manager or not can_manager.is_connected():
+            return jsonify({"status": "error", "message": "CAN not connected"}), 503
+
+        data = request.get_json(silent=True) or {}
+        joint = data.get('joint', '')
+        torque = int(data.get('torque', 0))
+        duration = int(data.get('duration', 0))
+
+        if not joint:
+            return jsonify({"status": "error", "message": "Missing 'joint' parameter"}), 400
+
+        try:
+            result = can_manager.send_startup_sequence(joint, torque=torque, duration=duration)
+            return jsonify({"status": "ok", **result})
+        except Exception as e:
+            current_app.logger.exception("CAN startup sequence failed")
+            return jsonify({"status": "error", "message": str(e)}), 500
 
     @app.route('/can_interfaces', methods=['GET'])
     def list_can_interfaces():

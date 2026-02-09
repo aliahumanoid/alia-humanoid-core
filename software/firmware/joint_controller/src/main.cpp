@@ -131,12 +131,22 @@ unsigned long last_encoder_test_time = 0;
 volatile bool encoder_stream_can_active = false;
 volatile uint32_t encoder_stream_last_send_us = 0;
 
-// Joint identification broadcast (triggered via CAN, emitted on Serial)
+// Joint identification broadcast (triggered via CAN, emitted on Serial + CAN)
 volatile bool identify_broadcast_active = false;
 volatile uint32_t identify_broadcast_start_ms = 0;
 const uint32_t IDENTIFY_BROADCAST_DURATION_MS = 3000;  // Broadcast for 3 seconds
 const uint32_t IDENTIFY_BROADCAST_INTERVAL_MS = 500;   // Emit every 500ms
 volatile uint32_t identify_broadcast_last_emit_ms = 0;
+volatile uint32_t identify_can_announce_last_ms = 0;    // CAN announce timing (Core1)
+
+// CAN-triggered startup sequence (Core1 sets flag, Core0 executes)
+volatile bool can_startup_requested = false;
+volatile uint8_t can_startup_joint_id = 0;
+volatile int16_t can_startup_torque = 0;
+volatile int16_t can_startup_duration = 0;
+
+// Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
+queue_t startup_event_queue;
 
 // PID diagnostics for tuning (updated by Core1 waypoint loop)
 PIDDiagnostics pid_diagnostics = {0};
@@ -561,12 +571,29 @@ void setup() {
   queue_init(&movement_sample_queue, sizeof(MovementSample), 512);
   clearMovementSampleQueue();
 
+  // Startup event queue (Core0 → Core1 for CAN status frames)
+  queue_init(&startup_event_queue, sizeof(StartupStatusEvent), STARTUP_EVENT_QUEUE_DEPTH);
+
   // Core1 log queue already initialized early in setup (before safety_init)
 
   // Enable motor power now that all systems are initialized
   // Rev B: GP22 HIGH — motors can now receive commands
   // Rev A: no-op (motors always powered)
   safety_motor_power_enable();
+
+  // Auto-start: execute startup sequence if enabled and equations available
+  if (system_settings.auto_start_enabled && active_joint_controller != nullptr) {
+    // Core1 needs time to initialize and start reading encoders
+    delay(1000);
+
+    // Trigger startup via the CAN flag mechanism (same path as CAN 0x009)
+    can_startup_torque = system_settings.auto_start_pretension;
+    can_startup_duration = system_settings.auto_start_duration;
+    can_startup_joint_id = ACTIVE_JOINT;
+    can_startup_requested = true;
+
+    LOG_INFO("Auto-start enabled: triggering startup sequence");
+  }
 #pragma endregion
 }
 #pragma endregion
