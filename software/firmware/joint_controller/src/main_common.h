@@ -236,6 +236,16 @@ extern volatile float cascade_speed_high;                // Above this speed (de
 extern volatile bool motor_ema_enabled;                  // Enable EMA filter on motor angles
 extern volatile float motor_ema_alpha;                   // EMA alpha (1.0=no filter, 0.1=heavy filter)
 
+// Inner PID tau scaling (increases D-term filter at low speeds to reduce stick-slip)
+extern volatile bool inner_tau_scaling_enabled;           // Enable velocity-dependent tau
+extern volatile float inner_tau_high;                     // Tau at low speed (seconds, e.g. 0.03)
+extern volatile float inner_tau_speed_threshold;          // Below this speed (deg/s): use tau_high
+
+// Joint angle EMA filter (smooths joint encoder before outer PID at low speeds)
+extern volatile bool joint_ema_enabled;                   // Enable joint angle EMA
+extern volatile float joint_ema_alpha;                    // EMA alpha (1.0=no filter, 0.1=heavy)
+extern volatile float joint_ema_speed_threshold;          // Above this speed (deg/s): passthrough
+
 // Recovery parameters
 extern volatile ComplianceRecoveryPolicy recovery_policy;
 extern volatile uint16_t recovery_ramp_back_ms;          // For RECOVERY_RAMP_BACK
@@ -368,12 +378,24 @@ struct PIDDiagnostics {
   int16_t error_deg_x100[3];     // PID error per DOF (°×100)
   int16_t torque_A[3];           // Torque command agonist per DOF
   int16_t torque_B[3];           // Torque command antagonist per DOF
+  // Inner PID contribution breakdown (agonist motor, DOF 0 only)
+  int16_t inner_p_term;          // Proportional increment
+  int16_t inner_i_term;          // Integral term
+  int16_t inner_d_term;          // Filtered derivative term
+  int16_t inner_ff_term;         // Feedforward term
+  // Outer PID contribution breakdown (joint PID, DOF 0 only)
+  int16_t outer_p_term;          // Proportional increment
+  int16_t outer_i_term;          // Integral term
+  int16_t outer_d_term;          // Filtered derivative term
+  int16_t outer_output;          // delta_theta output (°×100)
+  bool pid_terms_valid;          // PID terms breakdown populated
   uint32_t last_update_ms;       // Timestamp of last update
   bool valid;                    // Data valid flag
 };
 
 extern PIDDiagnostics pid_diagnostics;
-extern volatile bool pid_diag_stream_active;  // Cross-core: CAN sets, Core1 reads
+extern volatile bool pid_diag_stream_active;   // Cross-core: CAN sets, Core1 reads
+extern volatile bool pid_diag_terms_enabled;   // Cross-core: enable P/I/D breakdown streaming
 
 // ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)

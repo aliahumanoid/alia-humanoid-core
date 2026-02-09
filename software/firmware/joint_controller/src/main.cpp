@@ -97,6 +97,12 @@ volatile float cascade_speed_low = 3.0f;    // deg/s
 volatile float cascade_speed_high = 15.0f;  // deg/s
 volatile bool motor_ema_enabled = false;     // OFF by default (experimental)
 volatile float motor_ema_alpha = 0.5f;       // EMA alpha (1.0=passthrough, 0.1=heavy filter)
+volatile bool inner_tau_scaling_enabled = false;   // OFF by default (experimental)
+volatile float inner_tau_high = 0.03f;             // 30ms tau at low speed (cutoff ~5Hz)
+volatile float inner_tau_speed_threshold = 10.0f;  // deg/s — below this: use tau_high
+volatile bool joint_ema_enabled = false;           // OFF by default (experimental)
+volatile float joint_ema_alpha = 0.5f;             // EMA alpha for joint angle
+volatile float joint_ema_speed_threshold = 15.0f;  // deg/s — above this: passthrough
 volatile ComplianceRecoveryPolicy recovery_policy = RECOVERY_STAY_AT_CURRENT;
 volatile uint16_t recovery_ramp_back_ms = 1000;
 ComplianceState compliance_state[MAX_DOFS] = {};
@@ -135,6 +141,7 @@ volatile uint32_t identify_broadcast_last_emit_ms = 0;
 // PID diagnostics for tuning (updated by Core1 waypoint loop)
 PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
+volatile bool pid_diag_terms_enabled = false;  // OFF by default — P/I/D breakdown
 
 // Cached motor angles (for safety checks without redundant CAN reads)
 // This eliminates the ~2ms delay per motor during periodic safety checks

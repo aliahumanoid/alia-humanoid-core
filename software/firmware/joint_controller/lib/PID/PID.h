@@ -55,6 +55,13 @@ private:
 
 public:
   // ===================================================================
+  // DIAGNOSTIC OUTPUTS (written every control() call, read externally)
+  // ===================================================================
+
+  float last_up = 0;      ///< Last proportional increment: Kp * [e(k) - e(k-1)]
+  float last_ui = 0;      ///< Last integral term: Ki * Ts * e(k) (0 when saturated)
+  float last_udfilt = 0;  ///< Last filtered derivative term
+  // ===================================================================
   // CONSTRUCTOR
   // ===================================================================
   
@@ -144,6 +151,19 @@ public:
    */
   float getTau() const {
     return tau;
+  }
+
+  /**
+   * @brief Update derivative filter time constant (bumpless)
+   *
+   * Changes tau without resetting internal state, allowing smooth
+   * real-time adjustment of derivative filtering. Unlike setTunings(),
+   * this preserves the filtered derivative history for continuity.
+   *
+   * @param new_tau New time constant in seconds (0 = no filtering)
+   */
+  void setTau(float new_tau) {
+    tau = new_tau;
   }
 
   /**

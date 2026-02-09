@@ -1320,6 +1320,90 @@
                                     </div>
                                 </div>
                             </div>
+                            <!-- Inner PID Tau Scaling -->
+                            <div class="mt-4 p-4 bg-orange-50 rounded-lg border border-orange-200">
+                                <h4 class="text-sm font-semibold text-orange-800 mb-1">
+                                    <i class="fas fa-wave-square mr-1"></i>Inner PID Tau Scaling (D-term filter)
+                                </h4>
+                                <p class="text-xs text-orange-600 mb-3">
+                                    Increases derivative filter time constant at low speeds to reduce stick-slip torque oscillations.
+                                </p>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div class="flex items-center gap-3 col-span-2">
+                                        <label class="inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" id="innerTauScalingEnabled" class="sr-only peer"
+                                                   onchange="sendCascadeSpeedScaling()">
+                                            <div class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                                            <span class="ml-2 text-sm font-medium text-gray-700">Tau scaling enabled</span>
+                                        </label>
+                                    </div>
+                                    <div>
+                                        <label for="innerTauHigh" class="block text-sm font-medium text-gray-700">
+                                            Tau at low speed: <span id="innerTauHighValue" class="text-orange-600 font-bold">0.030</span>s
+                                            <span class="text-xs text-gray-400 ml-1" id="tauCutoffDisplay">(≈5 Hz)</span>
+                                        </label>
+                                        <input id="innerTauHigh" type="range" min="0.005" max="0.1" step="0.005" value="0.03"
+                                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                                               oninput="document.getElementById('innerTauHighValue').textContent = parseFloat(this.value).toFixed(3); updateTauCutoffDisplay()"
+                                               onchange="sendCascadeSpeedScaling()">
+                                        <div class="flex justify-between text-xs text-gray-400">
+                                            <span>0.005 (default)</span>
+                                            <span>0.100 (heavy)</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label for="innerTauSpeedThreshold" class="block text-sm font-medium text-gray-700">
+                                            Speed threshold (°/s)
+                                        </label>
+                                        <input id="innerTauSpeedThreshold" type="number" min="0.1" max="100" step="1" value="10"
+                                               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-orange-500 focus:ring focus:ring-orange-200 focus:ring-opacity-50 text-sm"
+                                               onchange="sendCascadeSpeedScaling()">
+                                        <p class="text-xs text-gray-400 mt-1">Below this → use high tau</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Joint Angle EMA Filter -->
+                            <div class="mt-4 p-4 bg-purple-50 rounded-lg border border-purple-200">
+                                <h4 class="text-sm font-semibold text-purple-800 mb-1">
+                                    <i class="fas fa-compass mr-1"></i>Joint Angle EMA (outer PID input)
+                                </h4>
+                                <p class="text-xs text-purple-600 mb-3">
+                                    Smooths joint encoder reading before outer PID at low speeds. Prevents cascade amplification of micro-vibrations.
+                                </p>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div class="flex items-center gap-3 col-span-2">
+                                        <label class="inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" id="jointEmaEnabled" class="sr-only peer"
+                                                   onchange="sendCascadeSpeedScaling()">
+                                            <div class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                                            <span class="ml-2 text-sm font-medium text-gray-700">Joint EMA enabled</span>
+                                        </label>
+                                    </div>
+                                    <div>
+                                        <label for="jointEmaAlpha" class="block text-sm font-medium text-gray-700">
+                                            Alpha: <span id="jointEmaAlphaValue" class="text-purple-600 font-bold">0.50</span>
+                                            <span class="text-xs text-gray-400 ml-1" id="jointEmaCutoffDisplay">(≈80 Hz)</span>
+                                        </label>
+                                        <input id="jointEmaAlpha" type="range" min="0.05" max="1" step="0.05" value="0.5"
+                                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
+                                               oninput="document.getElementById('jointEmaAlphaValue').textContent = parseFloat(this.value).toFixed(2); updateJointEmaCutoffDisplay()"
+                                               onchange="sendCascadeSpeedScaling()">
+                                        <div class="flex justify-between text-xs text-gray-400">
+                                            <span>0.05 (heavy)</span>
+                                            <span>1.0 (off)</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label for="jointEmaSpeedThreshold" class="block text-sm font-medium text-gray-700">
+                                            Speed threshold (°/s)
+                                        </label>
+                                        <input id="jointEmaSpeedThreshold" type="number" min="0.1" max="100" step="1" value="15"
+                                               class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-purple-500 focus:ring focus:ring-purple-200 focus:ring-opacity-50 text-sm"
+                                               onchange="sendCascadeSpeedScaling()">
+                                        <p class="text-xs text-gray-400 mt-1">Above this → passthrough (no filter)</p>
+                                    </div>
+                                </div>
+                            </div>
                             <!-- Visual explanation -->
                             <div class="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200 text-xs text-blue-700">
                                 <b>Effect:</b> At speeds ≤ <span id="cascadeSpeedLowDisplay">3.0</span>°/s → stiffness × <span id="cascadeMinFactorDisplay">0.30</span> |
@@ -1369,6 +1453,11 @@
                                     class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
                                     <i class="fas fa-download mr-2"></i>Export CSV
                                 </button>
+                                <label class="flex items-center gap-2 text-sm text-gray-700 ml-4 cursor-pointer select-none">
+                                    <input type="checkbox" id="pidTermsEnabled" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                                    <i class="fas fa-layer-group text-indigo-500"></i>
+                                    <span>P/I/D Breakdown</span>
+                                </label>
                             </div>
                             <p class="text-xs text-gray-500 mt-1">
                                 <span id="pidDiagBufferCount">0</span> records in buffer
@@ -1537,6 +1626,20 @@
                                         <i class="fas fa-bolt mr-1"></i>Torque Commands
                                     </h3>
                                     <canvas id="pidTorqueChart" height="200"></canvas>
+                                </div>
+                                <!-- Inner PID Terms Chart (hidden by default) -->
+                                <div id="pidInnerTermsContainer" class="bg-gray-50 p-4 rounded-md border border-indigo-200" style="display:none;">
+                                    <h3 class="text-sm font-semibold text-indigo-700 mb-2">
+                                        <i class="fas fa-layer-group mr-1"></i>Inner PID Terms (Agonist DOF 0)
+                                    </h3>
+                                    <canvas id="pidInnerTermsChart" height="200"></canvas>
+                                </div>
+                                <!-- Outer PID Terms Chart (hidden by default) -->
+                                <div id="pidOuterTermsContainer" class="bg-gray-50 p-4 rounded-md border border-indigo-200" style="display:none;">
+                                    <h3 class="text-sm font-semibold text-indigo-700 mb-2">
+                                        <i class="fas fa-layer-group mr-1"></i>Outer PID Terms (Joint DOF 0)
+                                    </h3>
+                                    <canvas id="pidOuterTermsChart" height="200"></canvas>
                                 </div>
                             </div>
                         </div>

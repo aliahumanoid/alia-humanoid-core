@@ -65,6 +65,8 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_PID_TORQUE_DATA 0x430      // PID torque commands per joint
 #define CAN_ID_MOVEMENT_METRICS 0x440     // Movement metrics (per DOF, sent on HOLDING)
 #define CAN_ID_SMOOTHNESS_METRICS 0x460   // Smoothness/oscillation metrics (per DOF)
+#define CAN_ID_PID_INNER_TERMS 0x470      // Inner PID P/I/D/FF breakdown (optional)
+#define CAN_ID_PID_OUTER_TERMS 0x480      // Outer PID P/I/D/output breakdown (optional)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -437,6 +439,38 @@ void sendPIDDiagStreamData() {
   
   uint32_t can_id_2 = CAN_ID_PID_TORQUE_DATA + ACTIVE_JOINT;
   CAN_HOST.sendMsgBuf(can_id_2, 0, sizeof(frame2), (uint8_t*)&frame2);
+
+  // Frame 3 & 4 (OPTIONAL): PID term breakdown — only when enabled
+  // Zero overhead when disabled (single bool check)
+  if (pid_diag_terms_enabled && pid_diagnostics.pid_terms_valid) {
+    // Frame 3: Inner PID terms (0x470 + joint)
+    // Format: [P, I, D, FF] — agonist motor, DOF 0
+    struct __attribute__((packed)) {
+      int16_t p_term;
+      int16_t i_term;
+      int16_t d_term;
+      int16_t ff_term;
+    } frame3;
+    frame3.p_term  = pid_diagnostics.inner_p_term;
+    frame3.i_term  = pid_diagnostics.inner_i_term;
+    frame3.d_term  = pid_diagnostics.inner_d_term;
+    frame3.ff_term = pid_diagnostics.inner_ff_term;
+    CAN_HOST.sendMsgBuf(CAN_ID_PID_INNER_TERMS + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t*)&frame3);
+
+    // Frame 4: Outer PID terms (0x480 + joint)
+    // Format: [P, I, D, output_x100] — joint PID, DOF 0
+    struct __attribute__((packed)) {
+      int16_t p_term;
+      int16_t i_term;
+      int16_t d_term;
+      int16_t output_x100;
+    } frame4;
+    frame4.p_term      = pid_diagnostics.outer_p_term;
+    frame4.i_term      = pid_diagnostics.outer_i_term;
+    frame4.d_term      = pid_diagnostics.outer_d_term;
+    frame4.output_x100 = pid_diagnostics.outer_output;
+    CAN_HOST.sendMsgBuf(CAN_ID_PID_OUTER_TERMS + ACTIVE_JOINT, 0, sizeof(frame4), (uint8_t*)&frame4);
+  }
 }
 
 /**
@@ -605,14 +639,24 @@ void pollHostCan() {
         }
       }
     } else if (rx_id == CAN_ID_PID_DIAG_CTRL) {
-      // PID diagnostics streaming control: byte 0 = 0x01 start, 0x00 stop
+      // PID diagnostics streaming control:
+      // byte 0 = 0x01 start / 0x00 stop
+      // byte 1 = 0x01 enable P/I/D terms breakdown / 0x00 disable (optional)
       if (len >= 1) {
         bool start = (buf[0] == 0x01);
         pid_diag_stream_active = start;
+        // Parse optional terms enable flag (byte 1)
+        if (len >= 2) {
+          pid_diag_terms_enabled = (buf[1] == 0x01);
+        } else {
+          pid_diag_terms_enabled = false;  // Default off if not specified
+        }
         if (start) {
           uint32_t freq_hz = 1000000 / pid_diag_interval_us;
-          LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ " + String(freq_hz) + "Hz");
+          LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STARTED @ " + String(freq_hz) + "Hz"
+                      + (pid_diag_terms_enabled ? " (P/I/D terms ON)" : ""));
         } else {
+          pid_diag_terms_enabled = false;  // Always disable terms when stopping
           LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
         }
       }

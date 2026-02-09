@@ -5,6 +5,7 @@ let hipDof0Chart, hipDof1Chart;     // Charts for hip
 let mappingChart;
 let mappingCharts = {}; // Object to manage multiple charts for DOFs
 let pidErrorChart, pidTorqueChart;  // PID diagnostics charts
+let pidInnerTermsChart, pidOuterTermsChart;  // PID P/I/D breakdown charts
 let pidDiagStreamActive = false;    // PID diagnostics streaming state
 let pidDiagDataBuffer = [];         // Buffer for CSV export (all data, no limit)
 let intervalId;
@@ -658,6 +659,38 @@ $(document).ready(function() {
         }
     });
 
+    // Listener for inner PID terms breakdown (P/I/D/FF)
+    socket.on('pid_inner_terms', function(data) {
+        if (!pidDiagStreamActive) return;
+        const selectedJoint = $('#jointSelect').val();
+        if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) return;
+        updatePidInnerTermsChart(data);
+
+        // Extend pending record with inner PID terms
+        if (pendingPidRecord) {
+            pendingPidRecord.inner_p = data.p_term || 0;
+            pendingPidRecord.inner_i = data.i_term || 0;
+            pendingPidRecord.inner_d = data.d_term || 0;
+            pendingPidRecord.inner_ff = data.ff_term || 0;
+        }
+    });
+
+    // Listener for outer PID terms breakdown (P/I/D/output)
+    socket.on('pid_outer_terms', function(data) {
+        if (!pidDiagStreamActive) return;
+        const selectedJoint = $('#jointSelect').val();
+        if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) return;
+        updatePidOuterTermsChart(data);
+
+        // Extend pending record with outer PID terms
+        if (pendingPidRecord) {
+            pendingPidRecord.outer_p = data.p_term || 0;
+            pendingPidRecord.outer_i = data.i_term || 0;
+            pendingPidRecord.outer_d = data.d_term || 0;
+            pendingPidRecord.outer_output = data.output_x100 ? (data.output_x100 / 100.0) : 0;
+        }
+    });
+
     // Listener for movement metrics (received when DOF enters HOLDING)
     socket.on('movement_metrics', function(data) {
         // Filter by currently selected joint
@@ -1151,6 +1184,55 @@ function initializeCharts() {
                 scales: {
                     x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Time (s)' }, min: 0, max: 30 },
                     y: { title: { display: true, text: 'Torque' } }
+                },
+                plugins: { legend: { position: 'top' } }
+            }
+        });
+    }
+
+    // PID Terms Breakdown Charts (Inner + Outer)
+    const pidInnerTermsCtx = document.getElementById('pidInnerTermsChart');
+    if (pidInnerTermsCtx) {
+        pidInnerTermsChart = new Chart(pidInnerTermsCtx.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    { label: 'P (Proportional)', data: [], borderColor: 'dodgerblue', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'I (Integral)', data: [], borderColor: 'limegreen', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'D (Derivative)', data: [], borderColor: 'crimson', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'FF (Feedforward)', data: [], borderColor: 'gray', borderWidth: 1.5, fill: false, pointRadius: 0, borderDash: [4,4] }
+                ]
+            },
+            options: {
+                responsive: true,
+                animation: false,
+                scales: {
+                    x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Time (s)' }, min: 0, max: 30 },
+                    y: { title: { display: true, text: 'Contribution' } }
+                },
+                plugins: { legend: { position: 'top' } }
+            }
+        });
+    }
+
+    const pidOuterTermsCtx = document.getElementById('pidOuterTermsChart');
+    if (pidOuterTermsCtx) {
+        pidOuterTermsChart = new Chart(pidOuterTermsCtx.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    { label: 'P (Proportional)', data: [], borderColor: 'dodgerblue', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'I (Integral)', data: [], borderColor: 'limegreen', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'D (Derivative)', data: [], borderColor: 'crimson', borderWidth: 2, fill: false, pointRadius: 0 },
+                    { label: 'Output (delta_theta)', data: [], borderColor: 'orange', borderWidth: 1.5, fill: false, pointRadius: 0, borderDash: [4,4] }
+                ]
+            },
+            options: {
+                responsive: true,
+                animation: false,
+                scales: {
+                    x: { type: 'linear', position: 'bottom', title: { display: true, text: 'Time (s)' }, min: 0, max: 30 },
+                    y: { title: { display: true, text: 'Contribution' } }
                 },
                 plugins: { legend: { position: 'top' } }
             }
@@ -1926,6 +2008,12 @@ function sendCascadeSpeedScaling() {
     const speedHigh = parseFloat(document.getElementById('cascadeSpeedHigh').value) || 15.0;
     const emaEnabled = document.getElementById('motorEmaEnabled').checked ? 1 : 0;
     const emaAlpha = parseFloat(document.getElementById('motorEmaAlpha').value) || 0.5;
+    const tauEnabled = document.getElementById('innerTauScalingEnabled').checked ? 1 : 0;
+    const tauHigh = parseFloat(document.getElementById('innerTauHigh').value) || 0.03;
+    const tauSpeed = parseFloat(document.getElementById('innerTauSpeedThreshold').value) || 10.0;
+    const jemaEnabled = document.getElementById('jointEmaEnabled').checked ? 1 : 0;
+    const jemaAlpha = parseFloat(document.getElementById('jointEmaAlpha').value) || 0.5;
+    const jemaSpeed = parseFloat(document.getElementById('jointEmaSpeedThreshold').value) || 15.0;
 
     // Update display labels
     const lowDisp = document.getElementById('cascadeSpeedLowDisplay');
@@ -1941,7 +2029,13 @@ function sendCascadeSpeedScaling() {
         speed_low: speedLow,
         speed_high: speedHigh,
         ema_enabled: emaEnabled,
-        ema_alpha: emaAlpha
+        ema_alpha: emaAlpha,
+        tau_enabled: tauEnabled,
+        tau_high: tauHigh,
+        tau_speed: tauSpeed,
+        jema_enabled: jemaEnabled,
+        jema_alpha: jemaAlpha,
+        jema_speed: jemaSpeed
     });
 }
 
@@ -1958,6 +2052,34 @@ function updateEmaCutoffDisplay() {
         // Approximate EMA cutoff: fc = alpha / (2*pi*Ts*(1-alpha)), Ts=0.002
         const fc = alpha / (2 * Math.PI * 0.002 * (1 - alpha));
         disp.textContent = `≈${Math.round(fc)} Hz cutoff`;
+    }
+}
+
+/**
+ * Update the tau cutoff frequency display based on current tau_high value.
+ */
+function updateTauCutoffDisplay() {
+    const tau = parseFloat(document.getElementById('innerTauHigh').value) || 0.03;
+    const disp = document.getElementById('tauCutoffDisplay');
+    if (!disp) return;
+    // Approximate cutoff: fc = 1 / (2*pi*tau)
+    const fc = 1.0 / (2 * Math.PI * tau);
+    disp.textContent = `(≈${Math.round(fc)} Hz)`;
+}
+
+/**
+ * Update the joint EMA cutoff frequency display based on current alpha value.
+ */
+function updateJointEmaCutoffDisplay() {
+    const alpha = parseFloat(document.getElementById('jointEmaAlpha').value) || 0.5;
+    const disp = document.getElementById('jointEmaCutoffDisplay');
+    if (!disp) return;
+    if (alpha >= 1.0) {
+        disp.textContent = '(no filter)';
+    } else {
+        // Approximate EMA cutoff: fc = alpha / (2*pi*Ts*(1-alpha)), Ts=0.002
+        const fc = alpha / (2 * Math.PI * 0.002 * (1 - alpha));
+        disp.textContent = `(≈${Math.round(fc)} Hz)`;
     }
 }
 
@@ -5698,16 +5820,23 @@ let pidDiagStartTime = null;
  * Start PID diagnostics streaming
  */
 function startPidDiagStream() {
+    const termsEnabled = $('#pidTermsEnabled').is(':checked');
     $.ajax({
         url: '/can/pid_diag/start',
-        type: 'POST'
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ terms_enabled: termsEnabled })
     }).done(response => {
         if (response.status === 'success') {
             pidDiagStreamActive = true;
             pidDiagStartTime = Date.now();
-            appendStatusMessage('📊 PID diagnostics streaming started @ 20Hz');
+            const termsStr = termsEnabled ? ' + P/I/D breakdown' : '';
+            appendStatusMessage(`📊 PID diagnostics streaming started @ 20Hz${termsStr}`);
             $('#startPidDiagBtn').prop('disabled', true);
             $('#stopPidDiagBtn').prop('disabled', false);
+            // Show/hide terms charts based on checkbox
+            $('#pidInnerTermsContainer').toggle(termsEnabled);
+            $('#pidOuterTermsContainer').toggle(termsEnabled);
         } else {
             appendStatusMessage(`❌ Failed to start PID diagnostics: ${response.message}`);
         }
@@ -5731,6 +5860,62 @@ function stopPidDiagStream() {
     }).fail(xhr => {
         appendStatusMessage(`❌ PID diagnostics stop error: ${xhr.responseJSON?.message || 'Unknown error'}`);
     });
+}
+
+/**
+ * Update inner PID terms chart with new data
+ */
+function updatePidInnerTermsChart(data) {
+    if (!pidInnerTermsChart) return;
+
+    const timeSeconds = (Date.now() - pidDiagStartTime) / 1000;
+    pidInnerTermsChart.data.datasets[0].data.push({ x: timeSeconds, y: data.p_term || 0 });
+    pidInnerTermsChart.data.datasets[1].data.push({ x: timeSeconds, y: data.i_term || 0 });
+    pidInnerTermsChart.data.datasets[2].data.push({ x: timeSeconds, y: data.d_term || 0 });
+    pidInnerTermsChart.data.datasets[3].data.push({ x: timeSeconds, y: data.ff_term || 0 });
+
+    const maxPoints = 300;
+    pidInnerTermsChart.data.datasets.forEach(ds => {
+        while (ds.data.length > maxPoints) ds.data.shift();
+    });
+
+    if (timeSeconds > 30) {
+        pidInnerTermsChart.options.scales.x.min = timeSeconds - 30;
+        pidInnerTermsChart.options.scales.x.max = timeSeconds;
+    }
+
+    if (!window.lastPidInnerTermsUpdate || Date.now() - window.lastPidInnerTermsUpdate > 100) {
+        pidInnerTermsChart.update('none');
+        window.lastPidInnerTermsUpdate = Date.now();
+    }
+}
+
+/**
+ * Update outer PID terms chart with new data
+ */
+function updatePidOuterTermsChart(data) {
+    if (!pidOuterTermsChart) return;
+
+    const timeSeconds = (Date.now() - pidDiagStartTime) / 1000;
+    pidOuterTermsChart.data.datasets[0].data.push({ x: timeSeconds, y: data.p_term || 0 });
+    pidOuterTermsChart.data.datasets[1].data.push({ x: timeSeconds, y: data.i_term || 0 });
+    pidOuterTermsChart.data.datasets[2].data.push({ x: timeSeconds, y: data.d_term || 0 });
+    pidOuterTermsChart.data.datasets[3].data.push({ x: timeSeconds, y: data.output_x100 ? data.output_x100 / 100.0 : 0 });
+
+    const maxPoints = 300;
+    pidOuterTermsChart.data.datasets.forEach(ds => {
+        while (ds.data.length > maxPoints) ds.data.shift();
+    });
+
+    if (timeSeconds > 30) {
+        pidOuterTermsChart.options.scales.x.min = timeSeconds - 30;
+        pidOuterTermsChart.options.scales.x.max = timeSeconds;
+    }
+
+    if (!window.lastPidOuterTermsUpdate || Date.now() - window.lastPidOuterTermsUpdate > 100) {
+        pidOuterTermsChart.update('none');
+        window.lastPidOuterTermsUpdate = Date.now();
+    }
 }
 
 /**
@@ -5770,6 +5955,14 @@ function clearPidDiagCharts() {
         pidTorqueChart.data.datasets.forEach(ds => ds.data = []);
         pidTorqueChart.update('none');
     }
+    if (pidInnerTermsChart) {
+        pidInnerTermsChart.data.datasets.forEach(ds => ds.data = []);
+        pidInnerTermsChart.update('none');
+    }
+    if (pidOuterTermsChart) {
+        pidOuterTermsChart.data.datasets.forEach(ds => ds.data = []);
+        pidOuterTermsChart.update('none');
+    }
     pidDiagStartTime = Date.now();
     pidDiagDataBuffer = [];  // Clear export buffer too
     $('#pidDiagBufferCount').text('0');
@@ -5785,16 +5978,23 @@ function exportPidDiagToCSV() {
         return;
     }
     
+    // Check if any records have PID terms data
+    const hasTerms = pidDiagDataBuffer.some(r => r.inner_p !== undefined);
+
     // CSV header
     const headers = [
         'time_s',
         'target_dof0', 'current_dof0', 'error_dof0', 'torque_a_dof0', 'torque_b_dof0',
         'target_dof1', 'current_dof1', 'error_dof1', 'torque_a_dof1', 'torque_b_dof1'
     ];
-    
+    if (hasTerms) {
+        headers.push('inner_p', 'inner_i', 'inner_d', 'inner_ff',
+                      'outer_p', 'outer_i', 'outer_d', 'outer_output');
+    }
+
     // Build CSV content
     let csvContent = headers.join(',') + '\n';
-    
+
     pidDiagDataBuffer.forEach(row => {
         const values = [
             row.time_s,
@@ -5803,6 +6003,12 @@ function exportPidDiagToCSV() {
             row.target_dof1.toFixed(2), row.current_dof1.toFixed(2), row.error_dof1.toFixed(2),
             row.torque_a_dof1.toFixed(1), row.torque_b_dof1.toFixed(1)
         ];
+        if (hasTerms) {
+            values.push(
+                (row.inner_p || 0), (row.inner_i || 0), (row.inner_d || 0), (row.inner_ff || 0),
+                (row.outer_p || 0), (row.outer_i || 0), (row.outer_d || 0), (row.outer_output || 0)
+            );
+        }
         csvContent += values.join(',') + '\n';
     });
     

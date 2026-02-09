@@ -283,18 +283,24 @@ class CanManager:
         self._log_can_info("Encoder streaming stopped")
         return {"streaming": False}
 
-    def start_pid_diag_stream(self) -> Dict[str, Any]:
+    def start_pid_diag_stream(self, terms_enabled: bool = False) -> Dict[str, Any]:
         """
         Start PID diagnostics streaming via CAN at 20Hz.
-        
+
         Sends control command (0x004) to enable PID diagnostic data.
         Data arrives on 0x420 (target/error) and 0x430 (torque).
+        When terms_enabled=True, also sends 0x470 (inner P/I/D) and 0x480 (outer P/I/D).
+
+        Args:
+            terms_enabled: Enable per-term P/I/D breakdown streaming (0x470/0x480)
         """
         self._ensure_connection()
-        payload = bytes([0x01]) + bytes(7)  # 0x01 = start streaming
+        terms_byte = 0x01 if terms_enabled else 0x00
+        payload = bytes([0x01, terms_byte]) + bytes(6)  # byte0=start, byte1=terms
         self._send_frame(0x004, payload, context="PID diag stream START")
-        self._log_can_info("PID diagnostics streaming started @ 20Hz")
-        return {"streaming": True}
+        terms_str = " + P/I/D terms" if terms_enabled else ""
+        self._log_can_info(f"PID diagnostics streaming started @ 20Hz{terms_str}")
+        return {"streaming": True, "terms_enabled": terms_enabled}
 
     def stop_pid_diag_stream(self) -> Dict[str, Any]:
         """
@@ -856,7 +862,19 @@ class CanManager:
             dof = offset % 3
             self._handle_smoothness_metrics_frame(data, message.timestamp, joint_id, dof)
             return
-        
+
+        # Inner PID terms data (0x470-0x47F) - P/I/D/FF breakdown
+        if 0x470 <= arb_id <= 0x47F and len(data) >= 8:
+            joint_id = arb_id - 0x470
+            self._handle_pid_inner_terms(data, message.timestamp, joint_id)
+            return  # Don't log every frame
+
+        # Outer PID terms data (0x480-0x48F) - P/I/D/output breakdown
+        if 0x480 <= arb_id <= 0x48F and len(data) >= 8:
+            joint_id = arb_id - 0x480
+            self._handle_pid_outer_terms(data, message.timestamp, joint_id)
+            return  # Don't log every frame
+
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -1043,6 +1061,64 @@ class CanManager:
         if self.socketio:
             try:
                 self.socketio.emit("pid_torque", data_point, namespace="/movement")
+            except Exception:
+                pass
+
+    def _handle_pid_inner_terms(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode inner PID terms breakdown from CAN (0x470-0x47F).
+
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t p_term (proportional increment)
+        - Bytes 2-3: int16_t i_term (integral term)
+        - Bytes 4-5: int16_t d_term (filtered derivative term)
+        - Bytes 6-7: int16_t ff_term (feedforward term)
+        """
+        p_term, i_term, d_term, ff_term = struct.unpack("<hhhh", data[:8])
+
+        data_point = {
+            "type": "pid_inner_terms",
+            "joint_id": joint_id,
+            "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
+            "p_term": p_term,
+            "i_term": i_term,
+            "d_term": d_term,
+            "ff_term": ff_term,
+            "timestamp": timestamp,
+        }
+
+        if self.socketio:
+            try:
+                self.socketio.emit("pid_inner_terms", data_point, namespace="/movement")
+            except Exception:
+                pass
+
+    def _handle_pid_outer_terms(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode outer PID terms breakdown from CAN (0x480-0x48F).
+
+        Frame format (8 bytes):
+        - Bytes 0-1: int16_t p_term (proportional increment)
+        - Bytes 2-3: int16_t i_term (integral term)
+        - Bytes 4-5: int16_t d_term (filtered derivative term)
+        - Bytes 6-7: int16_t output_x100 (delta_theta × 100)
+        """
+        p_term, i_term, d_term, output_x100 = struct.unpack("<hhhh", data[:8])
+
+        data_point = {
+            "type": "pid_outer_terms",
+            "joint_id": joint_id,
+            "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
+            "p_term": p_term,
+            "i_term": i_term,
+            "d_term": d_term,
+            "output_x100": output_x100,
+            "timestamp": timestamp,
+        }
+
+        if self.socketio:
+            try:
+                self.socketio.emit("pid_outer_terms", data_point, namespace="/movement")
             except Exception:
                 pass
 

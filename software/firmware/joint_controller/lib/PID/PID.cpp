@@ -80,6 +80,11 @@ float PID::control(float xsp, float x, float uff) {
   // Filter equation: y(k) = α*y(k-1) + (1-α)*x(k), where α = tau/(tau+Ts)
   float udfilt = tau / (tau + Ts) * udfiltprev + Ts / (tau + Ts) * ud;
 
+  // Store diagnostic outputs (for external monitoring)
+  last_up = up;
+  last_ui = ui;
+  last_udfilt = udfilt;
+
   // Step 5: Calculate total PID output (incremental form)
   // u(k) = u(k-1) + ΔP + I + D_filtered + feedforward
   float u = uprev + up + ui + udfilt + uff;

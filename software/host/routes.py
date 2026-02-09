@@ -780,19 +780,25 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
     def start_pid_diag_stream():
         """
         Start PID diagnostics streaming via CAN at 20Hz.
-        
+
         The controller will send target/error on 0x420 and torque on 0x430.
-        Data is emitted via SocketIO events: 'pid_diag' and 'pid_torque'.
+        When terms_enabled=true, also sends inner PID terms on 0x470
+        and outer PID terms on 0x480.
+        Data is emitted via SocketIO events: 'pid_diag', 'pid_torque',
+        'pid_inner_terms', 'pid_outer_terms'.
         """
         unavailable = can_unavailable_response()
         if unavailable:
             return unavailable
 
         try:
-            result = can_manager.start_pid_diag_stream()
+            data = request.get_json(silent=True) or {}
+            terms_enabled = data.get("terms_enabled", False)
+            result = can_manager.start_pid_diag_stream(terms_enabled=terms_enabled)
+            terms_str = " + P/I/D terms" if terms_enabled else ""
             return jsonify({
                 "status": "success",
-                "message": "PID diagnostics streaming started @ 20Hz",
+                "message": f"PID diagnostics streaming started @ 20Hz{terms_str}",
                 "result": result
             })
         except Exception as exc:
@@ -1263,17 +1269,28 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 handler.send_new_command(joint, 'ALL', COMMANDS['GET_AUTO_START'])
                 message = "Auto-start status requested"
             elif cmd == "cascade-speed-scaling":
-                # Set velocity-dependent stiffness scaling + EMA filter parameters
+                # Set velocity-dependent stiffness scaling + EMA filter + tau scaling parameters
                 enabled = int(data.get('enabled', 1))
                 min_factor = float(data.get('min_factor', 0.3))
                 speed_low = float(data.get('speed_low', 3.0))
                 speed_high = float(data.get('speed_high', 15.0))
                 ema_enabled = int(data.get('ema_enabled', 1))
                 ema_alpha = float(data.get('ema_alpha', 0.5))
+                tau_enabled = int(data.get('tau_enabled', 0))
+                tau_high = float(data.get('tau_high', 0.03))
+                tau_speed = float(data.get('tau_speed', 10.0))
+                jema_enabled = int(data.get('jema_enabled', 0))
+                jema_alpha = float(data.get('jema_alpha', 0.5))
+                jema_speed = float(data.get('jema_speed', 15.0))
                 params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
-                          f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}")
+                          f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}"
+                          f":TAU_EN={tau_enabled}:TAU_HIGH={tau_high}:TAU_SPEED={tau_speed}"
+                          f":JEMA_EN={jema_enabled}:JEMA_ALPHA={jema_alpha}:JEMA_SPEED={jema_speed}")
                 handler.send_new_command(joint, 'ALL', params)
-                message = f"Velocity tuning: stiff_en={enabled} min={min_factor} ema_en={ema_enabled} ema_a={ema_alpha}"
+                message = (f"Velocity tuning: stiff_en={enabled} min={min_factor} "
+                           f"ema_en={ema_enabled} ema_a={ema_alpha} "
+                           f"tau_en={tau_enabled} tau_h={tau_high} "
+                           f"jema_en={jema_enabled} jema_a={jema_alpha} jema_spd={jema_speed}")
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')

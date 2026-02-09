@@ -53,6 +53,10 @@ static float expected_velocity_cache[MAX_DOFS] = {0}; // Cached expected velocit
 static float theta_A_ema[MAX_DOFS] = {0};            // EMA-filtered motor A angle
 static float theta_B_ema[MAX_DOFS] = {0};            // EMA-filtered motor B angle
 static bool ema_initialized[MAX_DOFS] = {false};     // EMA initialization flag
+static float inner_tau_default[MAX_DOFS] = {0};       // Original PID tau per DOF (captured at first use)
+static bool inner_tau_default_captured[MAX_DOFS] = {false};
+static float joint_ema_value[MAX_DOFS] = {0};          // EMA-filtered joint angle
+static bool joint_ema_initialized[MAX_DOFS] = {false}; // Joint EMA initialization flag
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 // When outer_loop_divisor > 1, delta_theta changes every N cycles creating "steps".
 // To smooth this, we interpolate between delta_theta_prev and delta_theta based on
@@ -201,6 +205,8 @@ bool JointController::executeWaypointMovement() {
       velocity_filtered[dof] = 0.0f;
       expected_velocity_cache[dof] = 0.0f;
       ema_initialized[dof] = false;
+      inner_tau_default_captured[dof] = false;
+      joint_ema_initialized[dof] = false;
       continue; // Skip this DOF entirely
     }
 
@@ -374,6 +380,26 @@ bool JointController::executeWaypointMovement() {
         velocity_filtered[dof] = (1.0f - alpha) * velocity_filtered[dof] + alpha * actual_velocity;
       }
       // Note: if invalid, velocity_filtered[dof] retains its previous value
+
+      // === JOINT ANGLE EMA FILTER (before outer PID) ===
+      // At low speeds, smooth joint encoder to prevent outer PID from amplifying micro-variations.
+      // Disabled at high speed to preserve tracking responsiveness.
+      if (joint_ema_enabled && joint_ema_alpha < 1.0f) {
+        float speed = fabs(velocity_filtered[dof]);
+        if (speed <= joint_ema_speed_threshold) {
+          if (!joint_ema_initialized[dof]) {
+            joint_ema_value[dof] = q_curr;
+            joint_ema_initialized[dof] = true;
+          } else {
+            float a = joint_ema_alpha;
+            joint_ema_value[dof] = a * q_curr + (1.0f - a) * joint_ema_value[dof];
+          }
+          q_curr = joint_ema_value[dof];
+        } else {
+          // High speed: passthrough, but keep EMA state updated for smooth transition
+          joint_ema_value[dof] = q_curr;
+        }
+      }
 
       bool expected_holding = fabs(expected_velocity_deg_s) <= expected_velocity_deadband_deg_s;
       bool compliance_should_activate = false;
@@ -736,6 +762,14 @@ bool JointController::executeWaypointMovement() {
 
         // Normal PID control - compute delta_theta
         delta_theta[dof] = outer_pid->control(q_des, q_curr);
+
+        // Store outer PID term breakdown for diagnostics (DOF 0 only)
+        if (dof == 0 && pid_diag_terms_enabled) {
+          pid_diagnostics.outer_p_term = (int16_t)constrain(outer_pid->last_up, -32767, 32767);
+          pid_diagnostics.outer_i_term = (int16_t)constrain(outer_pid->last_ui, -32767, 32767);
+          pid_diagnostics.outer_d_term = (int16_t)constrain(outer_pid->last_udfilt, -32767, 32767);
+          pid_diagnostics.outer_output = (int16_t)(delta_theta[dof] * 100.0f);
+        }
       }
 
       // Error already computed above (used for compliance detection)
@@ -1112,12 +1146,39 @@ bool JointController::executeWaypointMovement() {
       theta_B_pid = theta_B_ema[dof];
     }
 
+    // === VELOCITY-DEPENDENT TAU SCALING ===
+    // At low speeds, increase D-term filter tau to reduce stick-slip oscillations.
+    // The filter adapts smoothly (no state reset) via PID::setTau().
+    if (inner_tau_scaling_enabled) {
+      // Capture original tau on first use (from PID config / flash)
+      if (!inner_tau_default_captured[dof]) {
+        inner_tau_default[dof] = pid_agonist->getTau();
+        inner_tau_default_captured[dof] = true;
+      }
+      float speed = fabs(expected_velocity_cache[dof]);
+      float tau_target = (speed <= inner_tau_speed_threshold) ? inner_tau_high : inner_tau_default[dof];
+      if (tau_target != pid_agonist->getTau()) {
+        pid_agonist->setTau(tau_target);
+        pid_antagonist->setTau(tau_target);
+      }
+    }
+
     // Inner PID for motors (compute torque commands)
 #if CONTROLLER_DEBUG
     uint32_t pid_start_us = time_us_32();
 #endif
     float command_A = pid_agonist->control(theta_A_ref, theta_A_pid);
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_pid);
+
+    // Store inner PID term breakdown for diagnostics (DOF 0, agonist only)
+    if (dof == 0 && pid_diag_terms_enabled) {
+      pid_diagnostics.inner_p_term = (int16_t)constrain(pid_agonist->last_up, -32767, 32767);
+      pid_diagnostics.inner_i_term = (int16_t)constrain(pid_agonist->last_ui, -32767, 32767);
+      pid_diagnostics.inner_d_term = (int16_t)constrain(pid_agonist->last_udfilt, -32767, 32767);
+      pid_diagnostics.inner_ff_term = 0;  // No feedforward currently used
+      pid_diagnostics.pid_terms_valid = true;
+    }
+
 #if CONTROLLER_DEBUG
     {
       uint32_t pid_dt = time_us_32() - pid_start_us;
