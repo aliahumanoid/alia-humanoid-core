@@ -467,9 +467,38 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     LOG_INFO("Motor offsets saved to flash after startup");
   }
 
+  // === Inject HOLDING waypoints for all DOFs ===
+  // After recalc, motors are stopped (torque 0). Injecting a waypoint at the
+  // current angle transitions each DOF from IDLE → MOVING → HOLDING, so the PID
+  // takes over and holds position under closed-loop control.
+  // Safe to push from Core0: Core1 is idle (no active commands/waypoints).
+  updateSharedDofAngles();  // Refresh angles right before injection
+  uint32_t t_now_hold = millis();
+  uint8_t dof_count_hold = active_joint_controller->getConfig().dof_count;
+
+  for (uint8_t dof = 0; dof < dof_count_hold; dof++) {
+    if (shared_dof_angles.valid[dof]) {
+      float current_angle = shared_dof_angles.angles[dof];
+
+      waypoint_buffer_set_prev(dof, current_angle, t_now_hold);
+
+      WaypointEntry hold_wp{};
+      hold_wp.dof_index = dof;
+      hold_wp.target_angle_deg = current_angle;
+      hold_wp.t_arrival_ms = t_now_hold + 100;  // 100ms — PID ramps up gently
+      hold_wp.mode = 0;
+
+      waypoint_buffer_push(dof, hold_wp);
+      waypoint_buffer_set_state(dof, WaypointState::MOVING);
+
+      LOG_INFO("DOF " + String(dof) + " entering HOLDING at " +
+               String(current_angle, 1) + "\xC2\xB0");
+    }
+  }
+
   uint32_t total_time_ms = millis() - startup_start_time;
   SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
-  LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — ready for waypoints");
+  LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — holding position");
   pushStartupEvent(STARTUP_EVT_COMPLETE, 0, STARTUP_REASON_OK, (uint16_t)total_time_ms);
   return true;
 }
