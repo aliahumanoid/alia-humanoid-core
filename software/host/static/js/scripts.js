@@ -2031,6 +2031,9 @@ function sendCascadeSpeedScaling() {
     const jemaEnabled = document.getElementById('jointEmaEnabled').checked ? 1 : 0;
     const jemaAlpha = parseFloat(document.getElementById('jointEmaAlpha').value) || 0.5;
     const jemaSpeed = parseFloat(document.getElementById('jointEmaSpeedThreshold').value) || 15.0;
+    const fricEnabled = document.getElementById('frictionFfEnabled').checked ? 1 : 0;
+    const fricTorque = parseFloat(document.getElementById('frictionFfTorque').value) || 15.0;
+    const fricSpeed = parseFloat(document.getElementById('frictionFfSpeed').value) || 3.0;
 
     // Update display labels
     const lowDisp = document.getElementById('cascadeSpeedLowDisplay');
@@ -2052,7 +2055,10 @@ function sendCascadeSpeedScaling() {
         tau_speed: tauSpeed,
         jema_enabled: jemaEnabled,
         jema_alpha: jemaAlpha,
-        jema_speed: jemaSpeed
+        jema_speed: jemaSpeed,
+        fric_enabled: fricEnabled,
+        fric_torque: fricTorque,
+        fric_speed: fricSpeed
     });
 }
 

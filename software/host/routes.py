@@ -1323,15 +1323,20 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 jema_enabled = int(data.get('jema_enabled', 0))
                 jema_alpha = float(data.get('jema_alpha', 0.5))
                 jema_speed = float(data.get('jema_speed', 15.0))
+                fric_enabled = int(data.get('fric_enabled', 0))
+                fric_torque = float(data.get('fric_torque', 15.0))
+                fric_speed = float(data.get('fric_speed', 3.0))
                 params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
                           f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}"
                           f":TAU_EN={tau_enabled}:TAU_HIGH={tau_high}:TAU_SPEED={tau_speed}"
-                          f":JEMA_EN={jema_enabled}:JEMA_ALPHA={jema_alpha}:JEMA_SPEED={jema_speed}")
+                          f":JEMA_EN={jema_enabled}:JEMA_ALPHA={jema_alpha}:JEMA_SPEED={jema_speed}"
+                          f":FRIC_EN={fric_enabled}:FRIC_TORQUE={fric_torque}:FRIC_SPEED={fric_speed}")
                 handler.send_new_command(joint, 'ALL', params)
                 message = (f"Velocity tuning: stiff_en={enabled} min={min_factor} "
                            f"ema_en={ema_enabled} ema_a={ema_alpha} "
                            f"tau_en={tau_enabled} tau_h={tau_high} "
-                           f"jema_en={jema_enabled} jema_a={jema_alpha} jema_spd={jema_speed}")
+                           f"jema_en={jema_enabled} jema_a={jema_alpha} jema_spd={jema_speed} "
+                           f"fric_en={fric_enabled} fric_t={fric_torque} fric_spd={fric_speed}")
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')
