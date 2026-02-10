@@ -1110,16 +1110,17 @@ class CanManager:
         - Bytes 4-5: int16_t d_term (filtered derivative term)
         - Bytes 6-7: int16_t ff_term (feedforward term)
         """
-        p_term, i_term, d_term, ff_term = struct.unpack("<hhhh", data[:8])
+        p_raw, i_raw, d_raw, ff_raw = struct.unpack("<hhhh", data[:8])
 
+        # Firmware sends values scaled ×100 (incremental PID terms are small floats)
         data_point = {
             "type": "pid_inner_terms",
             "joint_id": joint_id,
             "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
-            "p_term": p_term,
-            "i_term": i_term,
-            "d_term": d_term,
-            "ff_term": ff_term,
+            "p_term": p_raw / 100.0,
+            "i_term": i_raw / 100.0,
+            "d_term": d_raw / 100.0,
+            "ff_term": ff_raw / 100.0,
             "timestamp": timestamp,
         }
 
@@ -1139,15 +1140,17 @@ class CanManager:
         - Bytes 4-5: int16_t d_term (filtered derivative term)
         - Bytes 6-7: int16_t output_x100 (delta_theta × 100)
         """
-        p_term, i_term, d_term, output_x100 = struct.unpack("<hhhh", data[:8])
+        p_raw, i_raw, d_raw, output_x100 = struct.unpack("<hhhh", data[:8])
 
+        # Firmware sends P/I/D values scaled ×100 (incremental terms are small floats)
+        # output_x100 is delta_theta × 100 (already scaled in firmware)
         data_point = {
             "type": "pid_outer_terms",
             "joint_id": joint_id,
             "joint_name": self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}"),
-            "p_term": p_term,
-            "i_term": i_term,
-            "d_term": d_term,
+            "p_term": p_raw / 100.0,
+            "i_term": i_raw / 100.0,
+            "d_term": d_raw / 100.0,
             "output_x100": output_x100,
             "timestamp": timestamp,
         }

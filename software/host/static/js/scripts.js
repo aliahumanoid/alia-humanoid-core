@@ -629,33 +629,46 @@ $(document).ready(function() {
         };
     });
 
+    // Helper: flush pending PID record to buffer when all expected frames received
+    function tryFlushPidRecord() {
+        if (!pendingPidRecord) return;
+        if (!pendingPidRecord._hasTorque) return;
+        // If terms are enabled, wait for both inner and outer
+        if ($('#pidTermsEnabled').is(':checked')) {
+            if (!pendingPidRecord._hasInner || !pendingPidRecord._hasOuter) return;
+        }
+        // All expected data received — flush
+        delete pendingPidRecord._hasTorque;
+        delete pendingPidRecord._hasInner;
+        delete pendingPidRecord._hasOuter;
+        pidDiagDataBuffer.push(pendingPidRecord);
+        pendingPidRecord = null;
+        if (pidDiagDataBuffer.length % 10 === 0) {
+            $('#pidDiagBufferCount').text(pidDiagDataBuffer.length);
+        }
+    }
+
     // Listener for PID torque data
     socket.on('pid_torque', function(data) {
         if (!pidDiagStreamActive) return;
-        
+
         // Filter by currently selected joint to avoid flickering from other controllers
         const selectedJoint = $('#jointSelect').val();
         if (data.joint_name && data.joint_name.toUpperCase() !== selectedJoint.toUpperCase()) {
             return;  // Ignore data from other joints
         }
-        
+
         updatePidTorqueDisplay(data);
         updatePidTorqueChart(data);
-        
-        // Complete the pending record with torque data and add to buffer
+
+        // Complete the pending record with torque data
         if (pendingPidRecord) {
             pendingPidRecord.torque_a_dof0 = data.torque_A ? data.torque_A[0] : 0;
             pendingPidRecord.torque_b_dof0 = data.torque_B ? data.torque_B[0] : 0;
             pendingPidRecord.torque_a_dof1 = data.torque_A ? data.torque_A[1] : 0;
             pendingPidRecord.torque_b_dof1 = data.torque_B ? data.torque_B[1] : 0;
-            
-            pidDiagDataBuffer.push(pendingPidRecord);
-            pendingPidRecord = null;
-            
-            // Update buffer count display (throttled)
-            if (pidDiagDataBuffer.length % 10 === 0) {
-                $('#pidDiagBufferCount').text(pidDiagDataBuffer.length);
-            }
+            pendingPidRecord._hasTorque = true;
+            tryFlushPidRecord();
         }
     });
 
@@ -672,6 +685,8 @@ $(document).ready(function() {
             pendingPidRecord.inner_i = data.i_term || 0;
             pendingPidRecord.inner_d = data.d_term || 0;
             pendingPidRecord.inner_ff = data.ff_term || 0;
+            pendingPidRecord._hasInner = true;
+            tryFlushPidRecord();
         }
     });
 
@@ -688,6 +703,8 @@ $(document).ready(function() {
             pendingPidRecord.outer_i = data.i_term || 0;
             pendingPidRecord.outer_d = data.d_term || 0;
             pendingPidRecord.outer_output = data.output_x100 ? (data.output_x100 / 100.0) : 0;
+            pendingPidRecord._hasOuter = true;
+            tryFlushPidRecord();
         }
     });
 
@@ -6005,8 +6022,14 @@ function exportPidDiagToCSV() {
         ];
         if (hasTerms) {
             values.push(
-                (row.inner_p || 0), (row.inner_i || 0), (row.inner_d || 0), (row.inner_ff || 0),
-                (row.outer_p || 0), (row.outer_i || 0), (row.outer_d || 0), (row.outer_output || 0)
+                (row.inner_p || 0).toFixed ? (row.inner_p || 0).toFixed(4) : (row.inner_p || 0),
+                (row.inner_i || 0).toFixed ? (row.inner_i || 0).toFixed(4) : (row.inner_i || 0),
+                (row.inner_d || 0).toFixed ? (row.inner_d || 0).toFixed(4) : (row.inner_d || 0),
+                (row.inner_ff || 0).toFixed ? (row.inner_ff || 0).toFixed(4) : (row.inner_ff || 0),
+                (row.outer_p || 0).toFixed ? (row.outer_p || 0).toFixed(4) : (row.outer_p || 0),
+                (row.outer_i || 0).toFixed ? (row.outer_i || 0).toFixed(4) : (row.outer_i || 0),
+                (row.outer_d || 0).toFixed ? (row.outer_d || 0).toFixed(4) : (row.outer_d || 0),
+                (row.outer_output || 0).toFixed ? (row.outer_output || 0).toFixed(4) : (row.outer_output || 0)
             );
         }
         csvContent += values.join(',') + '\n';

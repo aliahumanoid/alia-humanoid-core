@@ -782,9 +782,10 @@ bool JointController::executeWaypointMovement() {
 
         // Store outer PID term breakdown for diagnostics (DOF 0 only)
         if (dof == 0 && pid_diag_terms_enabled) {
-          pid_diagnostics.outer_p_term = (int16_t)constrain(outer_pid->last_up, -32767, 32767);
-          pid_diagnostics.outer_i_term = (int16_t)constrain(outer_pid->last_ui, -32767, 32767);
-          pid_diagnostics.outer_d_term = (int16_t)constrain(outer_pid->last_udfilt, -32767, 32767);
+          // Values scaled ×100 for int16 transmission (incremental terms are small floats)
+          pid_diagnostics.outer_p_term = (int16_t)constrain(outer_pid->last_up * 100.0f, -32767, 32767);
+          pid_diagnostics.outer_i_term = (int16_t)constrain(outer_pid->last_ui * 100.0f, -32767, 32767);
+          pid_diagnostics.outer_d_term = (int16_t)constrain(outer_pid->last_udfilt * 100.0f, -32767, 32767);
           pid_diagnostics.outer_output = (int16_t)(delta_theta[dof] * 100.0f);
         }
       }
@@ -1204,10 +1205,11 @@ bool JointController::executeWaypointMovement() {
     float command_B = pid_antagonist->control(theta_B_ref, theta_B_pid);
 
     // Store inner PID term breakdown for diagnostics (DOF 0, agonist only)
+    // Values scaled ×100 for int16 transmission (incremental terms are small floats)
     if (dof == 0 && pid_diag_terms_enabled) {
-      pid_diagnostics.inner_p_term = (int16_t)constrain(pid_agonist->last_up, -32767, 32767);
-      pid_diagnostics.inner_i_term = (int16_t)constrain(pid_agonist->last_ui, -32767, 32767);
-      pid_diagnostics.inner_d_term = (int16_t)constrain(pid_agonist->last_udfilt, -32767, 32767);
+      pid_diagnostics.inner_p_term = (int16_t)constrain(pid_agonist->last_up * 100.0f, -32767, 32767);
+      pid_diagnostics.inner_i_term = (int16_t)constrain(pid_agonist->last_ui * 100.0f, -32767, 32767);
+      pid_diagnostics.inner_d_term = (int16_t)constrain(pid_agonist->last_udfilt * 100.0f, -32767, 32767);
       pid_diagnostics.inner_ff_term = 0;  // No feedforward currently used
       pid_diagnostics.pid_terms_valid = true;
     }

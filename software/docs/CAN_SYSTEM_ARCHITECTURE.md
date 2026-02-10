@@ -1681,7 +1681,8 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | 0x001 | 1 | Reserved | - | - |
 | 0x002 | 2 | Time Sync | Host → All | High |
 | 0x003 | 3 | Encoder Stream Control | Host → Ctrl | High |
-| 0x004-0x00F | 4-15 | Reserved | - | - |
+| **0x004** | 4 | **PID Diag Control** | Host → Ctrl | High |
+| 0x005-0x00F | 5-15 | Reserved | - | - |
 | 0x010-0x13F | 16-319 | Reserved (Future High Priority) | - | - |
 | 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
 | 0x200-0x2FF | 512-767 | Reserved | - | - |
@@ -1694,8 +1695,13 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | **0x393** | 915 | **Multi-DOF Waypoint Joint 19** | Host → Ctrl | **Level 3** (Medium) |
 | 0x394-0x3FF | 916-1023 | Reserved Waypoints | - | - |
 | 0x400-0x40F | 1024-1039 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
+| **0x004** | 4 | **PID Diag Control** | Host → Ctrl | High |
 | **0x410** | 1040 | **Encoder Stream Data** | Ctrl → Host | **Level 4** (Low) |
-| 0x411-0x4FF | 1041-1279 | Reserved Status | - | - |
+| **0x420-0x42F** | 1056-1071 | **PID Diag: Target + Error** (per joint) | Ctrl → Host | **Level 4** (Low) |
+| **0x430-0x43F** | 1072-1087 | **PID Diag: Torque A + B** (per joint) | Ctrl → Host | **Level 4** (Low) |
+| **0x470-0x47F** | 1136-1151 | **PID Diag: Inner PID Terms** (P/I/D/FF, optional) | Ctrl → Host | **Level 4** (Low) |
+| **0x480-0x48F** | 1152-1167 | **PID Diag: Outer PID Terms** (P/I/D/output, optional) | Ctrl → Host | **Level 4** (Low) |
+| 0x490-0x4FF | 1168-1279 | Reserved Status | - | - |
 
 **Encoder Stream Control (0x003):**
 ```
@@ -1713,6 +1719,48 @@ Byte 7:     uint8_t   timestamp_offset (ms since last packet, wraps at 255)
 ```
 **Frequency**: 50 Hz (20ms interval)
 **Purpose**: Real-time encoder feedback for UI visualization and debugging
+
+**PID Diag Control (0x004):**
+```
+Byte 0:   uint8_t  action (0x01 = start streaming, 0x00 = stop)
+Byte 1:   uint8_t  terms_enabled (0x01 = enable P/I/D breakdown frames, 0x00 = disable)
+Byte 2-7: Reserved (0x00)
+```
+
+**PID Diag: Target + Error (0x420 + joint_id):**
+```
+Byte 0-1:  int16_t  target_angle (0.01° resolution)
+Byte 2-3:  int16_t  actual_angle (0.01° resolution)
+Byte 4-5:  int16_t  error (0.01° resolution)
+Byte 6-7:  Reserved
+```
+**Frequency**: Control loop rate (when streaming enabled)
+
+**PID Diag: Torque A + B (0x430 + joint_id):**
+```
+Byte 0-1:  int16_t  torque_agonist (raw torque command)
+Byte 2-3:  int16_t  torque_antagonist (raw torque command)
+Byte 4-5:  int16_t  torque_agonist_filtered (after rate limiter)
+Byte 6-7:  int16_t  torque_antagonist_filtered (after rate limiter)
+```
+
+**PID Diag: Inner PID Terms (0x470 + joint_id) — OPTIONAL, DOF 0 only:**
+```
+Byte 0-1:  int16_t  p_term (proportional increment)
+Byte 2-3:  int16_t  i_term (integral term)
+Byte 4-5:  int16_t  d_term (filtered derivative term)
+Byte 6-7:  int16_t  ff_term (feedforward term)
+```
+**Condition**: Only sent when `terms_enabled = 1` in PID Diag Control
+
+**PID Diag: Outer PID Terms (0x480 + joint_id) — OPTIONAL, DOF 0 only:**
+```
+Byte 0-1:  int16_t  p_term (proportional increment)
+Byte 2-3:  int16_t  i_term (integral term)
+Byte 4-5:  int16_t  d_term (filtered derivative term)
+Byte 6-7:  int16_t  output_x100 (delta_theta × 100)
+```
+**Condition**: Only sent when `terms_enabled = 1` in PID Diag Control
 
 **Multi-DOF Waypoint Format (0x380-0x39F):**
 ```
