@@ -1197,12 +1197,31 @@ bool JointController::executeWaypointMovement() {
                    " Bref=" + String(theta_B_ref, 1) + " Bcurr=" + String(theta_B_pid, 1));
     }
 
+    // === FRICTION FEEDFORWARD ===
+    // At low speeds, tendon systems exhibit stick-slip friction: the joint stalls
+    // until the PID accumulates enough error to overcome static friction, then snaps
+    // forward violently. This feedforward adds a small torque in the direction of
+    // expected motion to pre-load against static friction, reducing stall time and
+    // overshoot at break-free. Ramps linearly from full at speed≈0 to zero at threshold.
+    float uff_A = 0.0f;
+    float uff_B = 0.0f;
+    if (friction_ff_enabled) {
+      float speed = fabs(expected_velocity_cache[dof]);
+      if (speed > 0.01f && speed <= friction_ff_speed_thresh) {
+        float direction = (expected_velocity_cache[dof] >= 0.0f) ? 1.0f : -1.0f;
+        float ramp = 1.0f - (speed / friction_ff_speed_thresh);
+        float ff = friction_ff_torque * direction * ramp;
+        uff_A = ff;       // Agonist: push in movement direction
+        uff_B = -ff;      // Antagonist: opposite (tendon opposition)
+      }
+    }
+
     // Inner PID for motors (compute torque commands)
 #if CONTROLLER_DEBUG
     uint32_t pid_start_us = time_us_32();
 #endif
-    float command_A = pid_agonist->control(theta_A_ref, theta_A_pid);
-    float command_B = pid_antagonist->control(theta_B_ref, theta_B_pid);
+    float command_A = pid_agonist->control(theta_A_ref, theta_A_pid, uff_A);
+    float command_B = pid_antagonist->control(theta_B_ref, theta_B_pid, uff_B);
 
     // Store inner PID term breakdown for diagnostics (DOF 0, agonist only)
     // Values scaled ×100 for int16 transmission (incremental terms are small floats)
@@ -1210,7 +1229,7 @@ bool JointController::executeWaypointMovement() {
       pid_diagnostics.inner_p_term = (int16_t)constrain(pid_agonist->last_up * 100.0f, -32767, 32767);
       pid_diagnostics.inner_i_term = (int16_t)constrain(pid_agonist->last_ui * 100.0f, -32767, 32767);
       pid_diagnostics.inner_d_term = (int16_t)constrain(pid_agonist->last_udfilt * 100.0f, -32767, 32767);
-      pid_diagnostics.inner_ff_term = 0;  // No feedforward currently used
+      pid_diagnostics.inner_ff_term = (int16_t)constrain(uff_A * 100.0f, -32767, 32767);
       pid_diagnostics.pid_terms_valid = true;
     }
 

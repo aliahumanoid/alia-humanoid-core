@@ -265,6 +265,15 @@ extern volatile bool joint_ema_enabled;                   // Enable joint angle 
 extern volatile float joint_ema_alpha;                    // EMA alpha (1.0=no filter, 0.1=heavy)
 extern volatile float joint_ema_speed_threshold;          // Above this speed (deg/s): passthrough
 
+// Friction feedforward compensation (overcomes static friction at low speeds)
+// At low velocity, tendon systems exhibit stick-slip: the joint stalls until PID
+// accumulates enough error to overcome static friction, then snaps forward.
+// This feedforward adds a small torque in the direction of motion to pre-load
+// against static friction, reducing the stall duration and overshoot at break-free.
+extern volatile bool friction_ff_enabled;                 // Enable friction feedforward
+extern volatile float friction_ff_torque;                 // Torque magnitude (motor units)
+extern volatile float friction_ff_speed_thresh;           // Below this speed (deg/s): apply FF
+
 // Recovery parameters
 extern volatile ComplianceRecoveryPolicy recovery_policy;
 extern volatile uint16_t recovery_ramp_back_ms;          // For RECOVERY_RAMP_BACK

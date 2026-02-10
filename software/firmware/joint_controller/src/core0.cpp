@@ -1111,6 +1111,22 @@ void core0_main_loop() {
                         if (val >= 0.1f && val <= 100.0f) joint_ema_speed_threshold = val;
                       }
 
+                      // Friction feedforward parameters (optional, in same command)
+                      char *fric_en_str = strstr(cmd_str, "FRIC_EN=");
+                      if (fric_en_str != nullptr) {
+                        friction_ff_enabled = (atoi(fric_en_str + 8) != 0);
+                      }
+                      char *fric_t_str = strstr(cmd_str, "FRIC_TORQUE=");
+                      if (fric_t_str != nullptr) {
+                        float val = atof(fric_t_str + 12);
+                        if (val >= 0.0f && val <= 100.0f) friction_ff_torque = val;
+                      }
+                      char *fric_s_str = strstr(cmd_str, "FRIC_SPEED=");
+                      if (fric_s_str != nullptr) {
+                        float val = atof(fric_s_str + 11);
+                        if (val >= 0.1f && val <= 50.0f) friction_ff_speed_thresh = val;
+                      }
+
                       SERIAL_COM_LN("RSP:CASCADE_SPEED_SCALING:ENABLED=" +
                                      String(cascade_speed_scaling_enabled ? 1 : 0) +
                                      ":MIN=" + String(cascade_min_factor, 2) +
@@ -1123,7 +1139,10 @@ void core0_main_loop() {
                                      ":TAU_SPEED=" + String(inner_tau_speed_threshold, 1) +
                                      ":JEMA_EN=" + String(joint_ema_enabled ? 1 : 0) +
                                      ":JEMA_ALPHA=" + String(joint_ema_alpha, 2) +
-                                     ":JEMA_SPEED=" + String(joint_ema_speed_threshold, 1));
+                                     ":JEMA_SPEED=" + String(joint_ema_speed_threshold, 1) +
+                                     ":FRIC_EN=" + String(friction_ff_enabled ? 1 : 0) +
+                                     ":FRIC_TORQUE=" + String(friction_ff_torque, 1) +
+                                     ":FRIC_SPEED=" + String(friction_ff_speed_thresh, 1));
                       LOG_INFO("[CASCADE] Speed scaling: en=" + String(cascade_speed_scaling_enabled) +
                                " min=" + String(cascade_min_factor, 2) +
                                " low=" + String(cascade_speed_low, 1) +
@@ -1135,7 +1154,10 @@ void core0_main_loop() {
                                " tau_spd=" + String(inner_tau_speed_threshold, 1) +
                                " jema_en=" + String(joint_ema_enabled) +
                                " jema_a=" + String(joint_ema_alpha, 2) +
-                               " jema_spd=" + String(joint_ema_speed_threshold, 1));
+                               " jema_spd=" + String(joint_ema_speed_threshold, 1) +
+                               " fric_en=" + String(friction_ff_enabled) +
+                               " fric_t=" + String(friction_ff_torque, 1) +
+                               " fric_spd=" + String(friction_ff_speed_thresh, 1));
                       handled_on_core0 = true;
                       break;
                     }
