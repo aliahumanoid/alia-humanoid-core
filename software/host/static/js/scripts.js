@@ -130,6 +130,42 @@ const DEFAULT_PARAMS = {
 // Safety limit for waypoint velocity (must match firmware ABSOLUTE_MAX_VELOCITY_DEG_S)
 const MAX_SAFE_VELOCITY_DEG_S = 150;
 
+// CAN waypoint angle resolution: int16 / 100 → 0.01° per count
+const WAYPOINT_ANGLE_RESOLUTION = 100;
+
+/**
+ * Remove consecutive waypoints that quantize to the same angle values.
+ *
+ * CAN waypoints encode angles as int16 × 100 (0.01° resolution). At low
+ * velocities the cosine S-curve produces adjacent angles that round to the
+ * same int16 value, creating "zero-steps" — the firmware sees no movement
+ * and the PID stalls. Removing duplicates lets the firmware interpolate
+ * over a longer interval instead, producing a smooth (albeit slightly
+ * time-shifted) trajectory with no stalls.
+ *
+ * @param {Array} waypoints - Array of {angles_deg: [a0,a1,a2], t_offset_ms, ...}
+ * @returns {Array} Filtered waypoints with zero-step duplicates removed
+ */
+function deduplicateWaypoints(waypoints) {
+    if (waypoints.length <= 1) return waypoints;
+    const result = [waypoints[0]];
+    for (let i = 1; i < waypoints.length; i++) {
+        const prev = result[result.length - 1].angles_deg;
+        const curr = waypoints[i].angles_deg;
+        let same = true;
+        for (let d = 0; d < 3; d++) {
+            if (prev[d] === null && curr[d] === null) continue;
+            if (prev[d] === null || curr[d] === null) { same = false; break; }
+            if (Math.round(prev[d] * WAYPOINT_ANGLE_RESOLUTION) !==
+                Math.round(curr[d] * WAYPOINT_ANGLE_RESOLUTION)) { same = false; break; }
+        }
+        if (!same) {
+            result.push(waypoints[i]);
+        }
+    }
+    return result;
+}
+
 /**
  * Get current encoder angle from LIVE streaming data only.
  * If streaming is not active, attempts to start it automatically.
@@ -3003,7 +3039,14 @@ function sendMultiWaypointSmoothCurve() {
         });
     }
 
-    appendStatusMessage(`📊 Generated ${waypoints.length} waypoints`);
+    // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
+    const rawCount = waypoints.length;
+    const dedupedWaypoints = deduplicateWaypoints(waypoints);
+    if (dedupedWaypoints.length < rawCount) {
+        appendStatusMessage(`📊 Generated ${rawCount} waypoints (${rawCount - dedupedWaypoints.length} zero-step duplicates removed)`);
+    } else {
+        appendStatusMessage(`📊 Generated ${rawCount} waypoints`);
+    }
 
     // Save waypoint batch info for debugging
     lastWaypointBatch = {
@@ -3012,26 +3055,26 @@ function sendMultiWaypointSmoothCurve() {
         source: 'single-dof',
         startAngles: { dof0: dofIndex === 0 ? startAngle : null, dof1: dofIndex === 1 ? startAngle : null },
         targetAngles: { dof0: dofIndex === 0 ? targetAngle : null, dof1: dofIndex === 1 ? targetAngle : null },
-        waypoints: waypoints,
+        waypoints: dedupedWaypoints,
         rate: waypointRate,
         totalTimeMs: totalTimeMs,
-        numPoints: waypoints.length,
+        numPoints: dedupedWaypoints.length,
         deltaT: deltaT,
         sent: false
     };
 
     // Mark trajectory as active before sending
     markTrajectoryActive();
-    
+
     // Send as batch
     $.ajax({
         url: '/can/waypoint_batch',
         method: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ joint: joint, waypoints: waypoints })
+        data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
     }).done(response => {
         if (response.status === 'success') {
-            appendStatusMessage(`✅ Multi-WP batch sent: ${waypoints.length} waypoints [LINEAR interp]`);
+            appendStatusMessage(`✅ Multi-WP batch sent: ${dedupedWaypoints.length} waypoints [LINEAR interp]`);
             lastWaypointBatch.sent = true;
             updateWaypointViewBtn();
         } else {
@@ -4453,7 +4496,14 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         });
     }
 
-    appendStatusMessage(`📊 Generated ${waypoints.length} dual-DOF waypoints`);
+    // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
+    const rawCount = waypoints.length;
+    const dedupedWaypoints = deduplicateWaypoints(waypoints);
+    if (dedupedWaypoints.length < rawCount) {
+        appendStatusMessage(`📊 Generated ${rawCount} dual-DOF waypoints (${rawCount - dedupedWaypoints.length} zero-step duplicates removed)`);
+    } else {
+        appendStatusMessage(`📊 Generated ${rawCount} dual-DOF waypoints`);
+    }
 
     // Save waypoint batch info for debugging
     lastWaypointBatch = {
@@ -4462,24 +4512,24 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         source: 'dual-dof',
         startAngles: { dof0: startAngle0, dof1: startAngle1 },
         targetAngles: { dof0: targetAngle0, dof1: targetAngle1 },
-        waypoints: waypoints,
+        waypoints: dedupedWaypoints,
         rate: waypointRate,
         totalTimeMs: totalTimeMs,
-        numPoints: waypoints.length,
+        numPoints: dedupedWaypoints.length,
         deltaT: deltaT,
         sent: false
     };
 
     markTrajectoryActive();
-    
+
     $.ajax({
         url: '/can/waypoint_batch',
         method: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ joint: joint, waypoints: waypoints })
+        data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
     }).done(response => {
         if (response.status === 'success') {
-            appendStatusMessage(`✅ Dual-DOF batch sent: ${waypoints.length} waypoints`);
+            appendStatusMessage(`✅ Dual-DOF batch sent: ${dedupedWaypoints.length} waypoints`);
             lastWaypointBatch.sent = true;
             updateWaypointViewBtn();
         } else {
@@ -4615,6 +4665,9 @@ function previewWaypointBatch() {
         });
     }
 
+    // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
+    const dedupedWaypoints = deduplicateWaypoints(waypoints);
+
     // Save to lastWaypointBatch for info display
     lastWaypointBatch = {
         timestamp: new Date(),
@@ -4622,10 +4675,10 @@ function previewWaypointBatch() {
         source: is2DOF ? 'preview-2dof' : 'preview',
         startAngles: { dof0: startAngle0, dof1: startAngle1 },
         targetAngles: { dof0: targetAngle0, dof1: targetAngle1 },
-        waypoints: waypoints,
+        waypoints: dedupedWaypoints,
         rate: waypointRate,
         totalTimeMs: totalTimeMs,
-        numPoints: waypoints.length,
+        numPoints: dedupedWaypoints.length,
         deltaT: deltaT,
         sent: false,
         startSource: startSource
@@ -8350,13 +8403,16 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
                 t_offset_ms: Math.round(desiredArrival)
             });
         }
-        
+
+        // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
+        const dedupedWaypoints = deduplicateWaypoints(waypoints);
+
         // Send batch
         $.ajax({
             url: '/can/waypoint_batch',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({ waypoints: waypoints })
+            data: JSON.stringify({ waypoints: dedupedWaypoints })
         }).done(response => {
             if (response.status === 'success') {
                 resolve(response);
@@ -8403,12 +8459,15 @@ async function sendMultiWaypointSmoothCurveAsync() {
                 t_offset_ms: Math.round(desiredArrival)
             });
         }
-        
+
+        // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
+        const dedupedWaypoints = deduplicateWaypoints(waypoints);
+
         $.ajax({
             url: '/can/waypoint_batch',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({ waypoints: waypoints })
+            data: JSON.stringify({ waypoints: dedupedWaypoints })
         }).done(response => {
             if (response.status === 'success') {
                 resolve(response);
