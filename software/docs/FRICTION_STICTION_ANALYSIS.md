@@ -91,18 +91,23 @@ break-free event.
 
 **Logic:**
 1. If joint expected velocity is below `friction_ff_speed_thresh` (default 3.0 deg/s):
-   - Apply `friction_ff_torque` in the direction of motion
-   - Linearly ramp from full feedforward at near-zero speed to zero at the threshold
+   - Apply **constant** `friction_ff_torque` in the direction of motion
+   - No ramp — the motor deadband is a threshold phenomenon, not proportional
 2. If velocity is above threshold: no feedforward (kinetic friction is manageable)
 3. If velocity is exactly zero (holding): no feedforward (dead zone at 0.01 deg/s)
+
+**Why constant (step) instead of ramp:** The motor deadband is binary — below ~30
+units the motor doesn't move, above it moves freely. A ramp that fades to zero would
+drop below the deadband at intermediate speeds, making it useless. A constant step
+ensures the FF always exceeds the deadband whenever it's active. The PID incremental
+form handles the step transition cleanly (`uprev = u - uff`).
 
 **Formula:**
 ```
 speed = |expected_velocity|
 if speed > 0.01 AND speed <= threshold:
     direction = sign(expected_velocity)
-    ramp = 1.0 - (speed / threshold)
-    uff_agonist     = friction_torque * direction * ramp
+    uff_agonist     = friction_torque * direction
     uff_antagonist  = -uff_agonist
 ```
 

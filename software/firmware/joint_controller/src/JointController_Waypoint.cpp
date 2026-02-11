@@ -1200,17 +1200,23 @@ bool JointController::executeWaypointMovement() {
     // === FRICTION FEEDFORWARD ===
     // At low speeds, tendon systems exhibit stick-slip friction: the joint stalls
     // until the PID accumulates enough error to overcome static friction, then snaps
-    // forward violently. This feedforward adds a small torque in the direction of
-    // expected motion to pre-load against static friction, reducing stall time and
-    // overshoot at break-free. Ramps linearly from full at speed≈0 to zero at threshold.
+    // forward violently. This feedforward adds a constant torque in the direction of
+    // expected motion to overcome the motor deadband and static friction.
+    //
+    // The motor deadband is a threshold phenomenon (not proportional): below ~30 units
+    // the motor doesn't move at all, above it moves freely. So we apply a constant
+    // step (not a ramp) whenever speed is in the low-velocity zone. This ensures the
+    // feedforward always exceeds the deadband when active.
+    //
+    // The PID incremental form handles the FF→0 transition cleanly: uprev = u - uff,
+    // so when FF drops out, the accumulated output already accounts for it.
     float uff_A = 0.0f;
     float uff_B = 0.0f;
     if (friction_ff_enabled) {
       float speed = fabs(expected_velocity_cache[dof]);
       if (speed > 0.01f && speed <= friction_ff_speed_thresh) {
         float direction = (expected_velocity_cache[dof] >= 0.0f) ? 1.0f : -1.0f;
-        float ramp = 1.0f - (speed / friction_ff_speed_thresh);
-        float ff = friction_ff_torque * direction * ramp;
+        float ff = friction_ff_torque * direction;
         uff_A = ff;       // Agonist: push in movement direction
         uff_B = -ff;      // Antagonist: opposite (tendon opposition)
       }
