@@ -1324,7 +1324,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 jema_alpha = float(data.get('jema_alpha', 0.5))
                 jema_speed = float(data.get('jema_speed', 15.0))
                 fric_enabled = int(data.get('fric_enabled', 0))
-                fric_torque = float(data.get('fric_torque', 15.0))
+                fric_torque = float(data.get('fric_torque', 30.0))
                 fric_speed = float(data.get('fric_speed', 3.0))
                 params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
                           f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}"

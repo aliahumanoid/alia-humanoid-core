@@ -111,15 +111,19 @@ if speed > 0.01 AND speed <= threshold:
 | Parameter | Serial command | Default | Range | Description |
 |-----------|---------------|---------|-------|-------------|
 | Enable | `FRIC_EN=1` | 0 (off) | 0-1 | Enable/disable |
-| Torque | `FRIC_TORQUE=15` | 15.0 | 0-100 | Feedforward magnitude |
+| Torque | `FRIC_TORQUE=30` | 30.0 | 0-100 | Feedforward magnitude (matches motor deadband) |
 | Speed threshold | `FRIC_SPEED=3.0` | 3.0 | 0.1-50 | Velocity threshold (deg/s) |
+
+**Note:** Default torque of 30 matches the observed motor deadband at bench (~30 motor
+units required to initiate motion with no load). Under tendon load, may need higher values.
 
 ### Runtime Configuration
 
-Parameters are set via the `CMD:CASCADE_SPEED_SCALING` serial command:
+Parameters are set via the `CMD:CASCADE_SPEED_SCALING` serial command or the
+**Velocity Tuning** panel in the web UI (red "Friction Feedforward" section):
 
 ```
-CMD:CASCADE_SPEED_SCALING FRIC_EN=1 FRIC_TORQUE=15 FRIC_SPEED=3.0
+CMD:CASCADE_SPEED_SCALING FRIC_EN=1 FRIC_TORQUE=30 FRIC_SPEED=3.0
 ```
 
 All three parameters are optional and can be combined with other cascade parameters
@@ -137,14 +141,15 @@ The feedforward value is visible in the PID diagnostics:
 ## Tuning Guide
 
 ### Starting Point
-1. Enable with conservative values: `FRIC_EN=1 FRIC_TORQUE=15 FRIC_SPEED=3.0`
+1. Enable with default values: `FRIC_EN=1 FRIC_TORQUE=30 FRIC_SPEED=3.0`
+   (or use the toggle in the Velocity Tuning panel of the web UI)
 2. Run a slow ramp (10 to 70 deg, ~10s) and record PID diagnostics CSV
 3. Compare with baseline (FRIC_EN=0): look at stuck sample count in first/last 30 samples
 
 ### If vibration persists (still too many stuck samples):
-- **Increase FRIC_TORQUE** in steps of 5 (20, 25, 30)
+- **Increase FRIC_TORQUE** in steps of 5 (35, 40, 45)
+- Motor deadband is ~30 units at bench; under tendon load, may need 40-50
 - The break-free torque was ~341, running torque ~320, delta ~21
-- FRIC_TORQUE of ~20-30 should match the static friction offset
 
 ### If joint overshoots at transitions:
 - **Decrease FRIC_TORQUE** in steps of 5

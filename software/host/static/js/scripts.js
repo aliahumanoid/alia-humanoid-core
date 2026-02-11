@@ -2032,7 +2032,7 @@ function sendCascadeSpeedScaling() {
     const jemaAlpha = parseFloat(document.getElementById('jointEmaAlpha').value) || 0.5;
     const jemaSpeed = parseFloat(document.getElementById('jointEmaSpeedThreshold').value) || 15.0;
     const fricEnabled = document.getElementById('frictionFfEnabled').checked ? 1 : 0;
-    const fricTorque = parseFloat(document.getElementById('frictionFfTorque').value) || 15.0;
+    const fricTorque = parseFloat(document.getElementById('frictionFfTorque').value) || 30.0;
     const fricSpeed = parseFloat(document.getElementById('frictionFfSpeed').value) || 3.0;
 
     // Update display labels
