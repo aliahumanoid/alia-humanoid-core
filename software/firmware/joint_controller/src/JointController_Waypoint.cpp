@@ -1200,23 +1200,31 @@ bool JointController::executeWaypointMovement() {
     // === FRICTION FEEDFORWARD ===
     // At low speeds, tendon systems exhibit stick-slip friction: the joint stalls
     // until the PID accumulates enough error to overcome static friction, then snaps
-    // forward violently. This feedforward adds a constant torque in the direction of
-    // expected motion to overcome the motor deadband and static friction.
+    // forward violently. This feedforward adds torque in the direction of expected
+    // motion to overcome the motor deadband and static friction.
     //
-    // The motor deadband is a threshold phenomenon (not proportional): below ~30 units
-    // the motor doesn't move at all, above it moves freely. So we apply a constant
-    // step (not a ramp) whenever speed is in the low-velocity zone. This ensures the
-    // feedforward always exceeds the deadband when active.
+    // Profile (trapezoidal with soft fade-out):
+    //   speed = 0            → FF = 0          (holding, dead zone)
+    //   0.01 < speed ≤ T     → FF = full       (constant, exceeds deadband)
+    //   T < speed ≤ 2*T      → FF = fade→0     (linear ramp-down, smooth release)
+    //   speed > 2*T          → FF = 0          (kinetic friction only, PID handles it)
     //
-    // The PID incremental form handles the FF→0 transition cleanly: uprev = u - uff,
-    // so when FF drops out, the accumulated output already accounts for it.
+    // The constant region ensures FF always exceeds the motor deadband (~30 units).
+    // The fade-out region avoids a hard step when crossing the threshold.
     float uff_A = 0.0f;
     float uff_B = 0.0f;
     if (friction_ff_enabled) {
       float speed = fabs(expected_velocity_cache[dof]);
-      if (speed > 0.01f && speed <= friction_ff_speed_thresh) {
+      float T = friction_ff_speed_thresh;
+      if (speed > 0.01f && speed <= 2.0f * T) {
         float direction = (expected_velocity_cache[dof] >= 0.0f) ? 1.0f : -1.0f;
-        float ff = friction_ff_torque * direction;
+        float gain;
+        if (speed <= T) {
+          gain = 1.0f;                         // Full FF below threshold
+        } else {
+          gain = 1.0f - (speed - T) / T;       // Linear fade from T to 2*T
+        }
+        float ff = friction_ff_torque * direction * gain;
         uff_A = ff;       // Agonist: push in movement direction
         uff_B = -ff;      // Antagonist: opposite (tendon opposition)
       }

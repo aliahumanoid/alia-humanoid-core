@@ -89,26 +89,36 @@ break-free event.
 
 **Location:** Inner PID feedforward parameter (`uff`) in `JointController_Waypoint.cpp`
 
-**Logic:**
-1. If joint expected velocity is below `friction_ff_speed_thresh` (default 3.0 deg/s):
-   - Apply **constant** `friction_ff_torque` in the direction of motion
-   - No ramp — the motor deadband is a threshold phenomenon, not proportional
-2. If velocity is above threshold: no feedforward (kinetic friction is manageable)
-3. If velocity is exactly zero (holding): no feedforward (dead zone at 0.01 deg/s)
+**Logic (trapezoidal profile with soft fade-out):**
+1. If velocity is exactly zero (holding): no feedforward (dead zone at 0.01 deg/s)
+2. If velocity is below `friction_ff_speed_thresh` T (default 3.0 deg/s):
+   - Apply **full** `friction_ff_torque` in the direction of motion (constant step)
+   - This ensures FF always exceeds the motor deadband (~30 units)
+3. If velocity is between T and 2×T: **linear fade-out** from full to zero
+   - Avoids a hard step discontinuity when crossing the threshold
+4. If velocity is above 2×T: no feedforward (kinetic friction only, PID handles it)
 
-**Why constant (step) instead of ramp:** The motor deadband is binary — below ~30
-units the motor doesn't move, above it moves freely. A ramp that fades to zero would
-drop below the deadband at intermediate speeds, making it useless. A constant step
-ensures the FF always exceeds the deadband whenever it's active. The PID incremental
-form handles the step transition cleanly (`uprev = u - uff`).
+**Why constant below T:** The motor deadband is binary — below ~30 units the motor
+doesn't move, above it moves freely. A ramp that fades to zero would drop below the
+deadband at intermediate speeds, making it useless. The constant region ensures the
+FF always exceeds the deadband when stiction matters most.
+
+**Why soft fade-out above T:** A pure step would create a torque discontinuity when
+the velocity crosses the threshold. The linear ramp-down from T to 2×T smooths the
+transition. The PID incremental form handles this cleanly (`uprev = u - uff`).
 
 **Formula:**
 ```
 speed = |expected_velocity|
-if speed > 0.01 AND speed <= threshold:
-    direction = sign(expected_velocity)
-    uff_agonist     = friction_torque * direction
-    uff_antagonist  = -uff_agonist
+T = friction_ff_speed_thresh
+
+if speed ≤ 0.01:                         → FF = 0 (holding)
+else if speed ≤ T:                       → FF = friction_torque × sign(velocity)
+else if speed ≤ 2×T:                     → FF = friction_torque × sign(velocity) × (1 - (speed-T)/T)
+else:                                    → FF = 0 (kinetic regime)
+
+uff_agonist     = FF
+uff_antagonist  = -FF
 ```
 
 ### Parameters
@@ -117,7 +127,7 @@ if speed > 0.01 AND speed <= threshold:
 |-----------|---------------|---------|-------|-------------|
 | Enable | `FRIC_EN=1` | 0 (off) | 0-1 | Enable/disable |
 | Torque | `FRIC_TORQUE=30` | 30.0 | 0-100 | Feedforward magnitude (matches motor deadband) |
-| Speed threshold | `FRIC_SPEED=3.0` | 3.0 | 0.1-50 | Velocity threshold (deg/s) |
+| Speed threshold | `FRIC_SPEED=3.0` | 3.0 | 0.1-50 | Full-FF zone limit (deg/s); fade-out extends to 2× this value |
 
 **Note:** Default torque of 30 matches the observed motor deadband at bench (~30 motor
 units required to initiate motion with no load). Under tendon load, may need higher values.
@@ -158,7 +168,7 @@ The feedforward value is visible in the PID diagnostics:
 
 ### If joint overshoots at transitions:
 - **Decrease FRIC_TORQUE** in steps of 5
-- Or **decrease FRIC_SPEED** to narrow the active zone
+- Or **decrease FRIC_SPEED** to narrow the active zone (also narrows the fade-out zone)
 
 ### If vibration only at very low speeds:
 - **Decrease FRIC_SPEED** (e.g., 2.0 or 1.5 deg/s)
