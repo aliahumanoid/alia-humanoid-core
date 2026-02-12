@@ -125,7 +125,7 @@ uff_antagonist  = -FF
 
 | Parameter | Serial command | Default | Range | Description |
 |-----------|---------------|---------|-------|-------------|
-| Enable | `FRIC_EN=1` | 0 (off) | 0-1 | Enable/disable |
+| Enable | `FRIC_EN=1` | 1 (on) | 0-1 | Enable/disable |
 | Torque | `FRIC_TORQUE=30` | 30.0 | 0-100 | Feedforward magnitude (matches motor deadband) |
 | Speed threshold | `FRIC_SPEED=3.0` | 3.0 | 0.1-50 | Full-FF zone limit (deg/s); fade-out extends to 2× this value |
 
@@ -187,6 +187,55 @@ The feedforward value is visible in the PID diagnostics:
 | `main.cpp` | Define friction_ff_* with defaults |
 | `JointController_Waypoint.cpp` | Compute and inject feedforward into inner PIDs |
 | `core0.cpp` | Serial command parsing for FRIC_EN/FRIC_TORQUE/FRIC_SPEED |
+
+---
+
+## Related Optimizations
+
+### Smart Startup — Skip recalcOffset (commit 4908120)
+
+During startup, the firmware now validates saved motor offsets (from flash) against
+current motor positions before running the full recalc sequence. If motors kept power
+and offsets are within the 5° threshold, they are applied directly — skipping the
+pretensioning sequence (~2-3s per DOF).
+
+**Startup flow per DOF:**
+1. `CMD_APPLY_SAVED_OFFSETS` → `validateSavedOffsets()` → error < 5°?
+2. YES → apply offsets from flash, skip recalc (~100ms)
+3. NO → fallback to full `CMD_RECALC_OFFSET` with pretension (~2-3s)
+
+**Serial events:** `EVT:STARTUP_DOF_SKIP` (offsets valid), `EVT:STARTUP_DOF_RECALC` (recalc needed)
+
+### Encoder Zero Boot Validation (EncoderFlashData v2)
+
+The MT6835 joint encoder is absolute — the raw angle for a given physical position is
+deterministic. When the encoder zero offset is set, the firmware now saves the raw angle
+at calibration time alongside the offset. At boot, it compares the current raw with the
+saved raw. If they differ by more than ~2.9° (0.05 rad), the zero offset is flagged as
+invalid and startup is blocked with `REASON=ENCODER_ZERO_INVALID`.
+
+**Why:** Certain firmware flash operations (full chip erase, large UF2 uploads) can
+erase the flash sector at 512KB where encoder offsets are stored. Without validation,
+the system would silently start with wrong joint angles, making recalcOffset produce
+incorrect motor offsets.
+
+**Flash layout:**
+```
+0-210KB    Firmware
+256KB      PID data
+320KB      Linear equations
+384KB      System settings
+448KB      Motor offsets
+512KB      Encoder zero offsets (EncoderFlashData v2)
+```
+
+### CAN Timing Optimizations
+
+| Optimization | Commit | Savings |
+|---|---|---|
+| Non-blocking setTorque (`sendMsgBufNoWait`) | 8e41987 | ~300 µs/cycle |
+| Torque profiling in WP PROF | 24453ee | (measurement) |
+| Zero-step waypoint dedup | 78dd3b6 | Eliminates stalls at cosine curve extremes |
 
 ---
 
