@@ -37,7 +37,7 @@
 
 // Flash storage constants
 #define ENCODER_FLASH_MAGIC_NUMBER 0xE5C0FFEE    // Magic number for validation ("ESCOFFEE")
-#define ENCODER_FLASH_STRUCT_VERSION 1            // Structure version
+#define ENCODER_FLASH_STRUCT_VERSION 2            // Structure version (v2: added raw_angles for boot validation)
 #define ENCODER_FLASH_TARGET_OFFSET (512 * 1024)  // 512KB offset (separate from other data)
 
 /**
@@ -47,7 +47,8 @@ struct EncoderFlashData {
   uint32_t magic_number;       ///< Magic number for validation
   uint16_t version;            ///< Structure version
   uint16_t checksum;           ///< Checksum for data integrity
-  float offsets[DIRECT_ENCODER_COUNT];  ///< Encoder zero offsets (radians)
+  float offsets[DIRECT_ENCODER_COUNT];      ///< Encoder zero offsets (radians)
+  float raw_angles[DIRECT_ENCODER_COUNT];   ///< Raw MT6835 angles at calibration time (radians) [v2]
 };
 
 /**
@@ -241,6 +242,12 @@ public:
    */
   bool isFlashDataValid() const { return _flashDataValid; }
 
+  /**
+   * @brief Check if encoder zero offsets passed boot validation
+   * @return true if all offsets are consistent with stored raw angles
+   */
+  bool isZeroValid() const { return _zeroValid; }
+
 private:
   // SPI object for encoder communication
   SPIClassRP2040 *_spi;
@@ -259,6 +266,10 @@ private:
   
   // Zero offsets (radians)
   float _offsets[DIRECT_ENCODER_COUNT];
+
+  // Raw angles at calibration time (for boot validation, loaded from flash v2)
+  float _flash_raw_angles[DIRECT_ENCODER_COUNT];
+  bool _has_flash_raw_angles;  // true if v2 data with raw_angles was loaded
   
   // Multi-turn tracking
   int32_t _turns[DIRECT_ENCODER_COUNT];
@@ -280,6 +291,7 @@ private:
   // Data validity
   bool _dataValid;
   bool _flashDataValid;  // Track if flash data was loaded correctly
+  bool _zeroValid;       // true if boot validation of encoder zero passed
   
   // Timing
   unsigned long _last_read_us;
