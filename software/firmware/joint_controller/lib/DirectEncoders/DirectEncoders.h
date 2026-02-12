@@ -241,6 +241,12 @@ public:
    */
   bool isFlashDataValid() const { return _flashDataValid; }
 
+  /**
+   * @brief Check and consume offsets-changed flag (for EVT emission by core0)
+   * @return true if offsets were changed since last call (auto-clears)
+   */
+  bool offsetsChanged() { bool v = _offsets_changed; _offsets_changed = false; return v; }
+
 private:
   // SPI object for encoder communication
   SPIClassRP2040 *_spi;
@@ -280,6 +286,7 @@ private:
   // Data validity
   bool _dataValid;
   bool _flashDataValid;  // Track if flash data was loaded correctly
+  bool _offsets_changed;  // Flag for core0 EVT emission after save/load
   
   // Timing
   unsigned long _last_read_us;

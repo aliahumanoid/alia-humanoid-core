@@ -148,6 +148,13 @@ volatile uint8_t can_startup_joint_id = 0;
 volatile int16_t can_startup_torque = 0;
 volatile int16_t can_startup_duration = 0;
 
+// CAN-triggered set-zero (Core1 sets flags, Core0 executes)
+volatile bool can_set_zero_requested = false;
+volatile uint8_t can_set_zero_dof_index = 0;
+
+// CAN encoder offset notification (Core0 sets flag, Core1 sends CAN frames)
+volatile bool can_encoder_offsets_notify = false;
+
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 queue_t startup_event_queue;
 

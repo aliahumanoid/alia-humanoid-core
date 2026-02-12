@@ -93,6 +93,9 @@ class SerialHandler:
         self.sequence_movement_data = []  # Accumulates movement data for all steps
         self.sequence_current_step = 0
 
+        # Encoder offset cross-validation
+        self._encoder_offsets: Dict[str, float] = {}  # key: "jointId_encIdx" → offset_rad
+
         # Initialize logger for communication (shared with CAN if provided)
         self.serial_logger = serial_logger or SerialLogger("logs/serial_communication.log")
         self._owns_logger = serial_logger is None
@@ -263,6 +266,9 @@ class SerialHandler:
             elif actual_message.startswith("OFFSET_DRIFT("):
                 # Parse offset drift check: OFFSET_DRIFT(joint_id,dof,status,err_a,err_b)
                 self._handle_offset_drift(actual_message)
+            elif actual_message.startswith("ENCODER_OFFSET("):
+                # Parse encoder offset for host cross-validation
+                self._handle_encoder_offset(actual_message)
             elif actual_message.startswith("JOINT "):
                 # Parse joint identification: "JOINT <id> <name>"
                 self._handle_joint_identification(actual_message)
@@ -422,6 +428,123 @@ class SerialHandler:
         else:
             logger.warning(f"Failed to parse OFFSET_DRIFT: {message}")
             self.status_message.append(message)
+
+    def _handle_encoder_offset(self, message: str) -> None:
+        """Parse ENCODER_OFFSET(joint_id,encoder_index,offset_rad) for cross-validation.
+
+        On every receive:
+        1. Compare with saved file (if exists) → warn on mismatch
+        2. Save/overwrite to calibration_data/{joint}_encoder_offsets.json
+        3. Emit SocketIO event for UI
+        """
+        match = re.match(
+            r"ENCODER_OFFSET\((\d+),(\d+),([-+]?\d*\.?\d+)\)",
+            message,
+        )
+        if not match:
+            logger.warning(f"Failed to parse ENCODER_OFFSET: {message}")
+            return
+
+        joint_id = int(match.group(1))
+        encoder_index = int(match.group(2))
+        offset_rad = float(match.group(3))
+
+        # Store in memory
+        key = f"{joint_id}_{encoder_index}"
+        self._encoder_offsets[key] = offset_rad
+
+        # Resolve joint name for file storage
+        joint_name = self.detected_joint_name
+        if not joint_name:
+            # Fallback: look up from JOINTS config
+            for name, info in JOINTS.items():
+                if info.get("id") == joint_id:
+                    joint_name = name
+                    break
+        if not joint_name:
+            joint_name = f"joint_{joint_id}"
+
+        # Cross-validate against saved offsets
+        saved = self._load_encoder_offsets(joint_name)
+        if saved is not None:
+            saved_key = str(encoder_index)
+            if saved_key in saved.get("offsets", {}):
+                saved_val = saved["offsets"][saved_key]
+                delta = abs(offset_rad - saved_val)
+                if delta > 0.001:  # ~0.06° tolerance for float precision
+                    logger.warning(
+                        f"⚠️ ENCODER OFFSET MISMATCH: joint={joint_name} enc={encoder_index} "
+                        f"firmware={offset_rad:.6f} saved={saved_val:.6f} delta={delta:.6f} rad"
+                    )
+                    self.status_message.append(
+                        f"⚠️ Encoder {encoder_index} offset mismatch! "
+                        f"Firmware: {offset_rad:.4f}, Saved: {saved_val:.4f} (Δ={delta:.4f} rad)"
+                    )
+                    if self.socketio:
+                        self.socketio.emit(
+                            "encoder_offset_mismatch",
+                            {
+                                "joint_id": joint_id,
+                                "joint_name": joint_name,
+                                "encoder_index": encoder_index,
+                                "firmware_offset": offset_rad,
+                                "saved_offset": saved_val,
+                                "delta_rad": delta,
+                            },
+                            namespace="/movement",
+                        )
+
+        # Save current offsets to file (overwrite)
+        self._save_encoder_offset(joint_name, encoder_index, offset_rad)
+
+        logger.info(
+            f"Encoder offset: joint={joint_name} enc={encoder_index} offset={offset_rad:.6f} rad"
+        )
+
+        if self.socketio:
+            self.socketio.emit(
+                "encoder_offset",
+                {
+                    "joint_id": joint_id,
+                    "encoder_index": encoder_index,
+                    "offset_rad": offset_rad,
+                },
+                namespace="/movement",
+            )
+
+    def _save_encoder_offset(self, joint_name: str, encoder_index: int, offset_rad: float) -> None:
+        """Save/update encoder offset to calibration_data/{joint}_encoder_offsets.json"""
+        try:
+            os.makedirs("calibration_data", exist_ok=True)
+            filename = f"calibration_data/{joint_name.lower()}_encoder_offsets.json"
+
+            # Load existing data or create new
+            data = self._load_encoder_offsets(joint_name) or {
+                "joint_name": joint_name,
+                "offsets": {},
+            }
+
+            # Update the specific encoder offset
+            data["offsets"][str(encoder_index)] = offset_rad
+            data["timestamp"] = datetime.now().isoformat()
+
+            with open(filename, "w") as f:
+                json.dump(data, f, indent=2)
+
+        except Exception as e:
+            logger.error(f"Error saving encoder offset for {joint_name}: {e}")
+
+    def _load_encoder_offsets(self, joint_name: str) -> Optional[Dict]:
+        """Load saved encoder offsets from calibration_data/{joint}_encoder_offsets.json"""
+        try:
+            filename = f"calibration_data/{joint_name.lower()}_encoder_offsets.json"
+            if not os.path.exists(filename):
+                return None
+            with open(filename, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading encoder offsets for {joint_name}: {e}")
+            return None
 
     def handle_mapping_data(self, line: str, ser: serial.Serial) -> None:
         # MAPPING_DATA(total_points,dof_count) protocol

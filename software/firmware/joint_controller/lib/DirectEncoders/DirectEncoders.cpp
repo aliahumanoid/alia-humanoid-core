@@ -65,6 +65,7 @@ DirectEncoders::DirectEncoders(bool *encoder_invert) {
   
   _dataValid = false;
   _flashDataValid = false;
+  _offsets_changed = false;
   _last_read_us = 0;
   _spi = nullptr;
 }
@@ -576,10 +577,11 @@ bool DirectEncoders::saveOffsetsToFlash() {
   flash_operation_in_progress = false;
   
   _flashDataValid = true;
+  _offsets_changed = true;
   LOG_INFO("Encoder offsets saved to flash successfully!");
-  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad", 
+  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad",
              data.offsets[0], data.offsets[1], data.offsets[2]);
-  
+
   return true;
 }
 
@@ -620,10 +622,11 @@ bool DirectEncoders::loadOffsetsFromFlash() {
   }
   
   _flashDataValid = true;
+  _offsets_changed = true;
   LOG_INFO("Encoder offsets loaded from flash successfully!");
-  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad", 
+  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad",
              data.offsets[0], data.offsets[1], data.offsets[2]);
-  
+
   return true;
 }
 

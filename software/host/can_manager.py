@@ -73,6 +73,14 @@ class CanManager:
         # Format: {joint_id: {"angles_deg": [...], "timestamp_ms": int, "timestamp": float}}
         self._last_encoder_angles: Dict[int, Dict[str, Any]] = {}
         
+        # Encoder offset cross-validation via CAN
+        self._encoder_offset_buffer: Dict[int, float] = {}  # enc_index → offset_rad
+        self._encoder_offset_event = threading.Event()
+        self._encoder_offset_expected: int = 0  # how many responses expected
+
+        # CAN set-zero completion event
+        self._zero_complete_event = threading.Event()
+
         # Configuration persistence
         self._config_file = "can_config.json"
 
@@ -274,27 +282,52 @@ class CanManager:
             Dict with request status
         """
         self._ensure_connection()
-        joint_id = self._resolve_joint_id(joint_name)
+        joint_id = JOINTS[joint_name]["id"]
         payload = struct.pack("<BBhh", joint_id, 0, torque, duration) + bytes(2)
         self._send_frame(0x009, payload,
                          context=f"Startup seq joint={joint_name} torque={torque} dur={duration}")
         self._log_can_info(f"Startup sequence requested for {joint_name}")
         return {"joint": joint_name, "requested": True}
 
-    def start_encoder_stream(self) -> Dict[str, Any]:
+    def start_encoder_stream(self, joint_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Start encoder streaming via CAN at 200Hz.
-        
+
         Sends control command (0x003) to enable high-frequency angle data.
         Data arrives on 0x410 and is decoded in _handle_encoder_stream().
+
+        If joint_name is provided, validates encoder offsets against saved
+        host copy before starting. Blocks streaming on mismatch.
         """
         self._ensure_connection()
+
+        # Cross-validate encoder offsets before streaming
+        validation = None
+        if joint_name:
+            validation = self.validate_encoder_offsets(joint_name)
+            if not validation["valid"]:
+                self._log_can_info(
+                    f"Encoder stream BLOCKED — offset mismatch for {joint_name}"
+                )
+                self.logger.warning(
+                    f"Encoder offset validation failed: {validation['details']}"
+                )
+                return {
+                    "streaming": False,
+                    "blocked": True,
+                    "reason": "encoder_offset_mismatch",
+                    "validation": validation,
+                }
+
         payload = bytes([0x01]) + bytes(7)  # 0x01 = start streaming
         self._send_frame(0x003, payload, context="Encoder stream START")
         self._encoder_stream_active = True
         self._encoder_stream_data.clear()
         self._log_can_info("Encoder streaming started @ 50Hz")
-        return {"streaming": True}
+        result: Dict[str, Any] = {"streaming": True}
+        if validation:
+            result["validation"] = validation
+        return result
 
     def stop_encoder_stream(self) -> Dict[str, Any]:
         """
@@ -306,6 +339,177 @@ class CanManager:
         self._encoder_stream_active = False
         self._log_can_info("Encoder streaming stopped")
         return {"streaming": False}
+
+    def query_encoder_offsets(self, joint_name: str, expected_count: int = 3,
+                              timeout: float = 1.0) -> Dict[int, float]:
+        """Query encoder offsets from firmware via CAN (0x00A → 0x4B0 response).
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            expected_count: Number of encoder responses to wait for
+            timeout: Seconds to wait for all responses
+
+        Returns:
+            Dict mapping encoder_index → offset_rad
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+
+        # Prepare buffer
+        with self._lock:
+            self._encoder_offset_buffer.clear()
+            self._encoder_offset_expected = expected_count
+            self._encoder_offset_event.clear()
+
+        # Send request
+        payload = bytes([joint_id]) + bytes(7)
+        self._send_frame(0x00A, payload, context=f"Get encoder offsets joint={joint_name}")
+
+        # Wait for responses
+        self._encoder_offset_event.wait(timeout=timeout)
+
+        with self._lock:
+            result = dict(self._encoder_offset_buffer)
+
+        if len(result) < expected_count:
+            self._log_can_info(
+                f"Encoder offset query: got {len(result)}/{expected_count} responses"
+            )
+
+        return result
+
+    def validate_encoder_offsets(self, joint_name: str) -> Dict[str, Any]:
+        """Query firmware encoder offsets and validate against saved host copy.
+
+        Returns:
+            Dict with 'valid' (bool), 'details' (list of per-encoder results),
+            and 'firmware_offsets' (dict of received offsets).
+        """
+        import os
+        import json as _json
+
+        firmware_offsets = self.query_encoder_offsets(joint_name)
+        if not firmware_offsets:
+            return {"valid": False, "details": ["No response from firmware"], "firmware_offsets": {}}
+
+        # Load saved offsets
+        filename = f"calibration_data/{joint_name.lower()}_encoder_offsets.json"
+        saved_data = None
+        if os.path.exists(filename):
+            try:
+                with open(filename, "r") as f:
+                    saved_data = _json.load(f)
+            except Exception as e:
+                self.logger.error(f"Error loading saved offsets: {e}")
+
+        if saved_data is None:
+            # No saved data — save current as baseline, consider valid (first run)
+            self._save_encoder_offsets(joint_name, firmware_offsets)
+            return {
+                "valid": True,
+                "details": ["No saved offsets — saved current as baseline"],
+                "firmware_offsets": firmware_offsets,
+            }
+
+        # Compare
+        THRESHOLD = 0.001  # ~0.06° tolerance for float precision
+        details = []
+        all_valid = True
+        for enc_idx, fw_offset in firmware_offsets.items():
+            saved_val = saved_data.get("offsets", {}).get(str(enc_idx))
+            if saved_val is None:
+                details.append(f"Encoder {enc_idx}: no saved reference")
+                continue
+            delta = abs(fw_offset - saved_val)
+            if delta > THRESHOLD:
+                details.append(
+                    f"Encoder {enc_idx}: MISMATCH fw={fw_offset:.6f} saved={saved_val:.6f} "
+                    f"delta={delta:.6f} rad"
+                )
+                all_valid = False
+            else:
+                details.append(f"Encoder {enc_idx}: OK (delta={delta:.8f} rad)")
+
+        if all_valid:
+            # Update saved offsets (in case of tiny float drift)
+            self._save_encoder_offsets(joint_name, firmware_offsets)
+
+        # Emit mismatch warning to UI
+        if not all_valid and self.socketio:
+            self.socketio.emit(
+                "encoder_offset_mismatch",
+                {
+                    "joint_name": joint_name,
+                    "details": details,
+                    "firmware_offsets": {str(k): v for k, v in firmware_offsets.items()},
+                },
+                namespace="/movement",
+            )
+
+        return {"valid": all_valid, "details": details, "firmware_offsets": firmware_offsets}
+
+    def set_zero_via_can(self, joint_name: str, dof_index: int,
+                         timeout: float = 5.0) -> Dict[str, Any]:
+        """Send set-zero command via CAN and wait for completion.
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            dof_index: DOF index within the joint
+            timeout: Seconds to wait for zero-complete response
+
+        Returns:
+            Dict with 'success' (bool) and either 'offsets' or 'error'.
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+
+        # Prepare state for receiving offset data + completion summary
+        with self._lock:
+            self._encoder_offset_buffer.clear()
+            self._zero_complete_event.clear()
+
+        # Send set-zero command: [joint_id, dof_index, 0, 0, 0, 0, 0, 0]
+        payload = bytes([joint_id, dof_index, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x00B, payload,
+                         context=f"Set zero {joint_name} DOF {dof_index}")
+
+        # Wait for zero-complete summary frame (0x4C0)
+        if self._zero_complete_event.wait(timeout=timeout):
+            with self._lock:
+                offsets = dict(self._encoder_offset_buffer)
+            # Save new offsets after successful zero
+            self._save_encoder_offsets(joint_name, offsets)
+            self._log_can_info(
+                f"Set-zero complete: {joint_name} DOF {dof_index}, "
+                f"{len(offsets)} encoder offsets saved"
+            )
+            return {"success": True, "offsets": {str(k): v for k, v in offsets.items()}}
+        else:
+            self.logger.warning(
+                f"Set-zero timeout: {joint_name} DOF {dof_index} "
+                f"(no response within {timeout}s)"
+            )
+            return {"success": False, "error": "timeout"}
+
+    def _save_encoder_offsets(self, joint_name: str, offsets: Dict[int, float]) -> None:
+        """Save encoder offsets to calibration_data/{joint}_encoder_offsets.json"""
+        import os
+        import json as _json
+        from datetime import datetime
+
+        try:
+            os.makedirs("calibration_data", exist_ok=True)
+            filename = f"calibration_data/{joint_name.lower()}_encoder_offsets.json"
+            data = {
+                "joint_name": joint_name,
+                "timestamp": datetime.now().isoformat(),
+                "offsets": {str(k): v for k, v in offsets.items()},
+            }
+            with open(filename, "w") as f:
+                _json.dump(data, f, indent=2)
+            self._log_can_info(f"Encoder offsets saved for {joint_name}")
+        except Exception as e:
+            self.logger.error(f"Error saving encoder offsets for {joint_name}: {e}")
 
     def start_pid_diag_stream(self, terms_enabled: bool = False) -> Dict[str, Any]:
         """
@@ -909,6 +1113,26 @@ class CanManager:
         if 0x4A0 <= arb_id <= 0x4AF and len(data) >= 8:
             joint_id = arb_id - 0x4A0
             self._handle_joint_announce(data, message.timestamp, joint_id)
+            return
+
+        # Encoder offset response (0x4B0-0x4BF) - cross-validation data
+        if 0x4B0 <= arb_id <= 0x4BF and len(data) >= 5:
+            enc_index = data[0]
+            offset_rad = struct.unpack_from("<f", data, 4)[0]
+            with self._lock:
+                self._encoder_offset_buffer[enc_index] = offset_rad
+                if len(self._encoder_offset_buffer) >= self._encoder_offset_expected:
+                    self._encoder_offset_event.set()
+            return
+
+        # Zero-complete summary (0x4C0-0x4CF) - sent after set-zero via CAN
+        if 0x4C0 <= arb_id <= 0x4CF and len(data) >= 4:
+            joint_id = arb_id - 0x4C0
+            enc_count = data[3]
+            self._log_can_info(
+                f"Zero complete: joint={joint_id} encoders={enc_count}"
+            )
+            self._zero_complete_event.set()
             return
 
         # Debug: log any received CAN frame (throttled)

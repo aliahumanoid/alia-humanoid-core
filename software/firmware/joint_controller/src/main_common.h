@@ -154,6 +154,13 @@ extern volatile uint8_t can_startup_joint_id;
 extern volatile int16_t can_startup_torque;    // 0 = use config default
 extern volatile int16_t can_startup_duration;  // 0 = use config default
 
+// CAN-triggered set-zero (Core1 sets flags, Core0 executes)
+extern volatile bool can_set_zero_requested;
+extern volatile uint8_t can_set_zero_dof_index;
+
+// CAN encoder offset notification (Core0 sets flag, Core1 sends CAN frames)
+extern volatile bool can_encoder_offsets_notify;
+
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 struct StartupStatusEvent {
   uint8_t event_type;   // 0=BEGIN, 1=DOF_READY, 2=DOF_FAILED, 3=COMPLETE, 4=FAILED

@@ -108,7 +108,9 @@
 #define CMD_APPLY_SAVED_OFFSETS 38  // Validate + apply saved offsets (skip recalc if valid)
 #endif
 
-// Reserved: 39 for future calibration commands
+#ifndef CMD_GET_ENCODER_OFFSETS
+#define CMD_GET_ENCODER_OFFSETS 39  // Query encoder offsets for host cross-validation
+#endif
 
 // --- PID Control Commands (40-49) ---
 #ifndef CMD_SET_PID

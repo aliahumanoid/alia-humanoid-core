@@ -726,7 +726,15 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             return unavailable
 
         try:
-            result = can_manager.start_encoder_stream()
+            # Pass joint_name for encoder offset cross-validation (optional)
+            joint_name = request.json.get("joint") if request.is_json else None
+            result = can_manager.start_encoder_stream(joint_name=joint_name)
+            if result.get("blocked"):
+                return jsonify({
+                    "status": "error",
+                    "message": "Encoder streaming blocked: encoder offset mismatch detected. Re-zero required.",
+                    "result": result
+                }), 409
             return jsonify({
                 "status": "success",
                 "message": "Encoder streaming started @ 50Hz",
@@ -812,6 +820,60 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             "status": "success",
             **data
         })
+
+    @app.route('/can/encoder_offsets/validate', methods=['POST'])
+    def validate_encoder_offsets():
+        """Validate firmware encoder offsets against saved host copy via CAN."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        joint_name = data.get("joint")
+        if not joint_name:
+            return jsonify({"status": "error", "message": "Missing 'joint' parameter"}), 400
+
+        try:
+            result = can_manager.validate_encoder_offsets(joint_name)
+            status_code = 200 if result["valid"] else 409
+            return jsonify({
+                "status": "success" if result["valid"] else "mismatch",
+                "message": "Encoder offsets valid" if result["valid"] else "Encoder offset mismatch detected",
+                "result": result
+            }), status_code
+        except Exception as exc:
+            logger.exception("Failed to validate encoder offsets")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+    @app.route('/can/set_zero', methods=['POST'])
+    def can_set_zero():
+        """Send set-zero command via CAN and wait for completion."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.get_json() or {}
+        joint_name = data.get("joint")
+        dof_index = data.get("dof", 0)
+        if not joint_name:
+            return jsonify({"status": "error", "message": "Missing 'joint' parameter"}), 400
+
+        try:
+            result = can_manager.set_zero_via_can(joint_name, dof_index)
+            if result.get("success"):
+                return jsonify({
+                    "status": "success",
+                    "message": f"Zero set for {joint_name} DOF {dof_index}",
+                    "offsets": result.get("offsets", {})
+                })
+            else:
+                return jsonify({
+                    "status": "error",
+                    "message": result.get("error", "unknown error")
+                }), 504
+        except Exception as exc:
+            logger.exception("Failed to set zero via CAN")
+            return jsonify({"status": "error", "message": str(exc)}), 500
 
     # ===============================================================
     # CAN PID DIAGNOSTICS STREAMING ROUTES
@@ -1198,9 +1260,17 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 # Send command without parameters
                 handler.send_new_command(joint, dof, COMMANDS['RECALC_OFFSET'])
             elif cmd == "set-zero":
-                # Send command to set current position as zero
-                handler.send_new_command(joint, dof, COMMANDS['SET_ZERO'])
-                message = f"Current position set as zero for {joint} DOF {dof}"
+                # Set-zero is operational → CAN first, serial fallback
+                dof_int = int(dof) if dof != 'ALL' else 0
+                if can_manager and can_manager.is_connected():
+                    result = can_manager.set_zero_via_can(joint, dof_int)
+                    if result.get("success"):
+                        message = f"Zero set via CAN for {joint} DOF {dof_int}"
+                    else:
+                        message = f"Set-zero CAN failed: {result.get('error', 'unknown')}"
+                else:
+                    handler.send_new_command(joint, dof, COMMANDS['SET_ZERO'])
+                    message = f"Current position set as zero for {joint} DOF {dof} (serial)"
             elif cmd == "start-test-encoder":
                 handler.send_new_command(joint, dof, COMMANDS['START_TEST_ENCODER'])
             elif cmd == "stop-test-encoder":

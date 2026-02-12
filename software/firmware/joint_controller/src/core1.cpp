@@ -70,6 +70,10 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_PID_OUTER_TERMS 0x480      // Outer PID P/I/D/output breakdown (optional)
 #define CAN_ID_STARTUP_STATUS 0x490       // Startup status events (Controller → Host)
 #define CAN_ID_JOINT_ANNOUNCE 0x4A0       // Joint announce/discovery (Controller → Host)
+#define CAN_ID_GET_ENCODER_OFFSETS 0x00A  // Request encoder offsets (Host → Controller)
+#define CAN_ID_SET_ZERO 0x00B             // Set-zero command (Host → Controller)
+#define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
+#define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -744,6 +748,28 @@ void pollHostCan() {
       } else {
         LOG_C1_WARN("[CAN_HOST] Startup sequence frame too short: " + String(len) + " bytes");
       }
+    } else if (rx_id == CAN_ID_GET_ENCODER_OFFSETS) {
+      // Encoder offsets query: byte 0 = joint_id
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        uint32_t resp_id = CAN_ID_ENCODER_OFFSETS_DATA + ACTIVE_JOINT;
+        for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
+          if (directEncoders.isEncoderConnected(i)) {
+            float off = directEncoders.getOffset(i);
+            uint8_t frame[8] = {0};
+            frame[0] = (uint8_t)i;  // encoder index
+            memcpy(&frame[4], &off, sizeof(float));  // offset as float32
+            CAN_HOST.sendMsgBuf(resp_id, 0, 8, frame);
+          }
+        }
+        LOG_C1_INFO("[CAN_HOST] Encoder offsets sent (" + String(DIRECT_ENCODER_COUNT) + " enc)");
+      }
+    } else if (rx_id == CAN_ID_SET_ZERO) {
+      // Set-zero command: byte 0 = joint_id, byte 1 = dof_index
+      if (len >= 2 && buf[0] == ACTIVE_JOINT) {
+        can_set_zero_dof_index = buf[1];
+        can_set_zero_requested = true;
+        LOG_C1_INFO("[CAN_HOST] Set-zero requested: DOF=" + String(buf[1]));
+      }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
@@ -844,7 +870,33 @@ void core1_loop() {
     // === PID DIAGNOSTICS STREAMING VIA CAN ===
     // Send PID target/error/torque data at 20Hz for tuning
     sendPIDDiagStreamData();
-    
+
+    // === ENCODER OFFSET NOTIFICATION VIA CAN ===
+    // Core0 sets this flag after zero (saveOffsetsToFlash) or boot (loadOffsetsFromFlash)
+    if (can_encoder_offsets_notify) {
+      can_encoder_offsets_notify = false;
+
+      uint32_t resp_id = CAN_ID_ENCODER_OFFSETS_DATA + ACTIVE_JOINT;
+      uint8_t enc_sent = 0;
+      for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
+        if (directEncoders.isEncoderConnected(i)) {
+          float off = directEncoders.getOffset(i);
+          uint8_t frame[8] = {0};
+          frame[0] = (uint8_t)i;  // encoder index
+          memcpy(&frame[4], &off, sizeof(float));
+          CAN_HOST.sendMsgBuf(resp_id, 0, 8, frame);
+          enc_sent++;
+        }
+      }
+
+      // Send zero-complete summary frame on 0x4C0 + joint_id
+      uint32_t summary_id = CAN_ID_ZERO_COMPLETE + ACTIVE_JOINT;
+      uint8_t summary[8] = {0xFF, 0, 0, enc_sent, 0, 0, 0, 0};
+      CAN_HOST.sendMsgBuf(summary_id, 0, 8, summary);
+
+      LOG_C1_INFO("[CAN_HOST] Encoder offsets notified via CAN (" + String(enc_sent) + " enc)");
+    }
+
     // === MOVEMENT METRICS VIA CAN ===
     // DISABLED: CAN_HOST.sendMsgBuf on SPI1 conflicts with Motor CAN reads
     // in the same Core1 cycle, causing SPI1 deadlock during HOLDING.

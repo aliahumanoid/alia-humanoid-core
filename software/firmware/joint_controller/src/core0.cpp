@@ -631,7 +631,20 @@ void updateSharedDofAngles() {
   // Update encoder data from hardware (direct SPI to MT6835)
   directEncoders.update();
   last_encoder_read_us = now_us;
-  
+
+  // Emit encoder offsets to host when changed (after zero or boot load)
+  if (directEncoders.offsetsChanged()) {
+    // Notify via Serial (when connected)
+    for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
+      if (directEncoders.isEncoderConnected(i)) {
+        SERIAL_COM_LN("EVT:ENCODER_OFFSET(" + String(ACTIVE_JOINT) + "," +
+                      String(i) + "," + String(directEncoders.getOffset(i), 6) + ")");
+      }
+    }
+    // Notify Core1 to send via CAN
+    can_encoder_offsets_notify = true;
+  }
+
   // Calculate time delta for velocity
   float dt_s = (last_update_us > 0) ? (now_us - last_update_us) / 1000000.0f : 0.0f;
   
@@ -764,6 +777,40 @@ void core0_main_loop() {
     LOG_INFO("[CAN] Startup sequence requested: torque=" + String(can_startup_torque) +
              " duration=" + String(can_startup_duration));
     executeStartupSequence(can_startup_torque, can_startup_duration);
+  }
+#pragma endregion
+
+#pragma region CAN Set-Zero Poll
+  // Poll CAN-triggered set-zero flag (set by Core1 on CAN 0x00B)
+  if (can_set_zero_requested) {
+    can_set_zero_requested = false;
+    uint8_t dof = can_set_zero_dof_index;
+
+    JointController *ctrl = active_joint_controller;
+    if (ctrl != nullptr) {
+      const JointConfig& cfg = ctrl->getConfig();
+      if (dof < cfg.dof_count) {
+        uint8_t enc_channel = cfg.dofs[dof].encoder_channel;
+        float zero_offset = cfg.dofs[dof].zero_mapping.zero_angle_offset;
+
+        // 1. Reset joint encoder (MT6835) - Core0
+        directEncoders.requestReset(enc_channel, zero_offset);
+        LOG_INFO_F("[CAN] Set Zero: DOF %d → joint encoder target %.2f°", dof, zero_offset);
+
+        // 2. Delegate motor encoder zeroing to Core1 (requires CAN access)
+        int next_buffer = (active_buffer + 1) % 2;
+        command_buffer[next_buffer].joint_id = ACTIVE_JOINT;
+        command_buffer[next_buffer].dof_index = dof;
+        pending_command_type = CMD_ZERO_MOTOR_ENCODERS;
+        buffer_ready[next_buffer] = true;
+        active_buffer = next_buffer;
+
+        // Signal completion (Core1 will do motor zeroing async)
+        shared_data_ext.dof_index = dof;
+        shared_data_ext.flag = CMD1_END_ZERO;
+        strcpy(shared_data_ext.message, "Zero position set (CAN)");
+      }
+    }
   }
 #pragma endregion
 
@@ -1287,6 +1334,17 @@ void core0_main_loop() {
                           strcpy(shared_data_ext.message, "Zero position set");
                         } else {
                           LOG_ERROR("Invalid DOF index for Set Zero");
+                        }
+                      }
+                      handled_on_core0 = true;
+                      break;
+                    }
+
+                    case CMD_GET_ENCODER_OFFSETS: {
+                      for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
+                        if (directEncoders.isEncoderConnected(i)) {
+                          SERIAL_COM_LN("EVT:ENCODER_OFFSET(" + String(ACTIVE_JOINT) + "," +
+                                        String(i) + "," + String(directEncoders.getOffset(i), 6) + ")");
                         }
                       }
                       handled_on_core0 = true;
