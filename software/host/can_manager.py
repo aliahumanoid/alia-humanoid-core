@@ -634,6 +634,65 @@ class CanManager:
         self._send_frame(0x015, payload, context="CASCADE apply")
         return {"success": True}
 
+    def start_auto_mapping_via_can(self, joint_name: str,
+                                    dof_index: int = 0) -> Dict[str, Any]:
+        """Send start-auto-mapping command via CAN (0x016).
+
+        Uses firmware config defaults for torque, step size, settle time.
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, dof_index, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x016, payload,
+                         context=f"Start auto-mapping {joint_name} DOF {dof_index}")
+        return {"success": True}
+
+    def stop_auto_mapping_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send stop-auto-mapping command via CAN (0x017)."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x017, payload,
+                         context=f"Stop auto-mapping {joint_name}")
+        return {"success": True}
+
+    def save_linear_eq_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send save-linear-equations-to-flash command via CAN (0x018)."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x018, payload,
+                         context=f"Save linear eq {joint_name}")
+        return {"success": True}
+
+    def load_linear_eq_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send load-linear-equations-from-flash command via CAN (0x019)."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x019, payload,
+                         context=f"Load linear eq {joint_name}")
+        return {"success": True}
+
+    def set_auto_start_via_can(self, joint_name: str, enabled: int,
+                                torque: int = 0,
+                                duration: int = 0) -> Dict[str, Any]:
+        """Send set-auto-start command via CAN (0x01A).
+
+        Args:
+            joint_name: Joint name
+            enabled: 1=enable, 0=disable
+            torque: Pretension torque override (0=use default)
+            duration: Startup duration override ms (0=use default)
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = struct.pack("<BBhH", joint_id, enabled,
+                              int(torque), int(duration)) + bytes(2)
+        self._send_frame(0x01A, payload,
+                         context=f"Set auto-start {joint_name} en={enabled}")
+        return {"success": True}
+
     def _save_encoder_offsets(self, joint_name: str, offsets: Dict[int, float]) -> None:
         """Save encoder offsets to calibration_data/{joint}_encoder_offsets.json"""
         import os

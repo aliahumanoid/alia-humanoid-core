@@ -82,6 +82,11 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SET_PID 0x013              // Set inner PID params (Host → Controller, multi-frame)
 #define CAN_ID_SET_PID_OUTER 0x014        // Set outer PID params (Host → Controller, multi-frame)
 #define CAN_ID_CASCADE_SPEED_SCALING 0x015 // Set cascade speed scaling (Host → Controller)
+#define CAN_ID_START_AUTO_MAPPING 0x016   // Start auto-mapping (Host → Controller)
+#define CAN_ID_STOP_AUTO_MAPPING 0x017    // Stop auto-mapping (Host → Controller)
+#define CAN_ID_SAVE_LINEAR_EQ 0x018       // Save linear equations to flash (Host → Controller)
+#define CAN_ID_LOAD_LINEAR_EQ 0x019       // Load linear equations from flash (Host → Controller)
+#define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 
@@ -941,6 +946,61 @@ void pollHostCan() {
                         " low=" + String(cascade_speed_low, 1) + " high=" + String(cascade_speed_high, 1));
             break;
         }
+      }
+    } else if (rx_id == CAN_ID_START_AUTO_MAPPING) {
+      // Start auto-mapping: [joint_id, dof_index, 0,0,0,0,0,0]
+      // Uses firmware config defaults (torque=0, steps=nullptr, settle=0 → config values)
+      if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        uint8_t dof = buf[1];
+        LOG_C1_INFO("[CAN_HOST] START_AUTO_MAPPING DOF=" + String(dof));
+        if (active_joint_controller->startAutoMapping(auto_mapping_state, 0, nullptr, 0)) {
+          LOG_C1_INFO("[CAN_HOST] Auto-mapping started successfully");
+        } else {
+          LOG_C1_ERROR("[CAN_HOST] Failed to start auto-mapping");
+        }
+      }
+    } else if (rx_id == CAN_ID_STOP_AUTO_MAPPING) {
+      // Stop auto-mapping: [joint_id, 0,0,0,0,0,0,0]
+      if (len >= 1 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        LOG_C1_INFO("[CAN_HOST] STOP_AUTO_MAPPING");
+        if (active_joint_controller->stopAutoMapping(auto_mapping_state)) {
+          LOG_C1_INFO("[CAN_HOST] Auto-mapping stopped");
+        } else {
+          LOG_C1_ERROR("[CAN_HOST] Failed to stop auto-mapping");
+        }
+      }
+    } else if (rx_id == CAN_ID_SAVE_LINEAR_EQ) {
+      // Save linear equations to flash: [joint_id, 0,0,0,0,0,0,0]
+      // Core0 executes flash write via volatile flag
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        LOG_C1_INFO("[CAN_HOST] SAVE_LINEAR_EQ requested");
+        can_save_linear_eq_requested = true;
+      }
+    } else if (rx_id == CAN_ID_LOAD_LINEAR_EQ) {
+      // Load linear equations from flash: [joint_id, 0,0,0,0,0,0,0]
+      // Core0 executes flash read via volatile flag
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        LOG_C1_INFO("[CAN_HOST] LOAD_LINEAR_EQ requested");
+        can_load_linear_eq_requested = true;
+      }
+    } else if (rx_id == CAN_ID_SET_AUTO_START) {
+      // Set auto-start: [joint_id, enabled, torque_lo, torque_hi, dur_lo, dur_hi, 0, 0]
+      // Core0 executes flash save via volatile flag + params
+      if (len >= 2 && buf[0] == ACTIVE_JOINT) {
+        can_auto_start_enabled = buf[1];
+        if (len >= 6) {
+          int16_t torque;
+          uint16_t duration;
+          memcpy(&torque, &buf[2], sizeof(int16_t));
+          memcpy(&duration, &buf[4], sizeof(uint16_t));
+          can_auto_start_torque = torque;
+          can_auto_start_duration = duration;
+        } else {
+          can_auto_start_torque = 0;
+          can_auto_start_duration = 0;
+        }
+        LOG_C1_INFO("[CAN_HOST] SET_AUTO_START en=" + String(can_auto_start_enabled));
+        can_set_auto_start_requested = true;
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame

@@ -1265,13 +1265,22 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                         handler.send_new_command(joint, dof, COMMANDS['RELEASE'])
                     message = f"Release via serial for {joint} DOF {dof}"
             elif cmd == "start-auto-mapping":
-                # Start advanced automatic mapping
-                handler.send_new_command(joint, dof, COMMANDS['START_AUTO_MAPPING'])
-                message = f"Started advanced automatic mapping for joint {joint} DOF {dof}"
+                # Auto-mapping is operational → CAN first, serial fallback
+                dof_int = int(dof) if dof != 'ALL' else 0
+                if can_manager and can_manager.is_connected():
+                    can_manager.start_auto_mapping_via_can(joint, dof_int)
+                    message = f"Auto-mapping started via CAN for {joint} DOF {dof_int}"
+                else:
+                    handler.send_new_command(joint, dof, COMMANDS['START_AUTO_MAPPING'])
+                    message = f"Auto-mapping started via serial for {joint} DOF {dof}"
             elif cmd == "stop-auto-mapping":
-                # Stop advanced automatic mapping
-                handler.send_new_command(joint, dof, COMMANDS['STOP_AUTO_MAPPING'])
-                message = f"Stopped advanced automatic mapping for joint {joint} DOF {dof}"
+                # Stop auto-mapping is operational → CAN first, serial fallback
+                if can_manager and can_manager.is_connected():
+                    can_manager.stop_auto_mapping_via_can(joint)
+                    message = f"Auto-mapping stopped via CAN for {joint}"
+                else:
+                    handler.send_new_command(joint, dof, COMMANDS['STOP_AUTO_MAPPING'])
+                    message = f"Auto-mapping stopped via serial for {joint}"
             elif cmd == "recalc-offset":
                 # Recalc-offset is operational → CAN first, serial fallback
                 dof_int = int(dof) if dof != 'ALL' else 0
@@ -1404,11 +1413,14 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 handler.send_new_command(joint, 'ALL', COMMANDS['CHECK_OFFSETS'])
                 message = "Offset validation check initiated"
             elif cmd == "set-auto-start":
-                # Enable or disable auto-start on boot
+                # Set auto-start is operational → CAN first, serial fallback
                 enabled = int(data.get('enabled', 0))
-                # Send command with ENABLED parameter
-                handler.send_new_command(joint, 'ALL', f"{COMMANDS['SET_AUTO_START']}:ENABLED={enabled}")
-                message = f"Auto-start {'enabled' if enabled else 'disabled'}"
+                if can_manager and can_manager.is_connected():
+                    can_manager.set_auto_start_via_can(joint, enabled)
+                    message = f"Auto-start {'enabled' if enabled else 'disabled'} via CAN"
+                else:
+                    handler.send_new_command(joint, 'ALL', f"{COMMANDS['SET_AUTO_START']}:ENABLED={enabled}")
+                    message = f"Auto-start {'enabled' if enabled else 'disabled'} via serial"
             elif cmd == "get-auto-start":
                 # Query current auto-start setting
                 handler.send_new_command(joint, 'ALL', COMMANDS['GET_AUTO_START'])

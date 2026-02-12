@@ -159,6 +159,16 @@ volatile bool can_encoder_offsets_notify = false;
 volatile bool can_save_pid_requested = false;
 volatile bool can_load_pid_requested = false;
 
+// CAN-triggered linear equations flash ops (Core1 sets flag, Core0 executes)
+volatile bool can_save_linear_eq_requested = false;
+volatile bool can_load_linear_eq_requested = false;
+
+// CAN-triggered auto-start setting (Core1 sets params + flag, Core0 executes flash save)
+volatile bool can_set_auto_start_requested = false;
+volatile uint8_t can_auto_start_enabled = 0;
+volatile int16_t can_auto_start_torque = 0;
+volatile uint16_t can_auto_start_duration = 0;
+
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 queue_t startup_event_queue;
 

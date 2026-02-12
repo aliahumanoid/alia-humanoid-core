@@ -838,6 +838,49 @@ void core0_main_loop() {
   }
 #pragma endregion
 
+#pragma region CAN Linear Equations Flash Operations Poll
+  // Poll CAN-triggered linear eq save/load flags (set by Core1 on CAN 0x018/0x019)
+  if (can_save_linear_eq_requested) {
+    can_save_linear_eq_requested = false;
+    if (active_joint_controller != nullptr) {
+      if (active_joint_controller->saveLinearEquationsToFlash()) {
+        LOG_INFO("[CAN] Linear equations saved to flash");
+      } else {
+        LOG_ERROR("[CAN] Failed to save linear equations to flash");
+      }
+    }
+  }
+  if (can_load_linear_eq_requested) {
+    can_load_linear_eq_requested = false;
+    if (active_joint_controller != nullptr) {
+      if (active_joint_controller->loadLinearEquationsFromFlash()) {
+        LOG_INFO("[CAN] Linear equations loaded from flash");
+      } else {
+        LOG_ERROR("[CAN] Failed to load linear equations from flash");
+      }
+    }
+  }
+#pragma endregion
+
+#pragma region CAN Auto-Start Setting Poll
+  // Poll CAN-triggered auto-start setting (set by Core1 on CAN 0x01A)
+  if (can_set_auto_start_requested) {
+    can_set_auto_start_requested = false;
+    system_settings.auto_start_enabled = can_auto_start_enabled;
+    system_settings.joint_type = ACTIVE_JOINT;
+    if (can_auto_start_torque != 0) {
+      system_settings.auto_start_pretension = (float)can_auto_start_torque;
+    }
+    if (can_auto_start_duration != 0) {
+      system_settings.auto_start_duration = can_auto_start_duration;
+    }
+    save_system_settings_data(system_settings);
+    system_settings_loaded = true;
+    LOG_INFO("[CAN] Auto-start " + String(can_auto_start_enabled ? "ENABLED" : "DISABLED") +
+             " for joint " + String(ACTIVE_JOINT));
+  }
+#pragma endregion
+
 #pragma region Receive SerialData
   // check for incoming serial data:
   if (Serial.available() > 0) {

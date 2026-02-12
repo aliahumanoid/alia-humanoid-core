@@ -165,6 +165,16 @@ extern volatile bool can_encoder_offsets_notify;
 extern volatile bool can_save_pid_requested;
 extern volatile bool can_load_pid_requested;
 
+// CAN-triggered linear equations flash ops (Core1 sets flag, Core0 executes)
+extern volatile bool can_save_linear_eq_requested;
+extern volatile bool can_load_linear_eq_requested;
+
+// CAN-triggered auto-start setting (Core1 sets params + flag, Core0 executes flash save)
+extern volatile bool can_set_auto_start_requested;
+extern volatile uint8_t can_auto_start_enabled;
+extern volatile int16_t can_auto_start_torque;
+extern volatile uint16_t can_auto_start_duration;
+
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 struct StartupStatusEvent {
   uint8_t event_type;   // 0=BEGIN, 1=DOF_READY, 2=DOF_FAILED, 3=COMPLETE, 4=FAILED
