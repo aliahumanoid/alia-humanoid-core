@@ -218,7 +218,6 @@ static void pushStartupEvent(uint8_t event_type, uint8_t dof_index,
 #define STARTUP_REASON_POSITION_RANGE    4
 #define STARTUP_REASON_RECALC_ERROR      5
 #define STARTUP_REASON_GLOBAL_TIMEOUT    6
-#define STARTUP_REASON_ENCODER_ZERO     7
 
 /**
  * @brief Execute startup sequence (recalc_offset for all DOFs, then HOLDING)
@@ -244,16 +243,6 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   if (active_joint_controller == nullptr) {
     SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=NO_CONTROLLER");
     pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_NO_CONTROLLER,
-                     (uint16_t)(millis() - startup_start_time));
-    return false;
-  }
-
-  // SAFETY CHECK 0.5: Encoder zero offsets valid (not lost during firmware flash)
-  if (!directEncoders.isZeroValid()) {
-    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=ENCODER_ZERO_INVALID");
-    LOG_ERROR("Startup failed: encoder zero offset lost (flash erased during firmware update?)");
-    LOG_ERROR("Run SET_ZERO_CURRENT_POS to re-zero the joint encoder before retrying");
-    pushStartupEvent(STARTUP_EVT_FAILED, 0, STARTUP_REASON_ENCODER_ZERO,
                      (uint16_t)(millis() - startup_start_time));
     return false;
   }

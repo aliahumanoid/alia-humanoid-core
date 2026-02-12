@@ -206,29 +206,6 @@ pretensioning sequence (~2-3s per DOF).
 
 **Serial events:** `EVT:STARTUP_DOF_SKIP` (offsets valid), `EVT:STARTUP_DOF_RECALC` (recalc needed)
 
-### Encoder Zero Boot Validation (EncoderFlashData v2)
-
-The MT6835 joint encoder is absolute — the raw angle for a given physical position is
-deterministic. When the encoder zero offset is set, the firmware now saves the raw angle
-at calibration time alongside the offset. At boot, it compares the current raw with the
-saved raw. If they differ by more than ~2.9° (0.05 rad), the zero offset is flagged as
-invalid and startup is blocked with `REASON=ENCODER_ZERO_INVALID`.
-
-**Why:** Certain firmware flash operations (full chip erase, large UF2 uploads) can
-erase the flash sector at 512KB where encoder offsets are stored. Without validation,
-the system would silently start with wrong joint angles, making recalcOffset produce
-incorrect motor offsets.
-
-**Flash layout:**
-```
-0-210KB    Firmware
-256KB      PID data
-320KB      Linear equations
-384KB      System settings
-448KB      Motor offsets
-512KB      Encoder zero offsets (EncoderFlashData v2)
-```
-
 ### CAN Timing Optimizations
 
 | Optimization | Commit | Savings |

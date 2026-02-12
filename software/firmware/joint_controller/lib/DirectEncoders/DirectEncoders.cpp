@@ -62,14 +62,9 @@ DirectEncoders::DirectEncoders(bool *encoder_invert) {
   }
   
   _pending_save_flash = false;
-
+  
   _dataValid = false;
   _flashDataValid = false;
-  _zeroValid = true;  // Assume valid until proven otherwise at boot
-  _has_flash_raw_angles = false;
-  for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
-    _flash_raw_angles[i] = 0.0f;
-  }
   _last_read_us = 0;
   _spi = nullptr;
 }
@@ -125,47 +120,6 @@ void DirectEncoders::begin() {
     }
   }
   
-  // === BOOT VALIDATION: verify encoder zero offsets are still consistent ===
-  // Compare current raw angles with those stored at calibration time.
-  // The MT6835 is an absolute encoder — if the magnet hasn't moved relative
-  // to the chip, the raw angle is deterministic. A large discrepancy means
-  // the offset was lost (flash erased during firmware update).
-  if (_flashDataValid && _has_flash_raw_angles) {
-    const float RAW_VALIDATION_THRESHOLD = 0.05f;  // ~2.9° in radians
-    bool all_ok = true;
-
-    for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
-      if (!_connected[i] || _sensors[i] == nullptr) continue;
-
-      float current_raw = _sensors[i]->getSensorAngle();
-      if (current_raw < 0) continue;  // CRC error, skip
-
-      float saved_raw = _flash_raw_angles[i];
-      // Compute shortest angular distance (handles wrap at 2π)
-      float delta = current_raw - saved_raw;
-      if (delta > PI) delta -= 2 * PI;
-      if (delta < -PI) delta += 2 * PI;
-      float abs_delta = (delta < 0) ? -delta : delta;
-
-      if (abs_delta > RAW_VALIDATION_THRESHOLD) {
-        LOG_ERROR_F("Encoder %d: ZERO OFFSET LOST! raw now=%.4f, raw at calib=%.4f, delta=%.2f deg",
-                    i + 1, current_raw, saved_raw, abs_delta * 180.0f / PI);
-        all_ok = false;
-      } else {
-        LOG_INFO_F("Encoder %d: zero valid (raw drift=%.2f deg)",
-                   i + 1, abs_delta * 180.0f / PI);
-      }
-    }
-
-    if (!all_ok) {
-      _zeroValid = false;
-      LOG_ERROR("*** ENCODER ZERO INVALID — joint zero required before startup ***");
-    }
-  } else if (_flashDataValid && !_has_flash_raw_angles) {
-    // v1 flash data — no raw angles to validate
-    LOG_WARN("Encoder flash data is v1 (no raw angles) — cannot validate zero, re-zero recommended");
-  }
-
   _last_read_us = micros();
   LOG_INFO("=================================");
 }
@@ -584,15 +538,9 @@ bool DirectEncoders::saveOffsetsToFlash() {
   data.magic_number = ENCODER_FLASH_MAGIC_NUMBER;
   data.version = ENCODER_FLASH_STRUCT_VERSION;
   
-  // Copy current offsets and snapshot raw angles for boot validation
+  // Copy current offsets
   for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
     data.offsets[i] = _offsets[i];
-    // Read current raw angle from sensor (for v2 boot validation)
-    if (_connected[i] && _sensors[i] != nullptr) {
-      data.raw_angles[i] = _sensors[i]->getSensorAngle();
-    } else {
-      data.raw_angles[i] = 0.0f;
-    }
   }
   
   // Calculate checksum (excluding header: magic, version, checksum)
@@ -628,12 +576,9 @@ bool DirectEncoders::saveOffsetsToFlash() {
   flash_operation_in_progress = false;
   
   _flashDataValid = true;
-  _zeroValid = true;
   LOG_INFO("Encoder offsets saved to flash successfully!");
-  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad",
+  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad", 
              data.offsets[0], data.offsets[1], data.offsets[2]);
-  LOG_INFO_F("  Raw angles at calib: %.4f, %.4f, %.4f rad",
-             data.raw_angles[0], data.raw_angles[1], data.raw_angles[2]);
   
   return true;
 }
@@ -652,39 +597,32 @@ bool DirectEncoders::loadOffsetsFromFlash() {
     return false;
   }
   
-  // Verify version (accept current version only — v1 data will trigger re-zero)
+  // Verify version
   if (data.version != ENCODER_FLASH_STRUCT_VERSION) {
-    LOG_WARN_F("Flash: Encoder data version mismatch (found %d, expected %d) — re-zero required",
-               data.version, ENCODER_FLASH_STRUCT_VERSION);
+    LOG_ERROR("Flash: Incompatible encoder data version!");
     _flashDataValid = false;
-    _zeroValid = false;
     return false;
   }
-
+  
   // Verify checksum
   size_t header_size = sizeof(uint32_t) + sizeof(uint16_t) * 2;
-  uint16_t calculated = calculateChecksum((uint8_t *)&data + header_size,
+  uint16_t calculated = calculateChecksum((uint8_t *)&data + header_size, 
                                            sizeof(EncoderFlashData) - header_size);
   if (calculated != data.checksum) {
     LOG_ERROR("Flash: Encoder data corrupted (checksum mismatch)!");
     _flashDataValid = false;
-    _zeroValid = false;
     return false;
   }
-
-  // Load offsets and raw angles
+  
+  // Load offsets
   for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
     _offsets[i] = data.offsets[i];
-    _flash_raw_angles[i] = data.raw_angles[i];
   }
-  _has_flash_raw_angles = true;
-
+  
   _flashDataValid = true;
-  LOG_INFO("Encoder offsets loaded from flash (v2)");
-  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad",
+  LOG_INFO("Encoder offsets loaded from flash successfully!");
+  LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad", 
              data.offsets[0], data.offsets[1], data.offsets[2]);
-  LOG_INFO_F("  Saved raw: %.4f, %.4f, %.4f rad",
-             data.raw_angles[0], data.raw_angles[1], data.raw_angles[2]);
   
   return true;
 }
