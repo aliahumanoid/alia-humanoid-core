@@ -71,12 +71,14 @@ struct WaypointMicroProfile {
   uint32_t accum_can_us = 0;
   uint32_t accum_pid_us = 0;
   uint32_t accum_safety_us = 0;
+  uint32_t accum_torque_us = 0;   // setTorque pair (non-blocking SPI)
   uint32_t max_dof_us = 0;
   uint32_t max_outer_us = 0;
   uint32_t max_eq_us = 0;
   uint32_t max_can_us = 0;
   uint32_t max_pid_us = 0;
   uint32_t max_safety_us = 0;
+  uint32_t max_torque_us = 0;
   uint32_t samples = 0;
   uint32_t safety_samples = 0;
   uint32_t last_log_ms = 0;
@@ -1360,8 +1362,20 @@ bool JointController::executeWaypointMovement() {
     }
     
     // Send torque commands to motors
+#if CONTROLLER_DEBUG
+    uint32_t torque_start_us = time_us_32();
+#endif
     agonist->setTorque((int)command_A);
     antagonist->setTorque((int)command_B);
+#if CONTROLLER_DEBUG
+    {
+      uint32_t torque_dt = time_us_32() - torque_start_us;
+      wp_micro_profile.accum_torque_us += torque_dt;
+      if (torque_dt > wp_micro_profile.max_torque_us) {
+        wp_micro_profile.max_torque_us = torque_dt;
+      }
+    }
+#endif
     
     // === UPDATE PID DIAGNOSTICS for CAN streaming ===
     // Store values for diagnostic stream (read by sendPIDDiagStreamData in core1.cpp)
@@ -1462,28 +1476,32 @@ bool JointController::executeWaypointMovement() {
       uint32_t avg_eq = wp_micro_profile.accum_eq_us / n;
       uint32_t avg_can = wp_micro_profile.accum_can_us / n;
       uint32_t avg_pid = wp_micro_profile.accum_pid_us / n;
+      uint32_t avg_torque = wp_micro_profile.accum_torque_us / n;
       uint32_t avg_safety = (sn > 0) ? wp_micro_profile.accum_safety_us / sn : 0;
       // Split into 2 messages to keep buffer small
-      LOG_C1_INFO_F("[WP PROF] avg_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu safety=%lu",
-                 avg_dof, avg_outer, avg_eq, avg_can, avg_pid, avg_safety);
-      LOG_C1_INFO_F("[WP PROF] max_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu safety=%lu",
+      LOG_C1_INFO_F("[WP PROF] avg_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu torq=%lu safety=%lu",
+                 avg_dof, avg_outer, avg_eq, avg_can, avg_pid, avg_torque, avg_safety);
+      LOG_C1_INFO_F("[WP PROF] max_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu torq=%lu safety=%lu",
                  (unsigned long)wp_micro_profile.max_dof_us,
                  (unsigned long)wp_micro_profile.max_outer_us,
                  (unsigned long)wp_micro_profile.max_eq_us,
                  (unsigned long)wp_micro_profile.max_can_us,
                  (unsigned long)wp_micro_profile.max_pid_us,
+                 (unsigned long)wp_micro_profile.max_torque_us,
                  (unsigned long)wp_micro_profile.max_safety_us);
       wp_micro_profile.accum_dof_us = 0;
       wp_micro_profile.accum_outer_us = 0;
       wp_micro_profile.accum_eq_us = 0;
       wp_micro_profile.accum_can_us = 0;
       wp_micro_profile.accum_pid_us = 0;
+      wp_micro_profile.accum_torque_us = 0;
       wp_micro_profile.accum_safety_us = 0;
       wp_micro_profile.max_dof_us = 0;
       wp_micro_profile.max_outer_us = 0;
       wp_micro_profile.max_eq_us = 0;
       wp_micro_profile.max_can_us = 0;
       wp_micro_profile.max_pid_us = 0;
+      wp_micro_profile.max_torque_us = 0;
       wp_micro_profile.max_safety_us = 0;
       wp_micro_profile.samples = 0;
       wp_micro_profile.safety_samples = 0;
