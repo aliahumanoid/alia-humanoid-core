@@ -1,9 +1,14 @@
 # CAN Control Protocol Specification
 
-**Version**: 1.0  
-**Date**: 14 November 2025  
-**Status**: Draft - Phase 0 Design  
+**Version**: 1.1
+**Date**: 12 February 2025
+**Status**: Draft - Updated after Phase 1-3 CAN Migration
 **Target**: Dual CAN bus architecture (Host ↔ Controllers, Controllers ↔ Motors)
+
+**Changelog v1.1:**
+- Updated Section 4.1 with all operational CAN IDs 0x004-0x01A (Phases 1-3)
+- Updated Section 4.2 rationale table with operational commands range
+- IDs previously "Reserved" are now active operational commands
 
 ---
 
@@ -191,63 +196,88 @@ struct CanStatus_EncoderStream {
 ```
 Priority Level 0 (Highest - Emergency):
   0x000: Emergency Stop (broadcast)
-  
-Priority Level 1 (System Control):
+
+Priority Level 1 (System Control + Operational Commands):
   0x002: Time Sync (broadcast)
-  0x003: Encoder Stream Control (Host → Pico)
-  
+  0x003: Encoder Stream Control (Host → Ctrl)
+  0x004: PID Diagnostics Stream Control
+  0x005: Interpolation Mode (linear/smooth)
+  0x006: Loop Frequency Config (inner/outer)
+  0x007: PID Diagnostics Stream Frequency
+  0x008: Joint Identification Request (broadcast)
+  0x009: Startup Sequence (recalc + HOLDING)
+  0x00A: Get Encoder Offsets (query → response on 0x4B0+joint)
+  0x00B: Set Zero (→ notification on 0x4C0+joint)
+  0x00C: Pretension single DOF
+  0x00D: Pretension all DOFs
+  0x00E: Release single DOF
+  0x00F: Release all DOFs
+  0x010: Recalculate Motor Offsets
+  0x011: Save PID to Flash
+  0x012: Load PID from Flash
+  0x013: Set Inner PID Parameters (multi-frame, 4 seq)
+  0x014: Set Outer PID Parameters (multi-frame, 5 seq)
+  0x015: Cascade Speed Scaling (per-param + 0xFF apply)
+  0x016: Start Auto-Mapping (all DOFs)
+  0x017: Stop Auto-Mapping
+  0x018: Save Linear Equations to Flash
+  0x019: Load Linear Equations from Flash
+  0x01A: Set Auto-Start on Boot
+
 Priority Level 2 (Motor Control - CRITICAL for PID loop @ 500 Hz):
-  0x140-0x144: Motor torque commands (Pico → Motors)
-  0x280: Multi-motor torque broadcast (Pico → 4 Motors)
-  
+  0x140-0x144: Motor torque commands (Ctrl → Motors)
+  0x280: Multi-motor torque broadcast (Ctrl → 4 Motors)
+
 Priority Level 3 (Trajectory Commands - 50-100 Hz):
-  0x300-0x31F: Waypoint commands (Host → Pico)
-    0x300: Ankle Right waypoint
-    0x301: Ankle Left waypoint
-    0x302: Knee Right waypoint
-    0x303: Knee Left waypoint
-    0x304: Hip Right waypoint
-    0x305: Hip Left waypoint
+  0x380-0x39F: Multi-DOF Waypoint commands (Host → Ctrl, per joint)
+    0x380: Ankle Right waypoint
+    0x381: Ankle Left waypoint
+    0x382: Knee Right waypoint
+    0x383: Knee Left waypoint
+    0x384: Hip Right waypoint
+    0x385: Hip Left waypoint
     ...
-    0x31F: Joint 32 waypoint (future expansion)
-    
+    0x393: Joint 19 waypoint (future expansion)
+
 Priority Level 4 (Status Feedback - Lowest priority):
-  0x400-0x40F: Status messages (Pico → Host)
-    0x400: Ankle Right status
-    0x401: Ankle Left status
-    0x402: Knee Right status
-    0x403: Knee Left status
-    0x404: Hip Right status
-    0x405: Hip Left status
-    ...
-    0x40F: Joint 16 status
-  0x410: Encoder Stream Data (Pico → Host, 50 Hz)
-  0x411-0x4FF: Reserved for future status messages
+  0x400-0x40F: Status messages (Ctrl → Host, per joint)
+  0x410+joint: Encoder Stream Data (@ 50 Hz)
+  0x420+joint: PID Diagnostics - Target + Error
+  0x430+joint: PID Diagnostics - Torque A + B
+  0x440+joint*3+dof: Movement Metrics
+  0x460+joint*3+dof: Smoothness Metrics
+  0x470+joint: PID Inner Terms (P/I/D/FF, optional)
+  0x480+joint: PID Outer Terms (P/I/D/output, optional)
+  0x490+joint: Startup Status Events
+  0x4A0+joint: Joint Announce/Discovery
+  0x4B0+joint: Encoder Offsets Response
+  0x4C0+joint: Zero Complete Notification
+  0x4D0-0x4FF: Reserved for future status
 ```
 
 ### 4.2 Rationale for New Allocation
 
 | Range | Purpose | Frequency | Priority Justification |
 |-------|---------|-----------|------------------------|
-| `0x000-0x003` | Emergency/Sync/Stream Ctrl | On-demand | Must preempt everything |
+| `0x000` | Emergency Stop | On-demand | Must preempt everything |
+| `0x002-0x009` | System Control (sync, stream, startup) | On-demand | Must preempt motor commands |
+| `0x00A-0x01A` | Operational Commands (zero, PID, calibration) | On-demand | Higher priority than motors ensures commands are processed immediately |
 | `0x140-0x280` | Motor Control | 500 Hz | **CRITICAL**: PID loop stability depends on low latency |
-| `0x300-0x31F` | Waypoints | 50-100 Hz | Medium: Trajectory updates, not time-critical per-frame |
-| `0x400-0x40F` | Status | 50 Hz | Low: Monitoring only, can tolerate delays |
-| `0x410` | Encoder Stream Data | 50 Hz | Low: Real-time encoder visualization |
+| `0x380-0x39F` | Multi-DOF Waypoints | 50-100 Hz | Medium: Trajectory updates, not time-critical per-frame |
+| `0x400-0x4C0` | Status/Feedback | 10-200 Hz | Low: Monitoring, can tolerate delays |
 
-**Key Change**: Motor torque commands (0x140-0x280) now have **higher priority** than waypoint commands (0x300-0x31F), ensuring the inner PID loop @ 500 Hz is never starved by trajectory updates.
+**Key Change**: Motor torque commands (0x140-0x280) have **higher priority** than waypoint commands (0x380-0x39F), ensuring the inner PID loop @ 500 Hz is never starved by trajectory updates. Operational commands (0x00A-0x01A) have even higher priority but are sent infrequently (on-demand).
 
 ### 4.3 Address Space Summary
 
 | Message Type | CAN ID Range | Allocation Formula | Max Nodes |
 |--------------|--------------|-------------------|-----------|
 | **Emergency Stop** | 0x000 | Fixed | Broadcast |
-| **Time Sync** | 0x002 | Fixed | Broadcast |
-| **Encoder Stream Ctrl** | 0x003 | Fixed | Broadcast |
+| **System Control** | 0x002-0x009 | Fixed | Broadcast |
+| **Operational Cmds** | 0x00A-0x01A | Fixed (joint_id in payload) | Per joint |
 | **Motor Commands** | 0x140-0x280 | Fixed (LKM protocol) | 4 motors + broadcast |
-| **Waypoint Commands** | 0x300-0x31F | 0x300 + joint_id | 32 joints |
-| **Status Feedback** | 0x400-0x40F | 0x400 + joint_id | 16 joints |
-| **Encoder Stream Data** | 0x410 | Fixed | Single stream |
+| **Multi-DOF Waypoints** | 0x380-0x39F | 0x380 + joint_id | 32 joints |
+| **Status Feedback** | 0x400-0x4C0 | 0x400/0x410/...+joint_id | 16 joints |
 
 ---
 

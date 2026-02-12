@@ -1,9 +1,14 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 1.5  
-**Date:** 2024-12-29  
-**Status:** Design Specification (Indicative)  
+**Document Version:** 1.6
+**Date:** 2025-02-12
+**Status:** Design Specification (Indicative)
 **Authors:** Alia Robotics Team
+
+**Changelog v1.6:**
+- **CAN ID Table Updated**: Documented all operational CAN IDs 0x005-0x01A (Phases 1-3 migration)
+- IDs previously shown as "Reserved" (0x005-0x00F, 0x010-0x13F) now list individual commands
+- Added status/response IDs 0x490-0x4C0 (startup events, discovery, encoder offsets, zero complete)
 
 **Changelog v1.5:**
 - **Batch Timing Compensation**: Added Section 4.2.3 documentation for waypoint batch timing
@@ -1682,8 +1687,29 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | 0x002 | 2 | Time Sync | Host → All | High |
 | 0x003 | 3 | Encoder Stream Control | Host → Ctrl | High |
 | **0x004** | 4 | **PID Diag Control** | Host → Ctrl | High |
-| 0x005-0x00F | 5-15 | Reserved | - | - |
-| 0x010-0x13F | 16-319 | Reserved (Future High Priority) | - | - |
+| **0x005** | 5 | **Interpolation Mode** (linear/smooth) | Host → Ctrl | High |
+| **0x006** | 6 | **Loop Frequency Config** (inner/outer) | Host → Ctrl | High |
+| **0x007** | 7 | **PID Diag Stream Frequency** | Host → Ctrl | High |
+| **0x008** | 8 | **Joint Identify Request** (broadcast) | Host → Ctrl | High |
+| **0x009** | 9 | **Startup Sequence** (recalc + HOLDING) | Host → Ctrl | High |
+| **0x00A** | 10 | **Get Encoder Offsets** (query) | Host → Ctrl | High |
+| **0x00B** | 11 | **Set Zero** (current position) | Host → Ctrl | High |
+| **0x00C** | 12 | **Pretension** (single DOF) | Host → Ctrl | High |
+| **0x00D** | 13 | **Pretension All** DOFs | Host → Ctrl | High |
+| **0x00E** | 14 | **Release** (single DOF) | Host → Ctrl | High |
+| **0x00F** | 15 | **Release All** DOFs | Host → Ctrl | High |
+| **0x010** | 16 | **Recalc Motor Offsets** | Host → Ctrl | High |
+| **0x011** | 17 | **Save PID to Flash** | Host → Ctrl | High |
+| **0x012** | 18 | **Load PID from Flash** | Host → Ctrl | High |
+| **0x013** | 19 | **Set Inner PID** (multi-frame, 4 seq) | Host → Ctrl | High |
+| **0x014** | 20 | **Set Outer PID** (multi-frame, 5 seq) | Host → Ctrl | High |
+| **0x015** | 21 | **Cascade Speed Scaling** (per-param) | Host → Ctrl | High |
+| **0x016** | 22 | **Start Auto-Mapping** (all DOFs) | Host → Ctrl | High |
+| **0x017** | 23 | **Stop Auto-Mapping** | Host → Ctrl | High |
+| **0x018** | 24 | **Save Linear Eq to Flash** | Host → Ctrl | High |
+| **0x019** | 25 | **Load Linear Eq from Flash** | Host → Ctrl | High |
+| **0x01A** | 26 | **Set Auto-Start on Boot** | Host → Ctrl | High |
+| 0x01B-0x13F | 27-319 | Reserved (Future High Priority) | - | - |
 | 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
 | 0x200-0x2FF | 512-767 | Reserved | - | - |
 | 0x300-0x37F | 768-895 | Reserved | - | - |
@@ -1695,13 +1721,18 @@ libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
 | **0x393** | 915 | **Multi-DOF Waypoint Joint 19** | Host → Ctrl | **Level 3** (Medium) |
 | 0x394-0x3FF | 916-1023 | Reserved Waypoints | - | - |
 | 0x400-0x40F | 1024-1039 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
-| **0x004** | 4 | **PID Diag Control** | Host → Ctrl | High |
 | **0x410** | 1040 | **Encoder Stream Data** | Ctrl → Host | **Level 4** (Low) |
 | **0x420-0x42F** | 1056-1071 | **PID Diag: Target + Error** (per joint) | Ctrl → Host | **Level 4** (Low) |
 | **0x430-0x43F** | 1072-1087 | **PID Diag: Torque A + B** (per joint) | Ctrl → Host | **Level 4** (Low) |
+| **0x440+j\*3+d** | 1088+ | **Movement Metrics** (per joint per DOF) | Ctrl → Host | **Level 4** (Low) |
+| **0x460+j\*3+d** | 1120+ | **Smoothness Metrics** (per joint per DOF) | Ctrl → Host | **Level 4** (Low) |
 | **0x470-0x47F** | 1136-1151 | **PID Diag: Inner PID Terms** (P/I/D/FF, optional) | Ctrl → Host | **Level 4** (Low) |
 | **0x480-0x48F** | 1152-1167 | **PID Diag: Outer PID Terms** (P/I/D/output, optional) | Ctrl → Host | **Level 4** (Low) |
-| 0x490-0x4FF | 1168-1279 | Reserved Status | - | - |
+| **0x490+joint** | 1168+ | **Startup Status Events** | Ctrl → Host | **Level 4** (Low) |
+| **0x4A0+joint** | 1184+ | **Joint Announce/Discovery** | Ctrl → Host | **Level 4** (Low) |
+| **0x4B0+joint** | 1200+ | **Encoder Offsets Response** | Ctrl → Host | **Level 4** (Low) |
+| **0x4C0+joint** | 1216+ | **Zero Complete Notification** | Ctrl → Host | **Level 4** (Low) |
+| 0x4D0-0x4FF | 1232-1279 | Reserved Status | - | - |
 
 **Encoder Stream Control (0x003):**
 ```

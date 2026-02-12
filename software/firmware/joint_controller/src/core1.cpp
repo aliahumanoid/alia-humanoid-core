@@ -948,11 +948,11 @@ void pollHostCan() {
         }
       }
     } else if (rx_id == CAN_ID_START_AUTO_MAPPING) {
-      // Start auto-mapping: [joint_id, dof_index, 0,0,0,0,0,0]
+      // Start auto-mapping: [joint_id, reserved, 0,0,0,0,0,0]
+      // Maps ALL DOFs simultaneously (Cartesian product). Byte 1 reserved for future use.
       // Uses firmware config defaults (torque=0, steps=nullptr, settle=0 → config values)
-      if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
-        uint8_t dof = buf[1];
-        LOG_C1_INFO("[CAN_HOST] START_AUTO_MAPPING DOF=" + String(dof));
+      if (len >= 1 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        LOG_C1_INFO("[CAN_HOST] START_AUTO_MAPPING (all DOFs)");
         if (active_joint_controller->startAutoMapping(auto_mapping_state, 0, nullptr, 0)) {
           LOG_C1_INFO("[CAN_HOST] Auto-mapping started successfully");
         } else {

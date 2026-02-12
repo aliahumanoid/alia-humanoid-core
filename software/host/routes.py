@@ -1404,10 +1404,30 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             elif cmd == "recalc-safe-limits":
                 handler.send_new_command(joint, 'ALL', COMMANDS['RECALC_SAFE_LIMITS'])
                 message = "Safe limits recalculation requested"
+            elif cmd == "save-linear-eq":
+                # Save linear equations to flash — CAN only (no serial command exists)
+                if can_manager and can_manager.is_connected():
+                    can_manager.save_linear_eq_via_can(joint)
+                    message = f"Linear equations save to flash via CAN for {joint}"
+                else:
+                    status = "error"
+                    message = "Save linear equations requires CAN connection (no serial fallback)"
+            elif cmd == "load-linear-eq":
+                # Load linear equations from flash — CAN only (no serial command exists)
+                if can_manager and can_manager.is_connected():
+                    can_manager.load_linear_eq_via_can(joint)
+                    message = f"Linear equations load from flash via CAN for {joint}"
+                else:
+                    status = "error"
+                    message = "Load linear equations requires CAN connection (no serial fallback)"
             elif cmd == "startup-sequence":
-                # Manual startup sequence: recalc_offset all DOFs + enter HOLDING
-                handler.send_new_command(joint, 'ALL', COMMANDS['STARTUP_SEQUENCE'])
-                message = "Startup sequence initiated (recalc + hold)"
+                # Startup sequence is operational → CAN first, serial fallback
+                if can_manager and can_manager.is_connected():
+                    can_manager.send_startup_sequence(joint)
+                    message = f"Startup sequence via CAN for {joint}"
+                else:
+                    handler.send_new_command(joint, 'ALL', COMMANDS['STARTUP_SEQUENCE'])
+                    message = "Startup sequence via serial (recalc + hold)"
             elif cmd == "check-offsets":
                 # Check if saved motor offsets are still valid (smart recalc detection)
                 handler.send_new_command(joint, 'ALL', COMMANDS['CHECK_OFFSETS'])
