@@ -366,7 +366,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   pushStartupEvent(STARTUP_EVT_BEGIN, 0, STARTUP_REASON_OK,
                    (uint16_t)(millis() - startup_start_time));
 
-  // Dispatch CMD_RECALC_OFFSET to Core1 for each DOF sequentially
+  // For each DOF: try applying saved offsets first, fallback to full recalc
   bool all_success = true;
   uint8_t last_successful_dof = 0;
 
@@ -380,42 +380,82 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       break;
     }
 
-    LOG_INFO("Running recalc_offset for DOF " + String(dof) + " (delegated to Core1)...");
     SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+
+    // --- Phase 1: Try applying saved offsets (fast path) ---
+    LOG_INFO("DOF " + String(dof) + ": trying saved offsets from flash...");
+    shared_data_ext.flag = 0;
+
+    {
+      int next_buf = (active_buffer + 1) % 2;
+      while (buffer_ready[next_buf]) { sleep_us(100); }
+      command_buffer[next_buf].joint_id = ACTIVE_JOINT;
+      command_buffer[next_buf].dof_index = dof;
+      pending_command_type = CMD_APPLY_SAVED_OFFSETS;
+      buffer_ready[next_buf] = true;
+      active_buffer = next_buf;
+    }
+
+    // Poll for Core1 completion
+    bool dof_timeout = false;
+    while (shared_data_ext.flag == 0) {
+      updateSharedDofAngles();
+      if (emergency_stop_requested) { dof_timeout = true; break; }
+      if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+        dof_timeout = true; emergency_stop_requested = true; break;
+      }
+      delay(10);
+    }
+
+    if (dof_timeout) {
+      LOG_ERROR("Startup timed out during saved offset check on DOF " + String(dof));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+      pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_GLOBAL_TIMEOUT,
+                       (uint16_t)(millis() - startup_start_time));
+      shared_data_ext.flag = 0;
+      all_success = false;
+      break;
+    }
+
+    if (shared_data_ext.flag == CMD1_END_MOVE) {
+      // Saved offsets valid — skip full recalc
+      last_successful_dof = dof;
+      LOG_INFO("DOF " + String(dof) + " SKIP recalc: " + String(shared_data_ext.message));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_SKIP(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+      pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
+                       (uint16_t)(millis() - startup_start_time));
+      shared_data_ext.flag = 0;
+      continue;  // Next DOF
+    }
+
+    // --- Phase 2: Saved offsets invalid — full recalc (original path) ---
+    LOG_INFO("DOF " + String(dof) + " saved offsets invalid (" +
+             String(shared_data_ext.message) + "), running full recalc...");
+    SERIAL_COM_LN("EVT:STARTUP_DOF_RECALC(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+    shared_data_ext.flag = 0;
 
     int pretension = (custom_torque > 0) ? (int)custom_torque : 0;
     int duration = (custom_duration > 0) ? (int)custom_duration : 0;
 
-    // Clear shared_data_ext.flag before dispatching
-    shared_data_ext.flag = 0;
+    {
+      int next_buf = (active_buffer + 1) % 2;
+      while (buffer_ready[next_buf]) { sleep_us(100); }
+      command_buffer[next_buf].joint_id = ACTIVE_JOINT;
+      command_buffer[next_buf].dof_index = dof;
+      command_buffer[next_buf].recalc_offset_torque = pretension;
+      command_buffer[next_buf].recalc_offset_duration = duration;
+      pending_command_type = CMD_RECALC_OFFSET;
+      buffer_ready[next_buf] = true;
+      active_buffer = next_buf;
+    }
 
-    // Dispatch CMD_RECALC_OFFSET to Core1 via double-buffered command system
-    int next_buf = (active_buffer + 1) % 2;
-    while (buffer_ready[next_buf]) { sleep_us(100); }
-
-    command_buffer[next_buf].joint_id = ACTIVE_JOINT;
-    command_buffer[next_buf].dof_index = dof;
-    command_buffer[next_buf].recalc_offset_torque = pretension;
-    command_buffer[next_buf].recalc_offset_duration = duration;
-    pending_command_type = CMD_RECALC_OFFSET;
-    buffer_ready[next_buf] = true;
-    active_buffer = next_buf;
-
-    // Poll for Core1 completion while keeping encoders alive
-    bool dof_timeout = false;
+    // Poll for Core1 completion
+    dof_timeout = false;
     while (shared_data_ext.flag == 0) {
       updateSharedDofAngles();
-
-      if (emergency_stop_requested) {
-        LOG_WARN("Emergency stop detected during startup polling");
-        dof_timeout = true;
-        break;
-      }
-
+      if (emergency_stop_requested) { dof_timeout = true; break; }
       if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-        dof_timeout = true;
-        emergency_stop_requested = true;
-        break;
+        dof_timeout = true; emergency_stop_requested = true; break;
       }
       delay(10);
     }
@@ -430,7 +470,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       break;
     }
 
-    // Process Core1 result
+    // Process recalc result
     if (shared_data_ext.flag == CMD1_END_MOVE) {
       last_successful_dof = dof;
       SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));

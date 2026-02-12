@@ -615,6 +615,17 @@ public:
   OffsetValidationResult validateSavedOffsets(uint8_t dof_index);
 
   /**
+   * @brief Apply saved offsets from flash to motor encoder objects
+   *
+   * Used during startup when validateSavedOffsets confirms offsets are still
+   * valid (motors kept power). Skips the full recalc pretension sequence.
+   *
+   * @param dof_index DOF to apply offsets for
+   * @return true if offsets applied successfully
+   */
+  bool applySavedOffsetsToMotors(uint8_t dof_index);
+
+  /**
    * @brief Check offset drift using cached motor angles (zero CAN overhead)
    * 
    * Uses cached_motor_angles (already read by control loop) and current

@@ -1144,6 +1144,43 @@ void core1_loop() {
       }
       break;
 
+    case CMD_APPLY_SAVED_OFFSETS: {
+      // Validate saved offsets against current motor positions, apply if valid
+      LOG_C1_INFO("=== SMART STARTUP: DOF " + String(dof_index) + " ===");
+      JointController::OffsetValidationResult vr = controller->validateSavedOffsets(dof_index);
+      // validateSavedOffsets already logs: VALID/NEEDS RECALC + error values
+
+      if (vr.valid) {
+        // Offsets still valid — apply from flash without full recalc
+        if (controller->applySavedOffsetsToMotors(dof_index)) {
+          // applySavedOffsetsToMotors logs: offsets applied + post-apply verification
+          if (shared_data_ext.flag == 0) {
+            snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
+                     "Saved offsets applied (err: %.1f/%.1f deg)",
+                     vr.error_agonist_deg, vr.error_antagonist_deg);
+            shared_data_ext.flag = CMD1_END_MOVE;
+          }
+        } else {
+          LOG_C1_ERROR("applySavedOffsetsToMotors failed for DOF " + String(dof_index));
+          if (shared_data_ext.flag == 0) {
+            strcpy(shared_data_ext.message, "Failed to apply saved offsets");
+            shared_data_ext.flag = CMD1_FAIL_MOVE;
+          }
+        }
+      } else {
+        // Offsets invalid or no data — signal caller to fall back to full recalc
+        LOG_C1_INFO("DOF " + String(dof_index) + " requires full recalc: " +
+                 String(vr.has_saved_data ? "offset drift detected" : "no saved data"));
+        if (shared_data_ext.flag == 0) {
+          snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
+                   "OFFSETS_INVALID: %s (err: %.1f/%.1f deg)",
+                   vr.has_saved_data ? "drift" : "no_data",
+                   vr.error_agonist_deg, vr.error_antagonist_deg);
+          shared_data_ext.flag = CMD1_FAIL_MOVE;
+        }
+      }
+    } break;
+
     case CMD_START_AUTO_MAPPING:
       // Start automatic mapping for the joint
       if (controller->startAutoMapping(auto_mapping_state, command_data_ext.tensioning_torque,

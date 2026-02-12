@@ -104,7 +104,11 @@
 #define CMD_CHECK_OFFSETS 37  // Validate saved motor offsets (smart recalc detection)
 #endif
 
-// Reserved: 38-39 for future calibration commands
+#ifndef CMD_APPLY_SAVED_OFFSETS
+#define CMD_APPLY_SAVED_OFFSETS 38  // Validate + apply saved offsets (skip recalc if valid)
+#endif
+
+// Reserved: 39 for future calibration commands
 
 // --- PID Control Commands (40-49) ---
 #ifndef CMD_SET_PID

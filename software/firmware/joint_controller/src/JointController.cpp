@@ -1245,6 +1245,69 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   return true;
 }
 
+// Apply saved offsets from flash to motor encoder objects (skip full recalc)
+bool JointController::applySavedOffsetsToMotors(uint8_t dof_index) {
+  if (dof_index >= config.dof_count) return false;
+
+  if (!_saved_offsets[dof_index].valid) {
+    LOG_C1_INFO("No saved offsets for DOF " + String(dof_index));
+    return false;
+  }
+
+  // Find agonist and antagonist motors for this DOF
+  LKM_Motor *agonist_motor = nullptr;
+  LKM_Motor *antagonist_motor = nullptr;
+
+  for (int i = 0; i < config.motor_count; i++) {
+    if (config.motors[i].dof_index == dof_index) {
+      if (config.motors[i].is_agonist) {
+        agonist_motor = motors[i];
+      } else {
+        antagonist_motor = motors[i];
+      }
+    }
+  }
+
+  if (agonist_motor == nullptr || antagonist_motor == nullptr) {
+    LOG_C1_ERROR("Motors not found for DOF " + String(dof_index));
+    return false;
+  }
+
+  // Apply saved offsets to motor encoder objects
+  agonist_motor->setOffsetEncoder(_saved_offsets[dof_index].agonist_offset);
+  antagonist_motor->setOffsetEncoder(_saved_offsets[dof_index].antagonist_offset);
+
+  // Read current joint angle for logging
+  float joint_angle = shared_dof_angles.valid[dof_index]
+                        ? shared_dof_angles.angles[dof_index] : NAN;
+
+  // Verify post-apply: read calibrated motor angles and compare with expected
+  float verified_agonist = agonist_motor->getMultiAngleSync().angle;   // with offset
+  float verified_antagonist = antagonist_motor->getMultiAngleSync().angle;
+
+  float expected_agonist = NAN, expected_antagonist = NAN;
+  float verify_err_a = NAN, verify_err_b = NAN;
+  if (hasValidEquations(dof_index) && !isnan(joint_angle)) {
+    calculateMotorAnglesWithEquations(dof_index, joint_angle, joint_angle,
+                                      expected_agonist, expected_antagonist);
+    verify_err_a = fabs(verified_agonist - expected_agonist);
+    verify_err_b = fabs(verified_antagonist - expected_antagonist);
+  }
+
+  motor_offsets_calibrated[dof_index] = true;
+
+  LOG_C1_INFO("DOF " + String(dof_index) + " offsets applied from flash: agon=" +
+           String(_saved_offsets[dof_index].agonist_offset, 2) +
+           " antag=" + String(_saved_offsets[dof_index].antagonist_offset, 2));
+  LOG_C1_INFO("  joint=" + String(joint_angle, 2) + "° verified: A=" +
+           String(verified_agonist, 2) + " B=" + String(verified_antagonist, 2) +
+           " expected: A=" + String(expected_agonist, 2) + " B=" + String(expected_antagonist, 2));
+  LOG_C1_INFO("  post-apply error: A=" + String(verify_err_a, 2) +
+           "° B=" + String(verify_err_b, 2) + "°");
+
+  return true;
+}
+
 // Verify if the system is ready for movement
 bool JointController::isSystemReadyForMovement() {
   // Verify that linear equations are available for all DOFs
