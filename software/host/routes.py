@@ -1237,17 +1237,33 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
 
         try:
             if cmd == "pretension":
-                # Send command appropriate based on DOF
-                if dof == 'ALL':
-                    handler.send_new_command(joint, dof, COMMANDS['PRETENSION_ALL'])
+                # Pretension is operational → CAN first, serial fallback
+                if can_manager and can_manager.is_connected():
+                    if dof == 'ALL':
+                        can_manager.pretension_all_via_can(joint)
+                    else:
+                        can_manager.pretension_via_can(joint, int(dof))
+                    message = f"Pretension via CAN for {joint} DOF {dof}"
                 else:
-                    handler.send_new_command(joint, dof, COMMANDS['PRETENSION'])
+                    if dof == 'ALL':
+                        handler.send_new_command(joint, dof, COMMANDS['PRETENSION_ALL'])
+                    else:
+                        handler.send_new_command(joint, dof, COMMANDS['PRETENSION'])
+                    message = f"Pretension via serial for {joint} DOF {dof}"
             elif cmd == "release":
-                # Send command without parameters
-                if dof == 'ALL':
-                    handler.send_new_command(joint, dof, COMMANDS['RELEASE_ALL'])
+                # Release is operational → CAN first, serial fallback
+                if can_manager and can_manager.is_connected():
+                    if dof == 'ALL':
+                        can_manager.release_all_via_can(joint)
+                    else:
+                        can_manager.release_via_can(joint, int(dof))
+                    message = f"Release via CAN for {joint} DOF {dof}"
                 else:
-                    handler.send_new_command(joint, dof, COMMANDS['RELEASE'])
+                    if dof == 'ALL':
+                        handler.send_new_command(joint, dof, COMMANDS['RELEASE_ALL'])
+                    else:
+                        handler.send_new_command(joint, dof, COMMANDS['RELEASE'])
+                    message = f"Release via serial for {joint} DOF {dof}"
             elif cmd == "start-auto-mapping":
                 # Start advanced automatic mapping
                 handler.send_new_command(joint, dof, COMMANDS['START_AUTO_MAPPING'])
@@ -1257,8 +1273,14 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 handler.send_new_command(joint, dof, COMMANDS['STOP_AUTO_MAPPING'])
                 message = f"Stopped advanced automatic mapping for joint {joint} DOF {dof}"
             elif cmd == "recalc-offset":
-                # Send command without parameters
-                handler.send_new_command(joint, dof, COMMANDS['RECALC_OFFSET'])
+                # Recalc-offset is operational → CAN first, serial fallback
+                dof_int = int(dof) if dof != 'ALL' else 0
+                if can_manager and can_manager.is_connected():
+                    can_manager.recalc_offset_via_can(joint, dof_int)
+                    message = f"Recalc offset via CAN for {joint} DOF {dof_int}"
+                else:
+                    handler.send_new_command(joint, dof, COMMANDS['RECALC_OFFSET'])
+                    message = f"Recalc offset via serial for {joint} DOF {dof}"
             elif cmd == "set-zero":
                 # Set-zero is operational → CAN first, serial fallback
                 dof_int = int(dof) if dof != 'ALL' else 0

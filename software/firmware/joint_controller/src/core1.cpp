@@ -72,6 +72,11 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_JOINT_ANNOUNCE 0x4A0       // Joint announce/discovery (Controller → Host)
 #define CAN_ID_GET_ENCODER_OFFSETS 0x00A  // Request encoder offsets (Host → Controller)
 #define CAN_ID_SET_ZERO 0x00B             // Set-zero command (Host → Controller)
+#define CAN_ID_PRETENSION 0x00C           // Pretension single DOF (Host → Controller)
+#define CAN_ID_PRETENSION_ALL 0x00D       // Pretension all DOFs (Host → Controller)
+#define CAN_ID_RELEASE 0x00E              // Release single DOF (Host → Controller)
+#define CAN_ID_RELEASE_ALL 0x00F          // Release all DOFs (Host → Controller)
+#define CAN_ID_RECALC_OFFSET 0x010        // Recalculate motor offsets (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 
@@ -769,6 +774,63 @@ void pollHostCan() {
         can_set_zero_dof_index = buf[1];
         can_set_zero_requested = true;
         LOG_C1_INFO("[CAN_HOST] Set-zero requested: DOF=" + String(buf[1]));
+      }
+    } else if (rx_id == CAN_ID_PRETENSION) {
+      // Pretension single DOF: [joint_id, dof_index, torque_lo, torque_hi, 0,0,0,0]
+      if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        uint8_t dof = buf[1];
+        int16_t torque = (len >= 4) ? (int16_t)(buf[2] | (buf[3] << 8)) : 0;
+        if (!safety_is_motor_power_enabled()) {
+          safety_motor_power_enable();
+        }
+        bool invert = active_joint_controller->getConfig().dofs[dof].zero_mapping.auto_mapping_invert_direction;
+        if (invert) {
+          active_joint_controller->release(dof, torque, 0);
+        } else {
+          active_joint_controller->pretension(dof, torque, 0);
+        }
+        LOG_C1_INFO("[CAN_HOST] Pretension DOF=" + String(dof) + " torque=" + String(torque));
+      }
+    } else if (rx_id == CAN_ID_PRETENSION_ALL) {
+      // Pretension all DOFs: [joint_id, 0,0,0,0,0,0,0]
+      if (len >= 1 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        if (!safety_is_motor_power_enabled()) {
+          safety_motor_power_enable();
+        }
+        active_joint_controller->pretensionAll();
+        LOG_C1_INFO("[CAN_HOST] Pretension ALL");
+      }
+    } else if (rx_id == CAN_ID_RELEASE) {
+      // Release single DOF: [joint_id, dof_index, 0,0,0,0,0,0]
+      if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        uint8_t dof = buf[1];
+        int16_t torque = (len >= 4) ? (int16_t)(buf[2] | (buf[3] << 8)) : 0;
+        bool invert = active_joint_controller->getConfig().dofs[dof].zero_mapping.auto_mapping_invert_direction;
+        if (invert) {
+          active_joint_controller->pretension(dof, torque, 0);
+        } else {
+          active_joint_controller->release(dof, torque, 0);
+        }
+        LOG_C1_INFO("[CAN_HOST] Release DOF=" + String(dof));
+      }
+    } else if (rx_id == CAN_ID_RELEASE_ALL) {
+      // Release all DOFs: [joint_id, 0,0,0,0,0,0,0]
+      if (len >= 1 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        active_joint_controller->releaseAll();
+        LOG_C1_INFO("[CAN_HOST] Release ALL");
+      }
+    } else if (rx_id == CAN_ID_RECALC_OFFSET) {
+      // Recalculate motor offsets: [joint_id, dof_index, torque_lo, torque_hi, duration_lo, duration_hi, 0, 0]
+      if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        uint8_t dof = buf[1];
+        int16_t torque = (len >= 4) ? (int16_t)(buf[2] | (buf[3] << 8)) : 0;
+        int16_t duration = (len >= 6) ? (int16_t)(buf[4] | (buf[5] << 8)) : 0;
+        const JointConfig& cfg = active_joint_controller->getConfig();
+        float actual_torque = (torque > 0) ? torque : cfg.dofs[dof].zero_mapping.recalc_offset_torque;
+        int actual_duration = (duration > 0) ? duration : cfg.dofs[dof].zero_mapping.recalc_offset_duration;
+        LOG_C1_INFO("[CAN_HOST] Recalc offset DOF=" + String(dof) +
+                    " torque=" + String(actual_torque) + " dur=" + String(actual_duration));
+        active_joint_controller->recalculateMotorOffsets(dof, actual_torque, actual_duration);
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame

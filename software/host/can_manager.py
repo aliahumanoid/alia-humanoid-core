@@ -491,6 +491,58 @@ class CanManager:
             )
             return {"success": False, "error": "timeout"}
 
+    def pretension_via_can(self, joint_name: str, dof_index: int,
+                           torque: int = 0) -> Dict[str, Any]:
+        """Send pretension command via CAN for a single DOF."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        torque_lo = torque & 0xFF
+        torque_hi = (torque >> 8) & 0xFF
+        payload = bytes([joint_id, dof_index, torque_lo, torque_hi, 0, 0, 0, 0])
+        self._send_frame(0x00C, payload,
+                         context=f"Pretension {joint_name} DOF {dof_index} torque={torque}")
+        return {"success": True}
+
+    def pretension_all_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send pretension-all command via CAN."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x00D, payload,
+                         context=f"Pretension ALL {joint_name}")
+        return {"success": True}
+
+    def release_via_can(self, joint_name: str, dof_index: int,
+                        torque: int = 0) -> Dict[str, Any]:
+        """Send release command via CAN for a single DOF."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        torque_lo = torque & 0xFF
+        torque_hi = (torque >> 8) & 0xFF
+        payload = bytes([joint_id, dof_index, torque_lo, torque_hi, 0, 0, 0, 0])
+        self._send_frame(0x00E, payload,
+                         context=f"Release {joint_name} DOF {dof_index}")
+        return {"success": True}
+
+    def release_all_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send release-all command via CAN."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x00F, payload,
+                         context=f"Release ALL {joint_name}")
+        return {"success": True}
+
+    def recalc_offset_via_can(self, joint_name: str, dof_index: int,
+                              torque: int = 0, duration: int = 0) -> Dict[str, Any]:
+        """Send recalc-offset command via CAN."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = struct.pack("<BBhh", joint_id, dof_index, torque, duration) + bytes(4)
+        self._send_frame(0x010, payload,
+                         context=f"Recalc offset {joint_name} DOF {dof_index}")
+        return {"success": True}
+
     def _save_encoder_offsets(self, joint_name: str, offsets: Dict[int, float]) -> None:
         """Save encoder offsets to calibration_data/{joint}_encoder_offsets.json"""
         import os
