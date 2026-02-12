@@ -543,6 +543,97 @@ class CanManager:
                          context=f"Recalc offset {joint_name} DOF {dof_index}")
         return {"success": True}
 
+    def save_pid_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send save-PID-to-flash command via CAN (0x011)."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x011, payload, context=f"Save PID {joint_name}")
+        return {"success": True}
+
+    def load_pid_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send load-PID-from-flash command via CAN (0x012)."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x012, payload, context=f"Load PID {joint_name}")
+        return {"success": True}
+
+    def set_pid_via_can(self, joint_name: str, dof_index: int, motor_type: int,
+                        kp: float, ki: float, kd: float, tau: float) -> Dict[str, Any]:
+        """Send SET_PID via CAN (0x013) — 4 sequential frames.
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            dof_index: DOF index
+            motor_type: 1=agonist, 2=antagonist
+            kp, ki, kd, tau: PID parameters
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        for seq, val in enumerate([kp, ki, kd, tau]):
+            payload = struct.pack("<BBBBf", joint_id, dof_index, motor_type, seq, val)
+            self._send_frame(0x013, payload,
+                             context=f"SET_PID seq={seq} val={val:.4f}")
+        return {"success": True}
+
+    def set_pid_outer_via_can(self, joint_name: str, dof_index: int,
+                               kp: float, ki: float, kd: float,
+                               stiffness: float, influence: float) -> Dict[str, Any]:
+        """Send SET_PID_OUTER via CAN (0x014) — 5 sequential frames.
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            dof_index: DOF index
+            kp, ki, kd: Outer PID gains
+            stiffness: Stiffness in degrees
+            influence: Cascade influence factor
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        for seq, val in enumerate([kp, ki, kd, stiffness, influence]):
+            payload = struct.pack("<BBBBf", joint_id, dof_index, seq, 0, val)
+            self._send_frame(0x014, payload,
+                             context=f"SET_PID_OUTER seq={seq} val={val:.4f}")
+        return {"success": True}
+
+    def cascade_speed_scaling_via_can(self, joint_name: str,
+                                       params: Dict[str, float]) -> Dict[str, Any]:
+        """Send CASCADE_SPEED_SCALING parameters via CAN (0x015).
+
+        Each parameter is sent as a separate frame: [joint_id, param_id, float32(4), 0, 0].
+        A final frame with param_id=0xFF signals completion.
+
+        Args:
+            joint_name: Joint name
+            params: Dict of parameter name → value. Known keys:
+                    enabled, min, low, high, ema_en, ema_alpha,
+                    tau_en, tau_high, tau_speed, jema_en, jema_alpha,
+                    jema_speed, fric_en, fric_torque, fric_speed
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+
+        param_map = {
+            "enabled": 0, "min": 1, "low": 2, "high": 3,
+            "ema_en": 4, "ema_alpha": 5,
+            "tau_en": 6, "tau_high": 7, "tau_speed": 8,
+            "jema_en": 9, "jema_alpha": 10, "jema_speed": 11,
+            "fric_en": 12, "fric_torque": 13, "fric_speed": 14,
+        }
+
+        for name, value in params.items():
+            pid = param_map.get(name)
+            if pid is not None:
+                payload = struct.pack("<BBf", joint_id, pid, float(value)) + bytes(2)
+                self._send_frame(0x015, payload,
+                                 context=f"CASCADE param={name} val={value}")
+
+        # Send apply marker
+        payload = struct.pack("<BBf", joint_id, 0xFF, 0.0) + bytes(2)
+        self._send_frame(0x015, payload, context="CASCADE apply")
+        return {"success": True}
+
     def _save_encoder_offsets(self, joint_name: str, offsets: Dict[int, float]) -> None:
         """Save encoder offsets to calibration_data/{joint}_encoder_offsets.json"""
         import os

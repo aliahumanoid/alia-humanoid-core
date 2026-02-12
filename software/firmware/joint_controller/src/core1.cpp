@@ -77,6 +77,11 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_RELEASE 0x00E              // Release single DOF (Host → Controller)
 #define CAN_ID_RELEASE_ALL 0x00F          // Release all DOFs (Host → Controller)
 #define CAN_ID_RECALC_OFFSET 0x010        // Recalculate motor offsets (Host → Controller)
+#define CAN_ID_SAVE_PID 0x011             // Save PID to flash (Host → Controller)
+#define CAN_ID_LOAD_PID 0x012             // Load PID from flash (Host → Controller)
+#define CAN_ID_SET_PID 0x013              // Set inner PID params (Host → Controller, multi-frame)
+#define CAN_ID_SET_PID_OUTER 0x014        // Set outer PID params (Host → Controller, multi-frame)
+#define CAN_ID_CASCADE_SPEED_SCALING 0x015 // Set cascade speed scaling (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 
@@ -831,6 +836,111 @@ void pollHostCan() {
         LOG_C1_INFO("[CAN_HOST] Recalc offset DOF=" + String(dof) +
                     " torque=" + String(actual_torque) + " dur=" + String(actual_duration));
         active_joint_controller->recalculateMotorOffsets(dof, actual_torque, actual_duration);
+      }
+    } else if (rx_id == CAN_ID_SAVE_PID) {
+      // Save PID to flash: [joint_id, 0,0,0,0,0,0,0] — Core0 handler (flash access)
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        can_save_pid_requested = true;
+        LOG_C1_INFO("[CAN_HOST] Save PID to flash requested");
+      }
+    } else if (rx_id == CAN_ID_LOAD_PID) {
+      // Load PID from flash: [joint_id, 0,0,0,0,0,0,0] — Core0 handler (flash access)
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        can_load_pid_requested = true;
+        LOG_C1_INFO("[CAN_HOST] Load PID from flash requested");
+      }
+    } else if (rx_id == CAN_ID_SET_PID) {
+      // Set inner PID: multi-frame accumulator
+      // Frame: [joint_id, dof, motor, seq, float32_value(4)]
+      // seq: 0=Kp, 1=Ki, 2=Kd, 3=Tau (triggers setPid)
+      if (len >= 8 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        static uint8_t spid_dof = 0, spid_motor = 0;
+        static float spid_kp = 0, spid_ki = 0, spid_kd = 0;
+        uint8_t dof = buf[1];
+        uint8_t motor = buf[2];
+        uint8_t seq = buf[3];
+        float val;
+        memcpy(&val, &buf[4], sizeof(float));
+        switch (seq) {
+          case 0: spid_dof = dof; spid_motor = motor; spid_kp = val; break;
+          case 1: spid_ki = val; break;
+          case 2: spid_kd = val; break;
+          case 3: {
+            float tau = val;
+            if (active_joint_controller->setPid(spid_dof, spid_motor, spid_kp, spid_ki, spid_kd, tau)) {
+              LOG_C1_INFO("[CAN_HOST] SET_PID OK: DOF=" + String(spid_dof) + " motor=" + String(spid_motor) +
+                          " Kp=" + String(spid_kp, 4) + " Ki=" + String(spid_ki, 4) +
+                          " Kd=" + String(spid_kd, 4) + " Tau=" + String(tau, 4));
+            } else {
+              LOG_C1_WARN("[CAN_HOST] SET_PID FAILED: DOF=" + String(spid_dof) + " motor=" + String(spid_motor));
+            }
+            break;
+          }
+        }
+      }
+    } else if (rx_id == CAN_ID_SET_PID_OUTER) {
+      // Set outer PID: multi-frame accumulator
+      // Frame: [joint_id, dof, seq, 0, float32_value(4)]
+      // seq: 0=Kp, 1=Ki, 2=Kd, 3=stiffness, 4=influence (triggers setOuterLoopParameters)
+      if (len >= 8 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        static uint8_t opid_dof = 0;
+        static float opid_kp = 0, opid_ki = 0, opid_kd = 0, opid_stiffness = 0;
+        uint8_t dof = buf[1];
+        uint8_t seq = buf[2];
+        float val;
+        memcpy(&val, &buf[4], sizeof(float));
+        switch (seq) {
+          case 0: opid_dof = dof; opid_kp = val; break;
+          case 1: opid_ki = val; break;
+          case 2: opid_kd = val; break;
+          case 3: opid_stiffness = val; break;
+          case 4: {
+            float influence = val;
+            if (active_joint_controller->setOuterLoopParameters(opid_dof, opid_kp, opid_ki, opid_kd,
+                                                                 opid_stiffness, influence)) {
+              LOG_C1_INFO("[CAN_HOST] SET_PID_OUTER OK: DOF=" + String(opid_dof) +
+                          " Kp=" + String(opid_kp, 4) + " Ki=" + String(opid_ki, 4) +
+                          " Kd=" + String(opid_kd, 4) + " stiff=" + String(opid_stiffness, 2) +
+                          " infl=" + String(influence, 2));
+            } else {
+              LOG_C1_WARN("[CAN_HOST] SET_PID_OUTER FAILED: DOF=" + String(opid_dof));
+            }
+            break;
+          }
+        }
+      }
+    } else if (rx_id == CAN_ID_CASCADE_SPEED_SCALING) {
+      // Cascade speed scaling: per-parameter frames
+      // Frame: [joint_id, param_id, 0, 0, float32_value(4)]
+      // param_id: 0=enabled, 1=min, 2=low, 3=high, 4=ema_en, 5=ema_alpha,
+      //           6=tau_en, 7=tau_high, 8=tau_speed, 9=jema_en, 10=jema_alpha,
+      //           11=jema_speed, 12=fric_en, 13=fric_torque, 14=fric_speed, 0xFF=apply (log)
+      if (len >= 6 && buf[0] == ACTIVE_JOINT) {
+        uint8_t param_id = buf[1];
+        float val;
+        memcpy(&val, &buf[2], sizeof(float));
+        switch (param_id) {
+          case 0:  cascade_speed_scaling_enabled = (val != 0.0f); break;
+          case 1:  if (val >= 0.0f && val <= 1.0f) cascade_min_factor = val; break;
+          case 2:  if (val >= 0.0f && val <= 100.0f) cascade_speed_low = val; break;
+          case 3:  if (val >= 0.0f && val <= 100.0f) cascade_speed_high = val; break;
+          case 4:  motor_ema_enabled = (val != 0.0f); break;
+          case 5:  if (val >= 0.05f && val <= 1.0f) motor_ema_alpha = val; break;
+          case 6:  inner_tau_scaling_enabled = (val != 0.0f); break;
+          case 7:  if (val >= 0.005f && val <= 0.2f) inner_tau_high = val; break;
+          case 8:  if (val >= 0.1f && val <= 100.0f) inner_tau_speed_threshold = val; break;
+          case 9:  joint_ema_enabled = (val != 0.0f); break;
+          case 10: if (val >= 0.05f && val <= 1.0f) joint_ema_alpha = val; break;
+          case 11: if (val >= 0.1f && val <= 100.0f) joint_ema_speed_threshold = val; break;
+          case 12: friction_ff_enabled = (val != 0.0f); break;
+          case 13: if (val >= 0.0f && val <= 100.0f) friction_ff_torque = val; break;
+          case 14: if (val >= 0.1f && val <= 50.0f) friction_ff_speed_thresh = val; break;
+          case 0xFF:
+            LOG_C1_INFO("[CAN_HOST] CASCADE_SPEED_SCALING applied: en=" +
+                        String(cascade_speed_scaling_enabled) + " min=" + String(cascade_min_factor, 2) +
+                        " low=" + String(cascade_speed_low, 1) + " high=" + String(cascade_speed_high, 1));
+            break;
+        }
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame

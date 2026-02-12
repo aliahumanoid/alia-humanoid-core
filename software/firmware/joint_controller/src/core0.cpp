@@ -814,6 +814,30 @@ void core0_main_loop() {
   }
 #pragma endregion
 
+#pragma region CAN PID Flash Operations Poll
+  // Poll CAN-triggered PID save/load flags (set by Core1 on CAN 0x011/0x012)
+  if (can_save_pid_requested) {
+    can_save_pid_requested = false;
+    if (active_joint_controller != nullptr) {
+      if (active_joint_controller->savePIDDataToFlash()) {
+        LOG_INFO("[CAN] PID parameters saved to flash");
+      } else {
+        LOG_ERROR("[CAN] Failed to save PID parameters to flash");
+      }
+    }
+  }
+  if (can_load_pid_requested) {
+    can_load_pid_requested = false;
+    if (active_joint_controller != nullptr) {
+      if (active_joint_controller->loadPIDDataFromFlash()) {
+        LOG_INFO("[CAN] PID parameters loaded from flash");
+      } else {
+        LOG_ERROR("[CAN] Failed to load PID parameters from flash");
+      }
+    }
+  }
+#pragma endregion
+
 #pragma region Receive SerialData
   // check for incoming serial data:
   if (Serial.available() > 0) {

@@ -1328,21 +1328,25 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 handler.get_outer_pid_for_joint_dof(joint, dof_index)
                 message = f"Outer PID request sent for {joint} DOF {dof_index}"
             elif cmd == "set-pid":
-                # New format: Set PID for specific DOF and motor type
+                # Set PID is operational → CAN first, serial fallback
                 dof_index = data.get('dof', 0)
-                # Check if dof_index is 'ALL' string
                 if dof_index == 'ALL':
-                    dof_index = 0  # Use 0 as default value
+                    dof_index = 0
                 else:
-                    dof_index = int(dof_index)  # Convert to int only if not 'ALL'
-                motor_type = int(data.get('motor_type', 1))  # Default: agonist (1)
+                    dof_index = int(dof_index)
+                motor_type = int(data.get('motor_type', 1))
                 kp = float(data.get('kp', 0))
                 ki = float(data.get('ki', 0))
                 kd = float(data.get('kd', 0))
-                tau = float(data.get('tau', 0.02))  # Default value for tau
-                handler.set_pid_for_joint_dof(joint, dof_index, motor_type, kp, ki, kd, tau)
-                message = f"PID values set for {joint} DOF {dof_index} motor {motor_type}"
+                tau = float(data.get('tau', 0.02))
+                if can_manager and can_manager.is_connected():
+                    can_manager.set_pid_via_can(joint, dof_index, motor_type, kp, ki, kd, tau)
+                    message = f"PID set via CAN for {joint} DOF {dof_index} motor {motor_type}"
+                else:
+                    handler.set_pid_for_joint_dof(joint, dof_index, motor_type, kp, ki, kd, tau)
+                    message = f"PID set via serial for {joint} DOF {dof_index} motor {motor_type}"
             elif cmd == "set-pid-outer":
+                # Set PID outer is operational → CAN first, serial fallback
                 dof_index = data.get('dof', 0)
                 if dof_index == 'ALL':
                     dof_index = 0
@@ -1353,33 +1357,41 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 kd = float(data.get('kd', 0))
                 stiffness = float(data.get('stiffness', 1.0))
                 cascade = float(data.get('cascade', 0.25))
-                handler.set_outer_pid_for_joint_dof(joint, dof_index, kp, ki, kd, stiffness, cascade)
-                message = f"Outer loop PID values set for {joint} DOF {dof_index}"
+                if can_manager and can_manager.is_connected():
+                    can_manager.set_pid_outer_via_can(joint, dof_index, kp, ki, kd, stiffness, cascade)
+                    message = f"Outer PID set via CAN for {joint} DOF {dof_index}"
+                else:
+                    handler.set_outer_pid_for_joint_dof(joint, dof_index, kp, ki, kd, stiffness, cascade)
+                    message = f"Outer PID set via serial for {joint} DOF {dof_index}"
             elif cmd == "load-pid-all":
-                # First, send LOAD_PID command to firmware to reload from flash
-                handler.send_new_command(joint, 'ALL', COMMANDS['LOAD_PID'])
-                
+                # Load PID is operational → CAN first, serial fallback
+                if can_manager and can_manager.is_connected():
+                    can_manager.load_pid_via_can(joint)
+                    message = f"PID load from flash via CAN for {joint}"
+                else:
+                    handler.send_new_command(joint, 'ALL', COMMANDS['LOAD_PID'])
+                    message = f"PID load from flash via serial for {joint}"
+
                 # Then request all PID values for current joint and DOFs
                 # (give firmware time to load, requests will be queued)
-                for dof_index in range(3):  # Supports up to 3 DOFs
-                    # Verify if this DOF is valid for the joint
+                for dof_index in range(3):
                     is_valid_dof = False
-                    
                     if joint in JOINTS:
                         joint_info = JOINTS[joint]
                         if 'dofs' in joint_info and dof_index < len(joint_info['dofs']):
                             is_valid_dof = True
-                            
                     if is_valid_dof:
-                        # Request PID for both motor types
                         handler.get_pid_for_joint_dof(joint, dof_index, 1)
                         handler.get_pid_for_joint_dof(joint, dof_index, 2)
                         handler.get_outer_pid_for_joint_dof(joint, dof_index)
-
-                message = f"PID load from flash requested and values being read for {joint}"
             elif cmd == "save-pid":
-                handler.send_new_command(joint, 'ALL', COMMANDS['SAVE_PID'])
-                message = "PID save request sent"
+                # Save PID is operational → CAN first, serial fallback
+                if can_manager and can_manager.is_connected():
+                    can_manager.save_pid_via_can(joint)
+                    message = f"PID save to flash via CAN for {joint}"
+                else:
+                    handler.send_new_command(joint, 'ALL', COMMANDS['SAVE_PID'])
+                    message = "PID save to flash via serial"
             elif cmd == "recalc-safe-limits":
                 handler.send_new_command(joint, 'ALL', COMMANDS['RECALC_SAFE_LIMITS'])
                 message = "Safe limits recalculation requested"
@@ -1402,7 +1414,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 handler.send_new_command(joint, 'ALL', COMMANDS['GET_AUTO_START'])
                 message = "Auto-start status requested"
             elif cmd == "cascade-speed-scaling":
-                # Set velocity-dependent stiffness scaling + EMA filter + tau scaling parameters
+                # Cascade speed scaling is operational → CAN first, serial fallback
                 enabled = int(data.get('enabled', 1))
                 min_factor = float(data.get('min_factor', 0.3))
                 speed_low = float(data.get('speed_low', 3.0))
@@ -1418,17 +1430,34 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 fric_enabled = int(data.get('fric_enabled', 0))
                 fric_torque = float(data.get('fric_torque', 30.0))
                 fric_speed = float(data.get('fric_speed', 3.0))
-                params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
-                          f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}"
-                          f":TAU_EN={tau_enabled}:TAU_HIGH={tau_high}:TAU_SPEED={tau_speed}"
-                          f":JEMA_EN={jema_enabled}:JEMA_ALPHA={jema_alpha}:JEMA_SPEED={jema_speed}"
-                          f":FRIC_EN={fric_enabled}:FRIC_TORQUE={fric_torque}:FRIC_SPEED={fric_speed}")
-                handler.send_new_command(joint, 'ALL', params)
-                message = (f"Velocity tuning: stiff_en={enabled} min={min_factor} "
-                           f"ema_en={ema_enabled} ema_a={ema_alpha} "
-                           f"tau_en={tau_enabled} tau_h={tau_high} "
-                           f"jema_en={jema_enabled} jema_a={jema_alpha} jema_spd={jema_speed} "
-                           f"fric_en={fric_enabled} fric_t={fric_torque} fric_spd={fric_speed}")
+                if can_manager and can_manager.is_connected():
+                    css_params = {
+                        'enabled': float(enabled),
+                        'min': min_factor,
+                        'low': speed_low,
+                        'high': speed_high,
+                        'ema_en': float(ema_enabled),
+                        'ema_alpha': ema_alpha,
+                        'tau_en': float(tau_enabled),
+                        'tau_high': tau_high,
+                        'tau_speed': tau_speed,
+                        'jema_en': float(jema_enabled),
+                        'jema_alpha': jema_alpha,
+                        'jema_speed': jema_speed,
+                        'fric_en': float(fric_enabled),
+                        'fric_torque': fric_torque,
+                        'fric_speed': fric_speed,
+                    }
+                    can_manager.cascade_speed_scaling_via_can(joint, css_params)
+                    message = f"Cascade speed scaling set via CAN for {joint}"
+                else:
+                    params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
+                              f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}"
+                              f":TAU_EN={tau_enabled}:TAU_HIGH={tau_high}:TAU_SPEED={tau_speed}"
+                              f":JEMA_EN={jema_enabled}:JEMA_ALPHA={jema_alpha}:JEMA_SPEED={jema_speed}"
+                              f":FRIC_EN={fric_enabled}:FRIC_TORQUE={fric_torque}:FRIC_SPEED={fric_speed}")
+                    handler.send_new_command(joint, 'ALL', params)
+                    message = (f"Cascade speed scaling set via serial for {joint}")
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')

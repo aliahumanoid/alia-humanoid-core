@@ -155,6 +155,10 @@ volatile uint8_t can_set_zero_dof_index = 0;
 // CAN encoder offset notification (Core0 sets flag, Core1 sends CAN frames)
 volatile bool can_encoder_offsets_notify = false;
 
+// CAN-triggered PID flash operations (Core1 sets flag, Core0 executes)
+volatile bool can_save_pid_requested = false;
+volatile bool can_load_pid_requested = false;
+
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 queue_t startup_event_queue;
 

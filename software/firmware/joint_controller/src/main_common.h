@@ -161,6 +161,10 @@ extern volatile uint8_t can_set_zero_dof_index;
 // CAN encoder offset notification (Core0 sets flag, Core1 sends CAN frames)
 extern volatile bool can_encoder_offsets_notify;
 
+// CAN-triggered PID flash operations (Core1 sets flag, Core0 executes)
+extern volatile bool can_save_pid_requested;
+extern volatile bool can_load_pid_requested;
+
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 struct StartupStatusEvent {
   uint8_t event_type;   // 0=BEGIN, 1=DOF_READY, 2=DOF_FAILED, 3=COMPLETE, 4=FAILED
