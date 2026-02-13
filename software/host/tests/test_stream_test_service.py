@@ -219,22 +219,55 @@ class TestTrajectoryGen:
             rate_hz=100,
             horizon_ms=250,
         )
-        chunk = gen.next_chunk(100.0)
+        chunk = gen.next_chunk(100.0, lead_ms=250.0)
         offsets = [wp["t_offset_ms"] for wp in chunk]
         for i in range(1, len(offsets)):
             assert offsets[i] > offsets[i - 1]
 
     def test_multiple_chunks_continuous(self):
-        """Sequential chunks should have non-overlapping t_offset_ms."""
+        """Sequential chunks produce consistent relative offsets."""
         gen = TrajectoryGenerator(
             traj_config={"type": "sinusoid"},
             rate_hz=50,
             horizon_ms=200,
         )
-        chunk1 = gen.next_chunk(0.0)
-        last_t1 = chunk1[-1]["t_offset_ms"]
-        chunk2 = gen.next_chunk(last_t1 + 20)
-        assert chunk2[0]["t_offset_ms"] > last_t1
+        # With the same lead_ms, each chunk should start at the same offset
+        chunk1 = gen.next_chunk(0.0, lead_ms=200.0)
+        chunk2 = gen.next_chunk(60.0, lead_ms=200.0)
+        # Both start at lead_ms, so first t_offset_ms should be 200
+        assert chunk1[0]["t_offset_ms"] == chunk2[0]["t_offset_ms"]
+        # But the sinusoid angles should differ
+        assert chunk1[0]["angles_deg"] != chunk2[0]["angles_deg"]
+
+    def test_t_offset_never_exceeds_uint16(self):
+        """Regression: t_offset_ms must stay within [1, 65535] even for
+        long-running sessions (P1 overflow fix).
+        """
+        gen = TrajectoryGenerator(
+            traj_config={"type": "sinusoid"},
+            rate_hz=50,
+            horizon_ms=250,
+        )
+        # Simulate tick at 600 seconds (10 minutes) — absolute time
+        t_base_ms = 600_000.0
+        chunk = gen.next_chunk(t_base_ms, lead_ms=250.0)
+        for wp in chunk:
+            assert 1 <= wp["t_offset_ms"] <= 65535, (
+                f"t_offset_ms={wp['t_offset_ms']} out of uint16 range"
+            )
+
+    def test_t_offset_stays_bounded_at_extreme_session(self):
+        """Even at 10-minute session with 100Hz, all offsets are bounded."""
+        gen = TrajectoryGenerator(
+            traj_config={"type": "sinusoid"},
+            rate_hz=100,
+            horizon_ms=250,
+        )
+        for tick in range(0, 60_000, 1000):  # every 10s for 10 minutes
+            t_base_ms = tick * 10.0  # 100Hz → 10ms period
+            chunk = gen.next_chunk(t_base_ms, lead_ms=250.0)
+            for wp in chunk:
+                assert wp["t_offset_ms"] <= 65535
 
 
 # =======================================================================
@@ -370,6 +403,30 @@ class TestMetrics:
         snap = m.snapshot()
         assert snap["http_status_counts"] == {200: 10, 409: 2}
         assert snap["retries"] == 3
+
+    def test_partial_increments_correctly(self):
+        """P3 regression: inc_partial(n) should increase waypoints_partial."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.inc_partial(3)
+        m.inc_partial(1)
+        snap = m.snapshot()
+        assert snap["waypoints_partial"] == 4
+
+    def test_extra_status_counts_merged(self):
+        """P2 regression: record_http_status (conflict spike) should merge
+        with WaypointClient status counts in snapshot.
+        """
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.merge_client_metrics({
+            "status_counts": {200: 10, 409: 1},
+            "retries": 0,
+        })
+        m.record_http_status(409)
+        m.record_http_status(409)
+        snap = m.snapshot()
+        # WaypointClient had 1 × 409, conflict spike added 2 → total 3
+        assert snap["http_status_counts"][409] == 3
+        assert snap["http_status_counts"][200] == 10
 
     def test_queue_fill_max(self):
         m = StreamMetrics(target_rate_hz=50, joints=["A", "B"])

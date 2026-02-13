@@ -87,8 +87,12 @@ class TrajectoryGenerator:
         self._n_dof = n_dof
         self._period_ms = 1000.0 / rate_hz
 
-    def next_chunk(self, t_base_ms: float) -> List[Dict[str, Any]]:
+    def next_chunk(self, t_base_ms: float, lead_ms: float = 0.0) -> List[Dict[str, Any]]:
         """Generate a short chunk of 2-4 waypoints starting at *t_base_ms*.
+
+        ``t_base_ms`` is the *absolute* session time used for sinusoid phase.
+        ``lead_ms`` is the base lead-time offset added to each waypoint's
+        ``t_offset_ms`` (which is relative to "now", not absolute).
 
         Returns list of ``{"angles_deg": [...], "t_offset_ms": int}``.
         """
@@ -96,8 +100,9 @@ class TrajectoryGenerator:
         n_wp = max(2, min(4, int(self._horizon_ms / self._period_ms)))
         chunk: List[Dict[str, Any]] = []
         for i in range(n_wp):
-            t_ms = t_base_ms + i * self._period_ms
-            t_s = t_ms / 1000.0
+            # Absolute time for angle calculation (continuous sinusoid)
+            t_abs_ms = t_base_ms + i * self._period_ms
+            t_s = t_abs_ms / 1000.0
             if self._type == "sinusoid":
                 angle = self._offset + self._amplitude * math.sin(
                     2 * math.pi * self._freq * t_s
@@ -105,10 +110,14 @@ class TrajectoryGenerator:
             else:
                 angle = self._offset  # fallback: constant
 
+            # t_offset_ms = relative lead from "now" (uint16, max 65535)
+            relative_ms = lead_ms + i * self._period_ms
+            t_offset = max(1, min(65535, int(relative_ms)))
+
             angles_deg = [round(angle, 2)] * self._n_dof
             chunk.append({
                 "angles_deg": angles_deg,
-                "t_offset_ms": max(1, int(t_ms)),
+                "t_offset_ms": t_offset,
             })
         return chunk
 
@@ -291,6 +300,7 @@ class StreamMetrics:
 
         # HTTP status counts (from WaypointClient metrics)
         self._http_status_counts: Dict[int, int] = {}
+        self._extra_status_counts: Dict[int, int] = {}  # conflict spike etc.
         self._retries: int = 0
 
         # Rate calculation
@@ -332,6 +342,13 @@ class StreamMetrics:
             if fill > self._queue_fill_max.get(joint, 0):
                 self._queue_fill_max[joint] = fill
 
+    def record_http_status(self, code: int) -> None:
+        """Record an extra HTTP status code (e.g. from conflict spike)."""
+        with self._lock:
+            self._extra_status_counts[code] = (
+                self._extra_status_counts.get(code, 0) + 1
+            )
+
     def merge_client_metrics(self, client_metrics: dict) -> None:
         """Pull HTTP status counts and retries from WaypointClient."""
         with self._lock:
@@ -351,9 +368,13 @@ class StreamMetrics:
             else:
                 p95 = 0.0
 
+            # Merge client + extra (conflict spike) HTTP status counts
+            merged_status: Dict[int, int] = dict(self._http_status_counts)
+            for code, cnt in self._extra_status_counts.items():
+                merged_status[code] = merged_status.get(code, 0) + cnt
+
             # late ratio from WaypointClient status counts
-            total_wp = self._waypoints_sent
-            late_count = self._http_status_counts.get(207, 0)  # partials as proxy
+            late_count = merged_status.get(207, 0)  # partials as proxy
             late_ratio = late_count / max(1, self._chunks_sent)
 
             return {
@@ -365,7 +386,7 @@ class StreamMetrics:
                 "chunks_deferred": self._chunks_deferred,
                 "waypoints_sent": self._waypoints_sent,
                 "waypoints_partial": self._waypoints_partial,
-                "http_status_counts": dict(self._http_status_counts),
+                "http_status_counts": merged_status,
                 "retries": self._retries,
                 "queue_fill_max": dict(self._queue_fill_max),
                 "late_ratio": round(late_ratio, 4),
@@ -546,8 +567,11 @@ class _StreamSession:
                             break
 
                     # Generate chunk
+                    # t_base_ms = absolute session time for sinusoid phase
+                    # lead_ms = horizon from "now" for t_offset_ms (uint16)
                     t_base_ms = tick * period_s * 1000
-                    chunk = self._trajectory[joint].next_chunk(t_base_ms)
+                    lead_ms = config.get("horizon_ms", 250)
+                    chunk = self._trajectory[joint].next_chunk(t_base_ms, lead_ms)
 
                     # Send via WaypointClient
                     try:
@@ -556,12 +580,25 @@ class _StreamSession:
                         self.metrics.inc_sent(joint, len(chunk))
                         self._pending_batches[batch_id] = joint
 
-                        # Conflict spike: send duplicate
+                        # Conflict spike: send duplicate directly via
+                        # transport to bypass WaypointClient serialisation,
+                        # provoking a real parallel same-joint 409 from Flask.
                         if self._fault.conflict_spike and tick % 10 == 0:
-                            try:
-                                client.enqueue_batch(joint, chunk)
-                            except Exception:
-                                pass  # expected 409
+                            def _fire_conflict(j=joint, wp=chunk):
+                                try:
+                                    resp = transport.send_batch(j, wp, f"conflict-{tick}")
+                                    code = resp.http_status
+                                    self.metrics.record_http_status(code)
+                                    if code == 409:
+                                        self.events.emit(
+                                            "INFO", "conflict_409", j,
+                                            "parallel duplicate got expected 409",
+                                        )
+                                except Exception:
+                                    pass
+                            threading.Thread(
+                                target=_fire_conflict, daemon=True,
+                            ).start()
                     except Exception as exc:
                         self.metrics.set_error(str(exc))
                         self.events.emit(
@@ -648,8 +685,11 @@ class _StreamSession:
             if record and record.completed_at is not None:
                 self._backpressure[joint].on_done()
                 if record.state == BatchState.PARTIAL:
-                    result = getattr(record, "result", None) or {}
-                    self.metrics.inc_partial(0)
+                    result = record.result or {}
+                    total = result.get("total", 0)
+                    sent = result.get("sent", 0)
+                    failed_wp = max(0, total - sent)
+                    self.metrics.inc_partial(failed_wp)
                 completed.append(batch_id)
         for bid in completed:
             del self._pending_batches[bid]

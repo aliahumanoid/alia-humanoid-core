@@ -89,6 +89,7 @@ class BatchRecord:
     completed_at: Optional[float] = None
     last_error: Optional[str] = None
     http_status: Optional[int] = None
+    result: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -491,11 +492,13 @@ class _JointWorker:
 
             if next_state == BatchState.COMPLETE:
                 record.server_batch_id = (resp.result or {}).get("batch_id")
+                record.result = resp.result
                 self._log_complete(record, resp)
                 return
 
             elif next_state == BatchState.PARTIAL:
                 record.server_batch_id = (resp.result or {}).get("batch_id")
+                record.result = resp.result
                 self._log_partial(record, resp)
                 return
 
