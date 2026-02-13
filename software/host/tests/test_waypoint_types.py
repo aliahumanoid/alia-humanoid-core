@@ -289,6 +289,30 @@ class TestBuildBatch:
                 {"angles_deg": [[1, 2]], "t_offset_ms": 100},
             ])
 
+    def test_nan_angle_raises_valueerror(self):
+        """NaN angle must raise ValueError, not silently pass through."""
+        import pytest
+        with pytest.raises(ValueError, match="not finite"):
+            build_batch("KNEE_LEFT", [
+                {"angles_deg": [float("nan")], "t_offset_ms": 100},
+            ])
+
+    def test_inf_angle_raises_valueerror(self):
+        """Infinity angle must raise ValueError."""
+        import pytest
+        with pytest.raises(ValueError, match="not finite"):
+            build_batch("KNEE_LEFT", [
+                {"angles_deg": [float("inf")], "t_offset_ms": 100},
+            ])
+
+    def test_neg_inf_angle_raises_valueerror(self):
+        """Negative infinity angle must raise ValueError."""
+        import pytest
+        with pytest.raises(ValueError, match="not finite"):
+            build_batch("KNEE_LEFT", [
+                {"angles_deg": [float("-inf")], "t_offset_ms": 100},
+            ])
+
 
 # -----------------------------------------------------------------------
 # get_dof_limits

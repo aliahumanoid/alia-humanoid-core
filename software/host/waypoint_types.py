@@ -121,11 +121,16 @@ def build_batch(joint: str, waypoints_raw: list) -> WaypointBatch:
                 angles.append(None)
             else:
                 try:
-                    angles.append(float(a))
+                    val = float(a)
                 except (TypeError, ValueError):
                     raise ValueError(
                         f"Waypoint {i}: angles_deg[{dof_idx}] = {a!r} is not numeric"
                     )
+                if not math.isfinite(val):
+                    raise ValueError(
+                        f"Waypoint {i}: angles_deg[{dof_idx}] = {val} is not finite"
+                    )
+                angles.append(val)
         while len(angles) < 3:
             angles.append(None)
 

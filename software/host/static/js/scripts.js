@@ -3081,7 +3081,11 @@ function sendMultiWaypointSmoothCurve() {
         contentType: 'application/json',
         data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
     }).done(response => {
-        if (response.status === 'success') {
+        if (response.status === 'success' || response.status === 'partial') {
+            if (response.status === 'partial') {
+                const r = response.result || {};
+                appendStatusMessage(`⚠️ Partial batch: ${r.sent}/${r.total} waypoints sent`);
+            }
             appendStatusMessage(`✅ Multi-WP batch sent: ${dedupedWaypoints.length} waypoints [LINEAR interp]`);
             lastWaypointBatch.sent = true;
             updateWaypointViewBtn();
@@ -3299,14 +3303,17 @@ function sendCanWaypointSequence() {
             waypoints: dedupedBatch
         })
     }).done(response => {
-        if (response.status === 'success') {
+        if (response.status === 'success' || response.status === 'partial') {
             const result = response.result || {};
             appendStatusMessage(`📤 Batch sent: ${result.sent || result.success}/${result.total} waypoints queued`);
-            
+
+            if (response.status === 'partial') {
+                appendStatusMessage(`  ⚠️ Partial: ${result.sent}/${result.total} waypoints sent`);
+            }
             if (result.errors > 0) {
                 appendStatusMessage(`  ⚠️ ${result.errors} waypoints failed`);
             }
-            
+
             // Wait for sequence to complete
             const waitTime = totalDuration + initialOffset + 500;
             setTimeout(() => {
@@ -3504,9 +3511,13 @@ function sendCosineOscillation() {
             waypoints: dedupedBatch
         })
     }).done(response => {
-        if (response.status === 'success') {
+        if (response.status === 'success' || response.status === 'partial') {
             const result = response.result || {};
             appendStatusMessage(`📤 Batch sent: ${result.sent || result.success}/${result.total} waypoints queued`);
+
+            if (response.status === 'partial') {
+                appendStatusMessage(`  ⚠️ Partial: ${result.sent}/${result.total} waypoints sent`);
+            }
 
             // Wait for sequence to complete
             const waitTime = finalTime + 500;
@@ -4540,7 +4551,11 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         contentType: 'application/json',
         data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
     }).done(response => {
-        if (response.status === 'success') {
+        if (response.status === 'success' || response.status === 'partial') {
+            if (response.status === 'partial') {
+                const r = response.result || {};
+                appendStatusMessage(`⚠️ Partial batch: ${r.sent}/${r.total} waypoints sent`);
+            }
             appendStatusMessage(`✅ Dual-DOF batch sent: ${dedupedWaypoints.length} waypoints`);
             lastWaypointBatch.sent = true;
             updateWaypointViewBtn();

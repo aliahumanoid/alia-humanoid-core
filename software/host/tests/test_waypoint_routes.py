@@ -165,7 +165,7 @@ class TestWaypointBatchRoute:
                 {"angles_deg": [30.0], "t_offset_ms": 300},
             ],
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 207  # Multi-Status for partial batch
         assert resp.get_json()["status"] == "partial"
 
     def test_concurrent_batch_returns_409(self, app_client):
