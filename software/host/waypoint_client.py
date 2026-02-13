@@ -429,13 +429,16 @@ class _JointWorker:
     def _ensure_started(self) -> None:
         with self._startup_lock:
             need_new = (self._thread is None or not self._thread.is_alive())
-            # If cancel was requested but old thread is still winding down,
-            # wait for it so the new thread starts with a clean cancel_event.
             if not need_new and self._cancel_event.is_set():
+                # Old thread still alive with cancel pending.  Try to
+                # wait for it so we can start a fresh one.
                 self._thread.join(timeout=2.0)
-                # Only spawn new thread if old one actually exited;
-                # otherwise keep the old thread to preserve serialisation.
-                need_new = not self._thread.is_alive()
+                if self._thread.is_alive():
+                    # Old thread stuck in a slow send — clear cancel so it
+                    # keeps processing the queue (preserves serialisation).
+                    self._cancel_event.clear()
+                    return
+                need_new = True
             if need_new:
                 self._cancel_event.clear()
                 self._thread = threading.Thread(

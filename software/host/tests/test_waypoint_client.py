@@ -466,7 +466,7 @@ class TestRegression:
 
     def test_enqueue_after_cancel_is_processed(self, mock_transport):
         """Regression: cancel_joint() then enqueue_batch() must not leave
-        the new batch stuck in IDLE (stale cancel_event race)."""
+        the new batch stuck in IDLE (stale cancel_event race — fast path)."""
         c = WaypointClient(mock_transport, config=FAST_CONFIG)
         try:
             # First batch — let it complete
@@ -486,6 +486,51 @@ class TestRegression:
             assert record.completed_at is not None
         finally:
             c.shutdown(timeout_s=2.0)
+
+    def test_enqueue_after_cancel_slow_send(self, mock_transport):
+        """Regression: cancel during a slow send_batch (>join timeout)
+        must still process a subsequent enqueue without duplicating
+        the worker thread."""
+        gate = threading.Event()
+        call_count = {"n": 0}
+        original_send = mock_transport.send_batch
+
+        def slow_then_fast(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # First call: block for 3s (longer than join timeout=2s)
+                gate.wait(timeout=5.0)
+            return original_send(*args, **kwargs)
+
+        mock_transport.send_batch = slow_then_fast
+
+        c = WaypointClient(mock_transport, config=FAST_CONFIG)
+        try:
+            # First batch — starts slow send
+            bid1 = c.enqueue_batch("KNEE_LEFT", VALID_WAYPOINTS)
+            time.sleep(0.1)     # Let worker enter slow_then_fast
+
+            # Cancel while send is blocked
+            c.cancel_joint("KNEE_LEFT")
+
+            # Enqueue second batch — worker still alive in slow send
+            bid2 = c.enqueue_batch("KNEE_LEFT", VALID_WAYPOINTS)
+
+            # Release the gate so first send completes
+            gate.set()
+
+            # Both batches must reach terminal state
+            r1 = _wait_batch(c, bid1, timeout=5.0)
+            r2 = _wait_batch(c, bid2, timeout=5.0)
+            assert r1 is not None
+            assert r1.state in (BatchState.COMPLETE, BatchState.PARTIAL,
+                                BatchState.FAILED_HARD)
+            assert r2 is not None
+            assert r2.state in (BatchState.COMPLETE, BatchState.PARTIAL)
+            assert r2.completed_at is not None
+        finally:
+            gate.set()
+            c.shutdown(timeout_s=3.0)
 
     def test_queue_full_no_ghost_batch(self, mock_transport):
         """Regression: queue.Full must not leave ghost records in history
