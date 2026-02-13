@@ -11,6 +11,11 @@ from flask import jsonify, request, current_app, render_template
 from typing import Dict, Any, List, Optional
 from serial_manager import SerialManager
 from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
+from waypoint_types import (
+    WaypointBatch, ValidationResult,
+    build_batch, validate_batch, deduplicate_batch, batch_to_dicts,
+    get_dof_limits, MAX_BATCH_SIZE,
+)
 import json
 import os
 import time
@@ -57,6 +62,75 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": "CAN features not available on this host (python-can missing or disabled)."
             }), 503
         return None
+
+    # Maximum time sync age before waypoints are rejected (ms)
+    MAX_SYNC_AGE_MS = 2000.0
+
+    def _waypoint_preflight(joint_name: str, waypoints_raw: list):
+        """
+        Validate preconditions for sending a waypoint batch.
+
+        Returns:
+            (WaypointBatch, None)               on success
+            (None, (jsonify_response, status))   on failure
+        """
+        # 1. CAN connected
+        if not can_manager.is_connected():
+            return None, (jsonify({
+                "status": "error",
+                "message": "CAN bus not connected"
+            }), 503)
+
+        # 2. Time sync freshness
+        sync_age = can_manager.last_time_sync_age_ms()
+        if sync_age is None:
+            return None, (jsonify({
+                "status": "error",
+                "message": "No time sync sent yet — send time sync first"
+            }), 400)
+        if sync_age > MAX_SYNC_AGE_MS:
+            return None, (jsonify({
+                "status": "error",
+                "message": f"Time sync stale ({sync_age:.0f}ms ago, limit {MAX_SYNC_AGE_MS:.0f}ms)"
+            }), 400)
+
+        # 3. Build batch dataclass from raw dicts
+        try:
+            batch = build_batch(joint_name, waypoints_raw)
+        except Exception as exc:
+            return None, (jsonify({
+                "status": "error",
+                "message": f"Invalid waypoint data: {exc}"
+            }), 400)
+
+        # 4. Validate batch (angle limits, monotonicity, velocity)
+        result: ValidationResult = validate_batch(batch)
+        if not result.ok:
+            error_details = [
+                {"index": e.index, "field": e.field, "message": e.message}
+                for e in result.errors
+            ]
+            return None, (jsonify({
+                "status": "error",
+                "message": f"Waypoint validation failed ({len(result.errors)} error(s))",
+                "validation_errors": error_details,
+            }), 400)
+
+        # Log warnings (non-fatal)
+        for w in result.warnings:
+            logger.warning(f"[Waypoint] {w}")
+
+        # 5. Deduplicate (remove zero-step quantization duplicates)
+        original_count = len(batch.entries)
+        batch = deduplicate_batch(batch)
+        if len(batch.entries) < original_count:
+            logger.info(
+                f"[Waypoint] Deduplication removed "
+                f"{original_count - len(batch.entries)} zero-step waypoints "
+                f"({original_count} → {len(batch.entries)})"
+            )
+
+        return batch, None
 
     def load_mapping_from_file(joint_name: str):
         filename = f"mapping_data/{joint_name.lower()}_mapping.json"
@@ -570,14 +644,27 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                     processed_angles.append(float(angle))
                 else:
                     processed_angles.append(None)
-            
+
             t_offset_ms = int(t_offset_ms)
             if t_offset_ms < 0 or t_offset_ms > 65535:
                 return jsonify({
                     "status": "error",
                     "message": "t_offset_ms must be 0-65535"
                 }), 400
-                
+
+            # Validate angles against physical limits
+            joint_key = joint.upper()
+            if joint_key in JOINTS:
+                dof_limits = get_dof_limits(joint_key)
+                for dof_idx, angle in enumerate(processed_angles):
+                    if angle is not None and dof_idx in dof_limits:
+                        lo, hi = dof_limits[dof_idx]
+                        if angle < lo or angle > hi:
+                            return jsonify({
+                                "status": "error",
+                                "message": f"DOF{dof_idx} angle {angle:.2f}° out of range [{lo:.1f}, {hi:.1f}]"
+                            }), 400
+
         except ValueError as exc:
             return jsonify({
                 "status": "error",
@@ -607,7 +694,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
     def send_can_waypoint_batch():
         """
         Send a batch of waypoints in deterministic order.
-        
+
         Request body:
         {
             "joint": "ANKLE_RIGHT",
@@ -617,8 +704,10 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 ...
             ]
         }
-        
-        All waypoints are sent sequentially, guaranteeing order and completeness.
+
+        Preflight checks: CAN connected, time sync fresh, angle/velocity/
+        monotonicity validation.  Per-joint concurrency lock prevents
+        interleaved batches.
         """
         unavailable = can_unavailable_response()
         if unavailable:
@@ -626,7 +715,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
 
         data = request.get_json() or {}
         joint = data.get('joint')
-        waypoints = data.get('waypoints', [])
+        waypoints_raw = data.get('waypoints', [])
 
         if not joint:
             return jsonify({
@@ -634,42 +723,58 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "message": "Missing 'joint' parameter"
             }), 400
 
-        if not waypoints or not isinstance(waypoints, list):
+        if not waypoints_raw or not isinstance(waypoints_raw, list):
             return jsonify({
                 "status": "error",
                 "message": "Missing or invalid 'waypoints' array"
             }), 400
 
-        # Enforce hard limit on batch size to prevent buffer overflow
-        # Firmware waypoint buffer is 2000 waypoints per DOF (see waypoint_buffer.h)
-        # We use the same limit here; for longer sequences, implement streaming
-        MAX_BATCH_SIZE = 2000
-        original_count = len(waypoints)
-        if original_count > MAX_BATCH_SIZE:
-            logger.warning(f"Waypoint batch size {original_count} exceeds limit {MAX_BATCH_SIZE}, truncating")
-            waypoints = waypoints[:MAX_BATCH_SIZE]
+        # --- Preflight: CAN, time sync, build & validate batch ---
+        batch, preflight_error = _waypoint_preflight(joint, waypoints_raw)
+        if preflight_error:
+            return preflight_error
 
         try:
             # NOTE: Interpolation mode is NOT forced here anymore.
             # The current mode (set by oscillation test or other commands) is used.
             # - LINEAR: For dense trajectories (many waypoints, small delta-t)
-            # - COSINE: For sparse trajectories (few waypoints, large delta-t) - smoother
+            # - COSINE: For sparse trajectories (few waypoints, large delta-t)
             # User should set mode via oscillation test or a dedicated control.
-            
-            result = can_manager.send_waypoint_batch(joint, waypoints)
-            msg = f"Batch of {result['success']}/{result['total']} waypoints sent to {joint}"
-            if original_count > MAX_BATCH_SIZE:
-                msg += f" (truncated from {original_count})"
+
+            # Use deduplicated batch (from preflight) instead of raw
+            result = can_manager.send_waypoint_batch(
+                joint, batch_to_dicts(batch),
+                batch_id=batch.batch_id,
+            )
+
+            sent = result["sent"]
+            total = result["total"]
+
+            # Determine status: success / partial / error
+            if sent == total:
+                status = "success"
+            elif sent > 0:
+                status = "partial"
+            else:
+                status = "error"
+
             return jsonify({
-                "status": "success",
-                "message": msg,
+                "status": status,
+                "message": f"Batch {batch.batch_id}: {sent}/{total} waypoints sent to {joint}",
                 "result": result,
-                "truncated": original_count > MAX_BATCH_SIZE
             })
+
         except ValueError as exc:
+            msg = str(exc)
+            # Per-joint concurrency conflict → 409
+            if "already in progress" in msg:
+                return jsonify({
+                    "status": "error",
+                    "message": msg
+                }), 409
             return jsonify({
                 "status": "error",
-                "message": str(exc)
+                "message": msg
             }), 400
         except Exception as exc:
             logger.exception("Failed to send waypoint batch")

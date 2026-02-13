@@ -119,6 +119,12 @@ class CanManager:
         # CAN set-zero completion event
         self._zero_complete_event = threading.Event()
 
+        # Time sync tracking (for preflight gating)
+        self._last_time_sync_ts: Optional[float] = None
+
+        # Per-joint batch locks (prevents concurrent batch sends to same joint)
+        self._batch_locks: Dict[str, threading.Lock] = {}
+
         # Configuration persistence
         self._config_file = "can_config.json"
 
@@ -281,7 +287,14 @@ class CanManager:
         timestamp_ms = timestamp_ms & 0xFFFFFFFF
         payload = struct.pack("<II", timestamp_ms, 0)
         self._send_frame(0x002, payload, context=f"TimeSync ts={timestamp_ms}")
+        self._last_time_sync_ts = time.monotonic()
         return {"timestamp_ms": timestamp_ms}
+
+    def last_time_sync_age_ms(self) -> Optional[float]:
+        """Return ms since last time sync, or None if never synced."""
+        if self._last_time_sync_ts is None:
+            return None
+        return (time.monotonic() - self._last_time_sync_ts) * 1000.0
 
     def send_emergency_stop(self, reason_code: int = 0) -> Dict[str, Any]:
         """Broadcast emergency stop frame."""
@@ -1013,75 +1026,177 @@ class CanManager:
         joint_name: str,
         waypoints: list,
         inter_waypoint_delay_ms: float = 2.0,
+        batch_id: str = "",
+        min_lead_ms: float = 15.0,
     ) -> Dict[str, Any]:
         """
         Send a batch of waypoints sequentially (deterministic order).
-        
+
         This ensures all waypoints arrive in order and none are lost.
         A small delay between waypoints prevents CAN buffer overflow.
-        
+        A per-joint lock prevents concurrent batches to the same joint.
+
         TIMING COMPENSATION:
         The t_offset_ms from JS represents "desired arrival time from batch start".
         Since each waypoint takes time to send, we adjust t_offset based on
         actual elapsed time since the first waypoint was sent:
-        
+
             adjusted_t_offset = original_t_offset - elapsed_since_first_wp
-        
+
         This ensures accurate timing regardless of CAN/system delays.
-        
+
+        LATE WAYPOINT POLICY:
+        If adjusted_t_offset drops below min_lead_ms the waypoint is "late"
+        and is skipped (the firmware interpolates from the previous to the
+        next waypoint).  If MAX_CONSECUTIVE_LATE consecutive waypoints are
+        late, the batch is aborted — the system cannot keep up.
+
         Args:
             joint_name: Joint name (e.g., 'ANKLE_RIGHT')
             waypoints: List of dicts with 'angles_deg' and 't_offset_ms'
             inter_waypoint_delay_ms: Delay between waypoints (default 2ms)
-        
+            batch_id: Optional batch identifier for traceability
+            min_lead_ms: Minimum adjusted t_offset to consider on-time (default 15)
+
         Returns:
             Dict with batch statistics
+
+        Raises:
+            ValueError: If a batch is already in progress for this joint
         """
         import time
+        from waypoint_types import MAX_CONSECUTIVE_LATE
+
         self._ensure_connection()
-        
-        success_count = 0
-        error_count = 0
-        delay_sec = inter_waypoint_delay_ms / 1000.0
-        
-        # Track actual elapsed time for accurate timing compensation
-        batch_start_time = time.perf_counter()
-        
-        for i, wp in enumerate(waypoints):
-            try:
-                angles = wp.get('angles_deg', [None, None, None])
-                original_t_offset = wp.get('t_offset_ms', 0)
-                
-                # Calculate actual elapsed time since batch start (in ms)
-                elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
-                
-                # Adjust t_offset: compensate for time already spent sending previous waypoints
-                # t_offset is relative to when THIS waypoint is received by the Pico
-                # We want the waypoint to arrive at (batch_start + original_t_offset)
-                # It will be received at (batch_start + elapsed_ms)
-                # So t_offset should be: original_t_offset - elapsed_ms
-                adjusted_t_offset = max(0, int(original_t_offset - elapsed_ms))
-                
-                self.send_multi_dof_waypoint(joint_name, angles, adjusted_t_offset)
-                success_count += 1
-                
-                # Small delay to prevent CAN buffer overflow
-                if i < len(waypoints) - 1:
-                    time.sleep(delay_sec)
-                    
-            except Exception as exc:
-                self.logger.warning(f"Waypoint {i} failed: {exc}")
-                error_count += 1
-        
-        total_elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
-        self.logger.info(f"Waypoint batch complete: {success_count}/{len(waypoints)} sent in {total_elapsed_ms:.1f}ms")
-        
-        return {
-            "total": len(waypoints),
-            "success": success_count,
-            "errors": error_count,
-            "joint": joint_name,
-        }
+
+        # Per-joint concurrency lock — prevents interleaved batches
+        joint_key = joint_name.upper()
+        lock = self._batch_locks.setdefault(joint_key, threading.Lock())
+        if not lock.acquire(timeout=0):
+            raise ValueError(f"Waypoint batch already in progress for {joint_key}")
+
+        try:
+            success_count = 0
+            failed_indices = []
+            skipped_indices = []
+            consecutive_late = 0
+            total_late = 0
+            aborted = False
+            delay_sec = inter_waypoint_delay_ms / 1000.0
+            max_timing_drift_ms = 0.0
+            tag = f"[{batch_id}]" if batch_id else ""
+
+            # Socket.IO progress throttle
+            PROGRESS_INTERVAL = 50
+
+            # Track actual elapsed time for accurate timing compensation
+            batch_start_time = time.perf_counter()
+
+            for i, wp in enumerate(waypoints):
+                try:
+                    angles = wp.get('angles_deg', [None, None, None])
+                    original_t_offset = wp.get('t_offset_ms', 0)
+
+                    # Calculate actual elapsed time since batch start (in ms)
+                    elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
+
+                    # Adjust t_offset: compensate for time already spent sending
+                    # previous waypoints.
+                    adjusted_t_offset = max(0, int(original_t_offset - elapsed_ms))
+
+                    # Track timing drift: how much offset was lost
+                    offset_loss = max(0.0, elapsed_ms - original_t_offset)
+                    if offset_loss > max_timing_drift_ms:
+                        max_timing_drift_ms = offset_loss
+
+                    # --- Late waypoint policy ---
+                    # First waypoint (i==0) is always sent regardless of lead
+                    if adjusted_t_offset < min_lead_ms and i > 0:
+                        consecutive_late += 1
+                        total_late += 1
+                        if consecutive_late > MAX_CONSECUTIVE_LATE:
+                            self.logger.error(
+                                f"Batch {tag} aborted: {consecutive_late} consecutive "
+                                f"late waypoints, system cannot maintain timing"
+                            )
+                            aborted = True
+                            break
+                        self.logger.warning(
+                            f"Waypoint {i} {tag} late: adjusted_t_offset="
+                            f"{adjusted_t_offset}ms < min_lead={min_lead_ms}ms, skipping"
+                        )
+                        skipped_indices.append(i)
+                        continue  # Skip — firmware interpolates from prev to next
+
+                    consecutive_late = 0  # Reset on successful send
+
+                    self.send_multi_dof_waypoint(joint_name, angles, adjusted_t_offset)
+                    success_count += 1
+
+                    if batch_id:
+                        self.logger.debug(
+                            f"{tag}:{i} sent t_off={adjusted_t_offset}ms "
+                            f"(orig={original_t_offset})"
+                        )
+
+                    # Small delay to prevent CAN buffer overflow
+                    if i < len(waypoints) - 1:
+                        time.sleep(delay_sec)
+
+                except Exception as exc:
+                    self.logger.warning(f"Waypoint {i} {tag} failed: {exc}")
+                    failed_indices.append(i)
+
+                # --- Socket.IO progress (throttled) ---
+                if (self.socketio and batch_id
+                        and (i + 1) % PROGRESS_INTERVAL == 0):
+                    try:
+                        self.socketio.emit("batch_progress", {
+                            "batch_id": batch_id,
+                            "joint": joint_key,
+                            "sent": success_count,
+                            "total": len(waypoints),
+                            "elapsed_ms": round(elapsed_ms, 1),
+                        }, namespace="/movement")
+                    except Exception:
+                        pass  # Non-critical
+
+            total_elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
+            status_str = "aborted" if aborted else "complete"
+            self.logger.info(
+                f"Waypoint batch {tag} {status_str}: {success_count}/{len(waypoints)} "
+                f"sent in {total_elapsed_ms:.1f}ms "
+                f"(late={total_late}, skipped={len(skipped_indices)})"
+            )
+
+            # --- Socket.IO batch complete event ---
+            if self.socketio and batch_id:
+                try:
+                    self.socketio.emit("batch_complete", {
+                        "batch_id": batch_id,
+                        "joint": joint_key,
+                        "sent": success_count,
+                        "total": len(waypoints),
+                        "elapsed_ms": round(total_elapsed_ms, 1),
+                        "status": "success" if not aborted else "aborted",
+                    }, namespace="/movement")
+                except Exception:
+                    pass
+
+            return {
+                "total": len(waypoints),
+                "sent": success_count,
+                "failed_indices": failed_indices,
+                "skipped_indices": skipped_indices,
+                "elapsed_ms": round(total_elapsed_ms, 1),
+                "timing_drift_ms": round(max_timing_drift_ms, 1),
+                "late_count": total_late,
+                "aborted": aborted,
+                "joint": joint_key,
+                "batch_id": batch_id,
+            }
+        finally:
+            lock.release()
 
     # ------------------------------------------------------------------
     # Telemetry accessors

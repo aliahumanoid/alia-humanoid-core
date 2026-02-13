@@ -632,6 +632,14 @@ $(document).ready(function() {
         }
     });
 
+    // Waypoint batch progress tracking (debug, no UI for now)
+    socket.on('batch_progress', function(data) {
+        console.log(`[Batch ${data.batch_id}] ${data.joint}: ${data.sent}/${data.total} sent (${data.elapsed_ms}ms)`);
+    });
+    socket.on('batch_complete', function(data) {
+        console.log(`[Batch ${data.batch_id}] ${data.joint}: ${data.status} — ${data.sent}/${data.total} in ${data.elapsed_ms}ms`);
+    });
+
     // Listener for PID diagnostics data (target/error)
     // Temporary storage for combining pid_diag and pid_torque into single records
     let pendingPidRecord = null;
@@ -3270,29 +3278,30 @@ function sendCanWaypointSequence() {
     // Send all waypoints in a single request - server forwards them sequentially
     // This guarantees order and completeness (no lost waypoints)
     
-    appendStatusMessage(`📡 Sending ${testSequence.length} waypoints (batch mode)...`);
-    
-    // Mark trajectory as active before sending
-    markTrajectoryActive();
-    
-    // Convert to batch format
+    // Convert to batch format and deduplicate
     const batchPayload = testSequence.map(wp => ({
         angles_deg: wp.angles,
         t_offset_ms: wp.arrival_offset_ms
     }));
-    
+    const dedupedBatch = deduplicateWaypoints(batchPayload);
+
+    appendStatusMessage(`📡 Sending ${dedupedBatch.length} waypoints (batch mode, deduped from ${batchPayload.length})...`);
+
+    // Mark trajectory as active before sending
+    markTrajectoryActive();
+
     $.ajax({
         url: '/can/waypoint_batch',
         method: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({
             joint: joint,
-            waypoints: batchPayload
+            waypoints: dedupedBatch
         })
     }).done(response => {
         if (response.status === 'success') {
             const result = response.result || {};
-            appendStatusMessage(`📤 Batch sent: ${result.success}/${result.total} waypoints queued`);
+            appendStatusMessage(`📤 Batch sent: ${result.sent || result.success}/${result.total} waypoints queued`);
             
             if (result.errors > 0) {
                 appendStatusMessage(`  ⚠️ ${result.errors} waypoints failed`);
@@ -3474,28 +3483,31 @@ function sendCosineOscillation() {
     appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total`);
     appendStatusMessage(`   🎯 Active: ${dofInfo} (min↔max direct)`);
 
-    // Mark trajectory as active before sending
-    markTrajectoryActive();
-    
-    // Convert to batch format
+    // Convert to batch format and deduplicate
     const batchPayload = testSequence.map(wp => ({
         angles_deg: wp.angles,
         t_offset_ms: wp.arrival_offset_ms
     }));
-    
+    const dedupedBatch = deduplicateWaypoints(batchPayload);
+
+    appendStatusMessage(`📡 Sending ${dedupedBatch.length} waypoints (batch mode, deduped from ${batchPayload.length})...`);
+
+    // Mark trajectory as active before sending
+    markTrajectoryActive();
+
     $.ajax({
         url: '/can/waypoint_batch',
         method: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({
             joint: joint,
-            waypoints: batchPayload
+            waypoints: dedupedBatch
         })
     }).done(response => {
         if (response.status === 'success') {
             const result = response.result || {};
-            appendStatusMessage(`📤 Batch sent: ${result.success}/${result.total} waypoints queued`);
-            
+            appendStatusMessage(`📤 Batch sent: ${result.sent || result.success}/${result.total} waypoints queued`);
+
             // Wait for sequence to complete
             const waitTime = finalTime + 500;
             setTimeout(() => {
@@ -8303,38 +8315,39 @@ async function playWpSequence() {
     }
     
     const loopEnabled = $("#wpSequenceLoopToggle").is(":checked");
+    // Capture joint and DOF once at sequence start to avoid DOM re-read race
+    const joint = $("#jointSelect").val();
+    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
     isWpSequencePlaying = true;
     updateWpPlaybackControls();
-    
-    appendStatusMessage(`▶️ Starting waypoint sequence (${wpSequence.length} steps${loopEnabled ? ', loop' : ''})`);
-    
+
+    appendStatusMessage(`▶️ Starting waypoint sequence (${wpSequence.length} steps${loopEnabled ? ', loop' : ''}) for ${joint}`);
+
     let loopCount = 0;
-    
+
     do {
         if (loopEnabled && loopCount > 0) {
             appendStatusMessage(`🔄 Loop iteration ${loopCount + 1}`);
         }
-        
+
         for (let i = 0; i < wpSequence.length; i++) {
             if (!isWpSequencePlaying) {
                 appendStatusMessage(`⏹️ Waypoint sequence stopped`);
                 updateWpPlaybackControls();
                 return;
             }
-            
+
             const step = wpSequence[i];
-            
+
             if (step.type === "waypoint") {
                 appendStatusMessage(`📍 Step ${i + 1}: Moving to DOF0=${step.angle0}°${step.angle1 !== null ? `, DOF1=${step.angle1}°` : ''}`);
-                
-                // Send waypoint trajectory
+
+                // Send waypoint trajectory (joint captured at sequence start)
                 if (step.angle1 !== null) {
-                    await sendMultiWaypointDualDofAsync(step.angle0, step.angle1, step.durationMs);
+                    await sendMultiWaypointDualDofAsync(step.angle0, step.angle1, step.durationMs, joint);
                 } else {
-                    // Single DOF - use existing function
-                    $("#canWaypointAngle").val(step.angle0);
-                    $("#canWaypointArrival").val(step.durationMs);
-                    await sendMultiWaypointSmoothCurveAsync();
+                    // Single DOF
+                    await sendMultiWaypointSmoothCurveAsync(joint, dofIndex, step.angle0, step.durationMs);
                 }
                 
                 // Wait for movement to complete
@@ -8373,11 +8386,14 @@ function updateWpPlaybackControls() {
 }
 
 /**
- * Async version of sendMultiWaypointDualDof for sequence playback
+ * Async version of sendMultiWaypointDualDof for sequence playback.
+ * @param {number} targetAngle0 - Target angle for DOF0
+ * @param {number} targetAngle1 - Target angle for DOF1
+ * @param {number} totalTimeMs - Movement duration in ms
+ * @param {string} joint - Joint name (captured once by caller to avoid DOM re-read race)
  */
-async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTimeMs) {
+async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTimeMs, joint) {
     return new Promise((resolve, reject) => {
-        const joint = $("#jointSelect").val();
         const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
         const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
         
@@ -8412,7 +8428,7 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
             url: '/can/waypoint_batch',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({ waypoints: dedupedWaypoints })
+            data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
         }).done(response => {
             if (response.status === 'success') {
                 resolve(response);
@@ -8426,15 +8442,14 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
 }
 
 /**
- * Async version of sendMultiWaypointSmoothCurve for sequence playback
+ * Async version of sendMultiWaypointSmoothCurve for sequence playback.
+ * @param {string} joint - Joint name (captured once by caller to avoid DOM re-read race)
+ * @param {number} dofIndex - DOF index
+ * @param {number} targetAngle - Target angle in degrees
+ * @param {number} totalTimeMs - Movement duration in ms
  */
-async function sendMultiWaypointSmoothCurveAsync() {
+async function sendMultiWaypointSmoothCurveAsync(joint, dofIndex, targetAngle, totalTimeMs) {
     return new Promise((resolve, reject) => {
-        // Reuse existing function logic but return promise
-        const joint = $("#jointSelect").val();
-        const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
-        const targetAngle = parseFloat($("#canWaypointAngle").val());
-        const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
         const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
         const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
         
@@ -8467,7 +8482,7 @@ async function sendMultiWaypointSmoothCurveAsync() {
             url: '/can/waypoint_batch',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({ waypoints: dedupedWaypoints })
+            data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
         }).done(response => {
             if (response.status === 'success') {
                 resolve(response);
