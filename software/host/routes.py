@@ -751,18 +751,22 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
             total = result["total"]
 
             # Determine status: success / partial / error
+            # HTTP codes: 200 = all sent, 207 = partial, 502 = none sent
             if sent == total:
                 status = "success"
+                http_code = 200
             elif sent > 0:
                 status = "partial"
+                http_code = 207  # Multi-Status — some waypoints sent
             else:
                 status = "error"
+                http_code = 502  # Upstream failure — CAN layer sent nothing
 
             return jsonify({
                 "status": status,
                 "message": f"Batch {batch.batch_id}: {sent}/{total} waypoints sent to {joint}",
                 "result": result,
-            })
+            }), http_code
 
         except ValueError as exc:
             msg = str(exc)

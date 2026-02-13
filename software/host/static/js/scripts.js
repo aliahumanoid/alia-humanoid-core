@@ -3260,11 +3260,11 @@ function sendCanWaypointSequence() {
     // Calculate delta-t between points for logging (Δt = 1000 / rate)
     const deltaT = Math.round(1000 / waypointRate);
     
-    // Warn if exceeding firmware buffer (2000 waypoints max per DOF)
-    if (testSequence.length > 2000) {
-        appendStatusMessage(`⚠️ Warning: ${testSequence.length} waypoints exceeds buffer (2000). Reduce rate or cycles.`);
+    // Warn if exceeding host batch limit (MAX_BATCH_SIZE=1800 in waypoint_types.py)
+    if (testSequence.length > 1800) {
+        appendStatusMessage(`⚠️ Warning: ${testSequence.length} waypoints exceeds batch limit (1800). Reduce rate or cycles.`);
     }
-    
+
     // Log active DOFs info
     const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
     const centerInfo = activeDofs.map(d => `${d.centerAngle}°`).join(', ');
@@ -3429,9 +3429,9 @@ function sendCosineOscillation() {
     // Small fixed lead-in; backend compensates for actual elapsed time
     const initialOffset = 50;
     
-    // Warn if exceeding firmware buffer (2000 waypoints max per DOF)
-    if (estimatedTotalWaypoints > 2000) {
-        appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds buffer (2000). Reduce rate or cycles.`);
+    // Warn if exceeding host batch limit (MAX_BATCH_SIZE=1800 in waypoint_types.py)
+    if (estimatedTotalWaypoints > 1800) {
+        appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds batch limit (1800). Reduce rate or cycles.`);
     }
     
     // Generate waypoints using same approach as Multi-WP
@@ -8430,7 +8430,11 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
             contentType: 'application/json',
             data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
         }).done(response => {
-            if (response.status === 'success') {
+            if (response.status === 'success' || response.status === 'partial') {
+                if (response.status === 'partial') {
+                    const r = response.result || {};
+                    console.warn(`[WP] Partial batch: ${r.sent}/${r.total} sent`);
+                }
                 resolve(response);
             } else {
                 reject(new Error(response.message || 'Failed to send waypoints'));
@@ -8484,7 +8488,11 @@ async function sendMultiWaypointSmoothCurveAsync(joint, dofIndex, targetAngle, t
             contentType: 'application/json',
             data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
         }).done(response => {
-            if (response.status === 'success') {
+            if (response.status === 'success' || response.status === 'partial') {
+                if (response.status === 'partial') {
+                    const r = response.result || {};
+                    console.warn(`[WP] Partial batch: ${r.sent}/${r.total} sent`);
+                }
                 resolve(response);
             } else {
                 reject(new Error(response.message || 'Failed to send waypoints'));

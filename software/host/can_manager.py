@@ -1114,7 +1114,7 @@ class CanManager:
                     if adjusted_t_offset < min_lead_ms and i > 0:
                         consecutive_late += 1
                         total_late += 1
-                        if consecutive_late > MAX_CONSECUTIVE_LATE:
+                        if consecutive_late >= MAX_CONSECUTIVE_LATE:
                             self.logger.error(
                                 f"Batch {tag} aborted: {consecutive_late} consecutive "
                                 f"late waypoints, system cannot maintain timing"

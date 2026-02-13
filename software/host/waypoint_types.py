@@ -108,16 +108,34 @@ def build_batch(joint: str, waypoints_raw: list) -> WaypointBatch:
     Each dict is expected to have:
         - angles_deg: list of up to 3 angles (float or null)
         - t_offset_ms: int
+
+    Raises ValueError on non-numeric angles or t_offset values.
     """
     entries: List[WaypointEntry] = []
-    for wp in waypoints_raw:
-        angles = wp.get("angles_deg", [None, None, None])
-        # Normalise to exactly 3 slots
+    for i, wp in enumerate(waypoints_raw):
+        raw_angles = wp.get("angles_deg", [None, None, None])
+        # Normalise to exactly 3 slots, coerce to float
+        angles: List[Optional[float]] = []
+        for dof_idx, a in enumerate(raw_angles[:3]):
+            if a is None:
+                angles.append(None)
+            else:
+                try:
+                    angles.append(float(a))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"Waypoint {i}: angles_deg[{dof_idx}] = {a!r} is not numeric"
+                    )
         while len(angles) < 3:
             angles.append(None)
-        angles = angles[:3]
 
-        t_offset = int(wp.get("t_offset_ms", 0))
+        raw_t = wp.get("t_offset_ms", 0)
+        try:
+            t_offset = int(raw_t)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Waypoint {i}: t_offset_ms = {raw_t!r} is not a valid integer"
+            )
         entries.append(WaypointEntry(angles_deg=angles, t_offset_ms=t_offset))
 
     return WaypointBatch(joint=joint.upper(), entries=entries)

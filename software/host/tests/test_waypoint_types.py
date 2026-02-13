@@ -244,6 +244,51 @@ class TestBuildBatch:
         ])
         assert len(batch.entries[0].angles_deg) == 3
 
+    def test_string_angle_raises_valueerror(self):
+        """Non-numeric angle must raise ValueError, not pass through."""
+        import pytest
+        with pytest.raises(ValueError, match="not numeric"):
+            build_batch("KNEE_LEFT", [
+                {"angles_deg": ["abc"], "t_offset_ms": 100},
+            ])
+
+    def test_string_t_offset_raises_valueerror(self):
+        """Non-numeric t_offset must raise ValueError."""
+        import pytest
+        with pytest.raises(ValueError, match="not a valid integer"):
+            build_batch("KNEE_LEFT", [
+                {"angles_deg": [10.0], "t_offset_ms": "not_a_number"},
+            ])
+
+    def test_numeric_string_angle_coerced(self):
+        """String '10.5' should be coerced to float 10.5."""
+        batch = build_batch("KNEE_LEFT", [
+            {"angles_deg": ["10.5"], "t_offset_ms": 100},
+        ])
+        assert batch.entries[0].angles_deg[0] == 10.5
+
+    def test_numeric_string_t_offset_coerced(self):
+        """String '200' should be coerced to int 200."""
+        batch = build_batch("KNEE_LEFT", [
+            {"angles_deg": [10.0], "t_offset_ms": "200"},
+        ])
+        assert batch.entries[0].t_offset_ms == 200
+
+    def test_bool_angle_coerced_to_float(self):
+        """Boolean True/False should coerce to float (1.0/0.0)."""
+        batch = build_batch("KNEE_LEFT", [
+            {"angles_deg": [True], "t_offset_ms": 100},
+        ])
+        assert batch.entries[0].angles_deg[0] == 1.0
+
+    def test_list_angle_raises_valueerror(self):
+        """A list inside angles_deg should raise ValueError."""
+        import pytest
+        with pytest.raises(ValueError, match="not numeric"):
+            build_batch("KNEE_LEFT", [
+                {"angles_deg": [[1, 2]], "t_offset_ms": 100},
+            ])
+
 
 # -----------------------------------------------------------------------
 # get_dof_limits
