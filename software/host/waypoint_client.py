@@ -433,7 +433,9 @@ class _JointWorker:
             # wait for it so the new thread starts with a clean cancel_event.
             if not need_new and self._cancel_event.is_set():
                 self._thread.join(timeout=2.0)
-                need_new = True
+                # Only spawn new thread if old one actually exited;
+                # otherwise keep the old thread to preserve serialisation.
+                need_new = not self._thread.is_alive()
             if need_new:
                 self._cancel_event.clear()
                 self._thread = threading.Thread(
