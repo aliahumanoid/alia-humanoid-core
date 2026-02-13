@@ -34,9 +34,11 @@ void waypoint_buffers_init(uint8_t dof_count) {
     g_buffers[i].head           = 0;
     g_buffers[i].tail           = 0;
     g_buffers[i].count          = 0;
-    g_buffers[i].prev_angle_deg = 0.0f;
-    g_buffers[i].prev_time_ms   = 0;
-    g_buffers[i].state          = WaypointState::IDLE;
+    g_buffers[i].prev_angle_deg      = 0.0f;
+    g_buffers[i].prev_time_ms        = 0;
+    g_buffers[i].state               = WaypointState::IDLE;
+    g_buffers[i].last_pushed_time_ms  = 0;
+    g_buffers[i].last_pushed_angle_deg = 0.0f;
   }
 }
 
@@ -58,7 +60,11 @@ bool waypoint_buffer_push(uint8_t dof_index, const WaypointEntry &entry) {
   buf.buffer[buf.tail] = entry;
   buf.tail = (buf.tail + 1) % WAYPOINT_BUFFER_DEPTH;
   buf.count++;
-  
+
+  // Track last pushed entry for monotonicity & velocity checks
+  buf.last_pushed_time_ms = entry.t_arrival_ms;
+  buf.last_pushed_angle_deg = entry.target_angle_deg;
+
   if (buf.state == WaypointState::IDLE) {
     buf.state = WaypointState::MOVING;
   }
@@ -107,9 +113,11 @@ void waypoint_buffer_clear(uint8_t dof_index) {
   buf.head           = 0;
   buf.tail           = 0;
   buf.count          = 0;
-  buf.prev_time_ms   = 0;
-  buf.prev_angle_deg = 0.0f;
-  buf.state          = WaypointState::IDLE;
+  buf.prev_time_ms        = 0;
+  buf.prev_angle_deg      = 0.0f;
+  buf.state               = WaypointState::IDLE;
+  buf.last_pushed_time_ms  = 0;
+  buf.last_pushed_angle_deg = 0.0f;
 }
 
 void waypoint_buffer_reset_all() {
@@ -117,9 +125,11 @@ void waypoint_buffer_reset_all() {
     g_buffers[i].head           = 0;
     g_buffers[i].tail           = 0;
     g_buffers[i].count          = 0;
-    g_buffers[i].prev_time_ms   = 0;
-    g_buffers[i].prev_angle_deg = 0.0f;
-    g_buffers[i].state          = WaypointState::IDLE;
+    g_buffers[i].prev_time_ms        = 0;
+    g_buffers[i].prev_angle_deg      = 0.0f;
+    g_buffers[i].state               = WaypointState::IDLE;
+    g_buffers[i].last_pushed_time_ms  = 0;
+    g_buffers[i].last_pushed_angle_deg = 0.0f;
   }
 }
 
@@ -165,4 +175,18 @@ void waypoint_buffer_set_prev(uint8_t dof_index, float angle_deg, uint32_t time_
   WaypointBuffer &buf = buffer_for(dof_index);
   buf.prev_angle_deg  = angle_deg;
   buf.prev_time_ms    = time_ms;
+}
+
+uint32_t waypoint_buffer_last_pushed_time(uint8_t dof_index) {
+  if (!is_valid_dof(dof_index)) {
+    return 0;
+  }
+  return buffer_for(dof_index).last_pushed_time_ms;
+}
+
+float waypoint_buffer_last_pushed_angle(uint8_t dof_index) {
+  if (!is_valid_dof(dof_index)) {
+    return 0.0f;
+  }
+  return buffer_for(dof_index).last_pushed_angle_deg;
 }

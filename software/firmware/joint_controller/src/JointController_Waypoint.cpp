@@ -284,7 +284,8 @@ bool JointController::executeWaypointMovement() {
     // Check if we've reached the current waypoint target
     WaypointEntry next_waypoint;
     if (waypoint_buffer_peek(dof, next_waypoint)) {
-      if (t_now >= next_waypoint.t_arrival_ms) {
+      // Wrap-safe: signed difference handles uint32_t overflow (valid for <24.8 days)
+      if ((int32_t)(t_now - next_waypoint.t_arrival_ms) >= 0) {
         // Waypoint reached - pop from buffer and update prev state
         waypoint_buffer_pop(dof);
         waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms);

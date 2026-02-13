@@ -217,12 +217,24 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     return;
   }
   
-  // SAFETY: Require minimum uptime before accepting waypoints
-  if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
-    LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: system startup");
+  // SAFETY: Require minimum uptime before accepting waypoints.
+  // Wrap-safe: latch after first pass (check only relevant at boot, avoids
+  // millis() wrap at ~49.71 days re-triggering the guard).
+  static bool uptime_check_passed = false;
+  if (!uptime_check_passed) {
+    if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
+      LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: system startup");
+      return;
+    }
+    uptime_check_passed = true;
+  }
+
+  // SAFETY: Drop waypoints during startup injection (Core0 writing to buffer)
+  if (__atomic_load_n(&startup_injecting_waypoints, __ATOMIC_ACQUIRE)) {
+    LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: startup injection in progress");
     return;
   }
-  
+
   // SAFETY: Verify system is ready for movement
   if (active_joint_controller != nullptr && !active_joint_controller->isSystemReadyForMovement()) {
     LOG_C1_ERROR("[CAN] Multi-DOF Waypoint REJECTED: System not ready - run recalcOffset first!");
@@ -267,11 +279,14 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     WaypointEntry entry{};
     entry.dof_index = dof;
     entry.target_angle_deg = static_cast<float>(angles[dof]) / 100.0f;
-    // Enforce monotonic arrival times per DOF to avoid interpolation glitches
-    uint32_t prev_time = waypoint_buffer_prev_time(dof);
+    // Monotonicity enforcement: ensure arrival times strictly increase per DOF.
+    // Uses last_pushed_time (tail of queue), not prev_time (consumed/interpolation ref),
+    // to catch out-of-order insertions relative to already-queued waypoints.
+    uint32_t last_push_t = waypoint_buffer_last_pushed_time(dof);
     uint32_t arrival_ms = t_arrival_local;
-    if (prev_time > 0 && arrival_ms <= prev_time) {
-      arrival_ms = prev_time + 1;
+    // Wrap-safe: signed difference detects backwards timestamps across uint32_t overflow
+    if (last_push_t > 0 && (int32_t)(arrival_ms - last_push_t) <= 0) {
+      arrival_ms = last_push_t + 1;
     }
     entry.t_arrival_ms = arrival_ms;
     entry.mode = 0;  // LINEAR interpolation
@@ -283,30 +298,78 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     
     // Initialize movement if needed
     if (needs_init && active_joint_controller != nullptr) {
-      // Use shared DOF angles (updated by Core0)
       bool is_valid = shared_dof_angles.valid[dof];
       float current_angle = shared_dof_angles.angles[dof];
-      
+
       if (is_valid) {
-        // Safety check
         String safety_violation;
-        if (!active_joint_controller->checkWaypointSafety(dof, current_angle, 
-                                                          entry.target_angle_deg, entry.t_arrival_ms, 
+        if (!active_joint_controller->checkWaypointSafety(dof, current_angle,
+                                                          entry.target_angle_deg, entry.t_arrival_ms,
                                                           t_now, safety_violation)) {
           LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) + ": " + safety_violation);
           emergency_stop_requested = true;
           return;
         }
-        
+
         waypoint_buffer_set_prev(dof, current_angle, t_now);
         waypoint_buffer_set_state(dof, WaypointState::MOVING);
-        
+
         if (is_first_waypoint) {
           LOG_C1_DEBUG("[CAN] DOF " + String(dof) + " IDLE → MOVING (multi-DOF)");
         }
+      } else {
+        // Encoder not valid during init — skip this DOF entirely
+        LOG_C1_WARN("[CAN] Multi-DOF DOF" + String(dof) + " waypoint dropped: encoder not valid");
+        continue;
+      }
+    } else if (active_joint_controller != nullptr) {
+      // In-stream waypoint (already MOVING) — lightweight angle validation
+      if (!active_joint_controller->isAngleInLimits(dof, entry.target_angle_deg)) {
+        LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +
+                     " in-stream waypoint outside physical limits: " +
+                     String(entry.target_angle_deg, 2) + " deg");
+        emergency_stop_requested = true;
+        return;
+      }
+      if (!active_joint_controller->isAngleInMappingLimits(dof, entry.target_angle_deg)) {
+        LOG_C1_WARN("[CAN] Multi-DOF DOF" + String(dof) +
+                    " in-stream waypoint outside mapping limits, skipped");
+        continue;
+      }
+
+      // In-stream velocity check: compare against last pushed waypoint
+      uint32_t last_t = waypoint_buffer_last_pushed_time(dof);
+      float last_angle = waypoint_buffer_last_pushed_angle(dof);
+      if (last_t > 0) {
+        float dt_s = (float)(arrival_ms - last_t) / 1000.0f;
+        if (dt_s > 0.001f) {
+          float vel_deg_s = fabsf(entry.target_angle_deg - last_angle) / dt_s;
+
+          // HARD CAP: 150 deg/s (same as checkWaypointSafety)
+          const float ABSOLUTE_MAX_VELOCITY_DEG_S = 150.0f;
+          if (vel_deg_s > ABSOLUTE_MAX_VELOCITY_DEG_S) {
+            LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +
+                         " in-stream velocity " + String(vel_deg_s, 1) +
+                         " deg/s exceeds hard limit");
+            emergency_stop_requested = true;
+            return;
+          }
+
+          // Per-DOF max_speed with 1.5x emergency margin
+          float max_speed_rad_s = active_joint_controller->getConfig().dofs[dof].motion.max_speed;
+          float max_speed_deg_s = max_speed_rad_s * RAD_TO_DEG;
+          if (vel_deg_s > max_speed_deg_s * 1.5f) {
+            LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +
+                         " in-stream velocity " + String(vel_deg_s, 1) +
+                         " deg/s exceeds 1.5x max_speed " +
+                         String(max_speed_deg_s, 1) + " deg/s");
+            emergency_stop_requested = true;
+            return;
+          }
+        }
       }
     }
-    
+
     // Push to buffer
     if (waypoint_buffer_push(dof, entry)) {
       queued_count++;
@@ -1183,24 +1246,33 @@ void core1_loop() {
       waypoint_active = active_joint_controller->executeWaypointMovement();
     }
 
-    // Signal Core0 to suspend Serial streaming during active movement
+    // Signal Core0 to suspend Serial streaming during active MOVING only.
+    // HOLDING is safe for serial — Core1 doesn't log when buffer is empty.
     movement_in_progress = waypoint_active;
 
     // === TIMING: Wait for next cycle (configurable frequency) ===
-    // Default: 500Hz (inner_loop_period_us = 2000µs)
-    // Only wait if waypoint control is active (to maintain precise timing)
-    // If no waypoints, loop runs as fast as possible for responsive command handling
-    if (waypoint_active) {
-      // Initialize timing on first active waypoint
+    // PID needs 500Hz both in MOVING and HOLDING (gains tuned for 2ms period).
+    // waypoint_active covers MOVING; check HOLDING (non-IDLE) separately.
+    bool pid_timing_needed = waypoint_active;
+    if (!pid_timing_needed && active_joint_controller != nullptr) {
+      uint8_t dof_count = active_joint_controller->getConfig().dof_count;
+      for (uint8_t d = 0; d < dof_count; d++) {
+        if (waypoint_buffer_state(d) != WaypointState::IDLE) {
+          pid_timing_needed = true;
+          break;
+        }
+      }
+    }
+
+    if (pid_timing_needed) {
       if (!timing_initialized) {
         next_time = time_us_64() + inner_loop_period_us;
         timing_initialized = true;
       }
-      
+
       busy_wait_until(next_time);
       next_time += inner_loop_period_us;
     } else {
-      // Reset timing when waypoints stop (for next activation)
       timing_initialized = false;
     }
 

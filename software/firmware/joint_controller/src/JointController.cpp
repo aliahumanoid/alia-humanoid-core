@@ -639,7 +639,8 @@ bool JointController::checkWaypointSafety(uint8_t dof_index, float current_angle
   }
 
   // === CHECK 2: Time validity (arrival must be in the future) ===
-  if (t_arrival_ms <= t_now) {
+  // Wrap-safe: signed difference handles millis() overflow at ~49.71 days
+  if ((int32_t)(t_arrival_ms - t_now) <= 0) {
     violation_message = "WAYPOINT REJECTED: DOF " + String(dof_index) + 
                         " arrival time in the past (t_arrival=" + String(t_arrival_ms) + 
                         " ms, t_now=" + String(t_now) + " ms)";
@@ -675,7 +676,7 @@ bool JointController::checkWaypointSafety(uint8_t dof_index, float current_angle
 
   // === CHECK 5: Velocity safety (with emergency margin) ===
   float angle_delta = abs(target_angle - current_angle);
-  float time_delta_s = (t_arrival_ms - t_now) / 1000.0f;
+  float time_delta_s = (float)((int32_t)(t_arrival_ms - t_now)) / 1000.0f;
 
   if (time_delta_s > 0.001f) { // Avoid division by zero (1ms minimum)
     float requested_velocity_deg_s = angle_delta / time_delta_s;

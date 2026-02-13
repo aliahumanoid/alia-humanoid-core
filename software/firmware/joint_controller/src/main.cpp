@@ -148,6 +148,9 @@ volatile uint8_t can_startup_joint_id = 0;
 volatile int16_t can_startup_torque = 0;
 volatile int16_t can_startup_duration = 0;
 
+// Startup waypoint injection guard (Core0 sets, Core1 checks)
+volatile bool startup_injecting_waypoints = false;
+
 // CAN-triggered set-zero (Core1 sets flags, Core0 executes)
 volatile bool can_set_zero_requested = false;
 volatile uint8_t can_set_zero_dof_index = 0;

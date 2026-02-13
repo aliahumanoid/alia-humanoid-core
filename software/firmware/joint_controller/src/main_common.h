@@ -154,6 +154,11 @@ extern volatile uint8_t can_startup_joint_id;
 extern volatile int16_t can_startup_torque;    // 0 = use config default
 extern volatile int16_t can_startup_duration;  // 0 = use config default
 
+// Startup waypoint injection guard (Core0 sets, Core1 checks)
+// Prevents race condition if host sends waypoints during Core0 startup injection.
+// Uses __atomic_store_n / __atomic_load_n for cross-core memory ordering.
+extern volatile bool startup_injecting_waypoints;
+
 // CAN-triggered set-zero (Core1 sets flags, Core0 executes)
 extern volatile bool can_set_zero_requested;
 extern volatile uint8_t can_set_zero_dof_index;

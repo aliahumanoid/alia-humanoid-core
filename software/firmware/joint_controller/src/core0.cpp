@@ -511,7 +511,8 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   // After recalc, motors are stopped (torque 0). Injecting a waypoint at the
   // current angle transitions each DOF from IDLE → MOVING → HOLDING, so the PID
   // takes over and holds position under closed-loop control.
-  // Safe to push from Core0: Core1 is idle (no active commands/waypoints).
+  // Guard: signal Core1 to drop any incoming CAN waypoints while we write to buffer.
+  __atomic_store_n(&startup_injecting_waypoints, true, __ATOMIC_RELEASE);
   updateSharedDofAngles();  // Refresh angles right before injection
   uint32_t t_now_hold = millis();
   uint8_t dof_count_hold = active_joint_controller->getConfig().dof_count;
@@ -535,6 +536,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
                String(current_angle, 1) + "\xC2\xB0");
     }
   }
+  __atomic_store_n(&startup_injecting_waypoints, false, __ATOMIC_RELEASE);  // Core1 can accept CAN waypoints
 
   uint32_t total_time_ms = millis() - startup_start_time;
   SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));

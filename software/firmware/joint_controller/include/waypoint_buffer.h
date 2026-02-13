@@ -3,6 +3,8 @@
  * @brief Waypoint buffer manager for host-driven CAN control (Core1 only)
  *
  * All access is from Core1 — no cross-core locking needed.
+ * Exception: Core0 writes during startup injection
+ * (guarded by startup_injecting_waypoints with RELEASE/ACQUIRE barriers).
  */
 
 #ifndef WAYPOINT_BUFFER_H
@@ -49,6 +51,9 @@ struct WaypointBuffer {
   float prev_angle_deg = 0.0f;
   uint32_t prev_time_ms = 0;
   WaypointState state = WaypointState::IDLE;
+  // Tail tracking: last pushed values (for monotonicity & velocity checks)
+  uint32_t last_pushed_time_ms = 0;
+  float last_pushed_angle_deg = 0.0f;
 };
 
 void waypoint_buffers_init(uint8_t dof_count);
@@ -68,6 +73,10 @@ void waypoint_buffer_set_state(uint8_t dof_index, WaypointState state);
 float waypoint_buffer_prev_angle(uint8_t dof_index);
 uint32_t waypoint_buffer_prev_time(uint8_t dof_index);
 void waypoint_buffer_set_prev(uint8_t dof_index, float angle_deg, uint32_t time_ms);
+
+// Tail tracking: last pushed entry values (monotonicity & velocity checks)
+uint32_t waypoint_buffer_last_pushed_time(uint8_t dof_index);
+float waypoint_buffer_last_pushed_angle(uint8_t dof_index);
 
 #endif // WAYPOINT_BUFFER_H
 
