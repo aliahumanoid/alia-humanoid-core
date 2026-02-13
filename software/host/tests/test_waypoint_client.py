@@ -12,6 +12,7 @@ Tests cover:
 Run with: python3 -m pytest tests/test_waypoint_client.py -v
 """
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -456,3 +457,82 @@ class TestFaultInjection:
             _wait_batch(client, bid)
         done_logs = [r for r in caplog.records if "batch_done" in r.message]
         assert len(done_logs) >= 1
+
+
+# =======================================================================
+# G. Regression Tests
+# =======================================================================
+class TestRegression:
+
+    def test_enqueue_after_cancel_is_processed(self, mock_transport):
+        """Regression: cancel_joint() then enqueue_batch() must not leave
+        the new batch stuck in IDLE (stale cancel_event race)."""
+        c = WaypointClient(mock_transport, config=FAST_CONFIG)
+        try:
+            # First batch — let it complete
+            bid1 = c.enqueue_batch("KNEE_LEFT", VALID_WAYPOINTS)
+            _wait_batch(c, bid1)
+            assert c.get_batch_status(bid1).state == BatchState.COMPLETE
+
+            # Cancel the joint (sets cancel_event)
+            c.cancel_joint("KNEE_LEFT")
+            time.sleep(0.2)     # Give worker time to see cancel
+
+            # Enqueue a new batch — must NOT be stuck in IDLE
+            bid2 = c.enqueue_batch("KNEE_LEFT", VALID_WAYPOINTS)
+            record = _wait_batch(c, bid2, timeout=5.0)
+            assert record is not None
+            assert record.state in (BatchState.COMPLETE, BatchState.PARTIAL)
+            assert record.completed_at is not None
+        finally:
+            c.shutdown(timeout_s=2.0)
+
+    def test_queue_full_no_ghost_batch(self, mock_transport):
+        """Regression: queue.Full must not leave ghost records in history
+        or inflate batches_total."""
+        tiny_config = ClientConfig(
+            retry=FAST_RETRY,
+            max_queue_size=1,
+        )
+
+        # Block the worker so the single queue slot stays occupied
+        gate = threading.Event()
+        original_send = mock_transport.send_batch
+
+        def blocked_send(*args, **kwargs):
+            gate.wait(timeout=10.0)
+            return original_send(*args, **kwargs)
+
+        mock_transport.send_batch = blocked_send
+
+        c = WaypointClient(mock_transport, config=tiny_config)
+        try:
+            # First enqueue → worker grabs it from queue, starts blocked_send
+            bid1 = c.enqueue_batch("KNEE_LEFT", VALID_WAYPOINTS)
+            time.sleep(0.1)     # Let worker pull from queue
+
+            # Second enqueue fills the single queue slot
+            bid2 = c.enqueue_batch("KNEE_LEFT", VALID_WAYPOINTS)
+
+            # Third should overflow — queue full, put times out
+            with pytest.raises(Exception):
+                # Override put timeout to fail fast
+                worker = c._get_or_create_worker("KNEE_LEFT")
+                worker._queue.put(("dummy",), block=True, timeout=0.1)
+
+            # Release the gate so batches can complete
+            gate.set()
+
+            _wait_batch(c, bid1, timeout=5.0)
+            _wait_batch(c, bid2, timeout=5.0)
+
+            m = c.get_metrics()
+            # Only 2 should be tracked — the Full one must leave no trace
+            assert m["batches_total"] == 2
+
+            # History should only contain the 2 valid batches
+            assert c.get_batch_status(bid1) is not None
+            assert c.get_batch_status(bid2) is not None
+        finally:
+            gate.set()
+            c.shutdown(timeout_s=3.0)

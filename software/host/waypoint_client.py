@@ -103,7 +103,6 @@ class RetryPolicy:
     base_backoff_500_s: float = 1.0         # 1 s
     base_backoff_timeout_s: float = 0.5
     jitter_factor: float = 0.3              # +/- 30 %
-    request_timeout_s: float = 30.0         # HTTP request timeout
 
 
 @dataclass
@@ -113,7 +112,6 @@ class ClientConfig:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     max_queue_size: int = 100               # Per-joint queue depth
     auto_time_sync: bool = True             # Re-sync on 502/503 before retry
-    log_json: bool = True                   # Structured JSON logging
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +347,8 @@ class _JointWorker:
 
     def enqueue(self, record: BatchRecord, waypoints: List[Dict]) -> None:
         """Add a batch to the joint queue.  Starts worker if needed."""
-        self._queue.put((record, waypoints), timeout=5.0)
         self._ensure_started()
+        self._queue.put((record, waypoints), timeout=5.0)
 
     def cancel(self) -> None:
         """Signal worker to stop and drain pending batches."""
@@ -430,7 +428,13 @@ class _JointWorker:
 
     def _ensure_started(self) -> None:
         with self._startup_lock:
-            if self._thread is None or not self._thread.is_alive():
+            need_new = (self._thread is None or not self._thread.is_alive())
+            # If cancel was requested but old thread is still winding down,
+            # wait for it so the new thread starts with a clean cancel_event.
+            if not need_new and self._cancel_event.is_set():
+                self._thread.join(timeout=2.0)
+                need_new = True
+            if need_new:
                 self._cancel_event.clear()
                 self._thread = threading.Thread(
                     target=self._run,
@@ -638,12 +642,13 @@ class WaypointClient:
             state=BatchState.IDLE,
         )
 
+        worker = self._get_or_create_worker(joint_upper)
+        # put() first — if queue.Full, no side-effects in history/metrics
+        worker.enqueue(record, waypoints)
+
         with self._history_lock:
             self._batch_history[client_batch_id] = record
         self._metrics.inc_total()
-
-        worker = self._get_or_create_worker(joint_upper)
-        worker.enqueue(record, waypoints)
 
         return client_batch_id
 
