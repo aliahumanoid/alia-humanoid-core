@@ -32,7 +32,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-def register_routes(app, serial_manager: SerialManager, can_manager=None):
+def register_routes(app, serial_manager: SerialManager, can_manager=None, stream_test_service=None):
     """
     Register all Flask routes for the joint controller application.
     
@@ -1908,6 +1908,66 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None):
                 "status": "error",
                 "message": f"Error getting sequence data: {str(e)}"
             }), 500
+
+    # ------------------------------------------------------------------
+    # Stream Test endpoints
+    # ------------------------------------------------------------------
+
+    @app.route('/stream_test/start', methods=['POST'])
+    def stream_test_start():
+        if stream_test_service is None:
+            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
+        try:
+            data = request.get_json() or {}
+            result = stream_test_service.start(data)
+            return jsonify({"status": "success", **result})
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except RuntimeError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 409
+        except Exception as exc:
+            logger.exception("Stream test start error")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+    @app.route('/stream_test/stop', methods=['POST'])
+    def stream_test_stop():
+        if stream_test_service is None:
+            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
+        try:
+            data = request.get_json() or {}
+            session_id = data.get("session_id", "")
+            reason = data.get("reason", "operator_stop")
+            result = stream_test_service.stop(session_id, reason=reason)
+            return jsonify(result)
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("Stream test stop error")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+    @app.route('/stream_test/status', methods=['GET'])
+    def stream_test_status():
+        if stream_test_service is None:
+            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
+        session_id = request.args.get("session_id")
+        result = stream_test_service.get_status(session_id)
+        return jsonify({"status": "success", **result})
+
+    @app.route('/stream_test/metrics', methods=['GET'])
+    def stream_test_metrics():
+        if stream_test_service is None:
+            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
+        metrics = stream_test_service.get_metrics()
+        return jsonify({"status": "success", "metrics": metrics})
+
+    @app.route('/stream_test/events', methods=['GET'])
+    def stream_test_events():
+        if stream_test_service is None:
+            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
+        session_id = request.args.get("session_id")
+        after_seq = request.args.get("after_seq", 0, type=int)
+        events = stream_test_service.get_events(session_id, after_seq)
+        return jsonify({"status": "success", "events": events})
 
     @app.route('/')
     def index():

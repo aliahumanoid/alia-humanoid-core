@@ -48,6 +48,28 @@ def mock_serial_manager():
 
 
 @pytest.fixture
+def mock_stream_test_service():
+    """A MagicMock StreamTestService with sensible defaults."""
+    svc = MagicMock()
+    svc.start.return_value = {
+        "session_id": "st_test_001",
+        "state": "RUNNING",
+    }
+    svc.stop.return_value = {
+        "status": "success",
+        "session_id": "st_test_001",
+        "state": "STOPPED",
+    }
+    svc.get_status.return_value = {
+        "state": "IDLE",
+        "session": None,
+    }
+    svc.get_metrics.return_value = {}
+    svc.get_events.return_value = []
+    return svc
+
+
+@pytest.fixture
 def app_client(mock_can_manager, mock_serial_manager):
     """Flask test client with mocked managers.
 
@@ -63,3 +85,21 @@ def app_client(mock_can_manager, mock_serial_manager):
 
     with app.test_client() as client:
         yield client, mock_can_manager
+
+
+@pytest.fixture
+def stream_client(mock_can_manager, mock_serial_manager, mock_stream_test_service):
+    """Flask test client with mocked stream test service.
+
+    Returns (client, mock_stream_test_service) for stream test route tests.
+    """
+    from flask import Flask
+    from routes import register_routes
+
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    register_routes(app, mock_serial_manager, mock_can_manager,
+                    mock_stream_test_service)
+
+    with app.test_client() as client:
+        yield client, mock_stream_test_service

@@ -22,6 +22,7 @@ from flask_socketio import SocketIO
 from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
 from serial_manager import SerialManager
 from can_manager import CanManager
+from stream_test_service import StreamTestService
 from routes import register_routes
 
 # Configure logging
@@ -85,7 +86,12 @@ def init_app():
         logger.warning("CAN features unavailable: %s", exc)
         can_manager_instance = None
 
-    register_routes(app, serial_manager_instance, can_manager_instance)
+    stream_test_service_instance = StreamTestService(
+        socketio=socketio,
+        base_url=f"http://127.0.0.1:{FLASK_PORT}",
+    )
+    register_routes(app, serial_manager_instance, can_manager_instance,
+                    stream_test_service_instance)
 
 
 def auto_boot_sequence():

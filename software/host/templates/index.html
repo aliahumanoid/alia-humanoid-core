@@ -2402,6 +2402,176 @@
                             </div><!-- end #sinusoidContent -->
                         </div>
 
+                        <!-- Continuous Stream Test Section (Collapsible) -->
+                        <div class="bg-teal-50 rounded-md border border-teal-200">
+                            <button type="button"
+                                    onclick="$('#streamTestContent').slideToggle(200); $(this).find('.fa-chevron-down, .fa-chevron-right').toggleClass('fa-chevron-down fa-chevron-right');"
+                                    class="w-full p-3 text-left flex items-center justify-between hover:bg-teal-100 rounded-t-md transition-colors">
+                                <h3 class="text-sm font-semibold text-teal-700">
+                                    <i class="fas fa-stream mr-1"></i>Continuous Stream Test
+                                </h3>
+                                <i class="fas fa-chevron-right text-teal-400 text-xs"></i>
+                            </button>
+                            <div id="streamTestContent" class="p-4 pt-0 hidden">
+
+                            <!-- Joint Multi-Select -->
+                            <div class="mb-3 mt-2">
+                                <label class="text-xs font-medium text-teal-600 block mb-1">Joints</label>
+                                <div id="streamTestJoints" class="flex flex-wrap gap-2">
+                                    <label class="inline-flex items-center text-xs">
+                                        <input type="checkbox" value="KNEE_LEFT" checked class="stream-joint-cb mr-1"> Knee L
+                                    </label>
+                                    <label class="inline-flex items-center text-xs">
+                                        <input type="checkbox" value="KNEE_RIGHT" class="stream-joint-cb mr-1"> Knee R
+                                    </label>
+                                    <label class="inline-flex items-center text-xs">
+                                        <input type="checkbox" value="ANKLE_LEFT" class="stream-joint-cb mr-1"> Ankle L
+                                    </label>
+                                    <label class="inline-flex items-center text-xs">
+                                        <input type="checkbox" value="ANKLE_RIGHT" class="stream-joint-cb mr-1"> Ankle R
+                                    </label>
+                                    <label class="inline-flex items-center text-xs">
+                                        <input type="checkbox" value="HIP_LEFT" class="stream-joint-cb mr-1"> Hip L
+                                    </label>
+                                    <label class="inline-flex items-center text-xs">
+                                        <input type="checkbox" value="HIP_RIGHT" class="stream-joint-cb mr-1"> Hip R
+                                    </label>
+                                </div>
+                            </div>
+
+                            <!-- Rate & Duration -->
+                            <div class="grid grid-cols-3 gap-2 mb-2">
+                                <div>
+                                    <label class="text-xs text-teal-600">Rate (Hz)</label>
+                                    <select id="streamTestRate" class="w-full px-2 py-1 text-sm border rounded">
+                                        <option value="50" selected>50</option>
+                                        <option value="100">100</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="text-xs text-teal-600">Duration</label>
+                                    <select id="streamTestDuration" class="w-full px-2 py-1 text-sm border rounded">
+                                        <option value="30">30s</option>
+                                        <option value="60" selected>60s</option>
+                                        <option value="120">120s</option>
+                                        <option value="600">10min</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="text-xs text-teal-600">Horizon (ms)</label>
+                                    <input type="number" id="streamTestHorizon" value="250" min="100" max="500" step="50"
+                                        class="w-full px-2 py-1 text-sm border rounded">
+                                </div>
+                            </div>
+
+                            <!-- Trajectory Parameters -->
+                            <div class="grid grid-cols-3 gap-2 mb-2">
+                                <div>
+                                    <label class="text-xs text-teal-600">Amplitude (&deg;)</label>
+                                    <input type="number" id="streamTestAmplitude" value="8" min="1" max="30" step="1"
+                                        class="w-full px-2 py-1 text-sm border rounded">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-teal-600">Offset (&deg;)</label>
+                                    <input type="number" id="streamTestOffset" value="0" min="-90" max="90" step="1"
+                                        class="w-full px-2 py-1 text-sm border rounded">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-teal-600">Freq (Hz)</label>
+                                    <input type="number" id="streamTestFreq" value="0.5" min="0.1" max="5" step="0.1"
+                                        class="w-full px-2 py-1 text-sm border rounded">
+                                </div>
+                            </div>
+
+                            <!-- Fault Profile -->
+                            <div class="mb-3">
+                                <label class="text-xs text-teal-600">Fault Profile</label>
+                                <select id="streamTestFault" class="w-full px-2 py-1 text-sm border rounded">
+                                    <option value="none" selected>None</option>
+                                    <option value="delay_jitter">Delay Jitter</option>
+                                    <option value="drop_rate">Drop Rate (1%)</option>
+                                    <option value="burst_pause">Burst Pause</option>
+                                    <option value="sync_stale">Sync Stale</option>
+                                    <option value="conflict_spike">Conflict Spike (409)</option>
+                                </select>
+                            </div>
+
+                            <!-- Start / Stop -->
+                            <div class="grid grid-cols-2 gap-2 mb-3">
+                                <button id="streamTestStartBtn" type="button" onclick="startStreamTest()"
+                                    class="px-4 py-2 rounded-md bg-teal-500 text-white hover:bg-teal-600 font-medium text-sm">
+                                    <i class="fas fa-play mr-1"></i>Start
+                                </button>
+                                <button id="streamTestStopBtn" type="button" onclick="stopStreamTest()" disabled
+                                    class="px-4 py-2 rounded-md bg-red-400 text-white hover:bg-red-500 font-medium text-sm disabled:opacity-50">
+                                    <i class="fas fa-stop mr-1"></i>Stop
+                                </button>
+                            </div>
+
+                            <!-- Live KPI Panel -->
+                            <div id="streamTestKPI" class="bg-white rounded border border-teal-100 p-3 text-xs space-y-1 hidden">
+                                <div class="flex justify-between">
+                                    <span class="font-semibold text-teal-700">State</span>
+                                    <span id="streamKpiState" class="font-bold">IDLE</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Uptime</span>
+                                    <span id="streamKpiUptime">-</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Target / Actual Hz</span>
+                                    <span><span id="streamKpiTargetHz">-</span> / <span id="streamKpiActualHz">-</span></span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Drift p95</span>
+                                    <span id="streamKpiDrift">-</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Late ratio</span>
+                                    <span id="streamKpiLate">-</span>
+                                </div>
+                                <hr class="border-teal-100">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Chunks sent</span>
+                                    <span id="streamKpiSent">0</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Dropped</span>
+                                    <span id="streamKpiDropped" class="text-red-500">0</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Deferred</span>
+                                    <span id="streamKpiDeferred" class="text-yellow-600">0</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Retries</span>
+                                    <span id="streamKpiRetries">0</span>
+                                </div>
+                                <hr class="border-teal-100">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">HTTP 409</span>
+                                    <span id="streamKpi409" class="text-orange-500">0</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">HTTP 502/503</span>
+                                    <span id="streamKpi502" class="text-red-500">0</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Sync refreshes</span>
+                                    <span id="streamKpiSync">0</span>
+                                </div>
+                                <!-- Queue fill per joint -->
+                                <div id="streamKpiQueues" class="mt-1"></div>
+                            </div>
+
+                            <!-- Pass/Fail Badge -->
+                            <div id="streamTestVerdict" class="mt-2 text-center text-xs font-medium hidden">
+                                <!-- Populated by JS -->
+                            </div>
+
+                            </div><!-- end #streamTestContent -->
+                        </div>
+
                         <!-- Hidden mode selector (keep for compatibility) -->
                         <input type="hidden" id="canWaypointMode" value="1" />
 

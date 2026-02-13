@@ -8785,10 +8785,265 @@ function updateDriftBadge(jointId, dof, status, errA, errB) {
 
     // Refresh the limits panel to show drift info
     updateTrajectoryLimitsPanel($("#jointSelect").val());
-    
+
     // Also update the recalc badge in setup section (indication only, no auto-action)
     if (status === 'DRIFT') {
         updateRecalcBadge(jointId, dof, 'NEEDED', errA, errB);
     }
+}
+
+
+// =====================================================================
+// Continuous Stream Test
+// =====================================================================
+
+/** Active session id (null when idle). */
+let _streamSessionId = null;
+
+/** Polling interval handle. */
+let _streamPollInterval = null;
+
+/**
+ * Build config payload from the UI controls.
+ */
+function _buildStreamConfig() {
+    const joints = [];
+    document.querySelectorAll('.stream-joint-cb:checked').forEach(cb => {
+        joints.push(cb.value);
+    });
+    return {
+        joints: joints,
+        rate_hz: parseInt($('#streamTestRate').val(), 10),
+        duration_s: parseInt($('#streamTestDuration').val(), 10),
+        horizon_ms: parseInt($('#streamTestHorizon').val(), 10),
+        buffer_depth_sim: 2,
+        max_inflight_per_joint: 1,
+        trajectory: {
+            type: 'sinusoid',
+            amplitude_deg: parseFloat($('#streamTestAmplitude').val()),
+            offset_deg: parseFloat($('#streamTestOffset').val()),
+            frequency_hz: parseFloat($('#streamTestFreq').val()),
+        },
+        fault_profile: {
+            mode: $('#streamTestFault').val(),
+        },
+    };
+}
+
+/**
+ * POST /stream_test/start — launch a streaming session.
+ */
+function startStreamTest() {
+    const config = _buildStreamConfig();
+    if (config.joints.length === 0) {
+        alert('Select at least one joint.');
+        return;
+    }
+
+    $('#streamTestStartBtn').prop('disabled', true);
+
+    $.ajax({
+        url: '/stream_test/start',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(config),
+        success: function(resp) {
+            _streamSessionId = resp.session_id;
+            $('#streamTestStopBtn').prop('disabled', false);
+            $('#streamTestKPI').removeClass('hidden');
+            _updateStreamState(resp.state || 'STARTING');
+            _startStreamPolling();
+        },
+        error: function(xhr) {
+            $('#streamTestStartBtn').prop('disabled', false);
+            const msg = xhr.responseJSON ? xhr.responseJSON.message : xhr.statusText;
+            alert('Stream start failed: ' + msg);
+        },
+    });
+}
+
+/**
+ * POST /stream_test/stop — stop the active session.
+ */
+function stopStreamTest() {
+    if (!_streamSessionId) return;
+
+    $.ajax({
+        url: '/stream_test/stop',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ session_id: _streamSessionId, reason: 'operator_stop' }),
+        success: function(resp) {
+            _updateStreamState(resp.state || 'STOPPED');
+            _stopStreamPolling();
+        },
+        error: function(xhr) {
+            const msg = xhr.responseJSON ? xhr.responseJSON.message : xhr.statusText;
+            console.error('Stream stop error:', msg);
+        },
+    });
+}
+
+/**
+ * Start 1 Hz polling for status + metrics.
+ */
+function _startStreamPolling() {
+    _stopStreamPolling();
+    _streamPollInterval = setInterval(function() {
+        _pollStreamStatus();
+        _pollStreamMetrics();
+    }, 1000);
+}
+
+function _stopStreamPolling() {
+    if (_streamPollInterval) {
+        clearInterval(_streamPollInterval);
+        _streamPollInterval = null;
+    }
+}
+
+/**
+ * GET /stream_test/status
+ */
+function _pollStreamStatus() {
+    $.getJSON('/stream_test/status', function(resp) {
+        const session = resp.session;
+        if (session) {
+            _updateStreamState(session.state);
+            $('#streamKpiUptime').text(
+                session.uptime_s != null ? session.uptime_s.toFixed(1) + 's' : '-'
+            );
+            // Check terminal states
+            if (session.state === 'STOPPED' || session.state === 'FAILED') {
+                _onStreamEnded(session.state);
+            }
+        } else {
+            _updateStreamState(resp.state || 'IDLE');
+        }
+    });
+}
+
+/**
+ * GET /stream_test/metrics
+ */
+function _pollStreamMetrics() {
+    $.getJSON('/stream_test/metrics', function(resp) {
+        const m = resp.metrics;
+        if (!m || Object.keys(m).length === 0) return;
+        _updateStreamKPI(m);
+    });
+}
+
+/**
+ * Update the state badge in the KPI panel.
+ */
+function _updateStreamState(state) {
+    const el = $('#streamKpiState');
+    el.text(state);
+    el.removeClass('text-green-600 text-yellow-600 text-red-600 text-gray-500');
+    if (state === 'RUNNING') el.addClass('text-green-600');
+    else if (state === 'STARTING' || state === 'STOPPING') el.addClass('text-yellow-600');
+    else if (state === 'FAILED') el.addClass('text-red-600');
+    else el.addClass('text-gray-500');
+}
+
+/**
+ * Populate the KPI panel from a metrics snapshot.
+ */
+function _updateStreamKPI(m) {
+    $('#streamKpiTargetHz').text(m.target_rate_hz || '-');
+    $('#streamKpiActualHz').text(
+        m.actual_rate_hz != null ? m.actual_rate_hz.toFixed(1) : '-'
+    );
+    $('#streamKpiDrift').text(
+        m.scheduler_drift_ms_p95 != null ? m.scheduler_drift_ms_p95.toFixed(2) + 'ms' : '-'
+    );
+    $('#streamKpiLate').text(
+        m.late_ratio != null ? (m.late_ratio * 100).toFixed(2) + '%' : '-'
+    );
+    $('#streamKpiSent').text(m.chunks_sent || 0);
+    $('#streamKpiDropped').text(m.chunks_dropped || 0);
+    $('#streamKpiDeferred').text(m.chunks_deferred || 0);
+    $('#streamKpiRetries').text(m.retries || 0);
+
+    // HTTP status codes
+    const sc = m.http_status_counts || {};
+    $('#streamKpi409').text(sc['409'] || sc[409] || 0);
+    const v502 = (sc['502'] || sc[502] || 0) + (sc['503'] || sc[503] || 0);
+    $('#streamKpi502').text(v502);
+    $('#streamKpiSync').text(m.sync_refresh_count || 0);
+
+    // Queue fill per joint
+    const qf = m.queue_fill_max || {};
+    let qhtml = '';
+    for (const [joint, fill] of Object.entries(qf)) {
+        const pct = Math.min(fill / 2 * 100, 100);  // buffer_depth_sim=2
+        qhtml += `<div class="flex justify-between items-center">
+            <span class="text-gray-500">${joint}</span>
+            <div class="flex items-center gap-1">
+                <div class="w-16 h-2 bg-gray-200 rounded overflow-hidden">
+                    <div class="h-full bg-teal-500 rounded" style="width:${pct}%"></div>
+                </div>
+                <span class="w-6 text-right">${fill}/2</span>
+            </div>
+        </div>`;
+    }
+    $('#streamKpiQueues').html(qhtml);
+
+    // Pass/fail evaluation
+    _evaluateStreamVerdict(m);
+}
+
+/**
+ * Evaluate pass/fail against scenario thresholds.
+ * Uses S1 criteria for 50 Hz, S2 for 100 Hz.
+ */
+function _evaluateStreamVerdict(m) {
+    const el = $('#streamTestVerdict');
+    if (!m.target_rate_hz) { el.addClass('hidden'); return; }
+
+    const is100 = m.target_rate_hz >= 100;
+    const minHz = is100 ? 98.0 : 49.0;
+    const maxLate = is100 ? 0.003 : 0.001;
+
+    const hzOk = m.actual_rate_hz != null && m.actual_rate_hz >= minHz;
+    const dropOk = (m.chunks_dropped || 0) === 0;
+    const lateOk = m.late_ratio != null && m.late_ratio <= maxLate;
+    const pass = hzOk && dropOk && lateOk;
+
+    el.removeClass('hidden');
+    if (pass) {
+        el.html('<span class="text-green-600 bg-green-50 px-2 py-1 rounded">&#x2705; Criteria met (S' + (is100 ? '2' : '1') + ')</span>');
+    } else {
+        let reasons = [];
+        if (!hzOk) reasons.push('Hz < ' + minHz);
+        if (!dropOk) reasons.push('drops > 0');
+        if (!lateOk) reasons.push('late > ' + (maxLate * 100).toFixed(1) + '%');
+        el.html('<span class="text-red-600 bg-red-50 px-2 py-1 rounded">&#x274C; ' + reasons.join(', ') + '</span>');
+    }
+}
+
+/**
+ * Handle stream session end (STOPPED or FAILED).
+ */
+function _onStreamEnded(finalState) {
+    _stopStreamPolling();
+    _streamSessionId = null;
+    $('#streamTestStartBtn').prop('disabled', false);
+    $('#streamTestStopBtn').prop('disabled', true);
+    _updateStreamState(finalState);
+}
+
+// --- SocketIO listeners for stream test (real-time push, optional) ---
+if (typeof socket !== 'undefined') {
+    socket.on('stream_test_metrics', function(data) {
+        _updateStreamKPI(data);
+    });
+    socket.on('stream_test_state', function(data) {
+        _updateStreamState(data.state);
+        if (data.state === 'STOPPED' || data.state === 'FAILED') {
+            _onStreamEnded(data.state);
+        }
+    });
 }
 
