@@ -219,14 +219,21 @@ Sends a time synchronization frame to firmware.
 
 ### GET /can/status
 
-Returns CAN bus connection status.
+Returns CAN bus connection status. The `state` object contains fields from
+`CanManager.get_connection_state()`.
 
 **Response (200):**
 ```json
 {
-    "status": "connected",
-    "bus_type": "socketcan",
-    "channel": "can0"
+    "status": "success",
+    "state": {
+        "connected": true,
+        "config": {"bus_type": "socketcan", "channel": "can0"},
+        "last_status": {},
+        "last_rx_timestamp": 1234567890.123,
+        "stats": {"tx_frames": 100, "rx_frames": 200, "errors": 0, "last_error": null},
+        "status_messages": []
+    }
 }
 ```
 

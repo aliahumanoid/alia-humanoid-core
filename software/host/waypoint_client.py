@@ -46,7 +46,6 @@ logger = logging.getLogger("waypoint_client")
 class BatchState(enum.Enum):
     """Per-joint batch lifecycle states."""
     IDLE = "IDLE"
-    PREFLIGHT = "PREFLIGHT"
     SENDING = "SENDING"
     PARTIAL = "PARTIAL"
     COMPLETE = "COMPLETE"
@@ -112,7 +111,6 @@ class ClientConfig:
     """Top-level client configuration."""
     base_url: str = "http://localhost:5001"
     retry: RetryPolicy = field(default_factory=RetryPolicy)
-    batch_timeout_s: float = 30.0           # Overall per-batch timeout
     max_queue_size: int = 100               # Per-joint queue depth
     auto_time_sync: bool = True             # Re-sync on 502/503 before retry
     log_json: bool = True                   # Structured JSON logging
@@ -233,9 +231,10 @@ class HttpTransport:
                     detail=f"HTTP {resp.status_code}",
                 )
             body = resp.json()
+            state = body.get("state", {})
             return HealthStatus(
-                can_connected=body.get("connected", False),
-                time_sync_age_ms=body.get("time_sync_age_ms"),
+                can_connected=state.get("connected", False),
+                time_sync_age_ms=state.get("time_sync_age_ms"),
                 server_reachable=True,
             )
         except (requests.Timeout, requests.ConnectionError) as exc:
@@ -275,6 +274,22 @@ class _Metrics:
                 self._send_times_ms.append(resp.result["elapsed_ms"])
                 if len(self._send_times_ms) > 1000:
                     self._send_times_ms = self._send_times_ms[-500:]
+
+    def inc_total(self) -> None:
+        with self._lock:
+            self.batches_total += 1
+
+    def inc_partial(self) -> None:
+        with self._lock:
+            self.batches_partial += 1
+
+    def inc_failed(self) -> None:
+        with self._lock:
+            self.batches_failed += 1
+
+    def inc_retries(self) -> None:
+        with self._lock:
+            self.retries += 1
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -487,7 +502,7 @@ class _JointWorker:
 
                 backoff = self._backoff_seconds(resp.http_status, attempt)
                 self._log_retry(record, resp, attempt, backoff)
-                self._metrics.retries += 1
+                self._metrics.inc_retries()
 
                 # Interruptible sleep (returns True if cancel was set)
                 if self._cancel_event.wait(timeout=backoff):
@@ -625,7 +640,7 @@ class WaypointClient:
 
         with self._history_lock:
             self._batch_history[client_batch_id] = record
-        self._metrics.batches_total += 1
+        self._metrics.inc_total()
 
         worker = self._get_or_create_worker(joint_upper)
         worker.enqueue(record, waypoints)
@@ -676,9 +691,9 @@ class WaypointClient:
     def _on_batch_done(self, record: BatchRecord) -> None:
         """Callback from worker when batch reaches terminal state."""
         if record.state == BatchState.PARTIAL:
-            self._metrics.batches_partial += 1
+            self._metrics.inc_partial()
         elif record.state == BatchState.FAILED_HARD:
-            self._metrics.batches_failed += 1
+            self._metrics.inc_failed()
 
         logger.info(json.dumps({
             "event": "batch_done",
