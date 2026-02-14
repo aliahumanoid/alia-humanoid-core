@@ -23,14 +23,20 @@ pytest.importorskip("numpy")
 # Helpers
 # -----------------------------------------------------------------------
 VALID_CONFIG = {
-    "joints": ["KNEE_LEFT"],
+    "joint": "KNEE_LEFT",
+    "active_dof": 0,
+    "n_dof": 1,
+    "min_deg": 20.0,
+    "max_deg": 80.0,
+    "start_at": "min",
+    "frequency_hz": 0.5,
     "rate_hz": 50,
     "duration_s": 60,
     "horizon_ms": 250,
     "buffer_depth_sim": 2,
     "max_inflight_per_joint": 1,
-    "trajectory": {"type": "sinusoid"},
     "fault_profile": {"mode": "none"},
+    "safe_limits": {"min": -2.0, "max": 112.0},
 }
 
 
@@ -56,10 +62,10 @@ class TestStreamTestStart:
     def test_start_empty_body(self, stream_client):
         """Empty body should be passed to service (which validates)."""
         client, svc = stream_client
-        svc.start.side_effect = ValueError("joints is required")
+        svc.start.side_effect = ValueError("'joint' must be a non-empty string")
         resp = _post_json(client, "/stream_test/start", {})
         assert resp.status_code == 400
-        assert "joints" in resp.get_json()["message"].lower()
+        assert "joint" in resp.get_json()["message"].lower()
 
     def test_start_validation_error_returns_400(self, stream_client):
         client, svc = stream_client

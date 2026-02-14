@@ -3,11 +3,13 @@ Unit tests for stream_test_service.py — continuous streaming test service.
 
 Tests cover:
 - Session lifecycle (start/stop/state machine)
-- Trajectory generation (sinusoid values, chunk shape)
+- Config validation (Phase 1: single joint, min/max, safe_limits)
+- Trajectory generation (bounded cosine, null DOFs, start_at)
 - Backpressure policy (defer, drop after threshold)
 - Fault injection (delay, drop, burst pause)
 - Metrics collection (rate, drift, counters)
 - Time sync policy
+- Preposition phase (encoder check, ready criterion)
 
 Run with: python3 -m pytest tests/test_stream_test_service.py -v
 """
@@ -41,20 +43,36 @@ from waypoint_client import BatchRecord, BatchResponse, BatchState
 # Helpers
 # ---------------------------------------------------------------------------
 MINIMAL_CONFIG = {
-    "joints": ["KNEE_LEFT"],
+    "joint": "KNEE_LEFT",
+    "active_dof": 0,
+    "n_dof": 1,
+    "min_deg": 20.0,
+    "max_deg": 80.0,
+    "start_at": "min",
+    "frequency_hz": 0.5,
     "rate_hz": 50,
     "duration_s": 2,
     "horizon_ms": 250,
     "buffer_depth_sim": 2,
     "max_inflight_per_joint": 1,
-    "trajectory": {
-        "type": "sinusoid",
-        "amplitude_deg": 8.0,
-        "offset_deg": 0.0,
-        "frequency_hz": 0.5,
-    },
     "fault_profile": {"mode": "none"},
+    "safe_limits": {"min": -2.0, "max": 112.0},
 }
+
+
+def _mock_encoder_response(angles_deg=None, age_ms=50, valid=True):
+    """Build a mock requests.Response for GET /can/encoder_angles."""
+    if angles_deg is None:
+        angles_deg = [45.0]
+    resp = MagicMock()
+    resp.json.return_value = {
+        "status": "success",
+        "valid": valid,
+        "age_ms": age_ms,
+        "angles_deg": angles_deg,
+    }
+    resp.status_code = 200
+    return resp
 
 
 def _wait_state(service, target_state, timeout=5.0):
@@ -72,14 +90,121 @@ def _wait_state(service, target_state, timeout=5.0):
 
 
 # =======================================================================
-# A. Session Lifecycle
+# A. Config Validation
+# =======================================================================
+class TestConfigValidation:
+
+    def test_joint_string_required(self):
+        """'joint' must be a non-empty string, not a list."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        with pytest.raises(ValueError, match="joint"):
+            svc.start({"joints": ["KNEE_LEFT"], "rate_hz": 50,
+                        "min_deg": 20, "max_deg": 80})
+        with pytest.raises(ValueError, match="joint"):
+            svc.start({"joint": "", "rate_hz": 50,
+                        "min_deg": 20, "max_deg": 80})
+
+    def test_invalid_rate_hz(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "rate_hz": 75}
+        with pytest.raises(ValueError, match="rate_hz"):
+            svc.start(cfg)
+
+    def test_min_gte_max_raises(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "min_deg": 80.0, "max_deg": 20.0}
+        with pytest.raises(ValueError, match="min_deg must be < max_deg"):
+            svc.start(cfg)
+
+    def test_min_equal_max_raises(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "min_deg": 50.0, "max_deg": 50.0}
+        with pytest.raises(ValueError, match="min_deg must be < max_deg"):
+            svc.start(cfg)
+
+    def test_range_exceeds_safe_limits(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "min_deg": 10.0, "max_deg": 120.0,
+               "safe_limits": {"min": 0.0, "max": 112.0}}
+        with pytest.raises(ValueError, match="exceeds safe limits"):
+            svc.start(cfg)
+
+    def test_active_dof_out_of_range(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "active_dof": 2, "n_dof": 1}
+        with pytest.raises(ValueError, match="active_dof"):
+            svc.start(cfg)
+
+    def test_active_dof_negative(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "active_dof": -1}
+        with pytest.raises(ValueError, match="active_dof"):
+            svc.start(cfg)
+
+    def test_non_finite_min_raises(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "min_deg": float("nan")}
+        with pytest.raises(ValueError, match="finite"):
+            svc.start(cfg)
+
+    def test_non_finite_max_raises(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "max_deg": float("inf")}
+        with pytest.raises(ValueError, match="finite"):
+            svc.start(cfg)
+
+    def test_invalid_start_at(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "start_at": "middle"}
+        with pytest.raises(ValueError, match="start_at"):
+            svc.start(cfg)
+
+    def test_zero_frequency_raises(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "frequency_hz": 0}
+        with pytest.raises(ValueError, match="frequency_hz"):
+            svc.start(cfg)
+
+    def test_missing_min_max_raises(self):
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG}
+        del cfg["min_deg"]
+        with pytest.raises(ValueError, match="min_deg"):
+            svc.start(cfg)
+
+    def test_valid_config_accepted(self):
+        """A valid config should not raise."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        with patch("stream_test_service.HttpTransport"), \
+             patch("stream_test_service.WaypointClient") as mock_cls, \
+             patch("stream_test_service.http_requests") as mock_req:
+            mock_client = MagicMock()
+            mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
+            mock_client.enqueue_batch.return_value = "t"
+            mock_client.get_batch_status.return_value = None
+            mock_cls.return_value = mock_client
+
+            mock_req.get.return_value = _mock_encoder_response([45.0])
+
+            result = svc.start(MINIMAL_CONFIG)
+            assert "session_id" in result
+            time.sleep(0.3)
+            svc.stop(result["session_id"])
+            time.sleep(0.5)
+
+
+# =======================================================================
+# B. Session Lifecycle
 # =======================================================================
 class TestSessionLifecycle:
 
+    @patch("stream_test_service.http_requests")
     @patch("stream_test_service.HttpTransport")
     @patch("stream_test_service.WaypointClient")
-    def test_start_transitions_to_running(self, mock_client_cls, mock_transport_cls):
-        """Start should transition session to RUNNING."""
+    def test_start_transitions_through_prepositioning(
+        self, mock_client_cls, mock_transport_cls, mock_req
+    ):
+        """Start should transition STARTING → PREPOSITIONING → RUNNING."""
         mock_client = MagicMock()
         mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
         mock_client.enqueue_batch.return_value = "test_id"
@@ -90,22 +215,25 @@ class TestSessionLifecycle:
         mock_transport.send_time_sync.return_value = True
         mock_transport_cls.return_value = mock_transport
 
+        mock_req.get.return_value = _mock_encoder_response([20.0])
+
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
         result = svc.start(MINIMAL_CONFIG)
         assert "session_id" in result
-        assert result["state"] in ("STARTING", "RUNNING")
 
-        # Wait for session to reach RUNNING or terminate
-        time.sleep(0.5)
-        status = svc.get_status()
-        assert status["session"] is not None
+        # Wait for session to reach RUNNING (after preposition)
+        reached = _wait_state(svc, "RUNNING", timeout=8.0)
+        assert reached, "Session did not reach RUNNING"
 
         svc.stop(result["session_id"])
         time.sleep(0.5)
 
+    @patch("stream_test_service.http_requests")
     @patch("stream_test_service.HttpTransport")
     @patch("stream_test_service.WaypointClient")
-    def test_stop_transitions_to_stopped(self, mock_client_cls, mock_transport_cls):
+    def test_stop_transitions_to_stopped(
+        self, mock_client_cls, mock_transport_cls, mock_req
+    ):
         """Stop should transition session to STOPPED."""
         mock_client = MagicMock()
         mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
@@ -117,9 +245,11 @@ class TestSessionLifecycle:
         mock_transport.send_time_sync.return_value = True
         mock_transport_cls.return_value = mock_transport
 
+        mock_req.get.return_value = _mock_encoder_response([20.0])
+
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
         result = svc.start(MINIMAL_CONFIG)
-        time.sleep(0.3)
+        _wait_state(svc, "RUNNING", timeout=8.0)
 
         stop_result = svc.stop(result["session_id"])
         assert stop_result["state"] in ("STOPPED", "STOPPING")
@@ -129,16 +259,18 @@ class TestSessionLifecycle:
         assert status["session"]["state"] in ("STOPPED", "FAILED")
 
     def test_double_start_raises_error(self):
-        """Starting a second session while one is active should raise."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
 
         with patch("stream_test_service.HttpTransport"), \
-             patch("stream_test_service.WaypointClient") as mock_cls:
+             patch("stream_test_service.WaypointClient") as mock_cls, \
+             patch("stream_test_service.http_requests") as mock_req:
             mock_client = MagicMock()
             mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
             mock_client.enqueue_batch.return_value = "t"
             mock_client.get_batch_status.return_value = None
             mock_cls.return_value = mock_client
+
+            mock_req.get.return_value = _mock_encoder_response([20.0])
 
             result = svc.start(MINIMAL_CONFIG)
             time.sleep(0.2)
@@ -150,21 +282,11 @@ class TestSessionLifecycle:
             time.sleep(0.5)
 
     def test_stop_idempotent(self):
-        """Stopping a non-existent session should return success."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
         result = svc.stop("nonexistent")
         assert result["state"] == "IDLE"
 
-    def test_invalid_config_raises_valueerror(self):
-        """Invalid config should raise ValueError."""
-        svc = StreamTestService(base_url="http://127.0.0.1:5001")
-        with pytest.raises(ValueError, match="joints"):
-            svc.start({"rate_hz": 50})
-        with pytest.raises(ValueError, match="rate_hz"):
-            svc.start({"joints": ["KNEE_LEFT"], "rate_hz": 75})
-
     def test_status_when_idle(self):
-        """Status with no session should return IDLE."""
         svc = StreamTestService()
         status = svc.get_status()
         assert status["state"] == "IDLE"
@@ -172,37 +294,67 @@ class TestSessionLifecycle:
 
 
 # =======================================================================
-# B. Trajectory Generation
+# C. Trajectory Generation (Bounded Cosine)
 # =======================================================================
 class TestTrajectoryGen:
 
-    def test_sinusoid_values(self):
-        """Sinusoid trajectory should produce correct angles."""
+    def test_bounded_cosine_stays_in_range(self):
+        """All generated angles must stay within [min_deg, max_deg]."""
         gen = TrajectoryGenerator(
-            traj_config={
-                "type": "sinusoid",
-                "amplitude_deg": 10.0,
-                "offset_deg": 5.0,
-                "frequency_hz": 1.0,
-            },
-            rate_hz=100,
-            horizon_ms=250,
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=50, horizon_ms=250,
+            active_dof=0, n_dof=1,
         )
-        # At t=0, sin(0)=0, angle should be offset
-        chunk = gen.next_chunk(0.0)
-        assert abs(chunk[0]["angles_deg"][0] - 5.0) < 0.1
+        for tick in range(1000):
+            t_base_ms = tick * 20.0  # 50Hz → 20ms period
+            chunk = gen.next_chunk(t_base_ms, lead_ms=250.0)
+            for wp in chunk:
+                angle = wp["angles_deg"][0]
+                assert 19.99 <= angle <= 80.01, (
+                    f"angle={angle} out of [20, 80] at tick={tick}"
+                )
 
-        # At t=250ms (quarter period for 1Hz), sin(pi/2)=1
-        chunk_250 = gen.next_chunk(250.0)
-        expected = 5.0 + 10.0 * math.sin(2 * math.pi * 1.0 * 0.25)
-        assert abs(chunk_250[0]["angles_deg"][0] - expected) < 0.5
+    def test_start_at_min(self):
+        """First angle should be approx min_deg when start_at='min'."""
+        gen = TrajectoryGenerator(
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=50, horizon_ms=250,
+            active_dof=0, n_dof=1,
+        )
+        chunk = gen.next_chunk(0.0, lead_ms=250.0)
+        # cos(0)=1, center - amplitude*cos(0) = 50 - 30 = 20
+        assert abs(chunk[0]["angles_deg"][0] - 20.0) < 0.1
+
+    def test_start_at_max(self):
+        """First angle should be approx max_deg when start_at='max'."""
+        gen = TrajectoryGenerator(
+            min_deg=20.0, max_deg=80.0, start_at="max",
+            frequency_hz=0.5, rate_hz=50, horizon_ms=250,
+            active_dof=0, n_dof=1,
+        )
+        chunk = gen.next_chunk(0.0, lead_ms=250.0)
+        # center + amplitude*cos(0) = 50 + 30 = 80
+        assert abs(chunk[0]["angles_deg"][0] - 80.0) < 0.1
+
+    def test_null_dofs(self):
+        """Non-active DOFs should be None."""
+        gen = TrajectoryGenerator(
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=50, horizon_ms=250,
+            active_dof=1, n_dof=3,
+        )
+        chunk = gen.next_chunk(0.0, lead_ms=250.0)
+        for wp in chunk:
+            assert wp["angles_deg"][0] is None
+            assert wp["angles_deg"][1] is not None  # active DOF
+            assert wp["angles_deg"][2] is None
 
     def test_chunk_shape(self):
-        """Chunks should have 2-4 waypoints."""
+        """Chunks should have 2-4 waypoints with correct structure."""
         gen = TrajectoryGenerator(
-            traj_config={"type": "sinusoid"},
-            rate_hz=50,
-            horizon_ms=250,
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=50, horizon_ms=250,
+            active_dof=0, n_dof=1,
         )
         chunk = gen.next_chunk(0.0)
         assert 2 <= len(chunk) <= 4
@@ -213,76 +365,195 @@ class TestTrajectoryGen:
             assert isinstance(wp["t_offset_ms"], int)
 
     def test_t_offset_monotonically_increasing(self):
-        """t_offset_ms values within a chunk must be strictly increasing."""
         gen = TrajectoryGenerator(
-            traj_config={"type": "sinusoid"},
-            rate_hz=100,
-            horizon_ms=250,
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=100, horizon_ms=250,
+            active_dof=0, n_dof=1,
         )
         chunk = gen.next_chunk(100.0, lead_ms=250.0)
         offsets = [wp["t_offset_ms"] for wp in chunk]
         for i in range(1, len(offsets)):
             assert offsets[i] > offsets[i - 1]
 
-    def test_multiple_chunks_continuous(self):
-        """Sequential chunks produce consistent relative offsets."""
-        gen = TrajectoryGenerator(
-            traj_config={"type": "sinusoid"},
-            rate_hz=50,
-            horizon_ms=200,
-        )
-        # With the same lead_ms, each chunk should start at the same offset
-        chunk1 = gen.next_chunk(0.0, lead_ms=200.0)
-        chunk2 = gen.next_chunk(60.0, lead_ms=200.0)
-        # Both start at lead_ms, so first t_offset_ms should be 200
-        assert chunk1[0]["t_offset_ms"] == chunk2[0]["t_offset_ms"]
-        # But the sinusoid angles should differ
-        assert chunk1[0]["angles_deg"] != chunk2[0]["angles_deg"]
-
     def test_t_offset_never_exceeds_uint16(self):
-        """Regression: t_offset_ms must stay within [1, 65535] even for
-        long-running sessions (P1 overflow fix).
-        """
+        """P1 regression: t_offset_ms must stay within [1, 65535]."""
         gen = TrajectoryGenerator(
-            traj_config={"type": "sinusoid"},
-            rate_hz=50,
-            horizon_ms=250,
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=50, horizon_ms=250,
+            active_dof=0, n_dof=1,
         )
-        # Simulate tick at 600 seconds (10 minutes) — absolute time
-        t_base_ms = 600_000.0
+        t_base_ms = 600_000.0  # 10 minutes
         chunk = gen.next_chunk(t_base_ms, lead_ms=250.0)
         for wp in chunk:
-            assert 1 <= wp["t_offset_ms"] <= 65535, (
-                f"t_offset_ms={wp['t_offset_ms']} out of uint16 range"
-            )
+            assert 1 <= wp["t_offset_ms"] <= 65535
 
     def test_t_offset_stays_bounded_at_extreme_session(self):
         """Even at 10-minute session with 100Hz, all offsets are bounded."""
         gen = TrajectoryGenerator(
-            traj_config={"type": "sinusoid"},
-            rate_hz=100,
-            horizon_ms=250,
+            min_deg=20.0, max_deg=80.0, start_at="min",
+            frequency_hz=0.5, rate_hz=100, horizon_ms=250,
+            active_dof=0, n_dof=1,
         )
-        for tick in range(0, 60_000, 1000):  # every 10s for 10 minutes
-            t_base_ms = tick * 10.0  # 100Hz → 10ms period
+        for tick in range(0, 60_000, 1000):
+            t_base_ms = tick * 10.0
             chunk = gen.next_chunk(t_base_ms, lead_ms=250.0)
             for wp in chunk:
                 assert wp["t_offset_ms"] <= 65535
 
+    def test_zero_initial_velocity(self):
+        """Cosine at t=0 has zero derivative → smooth start."""
+        gen = TrajectoryGenerator(
+            min_deg=0.0, max_deg=100.0, start_at="min",
+            frequency_hz=1.0, rate_hz=1000, horizon_ms=10,
+            active_dof=0, n_dof=1,
+        )
+        # Get first two waypoints at t=0 (1ms apart at 1000Hz)
+        chunk = gen.next_chunk(0.0, lead_ms=10.0)
+        a0 = chunk[0]["angles_deg"][0]
+        a1 = chunk[1]["angles_deg"][0]
+        # Angular velocity should be very small at start
+        velocity_deg_per_ms = abs(a1 - a0)
+        assert velocity_deg_per_ms < 1.0, (
+            f"velocity={velocity_deg_per_ms} deg/ms too high at t=0"
+        )
+
 
 # =======================================================================
-# C. Backpressure
+# D. Preposition Phase
+# =======================================================================
+class TestPreposition:
+
+    @patch("stream_test_service.http_requests")
+    @patch("stream_test_service.HttpTransport")
+    @patch("stream_test_service.WaypointClient")
+    def test_encoder_stale_fails(
+        self, mock_client_cls, mock_transport_cls, mock_req
+    ):
+        """Session should fail if encoder data is stale during preposition."""
+        mock_client = MagicMock()
+        mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
+        mock_client.enqueue_batch.return_value = "t"
+        mock_client.get_batch_status.return_value = None
+        mock_client_cls.return_value = mock_client
+
+        mock_transport = MagicMock()
+        mock_transport.send_time_sync.return_value = True
+        mock_transport_cls.return_value = mock_transport
+
+        # Stale encoder: age_ms=500 (> 300 threshold)
+        mock_req.get.return_value = _mock_encoder_response(
+            angles_deg=[45.0], age_ms=500, valid=True,
+        )
+
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        result = svc.start(MINIMAL_CONFIG)
+        reached = _wait_state(svc, "FAILED", timeout=5.0)
+        assert reached, "Session did not fail on stale encoder"
+
+    @patch("stream_test_service.http_requests")
+    @patch("stream_test_service.HttpTransport")
+    @patch("stream_test_service.WaypointClient")
+    def test_encoder_invalid_fails(
+        self, mock_client_cls, mock_transport_cls, mock_req
+    ):
+        """Session should fail if encoder reports valid=false."""
+        mock_client = MagicMock()
+        mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
+        mock_client.enqueue_batch.return_value = "t"
+        mock_client.get_batch_status.return_value = None
+        mock_client_cls.return_value = mock_client
+
+        mock_transport = MagicMock()
+        mock_transport.send_time_sync.return_value = True
+        mock_transport_cls.return_value = mock_transport
+
+        mock_req.get.return_value = _mock_encoder_response(
+            angles_deg=[45.0], age_ms=50, valid=False,
+        )
+
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        result = svc.start(MINIMAL_CONFIG)
+        reached = _wait_state(svc, "FAILED", timeout=5.0)
+        assert reached, "Session did not fail on invalid encoder"
+
+    @patch("stream_test_service.http_requests")
+    @patch("stream_test_service.HttpTransport")
+    @patch("stream_test_service.WaypointClient")
+    def test_encoder_null_dof_fails(
+        self, mock_client_cls, mock_transport_cls, mock_req
+    ):
+        """Session should fail if active DOF has no encoder reading."""
+        mock_client = MagicMock()
+        mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
+        mock_client.enqueue_batch.return_value = "t"
+        mock_client.get_batch_status.return_value = None
+        mock_client_cls.return_value = mock_client
+
+        mock_transport = MagicMock()
+        mock_transport.send_time_sync.return_value = True
+        mock_transport_cls.return_value = mock_transport
+
+        # DOF 0 has None reading
+        mock_req.get.return_value = _mock_encoder_response(
+            angles_deg=[None], age_ms=50, valid=True,
+        )
+
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        result = svc.start(MINIMAL_CONFIG)
+        reached = _wait_state(svc, "FAILED", timeout=5.0)
+        assert reached, "Session did not fail on null DOF encoder"
+
+    @patch("stream_test_service.http_requests")
+    @patch("stream_test_service.HttpTransport")
+    @patch("stream_test_service.WaypointClient")
+    def test_preposition_ramp_sent(
+        self, mock_client_cls, mock_transport_cls, mock_req
+    ):
+        """Preposition should send a ramp batch via WaypointClient."""
+        mock_client = MagicMock()
+        mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
+        mock_client.enqueue_batch.return_value = "ramp_id"
+        mock_client.get_batch_status.return_value = None
+        mock_client_cls.return_value = mock_client
+
+        mock_transport = MagicMock()
+        mock_transport.send_time_sync.return_value = True
+        mock_transport_cls.return_value = mock_transport
+
+        # Encoder at 45°, target is min_deg=20
+        mock_req.get.return_value = _mock_encoder_response([45.0])
+
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        result = svc.start(MINIMAL_CONFIG)
+
+        # Wait for preposition to send the ramp
+        time.sleep(1.0)
+        # First enqueue_batch call should be the ramp (20 waypoints)
+        assert mock_client.enqueue_batch.called
+        first_call = mock_client.enqueue_batch.call_args_list[0]
+        joint_arg = first_call[0][0]
+        waypoints_arg = first_call[0][1]
+        assert joint_arg == "KNEE_LEFT"
+        assert len(waypoints_arg) == 20
+        # Ramp should end at target (min_deg=20.0)
+        last_angle = waypoints_arg[-1]["angles_deg"][0]
+        assert abs(last_angle - 20.0) < 0.1
+
+        svc.stop(result["session_id"])
+        time.sleep(0.5)
+
+
+# =======================================================================
+# E. Backpressure
 # =======================================================================
 class TestBackpressure:
 
     def test_defer_when_full(self):
-        """can_send() should return False when inflight >= max_inflight."""
         bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
         bp.on_send()
         assert not bp.can_send()
 
     def test_allows_after_done(self):
-        """can_send() should return True after on_done()."""
         bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
         bp.on_send()
         assert not bp.can_send()
@@ -290,27 +561,24 @@ class TestBackpressure:
         assert bp.can_send()
 
     def test_drop_after_consecutive_threshold(self):
-        """should_drop should be True after >3 consecutive deferrals."""
         bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
-        bp.on_send()  # inflight = 1
-        # 4 consecutive can_send() failures
+        bp.on_send()
         for _ in range(4):
             assert not bp.can_send()
         assert bp.should_drop
 
     def test_consecutive_reset_on_success(self):
-        """Consecutive counter should reset when can_send() succeeds."""
         bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
         bp.on_send()
-        bp.can_send()  # fail, consecutive=1
-        bp.can_send()  # fail, consecutive=2
+        bp.can_send()
+        bp.can_send()
         bp.on_done()
-        bp.can_send()  # success, consecutive=0
+        bp.can_send()
         assert not bp.should_drop
 
 
 # =======================================================================
-# D. Fault Injection
+# F. Fault Injection
 # =======================================================================
 class TestFaultInjection:
 
@@ -327,7 +595,6 @@ class TestFaultInjection:
         fi = _FaultInjector({"mode": "drop_rate", "drop_rate": 0.5, "seed": 42})
         results = [fi.pre_send(i) for i in range(1000)]
         drop_count = results.count("drop")
-        # With 50% drop rate, should be roughly 500 ± reasonable margin
         assert 300 < drop_count < 700
 
     def test_burst_pause(self):
@@ -336,7 +603,7 @@ class TestFaultInjection:
             "burst_period": 10,
             "burst_pause_ms": 100,
         })
-        assert fi.pre_send(0) == "send"  # tick 0 is skipped
+        assert fi.pre_send(0) == "send"
         assert fi.pre_send(10) == "pause"
         assert fi.pre_send(11) == "send"
         assert fi.pre_send(20) == "pause"
@@ -344,7 +611,7 @@ class TestFaultInjection:
     def test_sync_stale_suppress(self):
         fi = _FaultInjector({"mode": "sync_stale"})
         assert fi.suppress_sync is True
-        assert fi.pre_send(0) == "send"  # Normal send, but sync disabled
+        assert fi.pre_send(0) == "send"
 
     def test_conflict_spike(self):
         fi = _FaultInjector({"mode": "conflict_spike"})
@@ -353,12 +620,11 @@ class TestFaultInjection:
 
 
 # =======================================================================
-# E. Metrics
+# G. Metrics
 # =======================================================================
 class TestMetrics:
 
     def test_snapshot_schema(self):
-        """Metrics snapshot should contain all required fields."""
         m = StreamMetrics(target_rate_hz=50, joints=["KNEE_LEFT"])
         snap = m.snapshot()
         required_keys = [
@@ -372,12 +638,10 @@ class TestMetrics:
             assert key in snap, f"Missing key: {key}"
 
     def test_drift_tracking(self):
-        """Drift p95 should reflect recorded samples."""
         m = StreamMetrics(target_rate_hz=100, joints=["J"])
         for i in range(100):
             m.record_drift(float(i))
         snap = m.snapshot()
-        # p95 of 0..99 should be around 95
         assert snap["scheduler_drift_ms_p95"] >= 90
 
     def test_counters_increment(self):
@@ -413,9 +677,7 @@ class TestMetrics:
         assert snap["waypoints_partial"] == 4
 
     def test_extra_status_counts_merged(self):
-        """P2 regression: record_http_status (conflict spike) should merge
-        with WaypointClient status counts in snapshot.
-        """
+        """P2 regression: conflict spike counts merge with client counts."""
         m = StreamMetrics(target_rate_hz=50, joints=["J"])
         m.merge_client_metrics({
             "status_counts": {200: 10, 409: 1},
@@ -424,7 +686,6 @@ class TestMetrics:
         m.record_http_status(409)
         m.record_http_status(409)
         snap = m.snapshot()
-        # WaypointClient had 1 × 409, conflict spike added 2 → total 3
         assert snap["http_status_counts"][409] == 3
         assert snap["http_status_counts"][200] == 10
 
@@ -432,7 +693,7 @@ class TestMetrics:
         m = StreamMetrics(target_rate_hz=50, joints=["A", "B"])
         m.update_queue_fill("A", 1)
         m.update_queue_fill("A", 2)
-        m.update_queue_fill("A", 1)  # max stays at 2
+        m.update_queue_fill("A", 1)
         m.update_queue_fill("B", 1)
         snap = m.snapshot()
         assert snap["queue_fill_max"]["A"] == 2
@@ -440,7 +701,7 @@ class TestMetrics:
 
 
 # =======================================================================
-# F. Event Log
+# H. Event Log
 # =======================================================================
 class TestEventLog:
 
@@ -474,7 +735,7 @@ class TestEventLog:
 
 
 # =======================================================================
-# G. Service API
+# I. Service API
 # =======================================================================
 class TestServiceAPI:
 
@@ -487,15 +748,17 @@ class TestServiceAPI:
         assert svc.get_metrics() == {}
 
     def test_unknown_session_stop(self):
-        """Stopping with wrong session_id should raise ValueError."""
         svc = StreamTestService()
         with patch("stream_test_service.HttpTransport"), \
-             patch("stream_test_service.WaypointClient") as mock_cls:
+             patch("stream_test_service.WaypointClient") as mock_cls, \
+             patch("stream_test_service.http_requests") as mock_req:
             mock_client = MagicMock()
             mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
             mock_client.enqueue_batch.return_value = "t"
             mock_client.get_batch_status.return_value = None
             mock_cls.return_value = mock_client
+
+            mock_req.get.return_value = _mock_encoder_response([45.0])
 
             result = svc.start(MINIMAL_CONFIG)
             time.sleep(0.2)

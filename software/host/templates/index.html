@@ -2414,28 +2414,49 @@
                             </button>
                             <div id="streamTestContent" class="p-4 pt-0 hidden">
 
-                            <!-- Joint Multi-Select -->
-                            <div class="mb-3 mt-2">
-                                <label class="text-xs font-medium text-teal-600 block mb-1">Joints</label>
-                                <div id="streamTestJoints" class="flex flex-wrap gap-2">
-                                    <label class="inline-flex items-center text-xs">
-                                        <input type="checkbox" value="KNEE_LEFT" checked class="stream-joint-cb mr-1"> Knee L
-                                    </label>
-                                    <label class="inline-flex items-center text-xs">
-                                        <input type="checkbox" value="KNEE_RIGHT" class="stream-joint-cb mr-1"> Knee R
-                                    </label>
-                                    <label class="inline-flex items-center text-xs">
-                                        <input type="checkbox" value="ANKLE_LEFT" class="stream-joint-cb mr-1"> Ankle L
-                                    </label>
-                                    <label class="inline-flex items-center text-xs">
-                                        <input type="checkbox" value="ANKLE_RIGHT" class="stream-joint-cb mr-1"> Ankle R
-                                    </label>
-                                    <label class="inline-flex items-center text-xs">
-                                        <input type="checkbox" value="HIP_LEFT" class="stream-joint-cb mr-1"> Hip L
-                                    </label>
-                                    <label class="inline-flex items-center text-xs">
-                                        <input type="checkbox" value="HIP_RIGHT" class="stream-joint-cb mr-1"> Hip R
-                                    </label>
+                            <!-- Joint: uses global #jointSelect -->
+                            <div class="mb-2 mt-2">
+                                <label class="text-xs font-medium text-teal-600 block mb-1">
+                                    Joint: <span id="streamTestJointLabel" class="font-bold text-teal-700">-</span>
+                                    <span class="text-gray-400 ml-1">(from Joint selector above)</span>
+                                </label>
+                            </div>
+
+                            <!-- Active DOF Selector (dynamic radio buttons) -->
+                            <div id="streamTestDofSelector" class="mb-2">
+                                <label class="text-xs font-medium text-teal-600 block mb-1">Active DOF</label>
+                                <div id="streamTestDofRadios" class="flex flex-wrap gap-2">
+                                    <!-- Populated dynamically from jointConfigData -->
+                                </div>
+                            </div>
+
+                            <!-- Safe Limits Display -->
+                            <div id="streamTestSafeLimitsInfo" class="text-xs text-teal-600 mb-2 hidden">
+                                Safe limits DOF <span id="streamTestSafeDof">0</span>:
+                                [<span id="streamTestSafeMin">-</span>&deg;, <span id="streamTestSafeMax">-</span>&deg;]
+                            </div>
+                            <div id="streamTestNoSafeLimits" class="text-xs text-red-500 mb-2 hidden">
+                                No safe limits available &mdash; run CHECK_OFFSETS first
+                            </div>
+
+                            <!-- Min / Max / Start At -->
+                            <div class="grid grid-cols-3 gap-2 mb-2">
+                                <div>
+                                    <label class="text-xs text-teal-600">Min (&deg;)</label>
+                                    <input type="number" id="streamTestMinDeg" value="20" step="0.5"
+                                        class="w-full px-2 py-1 text-sm border rounded">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-teal-600">Max (&deg;)</label>
+                                    <input type="number" id="streamTestMaxDeg" value="80" step="0.5"
+                                        class="w-full px-2 py-1 text-sm border rounded">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-teal-600">Start at</label>
+                                    <select id="streamTestStartAt" class="w-full px-2 py-1 text-sm border rounded">
+                                        <option value="min" selected>Min</option>
+                                        <option value="max">Max</option>
+                                    </select>
                                 </div>
                             </div>
 
@@ -2464,20 +2485,10 @@
                                 </div>
                             </div>
 
-                            <!-- Trajectory Parameters -->
+                            <!-- Frequency -->
                             <div class="grid grid-cols-3 gap-2 mb-2">
                                 <div>
-                                    <label class="text-xs text-teal-600">Amplitude (&deg;)</label>
-                                    <input type="number" id="streamTestAmplitude" value="8" min="1" max="30" step="1"
-                                        class="w-full px-2 py-1 text-sm border rounded">
-                                </div>
-                                <div>
-                                    <label class="text-xs text-teal-600">Offset (&deg;)</label>
-                                    <input type="number" id="streamTestOffset" value="0" min="-90" max="90" step="1"
-                                        class="w-full px-2 py-1 text-sm border rounded">
-                                </div>
-                                <div>
-                                    <label class="text-xs text-teal-600">Freq (Hz)</label>
+                                    <label class="text-xs text-teal-600">Frequency (Hz)</label>
                                     <input type="number" id="streamTestFreq" value="0.5" min="0.1" max="5" step="0.1"
                                         class="w-full px-2 py-1 text-sm border rounded">
                                 </div>

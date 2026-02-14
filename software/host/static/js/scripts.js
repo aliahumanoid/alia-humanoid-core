@@ -621,6 +621,8 @@ $(document).ready(function() {
             console.log(`Safe limits DOF ${data.dof}: [${data.min}, ${data.max}]`);
             // Refresh the limits panel with new data
             updateTrajectoryLimitsPanel($("#jointSelect").val());
+            // Refresh stream test safe limits display
+            _updateStreamTestSafeLimits();
         }
     });
 
@@ -7651,6 +7653,9 @@ function fetchJointConfig() {
                 
                 // Show expected mapping grid for initially selected joint
                 showExpectedMappingGrid(initialJoint);
+
+                // Initialize stream test DOF selector
+                _updateStreamTestDof();
             } else {
                 console.error('Failed to load joint config:', response);
             }
@@ -8804,29 +8809,95 @@ let _streamSessionId = null;
 let _streamPollInterval = null;
 
 /**
- * Build config payload from the UI controls.
+ * Populate DOF radio buttons for the stream test panel based on the
+ * currently selected joint in #jointSelect.
+ */
+function _updateStreamTestDof() {
+    const joint = $('#jointSelect').val();
+    $('#streamTestJointLabel').text(joint || '-');
+    if (!joint || !jointConfigData) return;
+
+    const dofCount = getJointDofCount(joint);
+    const dofLabels = getJointDofLabels(joint);
+    const container = $('#streamTestDofRadios');
+    container.empty();
+
+    for (let i = 0; i < dofCount; i++) {
+        const checked = i === 0 ? 'checked' : '';
+        container.append(
+            `<label class="text-xs bg-white px-2 py-1 rounded border cursor-pointer">
+                <input type="radio" name="streamTestDofRadio" value="${i}" ${checked} class="mr-1">
+                DOF ${i}: ${dofLabels[i]}
+            </label>`
+        );
+    }
+    _updateStreamTestSafeLimits();
+}
+
+/**
+ * Show/hide safe limits for the active DOF and gate the Start button.
+ */
+function _updateStreamTestSafeLimits() {
+    const joint = $('#jointSelect').val();
+    if (!joint || !jointConfigData || !jointConfigData.joints) return;
+
+    const configKey = joint.toLowerCase();
+    const jointEntry = jointConfigData.joints[configKey];
+    if (!jointEntry) return;
+
+    const jointId = jointEntry.id;
+    const activeDof = parseInt($('input[name="streamTestDofRadio"]:checked').val() || '0');
+    const key = `${jointId}_${activeDof}`;
+    const limits = firmwareSafeLimits[key];
+
+    if (limits) {
+        $('#streamTestSafeMin').text(limits.min.toFixed(1));
+        $('#streamTestSafeMax').text(limits.max.toFixed(1));
+        $('#streamTestSafeDof').text(activeDof);
+        $('#streamTestSafeLimitsInfo').removeClass('hidden');
+        $('#streamTestNoSafeLimits').addClass('hidden');
+        $('#streamTestStartBtn').prop('disabled', false);
+    } else {
+        $('#streamTestSafeLimitsInfo').addClass('hidden');
+        $('#streamTestNoSafeLimits').removeClass('hidden');
+        $('#streamTestStartBtn').prop('disabled', true);
+    }
+}
+
+/**
+ * Build config payload from the UI controls (single-joint, single-DOF).
  */
 function _buildStreamConfig() {
-    const joints = [];
-    document.querySelectorAll('.stream-joint-cb:checked').forEach(cb => {
-        joints.push(cb.value);
-    });
+    const joint = $('#jointSelect').val();
+    const activeDof = parseInt($('input[name="streamTestDofRadio"]:checked').val() || '0');
+    const dofCount = getJointDofCount(joint);
+
+    // Look up firmware safe limits for active DOF
+    let safeLimits = null;
+    if (joint && jointConfigData && jointConfigData.joints) {
+        const jointEntry = jointConfigData.joints[joint.toLowerCase()];
+        if (jointEntry) {
+            const safeKey = `${jointEntry.id}_${activeDof}`;
+            const fw = firmwareSafeLimits[safeKey];
+            if (fw) safeLimits = { min: fw.min, max: fw.max };
+        }
+    }
+
     return {
-        joints: joints,
+        joint: joint,
+        active_dof: activeDof,
+        n_dof: dofCount,
+        min_deg: parseFloat($('#streamTestMinDeg').val()),
+        max_deg: parseFloat($('#streamTestMaxDeg').val()),
+        start_at: $('#streamTestStartAt').val(),
+        frequency_hz: parseFloat($('#streamTestFreq').val()),
         rate_hz: parseInt($('#streamTestRate').val(), 10),
         duration_s: parseInt($('#streamTestDuration').val(), 10),
         horizon_ms: parseInt($('#streamTestHorizon').val(), 10),
         buffer_depth_sim: 2,
         max_inflight_per_joint: 1,
-        trajectory: {
-            type: 'sinusoid',
-            amplitude_deg: parseFloat($('#streamTestAmplitude').val()),
-            offset_deg: parseFloat($('#streamTestOffset').val()),
-            frequency_hz: parseFloat($('#streamTestFreq').val()),
-        },
-        fault_profile: {
-            mode: $('#streamTestFault').val(),
-        },
+        fault_profile: { mode: $('#streamTestFault').val() },
+        safe_limits: safeLimits,
     };
 }
 
@@ -8835,8 +8906,31 @@ function _buildStreamConfig() {
  */
 function startStreamTest() {
     const config = _buildStreamConfig();
-    if (config.joints.length === 0) {
-        alert('Select at least one joint.');
+
+    // Client-side validation
+    if (!config.joint) {
+        alert('Select a joint first.');
+        return;
+    }
+    if (!config.safe_limits) {
+        alert('No safe limits for this DOF. Run CHECK_OFFSETS first.');
+        return;
+    }
+    if (isNaN(config.min_deg) || isNaN(config.max_deg) || isNaN(config.frequency_hz)) {
+        alert('All numeric fields must be valid numbers.');
+        return;
+    }
+    if (!isFinite(config.min_deg) || !isFinite(config.max_deg) || !isFinite(config.frequency_hz)) {
+        alert('All numeric fields must be finite numbers.');
+        return;
+    }
+    if (config.min_deg >= config.max_deg) {
+        alert('Min must be less than Max.');
+        return;
+    }
+    if (config.min_deg < config.safe_limits.min || config.max_deg > config.safe_limits.max) {
+        alert(`Range [${config.min_deg}, ${config.max_deg}] exceeds safe limits ` +
+              `[${config.safe_limits.min}, ${config.safe_limits.max}].`);
         return;
     }
 
@@ -8942,7 +9036,7 @@ function _updateStreamState(state) {
     el.text(state);
     el.removeClass('text-green-600 text-yellow-600 text-red-600 text-gray-500');
     if (state === 'RUNNING') el.addClass('text-green-600');
-    else if (state === 'STARTING' || state === 'STOPPING') el.addClass('text-yellow-600');
+    else if (state === 'STARTING' || state === 'PREPOSITIONING' || state === 'STOPPING') el.addClass('text-yellow-600');
     else if (state === 'FAILED') el.addClass('text-red-600');
     else el.addClass('text-gray-500');
 }
@@ -9029,10 +9123,19 @@ function _evaluateStreamVerdict(m) {
 function _onStreamEnded(finalState) {
     _stopStreamPolling();
     _streamSessionId = null;
-    $('#streamTestStartBtn').prop('disabled', false);
     $('#streamTestStopBtn').prop('disabled', true);
     _updateStreamState(finalState);
+    // Re-enable Start only if safe limits exist for the current DOF
+    _updateStreamTestSafeLimits();
 }
+
+// --- Event listeners for stream test DOF selector ---
+$('#jointSelect').on('change', function() {
+    _updateStreamTestDof();
+});
+$(document).on('change', 'input[name="streamTestDofRadio"]', function() {
+    _updateStreamTestSafeLimits();
+});
 
 // --- SocketIO listeners for stream test (real-time push, optional) ---
 if (typeof socket !== 'undefined') {

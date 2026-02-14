@@ -9,12 +9,21 @@ the full HTTP → Flask → CanManager → CAN pipeline.
 See ``software/docs/WEB_CONTINUOUS_STREAM_TEST_SPEC.md`` for the full
 specification.
 
+Phase 1 model: single joint, single active DOF, bounded cosine
+oscillation with mandatory preposition ramp.
+
 Usage::
 
     from stream_test_service import StreamTestService
     service = StreamTestService(socketio=sio, base_url="http://127.0.0.1:5001")
     result = service.start({
-        "joints": ["KNEE_LEFT"],
+        "joint": "KNEE_LEFT",
+        "active_dof": 0,
+        "n_dof": 1,
+        "min_deg": 20.0,
+        "max_deg": 80.0,
+        "start_at": "min",
+        "frequency_hz": 0.5,
         "rate_hz": 50,
         "duration_s": 60,
         ...
@@ -36,6 +45,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+import requests as http_requests
+
 from waypoint_client import (
     BatchRecord,
     BatchState,
@@ -52,9 +63,14 @@ logger = logging.getLogger("stream_test")
 # Session State Machine
 # ---------------------------------------------------------------------------
 class SessionState(enum.Enum):
-    """Stream test session lifecycle states."""
+    """Stream test session lifecycle states.
+
+    Flow: IDLE → STARTING → PREPOSITIONING → RUNNING → STOPPING → STOPPED
+    Any state → FAILED on irrecoverable error.
+    """
     IDLE = "IDLE"
     STARTING = "STARTING"
+    PREPOSITIONING = "PREPOSITIONING"
     RUNNING = "RUNNING"
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
@@ -65,56 +81,74 @@ class SessionState(enum.Enum):
 # Trajectory Generator
 # ---------------------------------------------------------------------------
 class TrajectoryGenerator:
-    """Generate waypoint chunks for a single joint.
+    """Generate bounded cosine oscillation waypoint chunks for a single DOF.
 
-    Currently supports ``sinusoid`` trajectories.  Extensible to
-    ``cosine``, ``step``, ``custom`` in future versions.
+    Oscillates between ``min_deg`` and ``max_deg`` using a cosine wave,
+    which guarantees zero velocity at both extremes and bounded angles
+    by construction.
+
+    Only the ``active_dof`` index gets a computed angle; all other DOFs
+    in ``angles_deg`` are ``None`` (firmware ignores them).
     """
 
     def __init__(
         self,
-        traj_config: dict,
+        min_deg: float,
+        max_deg: float,
+        start_at: str,
+        frequency_hz: float,
         rate_hz: float,
         horizon_ms: float,
-        n_dof: int = 1,
+        active_dof: int,
+        n_dof: int,
     ):
-        self._type = traj_config.get("type", "sinusoid")
-        self._amplitude = traj_config.get("amplitude_deg", 8.0)
-        self._offset = traj_config.get("offset_deg", 0.0)
-        self._freq = traj_config.get("frequency_hz", 0.5)
+        self._min_deg = min_deg
+        self._max_deg = max_deg
+        self._center = (min_deg + max_deg) / 2.0
+        self._amplitude = (max_deg - min_deg) / 2.0
+        self._start_at = start_at  # "min" or "max"
+        self._freq = frequency_hz
+        self._active_dof = active_dof
+        self._n_dof = n_dof
         self._rate_hz = rate_hz
         self._horizon_ms = horizon_ms
-        self._n_dof = n_dof
         self._period_ms = 1000.0 / rate_hz
 
     def next_chunk(self, t_base_ms: float, lead_ms: float = 0.0) -> List[Dict[str, Any]]:
         """Generate a short chunk of 2-4 waypoints starting at *t_base_ms*.
 
-        ``t_base_ms`` is the *absolute* session time used for sinusoid phase.
+        ``t_base_ms`` is the *absolute* session time used for cosine phase.
         ``lead_ms`` is the base lead-time offset added to each waypoint's
         ``t_offset_ms`` (which is relative to "now", not absolute).
 
         Returns list of ``{"angles_deg": [...], "t_offset_ms": int}``.
         """
-        # Number of waypoints per chunk: cover horizon window
         n_wp = max(2, min(4, int(self._horizon_ms / self._period_ms)))
         chunk: List[Dict[str, Any]] = []
         for i in range(n_wp):
-            # Absolute time for angle calculation (continuous sinusoid)
             t_abs_ms = t_base_ms + i * self._period_ms
             t_s = t_abs_ms / 1000.0
-            if self._type == "sinusoid":
-                angle = self._offset + self._amplitude * math.sin(
+
+            # Bounded cosine oscillation:
+            #   cos(0) = 1  → at t=0: center ± amplitude = extreme
+            #   Derivative of cos at t=0 is 0 → zero initial velocity
+            if self._start_at == "max":
+                angle = self._center + self._amplitude * math.cos(
                     2 * math.pi * self._freq * t_s
                 )
-            else:
-                angle = self._offset  # fallback: constant
+            else:  # start_at == "min"
+                angle = self._center - self._amplitude * math.cos(
+                    2 * math.pi * self._freq * t_s
+                )
+
+            # Build angles_deg: active DOF gets angle, others are None
+            angles_deg: List[Optional[float]] = [None] * self._n_dof
+            angles_deg[self._active_dof] = round(angle, 2)
 
             # t_offset_ms = relative lead from "now" (uint16, max 65535)
             relative_ms = lead_ms + i * self._period_ms
             t_offset = max(1, min(65535, int(relative_ms)))
 
-            angles_deg = [round(angle, 2)] * self._n_dof
             chunk.append({
                 "angles_deg": angles_deg,
                 "t_offset_ms": t_offset,
@@ -418,32 +452,35 @@ class _StreamSession:
         self._thread: Optional[threading.Thread] = None
         self._stop_reason: Optional[str] = None
 
-        joints = config["joints"]
+        # Single joint (Phase 1)
+        joint = config["joints"][0]
         rate_hz = config["rate_hz"]
         horizon_ms = config.get("horizon_ms", 250)
         buffer_depth = config.get("buffer_depth_sim", 2)
         max_inflight = config.get("max_inflight_per_joint", 1)
-        traj_config = config.get("trajectory", {
-            "type": "sinusoid",
-            "amplitude_deg": 8.0,
-            "offset_deg": 0.0,
-            "frequency_hz": 0.5,
-        })
         fault_profile = config.get("fault_profile", {"mode": "none"})
 
-        # Per-joint components
-        self._trajectory: Dict[str, TrajectoryGenerator] = {}
-        self._backpressure: Dict[str, _JointBackpressure] = {}
-        for joint in joints:
-            self._trajectory[joint] = TrajectoryGenerator(
-                traj_config, rate_hz, horizon_ms, n_dof=1,
-            )
-            self._backpressure[joint] = _JointBackpressure(
-                buffer_depth, max_inflight,
-            )
+        active_dof = config.get("active_dof", 0)
+        n_dof = config.get("n_dof", 1)
+
+        self._trajectory: Dict[str, TrajectoryGenerator] = {
+            joint: TrajectoryGenerator(
+                min_deg=config["min_deg"],
+                max_deg=config["max_deg"],
+                start_at=config.get("start_at", "min"),
+                frequency_hz=config.get("frequency_hz", 0.5),
+                rate_hz=rate_hz,
+                horizon_ms=horizon_ms,
+                active_dof=active_dof,
+                n_dof=n_dof,
+            ),
+        }
+        self._backpressure: Dict[str, _JointBackpressure] = {
+            joint: _JointBackpressure(buffer_depth, max_inflight),
+        }
 
         self._fault = _FaultInjector(fault_profile)
-        self.metrics = StreamMetrics(rate_hz, joints)
+        self.metrics = StreamMetrics(rate_hz, [joint])
         self.events = _EventLog()
 
         # Batch completion tracking
@@ -485,11 +522,13 @@ class _StreamSession:
     # -- Publish loop ------------------------------------------------------
 
     def _run(self) -> None:
-        """Fixed-cadence publish loop with deadline tracking."""
+        """Preposition + fixed-cadence publish loop with deadline tracking."""
         config = self._config
         rate_hz = config["rate_hz"]
-        joints = config["joints"]
+        joint = config["joints"][0]  # single joint (Phase 1)
         duration_s = config.get("duration_s", 60)
+        active_dof = config.get("active_dof", 0)
+        n_dof = config.get("n_dof", 1)
 
         # Create per-session WaypointClient + HttpTransport
         transport = HttpTransport(self._base_url, timeout_s=10.0)
@@ -514,6 +553,130 @@ class _StreamSession:
                 else:
                     self.events.emit("WARN", "time_sync_fail", detail="initial sync failed")
 
+            # ============================================================
+            # PREPOSITIONING PHASE
+            # ============================================================
+            self.state = SessionState.PREPOSITIONING
+
+            start_at = config.get("start_at", "min")
+            prepos_target = config["min_deg"] if start_at == "min" else config["max_deg"]
+
+            # 1. Read current encoder position via loopback HTTP
+            try:
+                enc_resp = http_requests.get(
+                    f"{self._base_url}/can/encoder_angles",
+                    params={"joint": joint},
+                    timeout=2.0,
+                )
+                enc = enc_resp.json()
+            except Exception as e:
+                self.state = SessionState.FAILED
+                self.events.emit("ERROR", "encoder_read_failed", joint, str(e))
+                return
+
+            if not enc.get("valid") or enc.get("age_ms", 9999) > 300:
+                self.state = SessionState.FAILED
+                self.events.emit(
+                    "ERROR", "encoder_stale", joint,
+                    f"age_ms={enc.get('age_ms')}, valid={enc.get('valid')}",
+                )
+                return
+
+            encoder_angles = enc.get("angles_deg", [])
+            if active_dof >= len(encoder_angles) or encoder_angles[active_dof] is None:
+                self.state = SessionState.FAILED
+                self.events.emit(
+                    "ERROR", "encoder_null_dof", joint,
+                    f"DOF {active_dof} has no reading",
+                )
+                return
+
+            current_angle = encoder_angles[active_dof]
+
+            # 2. Cosine S-curve ramp: 20 waypoints over 2s
+            ramp_duration_s = 2.0
+            ramp_steps = 20
+            delta_t_ms = int(ramp_duration_s / ramp_steps * 1000)
+
+            ramp_waypoints = []
+            for i in range(ramp_steps):
+                t = (i + 1) / ramp_steps  # 0.05 to 1.0
+                smooth_t = 0.5 * (1 - math.cos(t * math.pi))
+                angle = current_angle + (prepos_target - current_angle) * smooth_t
+
+                angles = [None] * n_dof
+                angles[active_dof] = round(angle, 2)
+                ramp_waypoints.append({
+                    "angles_deg": angles,
+                    "t_offset_ms": (i + 1) * delta_t_ms,
+                })
+
+            # 3. Send ramp via WaypointClient (loopback)
+            try:
+                client.enqueue_batch(joint, ramp_waypoints)
+                self.events.emit(
+                    "INFO", "preposition_ramp_sent", joint,
+                    f"target={prepos_target}, from={current_angle:.1f}, "
+                    f"{ramp_steps} wp over {ramp_duration_s}s",
+                )
+            except Exception as e:
+                self.state = SessionState.FAILED
+                self.events.emit("ERROR", "preposition_send_failed", joint, str(e))
+                return
+
+            # 4. Wait for ramp to complete
+            if self._stop_event.wait(timeout=ramp_duration_s + 0.5):
+                return  # stopped during preposition
+
+            # 5. Ready check: poll encoder, 3 consecutive ±1°, timeout 3.0s
+            ready_count = 0
+            ready_deadline = time.monotonic() + 3.0
+            ready_reached = False
+            while time.monotonic() < ready_deadline:
+                if self._stop_event.is_set():
+                    return
+                try:
+                    r = http_requests.get(
+                        f"{self._base_url}/can/encoder_angles",
+                        params={"joint": joint},
+                        timeout=1.0,
+                    )
+                    edata = r.json()
+                    if edata.get("valid") and edata.get("age_ms", 9999) <= 300:
+                        ea = edata.get("angles_deg", [])
+                        if active_dof < len(ea) and ea[active_dof] is not None:
+                            actual = ea[active_dof]
+                            if abs(actual - prepos_target) <= 1.0:
+                                ready_count += 1
+                                if ready_count >= 3:
+                                    ready_reached = True
+                                    break
+                            else:
+                                ready_count = 0
+                        else:
+                            ready_count = 0
+                    else:
+                        ready_count = 0
+                except Exception:
+                    ready_count = 0
+                time.sleep(0.1)
+
+            if not ready_reached:
+                self.state = SessionState.FAILED
+                self.events.emit(
+                    "ERROR", "preposition_timeout", joint,
+                    f"target={prepos_target}, not reached within 3s",
+                )
+                return
+
+            self.events.emit(
+                "INFO", "preposition_ready", joint,
+                f"target={prepos_target}, ready ({ready_count} consecutive ±1°)",
+            )
+
+            # ============================================================
+            # STREAMING PHASE
+            # ============================================================
             self.state = SessionState.RUNNING
             period_s = 1.0 / rate_hz
             next_tick = time.monotonic()
@@ -528,34 +691,28 @@ class _StreamSession:
                 drift = (now - next_tick) * 1000  # ms
                 self.metrics.record_drift(drift)
 
-                for joint in joints:
-                    bp = self._backpressure[joint]
+                bp = self._backpressure[joint]
 
-                    # Backpressure check
-                    if not bp.can_send():
-                        if bp.should_drop:
-                            self.metrics.inc_dropped(joint)
-                            self.events.emit(
-                                "WARN", "backpressure_drop", joint,
-                                "consecutive overload > 3 ticks",
-                            )
-                        else:
-                            self.metrics.inc_deferred(joint)
-                            self.events.emit(
-                                "WARN", "backpressure_defer", joint,
-                                "queue full, defer one chunk",
-                            )
-                        continue
-
+                # Backpressure check
+                if not bp.can_send():
+                    if bp.should_drop:
+                        self.metrics.inc_dropped(joint)
+                        self.events.emit(
+                            "WARN", "backpressure_drop", joint,
+                            "consecutive overload > 3 ticks",
+                        )
+                    else:
+                        self.metrics.inc_deferred(joint)
+                        self.events.emit(
+                            "WARN", "backpressure_defer", joint,
+                            "queue full, defer one chunk",
+                        )
+                else:
                     # Fault injection
                     action = self._fault.pre_send(tick)
                     if action == "drop":
                         self.metrics.inc_dropped(joint)
                         self.events.emit("WARN", "fault_drop", joint)
-                        continue
-                    elif action == "delay":
-                        delay_ms = self._fault.delay_ms
-                        time.sleep(delay_ms / 1000)
                     elif action == "pause":
                         pause_ms = self._fault.pause_ms
                         self.events.emit(
@@ -565,53 +722,54 @@ class _StreamSession:
                         self._stop_event.wait(timeout=pause_ms / 1000)
                         if self._stop_event.is_set():
                             break
+                    else:
+                        if action == "delay":
+                            delay_ms = self._fault.delay_ms
+                            time.sleep(delay_ms / 1000)
 
-                    # Generate chunk
-                    # t_base_ms = absolute session time for sinusoid phase
-                    # lead_ms = horizon from "now" for t_offset_ms (uint16)
-                    t_base_ms = tick * period_s * 1000
-                    lead_ms = config.get("horizon_ms", 250)
-                    chunk = self._trajectory[joint].next_chunk(t_base_ms, lead_ms)
+                        # Generate chunk
+                        t_base_ms = tick * period_s * 1000
+                        lead_ms = config.get("horizon_ms", 250)
+                        chunk = self._trajectory[joint].next_chunk(t_base_ms, lead_ms)
 
-                    # Send via WaypointClient
-                    try:
-                        batch_id = client.enqueue_batch(joint, chunk)
-                        bp.on_send()
-                        self.metrics.inc_sent(joint, len(chunk))
-                        self._pending_batches[batch_id] = joint
+                        # Send via WaypointClient
+                        try:
+                            batch_id = client.enqueue_batch(joint, chunk)
+                            bp.on_send()
+                            self.metrics.inc_sent(joint, len(chunk))
+                            self._pending_batches[batch_id] = joint
 
-                        # Conflict spike: send duplicate directly via
-                        # transport to bypass WaypointClient serialisation,
-                        # provoking a real parallel same-joint 409 from Flask.
-                        if self._fault.conflict_spike and tick % 10 == 0:
-                            def _fire_conflict(j=joint, wp=chunk):
-                                try:
-                                    resp = transport.send_batch(j, wp, f"conflict-{tick}")
-                                    code = resp.http_status
-                                    self.metrics.record_http_status(code)
-                                    if code == 409:
-                                        self.events.emit(
-                                            "INFO", "conflict_409", j,
-                                            "parallel duplicate got expected 409",
+                            # Conflict spike: send duplicate directly via
+                            # transport to bypass WaypointClient serialisation
+                            if self._fault.conflict_spike and tick % 10 == 0:
+                                def _fire_conflict(j=joint, wp=chunk):
+                                    try:
+                                        resp = transport.send_batch(
+                                            j, wp, f"conflict-{tick}",
                                         )
-                                except Exception:
-                                    pass
-                            threading.Thread(
-                                target=_fire_conflict, daemon=True,
-                            ).start()
-                    except Exception as exc:
-                        self.metrics.set_error(str(exc))
-                        self.events.emit(
-                            "ERROR", "enqueue_failed", joint, str(exc),
-                        )
+                                        code = resp.http_status
+                                        self.metrics.record_http_status(code)
+                                        if code == 409:
+                                            self.events.emit(
+                                                "INFO", "conflict_409", j,
+                                                "parallel duplicate got expected 409",
+                                            )
+                                    except Exception:
+                                        pass
+                                threading.Thread(
+                                    target=_fire_conflict, daemon=True,
+                                ).start()
+                        except Exception as exc:
+                            self.metrics.set_error(str(exc))
+                            self.events.emit(
+                                "ERROR", "enqueue_failed", joint, str(exc),
+                            )
 
                 # Poll completed batches
                 self._poll_completions(client)
 
                 # Update queue fill metrics
-                for joint in joints:
-                    bp = self._backpressure[joint]
-                    self.metrics.update_queue_fill(joint, bp.fill)
+                self.metrics.update_queue_fill(joint, bp.fill)
 
                 # Periodic time sync (every 30s)
                 if (tick > 0
@@ -747,7 +905,7 @@ class StreamTestService:
         """Start a new streaming session.
 
         Args:
-            config: Session configuration matching spec section 6.1.
+            config: Session configuration (Phase 1: single joint, single DOF).
 
         Returns:
             ``{"session_id": str, "state": str}``
@@ -756,17 +914,56 @@ class StreamTestService:
             ValueError: If config is invalid.
             RuntimeError: If a session is already running (409).
         """
-        # Validate required fields
-        joints = config.get("joints")
-        if not joints or not isinstance(joints, list):
-            raise ValueError("'joints' must be a non-empty list")
+        # --- Validate required fields (Phase 1: single joint) ---
+        joint = config.get("joint")
+        if not joint or not isinstance(joint, str):
+            raise ValueError("'joint' must be a non-empty string")
+
         rate_hz = config.get("rate_hz", 50)
         if rate_hz not in (50, 100):
             raise ValueError("'rate_hz' must be 50 or 100")
 
+        # active_dof / n_dof
+        active_dof = config.get("active_dof", 0)
+        n_dof = config.get("n_dof", 1)
+        if not isinstance(active_dof, int) or active_dof < 0 or active_dof >= n_dof:
+            raise ValueError(
+                f"active_dof {active_dof} out of range [0, {n_dof})"
+            )
+
+        # min_deg / max_deg
+        min_deg = config.get("min_deg")
+        max_deg = config.get("max_deg")
+        if min_deg is None or max_deg is None:
+            raise ValueError("'min_deg' and 'max_deg' are required")
+        if not math.isfinite(min_deg) or not math.isfinite(max_deg):
+            raise ValueError("'min_deg' and 'max_deg' must be finite numbers")
+        if min_deg >= max_deg:
+            raise ValueError("min_deg must be < max_deg")
+
+        # safe_limits check
+        safe = config.get("safe_limits")
+        if safe:
+            if min_deg < safe["min"] or max_deg > safe["max"]:
+                raise ValueError(
+                    f"Range [{min_deg}, {max_deg}] exceeds safe limits "
+                    f"[{safe['min']}, {safe['max']}]"
+                )
+
+        # start_at
+        start_at = config.get("start_at", "min")
+        if start_at not in ("min", "max"):
+            raise ValueError("start_at must be 'min' or 'max'")
+
+        # frequency_hz
+        freq = config.get("frequency_hz", 0.5)
+        if not math.isfinite(freq) or freq <= 0:
+            raise ValueError("frequency_hz must be a positive finite number")
+
         with self._lock:
             if self._session and self._session.state in (
-                SessionState.STARTING, SessionState.RUNNING,
+                SessionState.STARTING, SessionState.PREPOSITIONING,
+                SessionState.RUNNING,
             ):
                 raise RuntimeError("Session already active")
 
@@ -774,18 +971,18 @@ class StreamTestService:
             session = _StreamSession(
                 session_id=session_id,
                 config={
-                    "joints": [j.upper() for j in joints],
+                    "joints": [joint.upper()],
                     "rate_hz": rate_hz,
                     "duration_s": config.get("duration_s", 60),
                     "horizon_ms": config.get("horizon_ms", 250),
                     "buffer_depth_sim": config.get("buffer_depth_sim", 2),
                     "max_inflight_per_joint": config.get("max_inflight_per_joint", 1),
-                    "trajectory": config.get("trajectory", {
-                        "type": "sinusoid",
-                        "amplitude_deg": 8.0,
-                        "offset_deg": 0.0,
-                        "frequency_hz": 0.5,
-                    }),
+                    "active_dof": active_dof,
+                    "n_dof": n_dof,
+                    "min_deg": float(min_deg),
+                    "max_deg": float(max_deg),
+                    "start_at": start_at,
+                    "frequency_hz": float(freq),
                     "fault_profile": config.get("fault_profile", {"mode": "none"}),
                 },
                 base_url=self._base_url,
