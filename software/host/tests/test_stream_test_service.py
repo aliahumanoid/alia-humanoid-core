@@ -187,6 +187,21 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="safe_limits"):
             svc.start(cfg)
 
+    def test_safe_limits_incomplete_rejected(self):
+        """safe_limits without 'max' key must raise ValueError, not KeyError."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "safe_limits": {"min": 0.0}}
+        with pytest.raises(ValueError, match="min.*max"):
+            svc.start(cfg)
+
+    def test_n_dof_mismatch_raises(self):
+        """n_dof must match real joint DOF count from config.JOINTS."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        # KNEE_LEFT has 1 DOF — sending n_dof=3 should be rejected
+        cfg = {**MINIMAL_CONFIG, "active_dof": 2, "n_dof": 3}
+        with pytest.raises(ValueError, match="does not match"):
+            svc.start(cfg)
+
     def test_string_min_max_coerced(self):
         """P2: string min_deg/max_deg should be coerced to float, not 500."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")

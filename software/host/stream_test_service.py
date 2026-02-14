@@ -919,6 +919,17 @@ class StreamTestService:
         if not joint or not isinstance(joint, str):
             raise ValueError("'joint' must be a non-empty string")
 
+        # Cross-check joint name and DOF count against firmware config
+        joint_upper = joint.upper()
+        try:
+            from config import JOINTS as _JOINTS
+            joint_entry = _JOINTS.get(joint_upper)
+            if joint_entry is None:
+                raise ValueError(f"Unknown joint '{joint_upper}'")
+            real_dof_count = len(joint_entry["dofs"])
+        except ImportError:
+            real_dof_count = None  # graceful: config unavailable in tests
+
         rate_hz = config.get("rate_hz", 50)
         if rate_hz not in (50, 100):
             raise ValueError("'rate_hz' must be 50 or 100")
@@ -926,6 +937,11 @@ class StreamTestService:
         # active_dof / n_dof
         active_dof = config.get("active_dof", 0)
         n_dof = config.get("n_dof", 1)
+        if real_dof_count is not None and n_dof != real_dof_count:
+            raise ValueError(
+                f"n_dof={n_dof} does not match joint '{joint_upper}' "
+                f"which has {real_dof_count} DOF(s)"
+            )
         if not isinstance(active_dof, int) or active_dof < 0 or active_dof >= n_dof:
             raise ValueError(
                 f"active_dof {active_dof} out of range [0, {n_dof})"
@@ -950,6 +966,8 @@ class StreamTestService:
         safe = config.get("safe_limits")
         if not safe or not isinstance(safe, dict):
             raise ValueError("'safe_limits' is required (run CHECK_OFFSETS first)")
+        if "min" not in safe or "max" not in safe:
+            raise ValueError("'safe_limits' must contain 'min' and 'max' keys")
         if min_deg < safe["min"] or max_deg > safe["max"]:
             raise ValueError(
                 f"Range [{min_deg}, {max_deg}] exceeds safe limits "
