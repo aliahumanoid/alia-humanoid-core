@@ -172,6 +172,48 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="min_deg"):
             svc.start(cfg)
 
+    def test_safe_limits_required(self):
+        """P1: safe_limits must be present — omitting it must raise."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG}
+        del cfg["safe_limits"]
+        with pytest.raises(ValueError, match="safe_limits"):
+            svc.start(cfg)
+
+    def test_safe_limits_null_rejected(self):
+        """P1: safe_limits=None must raise."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "safe_limits": None}
+        with pytest.raises(ValueError, match="safe_limits"):
+            svc.start(cfg)
+
+    def test_string_min_max_coerced(self):
+        """P2: string min_deg/max_deg should be coerced to float, not 500."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "min_deg": "20", "max_deg": "80"}
+        # Should not raise TypeError — gets coerced and passes validation
+        with patch("stream_test_service.HttpTransport"), \
+             patch("stream_test_service.WaypointClient") as mock_cls, \
+             patch("stream_test_service.http_requests") as mock_req:
+            mock_client = MagicMock()
+            mock_client.get_metrics.return_value = {"status_counts": {}, "retries": 0}
+            mock_client.enqueue_batch.return_value = "t"
+            mock_client.get_batch_status.return_value = None
+            mock_cls.return_value = mock_client
+            mock_req.get.return_value = _mock_encoder_response([45.0])
+
+            result = svc.start(cfg)
+            assert "session_id" in result
+            time.sleep(0.3)
+            svc.stop(result["session_id"])
+
+    def test_non_numeric_string_min_raises(self):
+        """P2: non-numeric string min_deg should raise ValueError, not TypeError."""
+        svc = StreamTestService(base_url="http://127.0.0.1:5001")
+        cfg = {**MINIMAL_CONFIG, "min_deg": "abc"}
+        with pytest.raises(ValueError, match="numeric"):
+            svc.start(cfg)
+
     def test_valid_config_accepted(self):
         """A valid config should not raise."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")

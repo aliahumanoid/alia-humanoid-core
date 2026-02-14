@@ -8856,7 +8856,10 @@ function _updateStreamTestSafeLimits() {
         $('#streamTestSafeDof').text(activeDof);
         $('#streamTestSafeLimitsInfo').removeClass('hidden');
         $('#streamTestNoSafeLimits').addClass('hidden');
-        $('#streamTestStartBtn').prop('disabled', false);
+        // Only enable Start if no session is active
+        if (!_streamSessionId) {
+            $('#streamTestStartBtn').prop('disabled', false);
+        }
     } else {
         $('#streamTestSafeLimitsInfo').addClass('hidden');
         $('#streamTestNoSafeLimits').removeClass('hidden');

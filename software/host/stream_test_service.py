@@ -931,32 +931,42 @@ class StreamTestService:
                 f"active_dof {active_dof} out of range [0, {n_dof})"
             )
 
-        # min_deg / max_deg
+        # min_deg / max_deg (coerce to float to handle JSON int/string)
         min_deg = config.get("min_deg")
         max_deg = config.get("max_deg")
         if min_deg is None or max_deg is None:
             raise ValueError("'min_deg' and 'max_deg' are required")
+        try:
+            min_deg = float(min_deg)
+            max_deg = float(max_deg)
+        except (TypeError, ValueError):
+            raise ValueError("'min_deg' and 'max_deg' must be numeric")
         if not math.isfinite(min_deg) or not math.isfinite(max_deg):
             raise ValueError("'min_deg' and 'max_deg' must be finite numbers")
         if min_deg >= max_deg:
             raise ValueError("min_deg must be < max_deg")
 
-        # safe_limits check
+        # safe_limits — required (firmware SAFE_LIMITS from CHECK_OFFSETS)
         safe = config.get("safe_limits")
-        if safe:
-            if min_deg < safe["min"] or max_deg > safe["max"]:
-                raise ValueError(
-                    f"Range [{min_deg}, {max_deg}] exceeds safe limits "
-                    f"[{safe['min']}, {safe['max']}]"
-                )
+        if not safe or not isinstance(safe, dict):
+            raise ValueError("'safe_limits' is required (run CHECK_OFFSETS first)")
+        if min_deg < safe["min"] or max_deg > safe["max"]:
+            raise ValueError(
+                f"Range [{min_deg}, {max_deg}] exceeds safe limits "
+                f"[{safe['min']}, {safe['max']}]"
+            )
 
         # start_at
         start_at = config.get("start_at", "min")
         if start_at not in ("min", "max"):
             raise ValueError("start_at must be 'min' or 'max'")
 
-        # frequency_hz
+        # frequency_hz (coerce to float)
         freq = config.get("frequency_hz", 0.5)
+        try:
+            freq = float(freq)
+        except (TypeError, ValueError):
+            raise ValueError("'frequency_hz' must be numeric")
         if not math.isfinite(freq) or freq <= 0:
             raise ValueError("frequency_hz must be a positive finite number")
 
