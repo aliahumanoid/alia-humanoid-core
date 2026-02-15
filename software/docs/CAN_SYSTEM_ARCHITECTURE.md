@@ -88,7 +88,7 @@ Each joint controller has a **dedicated CAN channel** on the expansion board (po
 | Component | Quantity | Function | Cost (EUR) |
 |-----------|----------|----------|------------|
 | Nvidia Jetson (Orin Nano/NX) | 1 | Central computer, trajectory planning | 400-600 |
-| CAN Expansion Boards (8ch) | 4 | SPI-to-CAN (32 channels, 20-26 used) | 496 |
+| CAN Expansion Boards (8ch) | 4 | SPI-to-CAN (32 channels; v1: 20 used, max 26) | 496 |
 | RP2350 (Pico 2) + motor CAN | 20 | Joint controller, motor PID control | 270 |
 | Cabling (CAN + SPI + power) | - | Point-to-point wiring | 132 |
 | LKM Servo Motors | 80 | Actuators (4 per joint) | External |
@@ -1044,7 +1044,15 @@ The following telemetry signals form the **minimum observability contract** betw
 
 **CAN IDs**: Not yet assigned. Recommended: reserve 0x4D0+joint for telemetry frames (2-3 frames per joint, packed).
 
-**Implementation status**: Specification only — firmware counters partially exist (e.g., `wp_consumed_count`), but no CAN streaming path is implemented yet.
+**Implementation roadmap**:
+
+| Step | Scope | Status |
+|------|-------|--------|
+| 1. Firmware counters | Add missing counters (`wp_late_count`, `buffer_underrun_count`, `loop_overrun_count`) | Partial — `wp_consumed_count` exists |
+| 2. CAN ID assignment | Assign 0x4D0+joint (or alternative range), define frame packing | Not started |
+| 3. Firmware TX path | Stream telemetry frames on Host CAN, gated by `telemetry_enable` | Not started |
+| 4. Host RX + logging | Parse telemetry in `can_manager.py`, expose via Flask/SocketIO | Not started |
+| 5. Dashboard | Real-time telemetry display in UI (buffer fill, late ratio, errors) | Not started |
 
 ---
 
@@ -1101,8 +1109,8 @@ The following telemetry signals form the **minimum observability contract** betw
 
 ### 10.1 Current Capacity
 
-- **4x CAN Expansion Boards** (8 channels each, 20-26 used)
-- **20x RP2350 Pico 2**
+- **4x CAN Expansion Boards** (8 channels each; v1: 20 used, expansion capacity: 26)
+- **20x RP2350 Pico 2** (v1 baseline)
 - **80x Motors** (4 per joint)
 - **Total Cost**: ~900 EUR (communication hardware only, see Section 11)
 
@@ -1193,7 +1201,7 @@ The following telemetry signals form the **minimum observability contract** betw
 
 **Host Software:**
 - [ ] Multi-bus connection (20 buses)
-- [ ] Time sync broadcast
+- [ ] Time sync fan-out (per-channel)
 - [ ] Waypoint streaming (50-100 Hz)
 - [ ] Emergency stop (all buses)
 
