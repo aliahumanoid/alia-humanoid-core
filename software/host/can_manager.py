@@ -872,6 +872,23 @@ class CanManager:
             "interval_ms": interval_ms
         }
 
+    def set_reanchor_interval(self, interval: int) -> Dict[str, Any]:
+        """
+        Set waypoint re-anchor interval.
+
+        Args:
+            interval: Number of consumed WPs between re-anchors (0 = disabled)
+
+        Sends control command (0x01B) to set re-anchor interval.
+        """
+        self._ensure_connection()
+        interval = max(0, min(65535, interval))
+        payload = struct.pack('<H', interval) + bytes(6)
+        self._send_frame(0x01B, payload, context=f"WP re-anchor interval={interval}")
+        self._log_can_info(f"WP re-anchor interval set to: {interval}" +
+                           (" (disabled)" if interval == 0 else " WPs"))
+        return {"interval": interval}
+
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
         return self._encoder_stream_active

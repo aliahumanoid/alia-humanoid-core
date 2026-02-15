@@ -1179,6 +1179,31 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
                 "message": f"Unable to set PID diagnostics frequency: {exc}"
             }), 500
 
+    @app.route('/can/reanchor_interval', methods=['POST'])
+    def set_reanchor_interval():
+        """Set waypoint re-anchor interval via CAN."""
+        try:
+            data = request.get_json(silent=True)
+            if not data or 'interval' not in data:
+                return jsonify({
+                    "status": "error",
+                    "message": "Missing 'interval' field"
+                }), 400
+            interval = int(data['interval'])
+            result = can_manager.set_reanchor_interval(interval)
+            return jsonify({
+                "status": "success",
+                "message": f"WP re-anchor interval set to: {interval}" +
+                           (" (disabled)" if interval == 0 else " WPs"),
+                "result": result
+            })
+        except Exception as exc:
+            logger.exception("Failed to set re-anchor interval")
+            return jsonify({
+                "status": "error",
+                "message": f"Unable to set re-anchor interval: {exc}"
+            }), 500
+
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
         popped = serial_manager.pop_status_message()

@@ -140,6 +140,19 @@ static WpDumpEntry wp_dump[MAX_DOFS][WP_DUMP_MAX];
 static uint16_t wp_dump_count[MAX_DOFS] = {0};
 volatile int8_t wp_dump_pending_dof = -1;  // -1 = no dump pending, 0..2 = DOF to dump
 
+// === RE-ANCHOR CORRECTION STATE (per-DOF, consume side only) ===
+// When wp_reanchor_interval > 0, every N consumed waypoints the firmware
+// computes a timing correction to re-synchronize arrival times with wall clock.
+static int32_t wp_reanchor_correction_ms[MAX_DOFS] = {0};
+static uint16_t wp_reanchor_consumed_count[MAX_DOFS] = {0};
+
+void wp_reanchor_reset_all() {
+  for (uint8_t i = 0; i < MAX_DOFS; i++) {
+    wp_reanchor_correction_ms[i] = 0;
+    wp_reanchor_consumed_count[i] = 0;
+  }
+}
+
 // === MOTOR POINTER CACHE ===
 // Cache motor pointers to avoid searching every cycle (saves ~10µs per DOF per cycle)
 static LKM_Motor* cached_agonist[MAX_DOFS] = {nullptr};
@@ -301,29 +314,52 @@ bool JointController::executeWaypointMovement() {
     // Check if we've reached the current waypoint target
     WaypointEntry next_waypoint;
     if (waypoint_buffer_peek(dof, next_waypoint)) {
+      // Apply re-anchor correction to arrival time (consume-side drift compensation)
+      uint32_t effective_arrival = next_waypoint.t_arrival_ms;
+      if (wp_reanchor_correction_ms[dof] != 0) {
+        effective_arrival = (uint32_t)((int32_t)next_waypoint.t_arrival_ms + wp_reanchor_correction_ms[dof]);
+      }
+
       // Wrap-safe: signed difference handles uint32_t overflow (valid for <24.8 days)
-      if ((int32_t)(t_now - next_waypoint.t_arrival_ms) >= 0) {
+      if ((int32_t)(t_now - effective_arrival) >= 0) {
         // Waypoint reached - pop from buffer and update prev state
         waypoint_buffer_pop(dof);
-        waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms);
+        // Set prev to EFFECTIVE arrival so interpolation sees corrected timestamps
+        waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, effective_arrival);
 
-        // Record consumed waypoint for trajectory dump
+        // Record consumed waypoint with effective arrival for diagnostic visibility
         if (dof < MAX_DOFS && wp_dump_count[dof] < WP_DUMP_MAX) {
-          wp_dump[dof][wp_dump_count[dof]] = {next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms};
+          wp_dump[dof][wp_dump_count[dof]] = {next_waypoint.target_angle_deg, effective_arrival};
           wp_dump_count[dof]++;
         }
-        
-        // NOTE: Periodic waypoint progress logging removed to reduce serial overhead
-        // Only log significant events (LAST waypoint, errors)
-        
+
+        // Re-anchor interval check: every N consumed WPs, recompute correction
+        wp_reanchor_consumed_count[dof]++;
+        uint16_t interval = wp_reanchor_interval;  // Read volatile once
+        if (interval > 0 && wp_reanchor_consumed_count[dof] >= interval) {
+          WaypointEntry peek_reanchor;
+          if (waypoint_buffer_peek(dof, peek_reanchor)) {
+            int32_t new_correction = (int32_t)(t_now - peek_reanchor.t_arrival_ms);
+            if (new_correction > 0) {
+              wp_reanchor_correction_ms[dof] = new_correction;
+              LOG_C1_INFO("[Reanchor] DOF " + String(dof) + " correction=" +
+                          String(new_correction) + "ms after " + String(interval) + " WPs");
+            } else {
+              LOG_C1_INFO("[Reanchor] DOF " + String(dof) + " no drift (delta=" +
+                          String(new_correction) + "ms) after " + String(interval) + " WPs");
+            }
+          }
+          wp_reanchor_consumed_count[dof] = 0;
+        }
+
         // Check if more waypoints available
         WaypointEntry peek_next;
         if (!waypoint_buffer_peek(dof, peek_next)) {
           // No more waypoints - this was the LAST waypoint
           // prev_angle is now set to this waypoint's target
           float final_target = waypoint_buffer_prev_angle(dof);
-          LOG_C1_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " + 
-                    String(next_waypoint.target_angle_deg, 2) + "° → prev_angle=" + 
+          LOG_C1_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " +
+                    String(next_waypoint.target_angle_deg, 2) + "° → prev_angle=" +
                     String(final_target, 2) + "°");
         }
       }
@@ -352,9 +388,14 @@ bool JointController::executeWaypointMovement() {
         // MOVING state - linear interpolation
         is_moving = true;
         any_movement = true;
-        
+
         float target_angle = current_target.target_angle_deg;
-        float time_total = current_target.t_arrival_ms - prev_time;
+        // Apply re-anchor correction to target arrival (consistent with prev_time which was set to effective_arrival)
+        uint32_t corrected_arrival = current_target.t_arrival_ms;
+        if (wp_reanchor_correction_ms[dof] != 0) {
+          corrected_arrival = (uint32_t)((int32_t)current_target.t_arrival_ms + wp_reanchor_correction_ms[dof]);
+        }
+        float time_total = corrected_arrival - prev_time;
         float time_elapsed = t_now - prev_time;
         
         // Compute progress (0.0 to 1.0)
@@ -962,7 +1003,12 @@ bool JointController::executeWaypointMovement() {
       float prev_angle = waypoint_buffer_prev_angle(dof);
       uint32_t prev_time = waypoint_buffer_prev_time(dof);
       float target_angle = current_target.target_angle_deg;
-      float time_total = current_target.t_arrival_ms - prev_time;
+      // Apply re-anchor correction (consistent with prev_time set to effective_arrival)
+      uint32_t corrected_arrival = current_target.t_arrival_ms;
+      if (wp_reanchor_correction_ms[dof] != 0) {
+        corrected_arrival = (uint32_t)((int32_t)current_target.t_arrival_ms + wp_reanchor_correction_ms[dof]);
+      }
+      float time_total = corrected_arrival - prev_time;
       float time_elapsed = t_now - prev_time;
       float progress = (time_total > 0) ? (time_elapsed / time_total) : 0.0f;
       progress = constrain(progress, 0.0f, 1.0f);

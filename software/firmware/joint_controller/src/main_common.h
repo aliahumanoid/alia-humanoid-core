@@ -839,5 +839,12 @@ void core1_loop();       // Core1 loop - hardware operations (implemented in cor
 extern volatile int8_t wp_dump_pending_dof;
 void wp_dump_print_from_core0();
 
+// Waypoint re-anchor interval (configurable via CAN 0x01B)
+// 0 = disabled, N = re-anchor every N consumed waypoints
+extern volatile uint16_t wp_reanchor_interval;
+
+// Reset re-anchor correction state for all DOFs (called on new batch)
+void wp_reanchor_reset_all();
+
 #endif // MAIN_COMMON_H
 

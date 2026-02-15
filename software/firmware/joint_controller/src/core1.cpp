@@ -87,6 +87,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SAVE_LINEAR_EQ 0x018       // Save linear equations to flash (Host → Controller)
 #define CAN_ID_LOAD_LINEAR_EQ 0x019       // Load linear equations from flash (Host → Controller)
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
+#define CAN_ID_WP_REANCHOR_INTERVAL 0x01B // Set waypoint re-anchor interval (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 
@@ -289,6 +290,9 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   if (is_new_batch || !batch_anchor_valid) {
     batch_anchor_local_ms = t_now;
     batch_anchor_valid = true;
+    if (is_new_batch) {
+      wp_reanchor_reset_all();
+    }
   }
 
   // Candidate arrival based on current anchor
@@ -299,6 +303,9 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   if ((int32_t)(t_now - t_arrival_local) > 0) {
     batch_anchor_local_ms = t_now;
     t_arrival_local = t_now + multi_wp.t_offset_ms;
+    // Reset re-anchor corrections: old corrections were relative to
+    // the previous batch_anchor, no longer valid with the new anchor.
+    wp_reanchor_reset_all();
   }
 
   // Get DOF count for this joint
@@ -1108,6 +1115,14 @@ void pollHostCan() {
         }
         LOG_C1_INFO("[CAN_HOST] SET_AUTO_START en=" + String(can_auto_start_enabled));
         can_set_auto_start_requested = true;
+      }
+    } else if (rx_id == CAN_ID_WP_REANCHOR_INTERVAL) {
+      // Re-anchor interval: byte 0-1 = uint16_t interval (0 = disabled)
+      if (len >= 2) {
+        uint16_t interval = buf[0] | (buf[1] << 8);
+        wp_reanchor_interval = interval;
+        LOG_C1_INFO("[CAN_HOST] WP re-anchor interval set to: " + String(interval) +
+                    (interval == 0 ? " (disabled)" : " WPs"));
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
