@@ -40,7 +40,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 // Both share SPI1 (GP10=SCK, GP11=MOSI, GP12=MISO) with different CS pins
 // ============================================================================
 
-// CAN ID ranges (from CAN_CONTROL_PROTOCOL.md - Priority-Optimized)
+// CAN ID ranges (from CAN_SYSTEM_ARCHITECTURE.md - Priority-Optimized)
 // Priority Level 0 (Highest): Emergency
 #define CAN_ID_EMERGENCY_STOP 0x000
 

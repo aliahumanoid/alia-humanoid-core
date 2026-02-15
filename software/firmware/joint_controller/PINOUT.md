@@ -32,7 +32,7 @@ Authoritative mapping is in code; this document mirrors those defaults for wirin
 - Library: `mcp_can` (MCP2515 CAN controller)
 - Requires 120Ω termination at both ends of each CAN bus
 - See: `software/firmware/joint_controller/src/core1.cpp` for CAN polling
-- See: `software/docs/CAN_CONTROL_PROTOCOL.md` for protocol details
+- See: `software/docs/CAN_SYSTEM_ARCHITECTURE.md` for protocol details
 
 ## SPI0 — Direct MT6835 Encoder Reading
 

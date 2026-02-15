@@ -2,7 +2,7 @@
  * @file JointController_Waypoint.cpp
  * @brief Waypoint-based trajectory execution with cascade control
  * 
- * Implementation follows CAN_CONTROL_PROTOCOL.md section 5.2 with cascade
+ * Implementation follows CAN_SYSTEM_ARCHITECTURE.md section 6.2 with cascade
  * control (outer joint PID + inner motor PID) and continuous waypoint consumption.
  * 
  * Key features:
@@ -16,8 +16,8 @@
  *   * theta_ref = theta_0 + cascade_correction
  * 
  * @see waypoint_buffer.h for buffer management
- * @see CAN_CONTROL_PROTOCOL.md section 5.2 for detailed specification
- * @see CAN_CONTROL_PROTOCOL.md for protocol specification
+ * @see CAN_SYSTEM_ARCHITECTURE.md section 6.2 for detailed specification
+ * @see CAN_SYSTEM_ARCHITECTURE.md for protocol specification
  */
 
 #include "JointController.h"
@@ -193,7 +193,7 @@ void getWaypointProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& ma
  * Implements the same cascade control as moveMultiDOF_cascade but with
  * continuous waypoint consumption instead of pre-generated trajectory arrays.
  * 
- * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
+ * Following CAN_SYSTEM_ARCHITECTURE.md section 6.2:
  * - Outer loop @ 100 Hz (every 5 cycles)
  * - Inner loop @ 500 Hz (every cycle)
  * - Linear interpolation between waypoints

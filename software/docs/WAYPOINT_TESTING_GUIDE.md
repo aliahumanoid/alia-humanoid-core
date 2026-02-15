@@ -245,8 +245,7 @@ Overall Result: [ ] PASS  [ ] FAIL
 
 ## 🔗 Related Documentation
 
-- [CAN System Architecture](CAN_SYSTEM_ARCHITECTURE.md)
-- [CAN Control Protocol](CAN_CONTROL_PROTOCOL.md)
+- [CAN System Architecture](CAN_SYSTEM_ARCHITECTURE.md) (includes protocol specification)
 - [Safety Limits Control](../firmware/joint_controller/SAFETY_LIMITS_CONTROL.md)
 - [Pinout Documentation](../firmware/joint_controller/PINOUT.md)
 

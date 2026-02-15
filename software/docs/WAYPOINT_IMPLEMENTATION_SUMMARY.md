@@ -118,9 +118,9 @@ This document summarizes the complete implementation of the waypoint-based movem
   - CAN ID allocation for 20-26 joint controllers
   - Expansion board design for multiple CAN buses
   
-- ✅ **CAN Control Protocol** (`CAN_CONTROL_PROTOCOL.md`)
-  - Frame format specifications
-  - Message types and payloads
+- ✅ **CAN System Architecture** (`CAN_SYSTEM_ARCHITECTURE.md`) — includes protocol specification
+  - Frame format specifications, message types and payloads
+  - Batch anchor timing and re-anchor
   - Timing requirements
   
 - ✅ **Waypoint Testing Guide** (`WAYPOINT_TESTING_GUIDE.md`)

@@ -711,7 +711,7 @@ public:
    * Implements cascade control (outer joint PID + inner motor PID) with continuous
    * waypoint consumption for smooth trajectory execution.
    * 
-   * Following CAN_CONTROL_PROTOCOL.md section 5.2.3:
+   * Following CAN_SYSTEM_ARCHITECTURE.md section 6.2:
    * - Outer loop runs every outer_loop_divisor cycles (default 1 = 500 Hz)
    * - Inner loop @ 500 Hz (every cycle)
    * - Linear interpolation between waypoints

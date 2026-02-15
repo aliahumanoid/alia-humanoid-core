@@ -1,52 +1,29 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 1.6
-**Date:** 2025-02-12
+**Document Version:** 2.0
+**Date:** 2026-02-15
 **Status:** Design Specification (Indicative)
 **Authors:** Alia Robotics Team
 
+**Changelog v2.0:**
+- **Consolidated**: Merged `CAN_CONTROL_PROTOCOL.md` and `jetson-streaming-can.md` into this document
+- **D028**: Updated architecture to reflect Jetson direct CAN (no Pico dispatcher for production)
+- **Batch anchor timing**: Documented firmware-side anchor + consume-side re-anchor
+- **Buffer depth**: Updated from 2 to 2000 (20s @ 100 Hz)
+- **CAN ID 0x01B**: Added Re-anchor Interval command
+- **Removed**: Obsolete timeline/milestones (dates were stale)
+
 **Changelog v1.6:**
-- **CAN ID Table Updated**: Documented all operational CAN IDs 0x005-0x01A (Phases 1-3 migration)
-- IDs previously shown as "Reserved" (0x005-0x00F, 0x010-0x13F) now list individual commands
-- Added status/response IDs 0x490-0x4C0 (startup events, discovery, encoder offsets, zero complete)
+- CAN ID Table Updated: Documented all operational CAN IDs 0x005-0x01A (Phases 1-3 migration)
 
 **Changelog v1.5:**
-- **Batch Timing Compensation**: Added Section 4.2.3 documentation for waypoint batch timing
-- Host compensates for sequential transmission delay when sending waypoint batches
-- Ensures trajectory duration matches specified time regardless of batch size
+- Batch Timing Compensation: Added documentation for waypoint batch timing
 
 **Changelog v1.4:**
-- **Encoder Pico eliminated**: Direct MT6835 reading via SPI0 on joint controller
-- Updated Section 3.2 with new encoder architecture and multicore design
-- Core0 now handles encoder reading, Core1 handles CAN/motor control
+- Encoder Pico eliminated: Direct MT6835 reading via SPI0 on joint controller
 
 **Changelog v1.3:**
-- **Removed Single-DOF Waypoint (0x300-0x31F)**: Deprecated in favor of Multi-DOF format
-- Multi-DOF Waypoint is now the only waypoint format (simpler, more efficient)
-
-**Changelog v1.2:**
-- Multi-DOF Waypoint timing fix: `t_offset_ms` as offset from current time
-- Added sentinel value `0x7FFF` for unused DOFs
-
-**Changelog v1.1:**
-- Added CAN Gateway architecture (Section 2.4)
-- Added Multi-DOF Waypoint Frame specification
-- Updated bandwidth analysis for optimized protocol
-- Added comparison with commercial humanoid robots
-
----
-
-## ⚠️ Important Notes
-
-**This document describes an indicative design specification that is subject to change:**
-
-1. **Microcontroller**: Using **RP2350 (Pico 2)** instead of RP2040 for improved performance
-2. **CAN Bus Allocation**: 
-   - **Lower Body**: 6 channels per leg (12 total) - may be combined or separated
-   - **Upper Body**: 6-8 channels per arm + 1-2 for torso/head (indicative)
-   - **Total**: ~20-26 channels (flexible based on mechanical design)
-3. **Hardware Configuration**: 4x CAN Expansion Boards (8 channels each) for scalability
-4. **Design Flexibility**: All specifications are subject to refinement as the mechanical design evolves
+- Removed Single-DOF Waypoint (0x300-0x31F): Deprecated in favor of Multi-DOF format
 
 ---
 
@@ -55,11 +32,24 @@
 This document describes the complete CAN-based communication architecture for the Alia humanoid robot, designed to support up to 20 joint controllers with 80+ motors in a scalable, reliable, and cost-effective manner.
 
 ### Key Design Decisions:
-- **Multi-Bus Architecture**: Dedicated CAN bus per joint controller
+- **Multi-Bus Architecture**: Dedicated CAN bus per joint controller (point-to-point, no bus sharing)
+- **Dual CAN per Joint**: Host CAN (commands/telemetry) + Motor CAN (torque/status) — electrically isolated
 - **Protocol**: CAN 2.0 @ 1 Mbps (upgradeable to CAN FD)
 - **Control Frequency**: 500 Hz (motor PID), 50-100 Hz (waypoint streaming)
-- **Latency Target**: < 5ms end-to-end
-- **Hardware Platform**: Nvidia Jetson + Custom CAN Expansion Boards
+- **Latency**: < 1 ms single frame transit; ~50 ms waypoint-to-motion (pre-buffered, see §9.1)
+- **Hardware Platform**: Nvidia Jetson direct CAN (D028) + 4x CAN Expansion Boards (8ch each)
+- **Timing**: Batch anchor timing on firmware — immune to sender-side jitter
+
+### v1 Test Baseline (frozen config):
+
+| Parameter | Value |
+|-----------|-------|
+| CAN Expansion Boards | 4x (8ch each, MCP2515 + SN65HVD230 target / TJA1050 prototype) |
+| Jetson SPI buses | 4 (SPI0-SPI3) |
+| Joint controllers | 20x RP2350 Pico 2 |
+| CAN channels used | 20 (dedicated, one per joint) |
+| Motors | 80 (4x LKM per joint) |
+| Communication cost | ~900 EUR (see §11.1) |
 
 ### Comparison with Commercial Robots:
 - **Similar to**: Figure 01 (CAN 2.0 multi-bus), Tesla Optimus (multi-bus approach)
@@ -75,12 +65,13 @@ This document describes the complete CAN-based communication architecture for th
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  NVIDIA JETSON (Central Computer)                                │
-│  ├─ SPI0 → CAN Expansion Board #1 (8 channels)                  │
-│  ├─ SPI1 → CAN Expansion Board #2 (8 channels)                  │
-│  └─ SPI2 → CAN Expansion Board #3 (4 channels)                  │
+│  ├─ SPI0 → CAN Expansion Board #1 (8ch: Left Leg 6 + spare 2)  │
+│  ├─ SPI1 → CAN Expansion Board #2 (8ch: Right Leg 6 + Torso 2) │
+│  ├─ SPI2 → CAN Expansion Board #3 (8ch: Left Arm)               │
+│  └─ SPI3 → CAN Expansion Board #4 (8ch: Right Arm)              │
 └────┬─────────┬─────────┬─────────┬─────────┬─────────┬──────────┘
      │         │         │         │         │         │
-  CAN Bus  CAN Bus  CAN Bus  CAN Bus  CAN Bus  CAN Bus  ... (20x)
+  CAN ch0  CAN ch1  CAN ch2  CAN ch3  CAN ch4  CAN ch5  ... (20-26x)
      │         │         │         │         │         │
 ┌────▼────┐┌───▼────┐┌───▼────┐┌───▼────┐┌───▼────┐┌───▼────┐
 │ Pico 1  ││ Pico 2 ││ Pico 3 ││ Pico 4 ││ Pico 5 ││ Pico 6 │ ...
@@ -90,25 +81,28 @@ This document describes the complete CAN-based communication architecture for th
   4x Motors 4x Motors 4x Motors 4x Motors 4x Motors 4x Motors
 ```
 
+Each joint controller has a **dedicated CAN channel** on the expansion board (point-to-point, no bus sharing between joints). Communication is unidirectional for waypoints (Host → Controller). The Jetson sends CAN frames directly to joint controllers without intermediate hardware (see Section 7 for rationale).
+
 ### 2.2 Key Components
 
 | Component | Quantity | Function | Cost (EUR) |
 |-----------|----------|----------|------------|
 | Nvidia Jetson (Orin Nano/NX) | 1 | Central computer, trajectory planning | 400-600 |
-| CAN Expansion Board (8ch) | 3 | SPI-to-CAN interface, 20 channels total | 240 |
-| RP2350 (Pico 2) | 20 | Joint controller, motor PID control | 100 |
-| MCP2515 CAN Controller | 20 | CAN protocol handling | 120 |
-| TJA1050 CAN Transceiver | 20 | Physical layer interface | 50 |
+| CAN Expansion Boards (8ch) | 4 | SPI-to-CAN (32 channels, 20-26 used) | 496 |
+| RP2350 (Pico 2) + motor CAN | 20 | Joint controller, motor PID control | 270 |
+| Cabling (CAN + SPI + power) | - | Point-to-point wiring | 132 |
 | LKM Servo Motors | 80 | Actuators (4 per joint) | External |
-| **TOTAL COMMUNICATION** | | | **~610** |
+| **TOTAL COMMUNICATION** | | | **~900** |
 
-**Note**: Using **RP2350 (Pico 2)** instead of RP2040 for improved performance and future-proofing.
+**Notes**:
+- Using **RP2350 (Pico 2)** instead of RP2040 for improved performance and future-proofing.
+- **Transceiver choice**: Prototype boards use TJA1050 (5V, requires level shifting). Target production boards use SN65HVD230 (3.3V native, directly compatible with Jetson logic). See Section 3.1 for details.
 
 ### 2.3 CAN Bus Allocation (Current Plan)
 
 **Total CAN Buses: ~20-26 (indicative, subject to change)**
 
-#### **Lower Body (12 channels):**
+#### Lower Body (12 channels):
 ```
 Option A: Separate Legs (6 + 6)
 ├─ Left Leg (6 channels)
@@ -133,32 +127,16 @@ Option B: Combined Legs (12 channels on 2 boards)
    └─ CAN Expansion Board #2 (4 channels): Remaining right leg
 
 Recommendation: Option A (separate legs)
-✅ Isolamento guasti (gamba sx/dx indipendenti)
-✅ Bandwidth dedicata per gamba
-✅ Debugging più facile
 ```
 
-#### **Upper Body (12-16 channels, indicative):**
+#### Upper Body (12-16 channels, indicative):
 ```
 ├─ Left Arm (6-8 channels)
-│  ├─ Shoulder Flexion/Extension
-│  ├─ Shoulder Abduction/Adduction
-│  ├─ Shoulder Internal/External Rotation
-│  ├─ Elbow Flexion/Extension
-│  ├─ Forearm Pronation/Supination (optional)
-│  ├─ Wrist Flexion/Extension (optional)
-│  ├─ Wrist Radial/Ulnar Deviation (optional)
-│  └─ Hand/Gripper (optional)
-│
 ├─ Right Arm (6-8 channels)
-│  └─ (same as left arm)
-│
 └─ Torso/Head (1-2 channels)
-   ├─ Waist Rotation/Lateral Flexion (optional)
-   └─ Neck Pan/Tilt (optional)
 ```
 
-#### **Hardware Configuration:**
+#### Hardware Configuration:
 
 | Body Region | Channels | CAN Expansion Board | Notes |
 |-------------|----------|---------------------|-------|
@@ -168,244 +146,6 @@ Recommendation: Option A (separate legs)
 | **Right Arm** | 6-8 | Board #4 (channels 0-7) | Full 8-channel board |
 | **Torso/Head** | 1-2 | Board #2 (channels 6-7) | Shared with right leg |
 | **TOTAL** | **20-26** | **4 boards** | Scalable design |
-
-**Flexibility:**
-- ⚠️ **Current plan is indicative** and will be refined based on mechanical design
-- ✅ **Scalable**: Easy to add/remove channels as needed
-- ✅ **Modular**: Each body region can be developed independently
-
-### 2.4 CAN Gateway Architecture (Recommended)
-
-#### 2.4.1 Why Not Direct Jetson SPI?
-
-**Technical Feasibility:** The Jetson Nano *can* technically manage multiple MCP2515 on a single SPI bus using multiple Chip Select (CS) pins, exactly like the Pico does. However, there's a critical reason to prefer an external Gateway: **timing determinism**.
-
-**The Real Problem: Linux Jitter**
-
-| Aspect | Jetson Direct (Linux) | Gateway (Bare-metal MCU) |
-|--------|----------------------|--------------------------|
-| **Latency per frame** | 0.5-1.5 ms | 0.2-0.4 ms |
-| **Jitter** | ±1-5 ms ❌ | ±50 µs ✅ |
-| **Determinism** | Low (kernel scheduling) | High (no OS) |
-| **RT kernel required?** | Yes (complex setup) | No |
-
-**Why Jitter Matters for Walking:**
-
-```
-IDEAL TIMING (waypoints every 10 ms):
-  |----●----●----●----●----|
-       ↑    ↑    ↑    ↑
-     Hip  Knee Ankle Foot   → Synchronized movement ✅
-
-WITH ±5ms JITTER (Linux without RT kernel):
-  |--●------●--●--------●--|
-       ↑      ↑  ↑        ↑
-     Hip    Knee Ankle   Foot
-     
-     ⚠️ Foot arrives BEFORE ankle command!
-     → Robot loses balance, potential fall
-```
-
-**Linux Timing Stack (causes jitter):**
-
-```
-Python send_waypoint()
-    │ ~0.1 ms (Python overhead)
-    ▼
-python-can library
-    │ ~0.05 ms
-    ▼
-SocketCAN (kernel) ← VARIABLE: kernel can preempt here!
-    │ ~0.1-1 ms (scheduling jitter)
-    ▼
-mcp251x driver
-    │ ~0.05 ms
-    ▼
-SPI transaction → CAN frame
-
-TOTAL: 0.4-1.5 ms per frame (VARIABLE, jitter ±1-5 ms)
-```
-
-**Gateway Timing Stack (deterministic):**
-
-```
-Python send_batch() via USB
-    │ ~0.15 ms (160 bytes @ 12 Mbps)
-    ▼
-USB CDC receive (Pico bare-metal)
-    │ ~0.02 ms
-    ▼
-Direct SPI write (no kernel!)
-    │ ~0.06 ms per MCP2515
-    ▼
-CAN frame TX
-
-TOTAL: 0.2-0.4 ms per frame (DETERMINISTIC, jitter ±50 µs)
-```
-
-**When to Use Each Approach:**
-
-| Scenario | Recommendation |
-|----------|----------------|
-| Rapid prototype, 1-2 joints | Jetson direct OK |
-| Low frequency testing (10-20 Hz) | Jetson direct OK |
-| **Production, 20 joints, 100 Hz** | **Gateway MCU** ✅ |
-| **Synchronized walking/running** | **Gateway MCU** ✅ |
-| **Balance corrections (50-100 Hz)** | **Gateway MCU** ✅ |
-
-**Cost of Determinism:** ~€40 (Pico 2 + 3× MCP2515) — negligible vs robot total cost.
-
-#### 2.4.2 Solution: RP2350 CAN Gateway
-
-A dedicated **Raspberry Pi Pico 2 (RP2350)** acts as a CAN Gateway between Jetson and joint controllers:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  NVIDIA JETSON NANO                                                 │
-│  - Trajectory planning (Python, 50-100 Hz)                          │
-│  - Sends batch waypoints via USB CDC                                │
-│  - Time sync broadcast                                              │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ USB CDC (12 Mbps Full Speed)
-                            │ Latency: < 0.2 ms for 160 bytes
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  CAN GATEWAY (RP2350 Pico 2)                                        │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  Core0: USB CDC Reception                                    │   │
-│  │  - Receives batch waypoint frames from Jetson                │   │
-│  │  - Parses and queues to inter-core buffer                    │   │
-│  │  - Handles time sync distribution                            │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  Core1: CAN Distribution                                     │   │
-│  │  - Reads from inter-core buffer                              │   │
-│  │  - Distributes to 3 CAN buses (round-robin)                  │   │
-│  │  - Manages timing and synchronization                        │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  SPI1 (shared bus, multiple CS):                             │   │
-│  │  GP10 = SCK  ─────┬──────────┬──────────┐                   │   │
-│  │  GP11 = MOSI ─────┼──────────┼──────────┤                   │   │
-│  │  GP12 = MISO ─────┼──────────┼──────────┤                   │   │
-│  │                   │          │          │                   │   │
-│  │  GP8  = CS0 ──►┌──┴──┐  ┌────┴────┐ ┌───┴───┐              │   │
-│  │  GP9  = CS1 ──►│MCP  │  │  MCP    │ │  MCP  │              │   │
-│  │  GP13 = CS2 ──►│2515 │  │  2515   │ │  2515 │              │   │
-│  │                │ #0  │  │  #1     │ │  #2   │              │   │
-│  │                └──┬──┘  └────┬────┘ └───┬───┘              │   │
-│  └───────────────────┼──────────┼──────────┼───────────────────┘   │
-│                      │          │          │                       │
-└──────────────────────┼──────────┼──────────┼───────────────────────┘
-                       │          │          │
-                  CAN Bus 0   CAN Bus 1  CAN Bus 2
-                  (Legs L)    (Legs R)   (Arms+Head)
-                       │          │          │
-              ┌────────┴────┐ ┌───┴────┐ ┌───┴────┐
-              │ 6× Pico     │ │ 6× Pico│ │ 8× Pico│
-              │ (6 joints)  │ │(6 jnts)│ │(8 jnts)│
-              └─────────────┘ └────────┘ └────────┘
-```
-
-#### 2.4.3 Why CAN Gateway Works
-
-**Timing Analysis:**
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| USB receive 160 bytes (20 joints × 8 bytes) | ~0.15 ms | USB Full Speed 12 Mbps |
-| Parse and queue to buffer | ~0.02 ms | Simple memcpy |
-| SPI write to MCP2515 (8 bytes) | ~6.4 µs | SPI @ 10 MHz |
-| MCP2515 load + send | ~50 µs | Internal processing |
-| CAN frame transmission | ~111 µs | 111 bits @ 1 Mbps |
-| **Total per joint** | **~60 µs** | Sequential per bus |
-| **Total 20 joints (3 buses)** | **~1.2 ms** | 7 joints/bus max |
-
-**Frequency Capability:**
-
-| Waypoint Frequency | Cycle Time | Distribution Time | Margin |
-|--------------------|------------|-------------------|--------|
-| 50 Hz | 20 ms | 1.2 ms | 94% ✅ |
-| 100 Hz | 10 ms | 1.2 ms | 88% ✅ |
-| 200 Hz | 5 ms | 1.2 ms | 76% ✅ |
-| 500 Hz | 2 ms | 1.2 ms | 40% ⚠️ |
-
-**Conclusion:** 100 Hz waypoint streaming is easily achievable with significant margin.
-
-#### 2.4.4 Gateway Bill of Materials
-
-| Component | Quantity | Unit Cost (€) | Total (€) |
-|-----------|----------|---------------|-----------|
-| RP2350 Pico 2 | 1 | 5 | 5 |
-| MCP2515 module | 3 | 6 | 18 |
-| TJA1050 transceiver | 3 | 2.50 | 7.50 |
-| USB cable | 1 | 3 | 3 |
-| Connectors | 5 | 1 | 5 |
-| **TOTAL** | | | **€38.50** |
-
-#### 2.4.5 Comparison: Gateway vs Direct Jetson SPI
-
-| Aspect | Direct Jetson (SPI + CS) | CAN Gateway |
-|--------|--------------------------|-------------|
-| **Technically feasible?** | ✅ Yes | ✅ Yes |
-| **Complexity** | High (device tree, RT kernel) | Low (USB CDC) |
-| **Real-time determinism** | ❌ Linux jitter ±1-5 ms | ✅ Bare-metal ±50 µs |
-| **Development effort** | High (kernel drivers, DT overlay) | Low (Arduino/C++) |
-| **Debugging** | Difficult (kernel logs) | Easy (USB serial) |
-| **Cost** | €0 (uses existing Jetson) | €38.50 |
-| **Walking/balance safe?** | ⚠️ Only with RT kernel | ✅ Yes |
-| **Scalability** | Limited by GPIO count | Easy (add more MCP2515) |
-
-**Key Insight:** The Gateway is not required because Jetson "can't" do it, but because **Linux timing jitter is unacceptable for synchronized multi-joint movement**. A bare-metal MCU provides the determinism needed for safe walking.
-
-**Recommendation:** ✅ **Use CAN Gateway** for production robots. Direct Jetson SPI is acceptable only for low-frequency prototyping.
-
-#### 2.4.6 Gateway Firmware Architecture
-
-```cpp
-// CAN Gateway - Core0: USB Reception
-void core0_loop() {
-    if (Serial.available() >= sizeof(BatchWaypointFrame)) {
-        BatchWaypointFrame batch;
-        Serial.readBytes((char*)&batch, sizeof(batch));
-        
-        // Push to inter-core queue
-        multicore_fifo_push_blocking((uint32_t)&batch);
-    }
-}
-
-// CAN Gateway - Core1: CAN Distribution  
-void core1_loop() {
-    if (multicore_fifo_rvalid()) {
-        BatchWaypointFrame* batch = (BatchWaypointFrame*)multicore_fifo_pop_blocking();
-        
-        // Distribute to 3 CAN buses
-        for (int i = 0; i < batch->joint_count; i++) {
-            uint8_t bus_id = batch->joints[i].joint_id / 7;  // 0, 1, or 2
-            MCP_CAN* can = can_buses[bus_id];
-            
-            can->sendMsgBuf(
-                0x380 + (batch->joints[i].joint_id % 7),  // Multi-DOF waypoint ID
-                0, 8,
-                batch->joints[i].data
-            );
-        }
-    }
-}
-```
-
-#### 2.4.7 Future Expansion
-
-If more than 20 joints are needed:
-
-| Option | Additional Joints | Cost | Notes |
-|--------|-------------------|------|-------|
-| Add MCP2515 to Gateway | +7 per MCP2515 | +€8.50 | Up to 6 MCP2515 on one Pico |
-| Second Gateway | +20 | +€38.50 | Separate USB connection |
-| Upgrade to CAN FD | Same | +€50 | 5x bandwidth (MCP2518FD) |
 
 ---
 
@@ -421,7 +161,7 @@ If more than 20 joints are needed:
 - **Components per channel**:
   - 1x MCP2515 CAN Controller (SPI interface)
   - 1x TJA1050 CAN Transceiver (physical layer)
-  - 1x 120Ω termination resistor (switchable)
+  - 1x 120 ohm termination resistor (switchable)
 - **SPI Multiplexing**: 74HC4051 or similar (8:1 mux)
 - **Power**: 5V input, 3.3V regulation for MCP2515
 - **Mounting**: DIN rail compatible
@@ -454,21 +194,37 @@ If more than 20 joints are needed:
 ```
 
 **Bill of Materials (per board):**
+
 | Component | Quantity | Unit Cost | Total |
 |-----------|----------|-----------|-------|
-| MCP2515 | 8 | €6 | €48 |
-| TJA1050 | 8 | €2.50 | €20 |
-| 74HC4051 | 1 | €1 | €1 |
-| PCB (4-layer) | 1 | €30 | €30 |
-| Connectors | 10 | €2 | €20 |
-| Passives | - | €5 | €5 |
-| **TOTAL** | | | **€124** |
+| MCP2515 | 8 | 6 EUR | 48 EUR |
+| CAN Transceiver (*) | 8 | 2.50 EUR | 20 EUR |
+| 74HC4051 | 1 | 1 EUR | 1 EUR |
+| PCB (4-layer) | 1 | 30 EUR | 30 EUR |
+| Connectors | 10 | 2 EUR | 20 EUR |
+| Passives | - | 5 EUR | 5 EUR |
+| **TOTAL** | | | **124 EUR** |
+
+(*) Prototype: TJA1050 (5V, requires level shifting). Target: SN65HVD230 (3.3V native).
 
 **Production:**
 - **PCB Manufacturer**: JLCPCB, PCBWay
 - **Assembly**: PCBA service or DIY
 - **Lead Time**: 2-3 weeks
-- **Quantity**: 3 boards for 20 channels (+ 1 spare = 4 total)
+- **Quantity**: 4 boards (20-26 channels used)
+
+#### Component Selection for Custom PCB
+
+**Recommended BOM:**
+1. **CAN Controller**: `Microchip MCP2515-I/SO` (SOIC-18) — industry standard, robust Linux driver
+2. **CAN Transceiver**: `Texas Instruments SN65HVD230` (SOIC-8) — runs on 3.3V natively, eliminates level shifting
+3. **SPI Multiplexer**: `Texas Instruments SN74HC4051D` (SOIC-16)
+4. **Crystal**: `8.000 MHz` (SMD 5032 or HC-49) — one per MCP2515
+
+#### Power Strategy
+- **Logic Power (3.3V)**: Can be drawn from Jetson header (Pins 1, 17) if total current < 500mA
+  - 20x MCP2515 + 20x Transceivers ~ 300mA. Safe.
+- **Bus Isolation**: Ideally, use an isolated DC/DC converter for electrically noisy environments
 
 ### 3.2 Joint Controller (RP2350 Pico 2)
 
@@ -479,103 +235,39 @@ If more than 20 joints are needed:
 - **Encoder Interface**: Direct MT6835 reading via SPI0 (up to 3 encoders)
 - **Firmware**: Arduino framework (PlatformIO)
 
-**Encoder Architecture (December 2024 Update):**
-- Eliminated dedicated encoder Pico (was separate SPI slave)
-- MT6835 magnetic encoders now read directly by joint controller
-- SPI0 shared bus with individual CS pins (GP17, GP20, GP21)
-- Core0 handles encoder reading at ~500 Hz
-- Thread-safe `shared_dof_angles` structure for Core1 access
-
-**RP2350 Advantages over RP2040:**
-- ✅ **Faster CPU**: 150 MHz vs 133 MHz (13% faster)
-- ✅ **More RAM**: 520 KB vs 264 KB (2x more)
-- ✅ **More Flash**: 4 MB vs 2 MB (2x more)
-- ✅ **Better FPU**: ARM Cortex-M33 vs M0+ (hardware floating-point)
-- ✅ **Future-proof**: Latest generation, better support
+**Multicore Architecture:**
+- **Core0**: SPI0 — encoder reading (MT6835, ~500 Hz), serial (diagnostics only), flash operations
+- **Core1**: SPI1 — CAN polling + motor control + movement execution (~500 Hz)
+- **SPI Isolation**: Core0 owns SPI0 (encoders), Core1 owns SPI1 (CAN). No cross-core SPI access.
 
 **Key Firmware Features:**
-- **Core0**: Serial communication + Encoder reading (~500 Hz)
-- **Core1**: CAN polling + Motor control + Movement execution (~500 Hz)
-- **SPI isolation**: Core0 owns SPI0 (encoders), Core1 owns SPI1 (CAN)
-- **Waypoint buffer**: 20 waypoints per DOF (configurable)
+- **Waypoint buffer**: 2000 waypoints per DOF (~20s at 100 Hz)
+- **Batch anchor timing**: Firmware captures `millis()` on first WP, schedules entire batch from that anchor
+- **Consume-side re-anchor**: Periodic drift compensation every N waypoints consumed
 - **Time synchronization**: NTP-like protocol via CAN
 - **Flash storage**: Encoder offsets, PID parameters, linear equations (with multicore sync)
 
 **Memory Usage (RP2350):**
-- **RAM**: 20 KB / 520 KB (3.8%)
-- **Flash**: 178 KB / 4096 KB (4.3%)
-- **Plenty of headroom** for future features (96% RAM free, 95% Flash free)
+- **RAM**: ~20 KB / 520 KB (3.8%)
+- **Flash**: ~178 KB / 4096 KB (4.3%)
 
 ### 3.3 CAN Bus Physical Layer
 
 **Cable Specifications:**
-- **Type**: Twisted pair (120Ω characteristic impedance)
-- **Recommended**: Belden 3105A, Alpha Wire 6712
-- **Gauge**: 24 AWG (0.5 mm²)
+- **Type**: Twisted pair (120 ohm characteristic impedance)
+- **Gauge**: 24 AWG (0.5 mm2)
 - **Max Length**: 40 m @ 1 Mbps (per bus)
 - **Shielding**: Optional (recommended in noisy environments)
 
 **Termination:**
-- **120Ω resistor** at both ends of each bus
+- **120 ohm resistor** at both ends of each bus
 - **Switchable** on CAN Expansion Board
 - **Always enabled** on Pico side
 
 **Connectors:**
 - **Expansion Board**: Screw terminals (CANH, CANL, GND)
 - **Pico**: JST-XH 3-pin or similar
-- **Color Code**: 
-  - CANH: Yellow
-  - CANL: Green
-  - GND: Black
-
-### 3.4 Operational Guide: Hardware Development
-
-This section outlines the practical steps to move from concept to physical implementation.
-
-#### Step 1: Rapid Prototyping (Breadboard Phase)
-**Objective**: Validate the multi-bus software stack before manufacturing custom PCBs.
-
-**Hardware Checklist:**
-1.  **Nvidia Jetson** (Nano / Orin Nano / Orin NX)
-2.  **2x MCP2515 Modules** (Generic blue boards, ~€3 each)
-3.  **Jumper Wires** (Female-Female)
-4.  **1x Breadboard** (for sharing power/GND)
-
-**Wiring (Jetson 40-pin Header J30):**
-
-| Jetson Pin | Signal | Connect to MCP2515 (1) | Connect to MCP2515 (2) |
-|------------|--------|------------------------|------------------------|
-| **1** | 3.3V | VCC | VCC |
-| **6** | GND | GND | GND |
-| **19** | MOSI | SI | SI |
-| **21** | MISO | SO | SO |
-| **23** | SCK | SCK | SCK |
-| **24** | CS0 | **CS** | - |
-| **26** | CS1 | - | **CS** |
-| **2** | 5V | *VCC_5V (if TJA1050)* | *VCC_5V (if TJA1050)* |
-
-*Note: If using generic modules with TJA1050, they need 5V for the transceiver but 3.3V for SPI logic. Check if your module has a jumper or separate pins. Safer alternative: Use modules with **SN65HVD230** (3.3V native).*
-
-#### Step 2: Component Selection for Custom PCB
-For the final **CAN Expansion Board**, we recommend specific components to simplify integration with Jetson (3.3V logic).
-
-**Recommended BOM:**
-
-1.  **CAN Controller**: `Microchip MCP2515-I/SO` (SOIC-18)
-    *   *Status*: Industry standard, robust Linux driver.
-2.  **CAN Transceiver**: `Texas Instruments SN65HVD230` (SOIC-8)
-    *   *Why*: **Crucial Change**. Unlike TJA1050 (5V), this runs on **3.3V**.
-    *   *Benefit*: Eliminates need for 5V level shifting or dual power rails on the interface board. Directly compatible with Jetson logic.
-3.  **SPI Multiplexer**: `Texas Instruments SN74HC4051D` (SOIC-16)
-    *   *Function*: Expands 1 Chip Select line into 8.
-4.  **Crystal**: `8.000 MHz` (SMD 5032 or HC-49)
-    *   *Note*: One per MCP2515 (or a single oscillator buffered to all).
-
-#### Step 3: Power Strategy
-*   **Logic Power (3.3V)**: Can be drawn from Jetson header (Pins 1, 17) if total current < 500mA.
-    *   *Calculation*: 20x MCP2515 + 20x Transceivers ≈ 20 * 15mA = 300mA. **Safe.**
-*   **Bus Isolation**: Ideally, use an isolated DC/DC converter for the transceiver side if operating in electrically noisy environment (near high-power motors).
-    *   *Pro Tip*: For the first version, shared GND with Jetson is acceptable if star-grounding is used.
+- **Color Code**: CANH=Yellow, CANL=Green, GND=Black
 
 ---
 
@@ -591,105 +283,142 @@ For the final **CAN Expansion Board**, we recommend specific components to simpl
 └──────────┴────────┴────────────────────────────────┴─────┘
 ```
 
-**CAN ID Allocation (Priority-Optimized):**
-
 **CAN Priority Rule**: Lower CAN ID = Higher Priority (CAN arbitration)
 
 | ID Range | Purpose | Priority | Frequency | Direction |
 |----------|---------|----------|-----------|-----------|
 | 0x000 | Emergency Stop | **Level 0** (Highest) | On-demand | Host → All |
-| 0x002 | Time Sync | **Level 1** (System) | 10 Hz | Host → All |
-| 0x140-0x280 | Motor Torque Commands | **Level 2** (CRITICAL) | 500 Hz | Controller → Motors |
-| 0x380-0x39F | Waypoint Commands | **Level 3** (Trajectory) | 50-100 Hz | Host → Controller |
-| 0x400-0x4FF | Status/Feedback | **Level 4** (Lowest) | 10-50 Hz | Controller → Host |
+| 0x002-0x01B | System Control + Commands | **Level 1** (System) | On-demand | Host → Ctrl |
+| 0x140-0x280 | Motor Torque Commands | **Level 2** (CRITICAL) | 500 Hz | Ctrl → Motors |
+| 0x380-0x39F | Waypoint Commands | **Level 3** (Trajectory) | 50-100 Hz | Host → Ctrl |
+| 0x400-0x4FF | Status/Feedback | **Level 4** (Lowest) | 10-50 Hz | Ctrl → Host |
 
-**Key Design**: Motor torque commands (0x140-0x280) have **higher priority** than waypoint commands (0x380-0x39F) to ensure the inner PID loop @ 500 Hz is never starved by trajectory updates. This is critical for control stability.
+**Key Design**: Motor torque commands (0x140-0x280) have **higher priority** than waypoint commands (0x380-0x39F) to ensure the inner PID loop @ 500 Hz is never starved by trajectory updates.
 
 ### 4.2 Message Types
 
-#### 4.2.1 Time Sync (ID: 0x002)
+#### 4.2.1 Emergency Stop (ID: 0x000)
+
+**Purpose**: Immediately stop all motors (highest priority)
+
+```cpp
+struct CanCmd_EmergencyStop {
+    uint8_t  reason_code;     // Stop reason (user, limit, error, etc.)
+    uint8_t  reserved[7];
+} __attribute__((packed));   // 8 bytes
+```
+
+**Latency**: < 500 us (highest CAN priority)
+**Action**: All controllers stop motors and clear waypoint buffers
+
+#### 4.2.2 Time Sync (ID: 0x002)
+
 **Purpose**: Synchronize all controllers with host absolute time
 
-**Format (8 bytes):**
-```
-Byte 0-3: uint32_t t_host_ms (little-endian)
-Byte 4-7: Reserved (0x00)
+```cpp
+struct CanCmd_TimeSync {
+    uint32_t t_host_ms;       // Host epoch time (milliseconds, little-endian)
+    uint32_t reserved;
+} __attribute__((packed));   // 8 bytes
 ```
 
-**Frequency**: 10 Hz  
-**Latency**: < 200 µs  
-**Jitter**: ± 1 ms (± 0.5 ms with RT kernel)
-
-**Example:**
-```python
-# Host sends time sync
-timestamp_ms = int(time.time() * 1000)
-msg = can.Message(
-    arbitration_id=0x002,
-    data=timestamp_ms.to_bytes(4, 'little') + b'\x00\x00\x00\x00',
-    is_extended_id=False
-)
-bus.send(msg)
-```
+**Frequency**: Sent before each waypoint batch (and periodically at ~10 Hz for clock maintenance)
 
 **Controller Processing:**
 ```cpp
 void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
-  uint32_t t_host_ms = 0;
-  memcpy(&t_host_ms, data, sizeof(uint32_t));
-  
-  const uint32_t t_local = millis();
-  clock_offset_ms = static_cast<int32_t>(t_host_ms) - static_cast<int32_t>(t_local);
-  clock_synced = true;
+    uint32_t t_host_ms = 0;
+    memcpy(&t_host_ms, data, sizeof(uint32_t));
+    const uint32_t t_local = millis();
+    clock_offset_ms = static_cast<int32_t>(t_host_ms) - static_cast<int32_t>(t_local);
+    clock_synced = true;
 }
 ```
 
-#### 4.2.2 Emergency Stop (ID: 0x000)
-**Purpose**: Immediately stop all motors (highest priority)
+#### 4.2.3 Encoder Stream Control (ID: 0x003)
 
-**Format (8 bytes):**
 ```
-Byte 0-7: 0x00 (unused, but required for 8-byte frame)
-```
-
-**Frequency**: On-demand (user trigger)  
-**Latency**: < 500 µs (highest CAN priority)  
-**Action**: All controllers stop motors and clear waypoint buffers
-
-**Example:**
-```python
-# Host sends emergency stop
-msg = can.Message(
-    arbitration_id=0x000,
-    data=b'\x00\x00\x00\x00\x00\x00\x00\x00',
-    is_extended_id=False
-)
-bus.send(msg)
+Byte 0:   uint8_t  action (0x01 = start, 0x00 = stop)
+Byte 1-7: Reserved (0x00)
 ```
 
-**Controller Processing:**
-```cpp
-if (rx_id == CAN_ID_EMERGENCY_STOP) {
-  emergency_stop_requested = true;  // Core1 will handle
-}
+**Encoder Stream Data (ID: 0x410):**
+```
+Byte 0:     uint8_t   joint_id
+Byte 1-2:   int16_t   angle_dof0 (0.01 deg resolution)
+Byte 3-4:   int16_t   angle_dof1 (0x7FFF = unused)
+Byte 5-6:   int16_t   angle_dof2 (0x7FFF = unused)
+Byte 7:     uint8_t   timestamp_offset (ms since last packet, wraps at 255)
+```
+**Stream Rate**: 50 Hz (20ms interval)
 
-// In Core1 loop:
-if (emergency_stop_requested) {
-  active_joint_controller->stopAllMotors();
-  // Clear waypoint buffers
-  // Exit movement loops
-}
+#### 4.2.4 PID Diagnostics Control (ID: 0x004)
+
+```
+Byte 0:   uint8_t  action (0x01 = start streaming, 0x00 = stop)
+Byte 1:   uint8_t  terms_enabled (0x01 = enable P/I/D breakdown, 0x00 = disable)
+Byte 2-7: Reserved
 ```
 
-#### 4.2.3 Waypoint (ID: 0x380-0x39F)
+**PID Diag: Target + Error (0x420 + joint_id):**
+```
+Byte 0-1:  int16_t  target_angle (0.01 deg)
+Byte 2-3:  int16_t  actual_angle (0.01 deg)
+Byte 4-5:  int16_t  error (0.01 deg)
+Byte 6-7:  Reserved
+```
+
+**PID Diag: Torque A + B (0x430 + joint_id):**
+```
+Byte 0-1:  int16_t  torque_agonist
+Byte 2-3:  int16_t  torque_antagonist
+Byte 4-5:  int16_t  torque_agonist_filtered
+Byte 6-7:  int16_t  torque_antagonist_filtered
+```
+
+**PID Diag: Inner PID Terms (0x470 + joint_id) — optional, DOF 0 only:**
+```
+Byte 0-1:  int16_t  p_term
+Byte 2-3:  int16_t  i_term
+Byte 4-5:  int16_t  d_term
+Byte 6-7:  int16_t  ff_term
+```
+
+**PID Diag: Outer PID Terms (0x480 + joint_id) — optional, DOF 0 only:**
+```
+Byte 0-1:  int16_t  p_term
+Byte 2-3:  int16_t  i_term
+Byte 4-5:  int16_t  d_term
+Byte 6-7:  int16_t  output_x100
+```
+
+#### 4.2.5 Interpolation Mode (ID: 0x005)
+
+```
+Byte 0:   uint8_t  mode (0 = LINEAR, 1 = COSINE)
+Byte 1-7: Reserved
+```
+
+Sent once before the first waypoint batch. Determines interpolation curve between consecutive waypoints.
+
+#### 4.2.6 Re-anchor Interval (ID: 0x01B)
+
+```
+Byte 0-1: uint16_t interval (0 = disabled, N = re-anchor every N waypoints consumed)
+Byte 2-7: Reserved
+```
+
+Sent before each batch. Controls consume-side drift compensation frequency. See Section 5.2.
+
+#### 4.2.7 Multi-DOF Waypoint (ID: 0x380-0x39F)
+
 **Purpose**: Stream target positions for all DOFs of a joint in a single frame
 
-**Format (8 bytes, packed):**
 ```
-Byte 0-1:  int16_t  dof0_angle (0.01° resolution, ±327.67°, 0x7FFF = unused)
-Byte 2-3:  int16_t  dof1_angle (0.01° resolution, ±327.67°, 0x7FFF = unused)
-Byte 4-5:  int16_t  dof2_angle (0.01° resolution, ±327.67°, 0x7FFF = unused)
-Byte 6-7:  uint16_t t_offset_ms (offset from CURRENT time, 0-65535 ms)
+Byte 0-1:  int16_t  dof0_angle (0.01 deg resolution, 0x7FFF = unused)
+Byte 2-3:  int16_t  dof1_angle (0.01 deg resolution, 0x7FFF = unused)
+Byte 4-5:  int16_t  dof2_angle (0.01 deg resolution, 0x7FFF = unused)
+Byte 6-7:  uint16_t t_offset_ms (offset from batch anchor, 0-65535 ms)
 ```
 
 **CAN ID**: `0x380 + joint_id` (0x380 = Ankle Right, 0x381 = Ankle Left, etc.)
@@ -698,478 +427,458 @@ Byte 6-7:  uint16_t t_offset_ms (offset from CURRENT time, 0-65535 ms)
 - All DOFs in a single CAN frame (8 bytes)
 - 66% less CAN traffic compared to per-DOF frames
 - Explicit synchronization between DOFs
-
-**Time Reference:**
-- Uses **relative offset** from **current time**
-- Firmware calculates: `t_arrival = t_now + t_offset_ms`
-- Reduces payload from 4 bytes to 2 bytes
-- Maximum offset: 65.535 seconds (sufficient for 50+ waypoints @ 100 Hz)
-
-**Example (Python):**
-```python
-UNUSED_DOF = 0x7FFF  # Sentinel value for unused DOF
-
-def send_multi_dof_waypoint(bus, joint_id, angles_deg, t_offset_ms):
-    """
-    Send a multi-DOF waypoint to a joint.
-    
-    Args:
-        bus: python-can Bus instance
-        joint_id: 0-31 (joint index)
-        angles_deg: [dof0, dof1, dof2] angles in degrees (use None for unused DOFs)
-        t_offset_ms: offset from current time in ms
-    
-    Example:
-        # 3-DOF joint (ankle): all DOFs used, arrive in 1 second
-        send_multi_dof_waypoint(bus, 0, [45.0, 10.0, -5.0], 1000)
-        
-        # 1-DOF joint (knee): only DOF0 used, arrive in 500ms
-        send_multi_dof_waypoint(bus, 2, [90.0, None, None], 500)
-    """
-    # Convert angles to 0.01° resolution, use sentinel for unused DOFs
-    def to_counts(angle):
-        if angle is None:
-            return UNUSED_DOF
-        return max(-32768, min(32767, int(angle * 100)))
-    
-    dof0 = to_counts(angles_deg[0]) if len(angles_deg) > 0 else UNUSED_DOF
-    dof1 = to_counts(angles_deg[1]) if len(angles_deg) > 1 else UNUSED_DOF
-    dof2 = to_counts(angles_deg[2]) if len(angles_deg) > 2 else UNUSED_DOF
-    
-    data = struct.pack('<hhhH', dof0, dof1, dof2, t_offset_ms)
-    
-    msg = can.Message(
-        arbitration_id=0x380 + joint_id,
-        data=data,
-        is_extended_id=False
-    )
-    bus.send(msg)
-```
-
-**Example (C++ Controller):**
-```cpp
-#define MULTI_DOF_UNUSED 0x7FFF  // Sentinel value for unused DOF
-
-void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
-    uint8_t joint_id = id - 0x380;
-    
-    struct {
-        int16_t dof0_angle;
-        int16_t dof1_angle;
-        int16_t dof2_angle;
-        uint16_t t_offset_ms;  // Offset from CURRENT time
-    } __attribute__((packed)) waypoint;
-    
-    memcpy(&waypoint, data, sizeof(waypoint));
-    
-    // Calculate absolute arrival time from current time + offset
-    uint32_t t_now = millis();  // Or getAbsoluteTimeMs()
-    uint32_t t_arrival = t_now + waypoint.t_offset_ms;
-    
-    // Push to all DOF buffers with same arrival time (synchronized)
-    for (uint8_t dof = 0; dof < 3; dof++) {
-        int16_t angle_raw = (dof == 0) ? waypoint.dof0_angle :
-                            (dof == 1) ? waypoint.dof1_angle :
-                                         waypoint.dof2_angle;
-        
-        if (angle_raw == MULTI_DOF_UNUSED) continue;  // Skip unused DOF (sentinel value)
-        
-        WaypointEntry entry{};
-        entry.dof_index = dof;
-        entry.target_angle_deg = static_cast<float>(angle_raw) / 100.0f;
-        entry.t_arrival_ms = t_arrival;
-        entry.mode = 0;  // LINEAR
-        
-        waypoint_buffer_push(dof, entry);
-    }
-}
-```
+- `t_offset_ms` is relative to batch anchor, NOT to current time (see Section 5.1)
 
 **Unused DOF Handling:**
-- For joints with fewer than 3 DOFs (e.g., knee = 1 DOF), set unused angles to `0x7FFF` (sentinel)
+- For joints with fewer than 3 DOFs, set unused angles to `0x7FFF` (sentinel)
 - Controller skips DOFs with sentinel value
-- Example: Knee joint sends `[angle, 0x7FFF, 0x7FFF, t_offset]`
 
-**Batch Timing Compensation (Prototype Implementation):**
+#### 4.2.8 Motor Commands (ID: 0x140-0x1FF) — Motor CAN Bus
 
-When sending a batch of waypoints from the host (e.g., 100 waypoints for a trajectory),
-each waypoint is transmitted sequentially with a small delay (~2-3ms per waypoint).
-Since `t_offset_ms` is relative to when each individual waypoint is **received** by the
-controller, the host must compensate for the transmission time to ensure correct arrival timing.
+**Bus**: Motor CAN (MCP2515, CS=GP9) — physically separate from Host CAN
+**Format**: LKM protocol (8 bytes)
+**Frequency**: 500 Hz (inner PID loop)
+**Direction**: Controller → Motors
+Handled by existing `LKM_Motor` library. Traffic never crosses to the Host CAN bus.
 
-**Problem without compensation:**
-```
-Waypoint 0:  sent at T=0ms,    t_offset=600ms  → arrives at T=0+600   = 600ms  ✅
-Waypoint 50: sent at T=150ms,  t_offset=1100ms → arrives at T=150+1100 = 1250ms ❌
-Waypoint 100: sent at T=300ms, t_offset=1600ms → arrives at T=300+1600 = 1900ms ❌
+#### 4.2.9 Status Feedback (ID: 0x400-0x4FF)
 
-Expected trajectory duration: 1000ms
-Actual trajectory duration:   1900-600 = 1300ms (30% slower!)
-```
-
-**Solution: Backend compensates for elapsed send time:**
-```python
-# In can_manager.py send_waypoint_batch()
-batch_start_time = time.perf_counter()
-
-for i, wp in enumerate(waypoints):
-    # Calculate actual elapsed time since batch start
-    elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
-    
-    # Adjust t_offset: compensate for time spent sending previous waypoints
-    # original_t_offset = "desired arrival time from batch start"
-    # adjusted_t_offset = original_t_offset - elapsed_ms
-    adjusted_t_offset = max(0, int(original_t_offset - elapsed_ms))
-    
-    send_multi_dof_waypoint(joint_name, angles, adjusted_t_offset)
-    time.sleep(0.002)  # 2ms inter-waypoint delay
+```cpp
+struct CanStatus_Joint {
+    uint8_t  joint_id;
+    uint8_t  status_flags;
+    int16_t  current_angle;     // 0.01 deg resolution
+    int16_t  current_velocity;  // 0.1 deg/s resolution
+    uint16_t error_code;
+} __attribute__((packed));
 ```
 
-**Result with compensation:**
-```
-Waypoint 0:  sent at T=0ms,   adj_offset=600ms  → arrives at T=0+600   = 600ms  ✅
-Waypoint 50: sent at T=150ms, adj_offset=950ms  → arrives at T=150+950 = 1100ms ✅
-Waypoint 100: sent at T=300ms, adj_offset=1300ms → arrives at T=300+1300 = 1600ms ✅
-
-Trajectory duration: 1600-600 = 1000ms ✅ (exactly as specified)
-```
-
-**Note:** This compensation is implemented in the prototype host software (`can_manager.py`).
-In production with the CAN Gateway, the gateway firmware will handle this compensation
-with even higher precision (bare-metal timing, no Python overhead).
-
-#### 4.2.4 Motor Commands (ID: 0x140-0x1FF)
-**Purpose**: Send torque/position commands to LKM servos
-
-**Format**: LKM protocol (8 bytes)  
-**Frequency**: 500 Hz (inner PID loop)  
-**Direction**: Controller → Motors  
-**Note**: Handled by existing `LKM_Motor` library
-
-#### 4.2.5 Status Feedback (ID: 0x400-0x4FF)
-**Purpose**: Report controller/motor status to host (optional)
-
-**Format (8 bytes):**
-```
-Byte 0:    uint8_t  joint_id
-Byte 1:    uint8_t  status_flags (bit field)
-Byte 2-3:  int16_t  current_angle_deg (0.01° resolution)
-Byte 4-5:  int16_t  current_velocity_dps (0.1°/s resolution)
-Byte 6-7:  uint16_t error_code
+**Status Flags:**
+```cpp
+#define STATUS_MOVING       (1 << 0)
+#define STATUS_HOLDING      (1 << 1)
+#define STATUS_ERROR        (1 << 2)
+#define STATUS_BUFFER_FULL  (1 << 3)
+#define STATUS_SYNCED       (1 << 4)
 ```
 
-**Frequency**: 10-50 Hz (configurable)  
-**Direction**: Controller → Host  
-**Note**: Optional, for debugging/monitoring
+### 4.3 CAN ID Allocation
 
-**CAN ID**: `0x400 + joint_id` (NEW: 0x400 base instead of 0x200 for lowest priority)
+See **Appendix A** for the complete CAN ID allocation table.
 
-### 4.3 Bandwidth Analysis
+### 4.4 Bandwidth Analysis
 
-#### 4.3.1 Per Joint
+Each joint controller has **two physically separate CAN buses** (both via MCP2515 on SPI1, different CS pins):
 
-| Message Type | Freq (Hz) | Frame/s | Bandwidth | Notes |
-|--------------|-----------|---------|-----------|-------|
-| Time Sync | 10 | 10 | 0.14% | Broadcast to all |
-| Waypoint DOF0 | 100 | 100 | 1.4% | Max frequency |
-| Waypoint DOF1 | 100 | 100 | 1.4% | Max frequency |
-| Waypoint DOF2 | 100 | 100 | 1.4% | Max frequency |
-| Motor 0 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 1 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 2 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 3 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 0 Status | 100 | 100 | 1.4% | Optional feedback |
-| Motor 1 Status | 100 | 100 | 1.4% | Optional feedback |
-| Motor 2 Status | 100 | 100 | 1.4% | Optional feedback |
-| Motor 3 Status | 100 | 100 | 1.4% | Optional feedback |
-| **TOTAL** | | **2710** | **38.7%** | **61.3% margin** ✅ |
+- **Host CAN** (GP8 CS): Expansion board channel — waypoints, commands, telemetry (Host ↔ Controller)
+- **Motor CAN** (GP9 CS): Local to the joint — motor torque commands and status (Controller ↔ Motors)
 
-#### 4.3.2 Per Joint (Multi-DOF Waypoint - Optimized)
+These buses are electrically isolated. Bandwidth must be analyzed separately.
 
-| Message Type | Freq (Hz) | Frame/s | Bandwidth | Notes |
-|--------------|-----------|---------|-----------|-------|
-| Time Sync | 10 | 10 | 0.14% | Broadcast to all |
-| **Multi-DOF Waypoint** | 100 | **100** | **1.4%** | **All 3 DOFs in 1 frame** |
-| Motor 0 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 1 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 2 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 3 Cmd | 500 | 500 | 7.1% | Inner PID loop |
-| Motor 0 Status | 100 | 100 | 1.4% | Optional feedback |
-| Motor 1 Status | 100 | 100 | 1.4% | Optional feedback |
-| Motor 2 Status | 100 | 100 | 1.4% | Optional feedback |
-| Motor 3 Status | 100 | 100 | 1.4% | Optional feedback |
-| **TOTAL** | | **2510** | **35.9%** | **64.1% margin** ✅ |
+#### Host CAN (per channel, dedicated, point-to-point):
 
-**Savings with Multi-DOF format:**
-- **Waypoint frames reduced**: 300 → 100 (66% reduction)
-- **Total bandwidth reduced**: 38.7% → 35.9%
-- **Additional headroom**: +2.8% for future features
+| Message Type | Dir | Freq (Hz) | Frame/s | Bandwidth | Notes |
+|--------------|-----|-----------|---------|-----------|-------|
+| Time Sync | H→C | 10 | 10 | 0.14% | Broadcast |
+| Multi-DOF Waypoint | H→C | 100 | 100 | 1.4% | All 3 DOFs in 1 frame |
+| Config/Commands | H→C | sporadic | <10 | <0.14% | PID set, interpolation, etc. |
+| Encoder Stream | C→H | 100 | 100 | 1.4% | Optional |
+| PID Diagnostics | C→H | 50-100 | 100-200 | 1.4-2.8% | Optional (2-4 frames) |
+| Status/Feedback | C→H | 10 | 10 | 0.14% | Heartbeat |
+| **TOTAL** | | | **~330-430** | **~4.7-6.1%** | **~94% margin** |
 
-#### 4.3.3 Host CAN Bus Analysis (Gateway → 20 Joints)
+#### Motor CAN (per joint, local bus):
 
-**Scenario: Full Robot with CAN Gateway (3 physical buses)**
+| Message Type | Dir | Freq (Hz) | Frame/s | Bandwidth | Notes |
+|--------------|-----|-----------|---------|-----------|-------|
+| Motor 0 Torque Cmd | C→M | 500 | 500 | 7.1% | Inner PID |
+| Motor 1 Torque Cmd | C→M | 500 | 500 | 7.1% | Inner PID |
+| Motor 2 Torque Cmd | C→M | 500 | 500 | 7.1% | Inner PID |
+| Motor 3 Torque Cmd | C→M | 500 | 500 | 7.1% | Inner PID |
+| Motor 0-3 Status | M→C | 500 | 2000 | 28.6% | LKM reply |
+| **TOTAL** | | | **4000** | **57.1%** | **42.9% margin** |
 
-| Bus | Joints | DOFs | Waypoint Frames @ 100 Hz | Bandwidth |
-|-----|--------|------|--------------------------|-----------|
-| Bus 0 (Leg L) | 6 | ~12 | 600 (legacy) / **200 (multi-DOF)** | 8.6% / **2.9%** |
-| Bus 1 (Leg R) | 6 | ~12 | 600 (legacy) / **200 (multi-DOF)** | 8.6% / **2.9%** |
-| Bus 2 (Arms+) | 8 | ~18 | 800 (legacy) / **267 (multi-DOF)** | 11.4% / **3.8%** |
+**Note**: Motor CAN is the tighter bus. At 500 Hz with 4 motors (command + reply), utilization is ~57%. This leaves margin for future expansion but rules out adding more motors per joint without CAN FD or reduced poll rate.
 
-**Conclusion:** Multi-DOF format reduces host bus traffic by **66%**, leaving ample bandwidth for status feedback and diagnostics.
+#### Jetson SPI Bus Load (aggregate):
 
-**Notes:**
-- **Theoretical max**: ~7000 frame/s @ 1 Mbps (8-byte frames)
-- **Practical max**: ~5000 frame/s (accounting for overhead)
-- **Current usage (Multi-DOF)**: 2510 frame/s (50% of practical max)
-- **Margin**: Sufficient for future features (status feedback, diagnostics)
+Each SPI bus on the Jetson serves one 8-channel expansion board. The Jetson sends waypoints and commands to all joints on that board sequentially via SPI.
+
+| SPI Bus | Board | Joints | WP Frames @ 100 Hz | SPI Time/Cycle |
+|---------|-------|--------|---------------------|----------------|
+| SPI0 | Board #1 | 6 (Leg L) | 600 | ~0.4 ms |
+| SPI1 | Board #2 | 8 (Leg R + Torso) | 800 | ~0.5 ms |
+| SPI2 | Board #3 | 6-8 (Arm L) | 600-800 | ~0.4-0.5 ms |
+| SPI3 | Board #4 | 6-8 (Arm R) | 600-800 | ~0.4-0.5 ms |
+
+**Note**: SPI time per frame ~ 60 us (8 bytes @ 10 MHz + MCP2515 overhead). All within 10 ms cycle budget at 100 Hz. This load is Host CAN only — Motor CAN traffic is local to each Pico and never traverses the expansion board.
 
 ---
 
-## 5. Software Architecture
+## 5. Waypoint Streaming
 
-### 5.1 Host Software (Python on Jetson)
+This section documents the complete waypoint streaming pipeline — how the host sends batches of waypoints and how the firmware consumes them with deterministic timing.
 
-**Framework**: `python-can` library with SocketCAN interface
+### 5.1 Batch Anchor Timing
 
-**Key Components:**
-1. **CanManager**: Multi-bus management
-2. **TrajectoryPlanner**: Generate waypoint streams
-3. **TimeSync**: Broadcast time synchronization
-4. **EmergencyStop**: Safety system
-5. **StatusMonitor**: Collect feedback (optional)
+**Problem**: When the host sends waypoints sequentially (2ms delay between frames), each WP arrives at a slightly different time. If `t_offset_ms` is relative to reception time, cumulative transmission delay distorts the trajectory.
 
-**Class Diagram:**
-```python
-class CanManager:
-    def __init__(self):
-        self.buses = {}  # Dict[joint_name, can.Bus]
-        self.listeners = {}  # Dict[joint_name, Thread]
-    
-    def connect_joint(self, joint_name: str, can_interface: str):
-        """Connect a dedicated CAN bus for a specific joint"""
-        bus = can.interface.Bus(
-            interface='socketcan',
-            channel=can_interface,  # e.g., 'can0'
-            bitrate=1_000_000
-        )
-        self.buses[joint_name] = bus
-        
-        # Start listener thread
-        listener = threading.Thread(
-            target=self._listen_bus,
-            args=(joint_name, bus)
-        )
-        listener.start()
-        self.listeners[joint_name] = listener
-    
-    def broadcast_time_sync(self):
-        """Send time sync to all joints in parallel"""
-        timestamp_ms = int(time.time() * 1000)
-        threads = []
-        
-        for joint_name, bus in self.buses.items():
-            t = threading.Thread(
-                target=self._send_time_sync,
-                args=(bus, timestamp_ms)
-            )
-            threads.append(t)
-            t.start()
-        
-        for t in threads:
-            t.join()
-    
-    def send_waypoint(self, joint_name: str, dof_index: int, 
-                      target_angle: float, t_arrival_ms: int, mode: int = 0):
-        """Send waypoint to specific joint"""
-        bus = self.buses.get(joint_name)
-        if not bus:
-            raise ValueError(f"Joint {joint_name} not connected")
-        
-        target_angle_int = int(target_angle * 100)
-        data = struct.pack('<BhIB', 
-            dof_index,
-            target_angle_int,
-            t_arrival_ms,
-            mode
-        ) + b'\x00'
-        
-        msg = can.Message(
-            arbitration_id=0x010 + dof_index,
-            data=data,
-            is_extended_id=False
-        )
-        bus.send(msg)
-    
-    def emergency_stop(self):
-        """Broadcast emergency stop to all joints"""
-        msg = can.Message(
-            arbitration_id=0x000,
-            data=b'\x00' * 8,
-            is_extended_id=False
-        )
-        
-        for bus in self.buses.values():
-            bus.send(msg)
+**Solution**: The firmware captures `millis()` when the first waypoint of a batch arrives, and uses this as the **batch anchor** for all subsequent waypoints in the batch.
+
+```
+Host sends batch:                    Firmware receives:
+  WP0 (t_offset=50ms)  ──2ms──▶     batch_anchor = millis()
+  WP1 (t_offset=60ms)  ──2ms──▶     t_arrival = anchor + 60ms
+  WP2 (t_offset=70ms)  ──2ms──▶     t_arrival = anchor + 70ms
+  ...
+  WP99 (t_offset=1050ms) ─2ms─▶     t_arrival = anchor + 1050ms
 ```
 
-**Configuration Example:**
-```python
-# config.py
-JOINT_CAN_MAPPING = {
-    # Lower Body
-    'ANKLE_LEFT_PD': 'can0',
-    'ANKLE_LEFT_IE': 'can1',
-    'KNEE_LEFT': 'can2',
-    'HIP_LEFT_FE': 'can3',
-    'HIP_LEFT_AA': 'can4',
-    'HIP_LEFT_ROT': 'can5',
-    'ANKLE_RIGHT_PD': 'can6',
-    'ANKLE_RIGHT_IE': 'can7',
-    'KNEE_RIGHT': 'can8',
-    'HIP_RIGHT_FE': 'can9',
-    'HIP_RIGHT_AA': 'can10',
-    'HIP_RIGHT_ROT': 'can11',
-    
-    # Upper Body
-    'SHOULDER_LEFT_FE': 'can12',
-    'SHOULDER_LEFT_AA': 'can13',
-    'SHOULDER_LEFT_ROT': 'can14',
-    'ELBOW_LEFT': 'can15',
-    'SHOULDER_RIGHT_FE': 'can16',
-    'SHOULDER_RIGHT_AA': 'can17',
-    'SHOULDER_RIGHT_ROT': 'can18',
-    'ELBOW_RIGHT': 'can19',
-}
-
-# Initialize
-can_manager = CanManager()
-for joint_name, can_interface in JOINT_CAN_MAPPING.items():
-    can_manager.connect_joint(joint_name, can_interface)
-
-# Start time sync (10 Hz)
-schedule.every(0.1).seconds.do(can_manager.broadcast_time_sync)
-```
-
-### 5.2 Firmware (C++ on RP2350 Pico 2)
-
-**Current Implementation** (from existing codebase):
-- **Core0**: Serial communication (debug/config only)
-- **Core1**: `pollUnifiedCan()` + Motor control + Movement execution
-
-**Key Functions:**
+**Firmware logic** (core1.cpp):
 ```cpp
-// In core1.cpp
-void core1_loop() {
-  while (true) {
-    // Poll CAN bus for host commands
-    pollUnifiedCan();
-    
-    // Check emergency stop
-    if (emergency_stop_requested) {
-      stopAllMotors();
-      // ...
-    }
-    
-    // Process movement commands
-    // ...
-  }
+if (is_new_batch) {
+    batch_anchor_local_ms = millis();
+    wp_reanchor_reset_all();
 }
-
-void pollUnifiedCan() {
-  extern MCP_CAN CAN;
-  
-  if (CAN.checkReceive() != CAN_MSGAVAIL) {
-    return;
-  }
-  
-  while (CAN.checkReceive() == CAN_MSGAVAIL) {
-    unsigned long rx_id = 0;
-    unsigned char len = 0;
-    unsigned char buf[8] = {0};
-    
-    if (CAN.readMsgBuf(&rx_id, &len, buf) != CAN_OK) {
-      break;
-    }
-    
-    // Dispatch based on CAN ID
-    if (rx_id == CAN_ID_TIME_SYNC) {
-      handleTimeSyncFrame(buf, len);
-    } else if (rx_id == CAN_ID_EMERGENCY_STOP) {
-      emergency_stop_requested = true;
-    } else if (rx_id >= CAN_ID_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
-      handleWaypointFrame(rx_id, buf, len);
-    }
-  }
-}
+uint32_t t_arrival_local = batch_anchor_local_ms + multi_wp.t_offset_ms;
 ```
 
-**Waypoint Buffer Management:**
+This makes the firmware **immune to sender-side jitter** — whether the sender is a browser, Python host, or Jetson under GPU load, the result is identical: waypoints are consumed at 500 Hz with deterministic timing.
+
+### 5.2 Consume-Side Re-anchor
+
+Over time, the firmware's local clock may drift relative to the intended trajectory timing. The re-anchor mechanism periodically measures and corrects this drift.
+
+**How it works**: Every N waypoints consumed (set via CAN ID 0x01B), the firmware compares `t_now` with the raw `t_arrival` of the current waypoint. If positive drift is detected (firmware is ahead), a correction is applied to all future arrival times.
+
 ```cpp
-// In waypoint_buffer.cpp
-class WaypointBuffer {
-  WaypointEntry buffer[WAYPOINT_BUFFER_DEPTH];  // 20 entries
-  uint8_t count;
-  WaypointState state;  // IDLE, MOVING, HOLDING
-  
-  bool push(const WaypointEntry& entry);
-  WaypointEntry* peek();
-  void pop();
-  // ...
+// In JointController_Waypoint.cpp (consume loop)
+if (wp_reanchor_interval > 0 && wp_consumed_count[dof] >= wp_reanchor_interval) {
+    int32_t new_correction = (int32_t)(t_now - raw_t_arrival);
+    if (new_correction > 0) {
+        wp_reanchor_correction_ms[dof] = new_correction;  // absolute, not incremental
+    } else {
+        wp_reanchor_correction_ms[dof] = 0;  // clear stale correction
+    }
+    wp_consumed_count[dof] = 0;
+}
+
+// Applied during interpolation:
+uint32_t effective_arrival = t_arrival + wp_reanchor_correction_ms[dof];
+```
+
+**Key design**: correction is **absolute** (not incremental), and is **explicitly cleared** when drift is non-positive. This prevents stale corrections from accumulating.
+
+### 5.3 Streaming Continuo (Batch-dopo-Batch)
+
+For long trajectories (e.g., 30 seconds), the host splits the trajectory into consecutive batches (typically 1s each, ~100 WP @ 100 Hz).
+
+```
+Time     Host sends                             Firmware state
+─────    ──────────────────                     ──────────────
+T=0s     Batch 1: 0x005 + 0x002 + 0x01B        DOF IDLE → MOVING
+         + 100 WP (t_offset 50..1050ms)         batch_anchor = millis()
+                                                 reanchor_reset_all()
+
+T~0.2s   (send complete, 100 WP × 2ms)         Consuming WPs from buffer
+
+T~1.0s   Batch 2: 0x002 + 0x01B                DOF still MOVING
+         + 100 WP (t_offset 50..1050ms)         t_arrival = old_anchor + 50 → IN THE PAST
+                                                 → batch_anchor = millis() (auto re-anchor)
+                                                 → wp_reanchor_reset_all()
+
+T~2.0s   Batch 3: same mechanism               Same auto re-anchor
+  ...      ...                                   ...
+T~29s    Batch 30: last batch                   Last WP → DOF → HOLDING
+```
+
+**What happens at the boundary between batch N and batch N+1:**
+
+1. DOF stays MOVING (firmware hasn't consumed all of batch N yet)
+2. First WP of batch N+1 has `t_offset_ms ~ 50ms` (small lead)
+3. Firmware computes `t_arrival = old_anchor + 50ms` → **in the past** (old_anchor is ~1s ago)
+4. The "arrival in past" re-anchor triggers:
+   ```cpp
+   if ((int32_t)(t_now - t_arrival_local) > 0) {
+       batch_anchor_local_ms = t_now;
+       t_arrival_local = t_now + multi_wp.t_offset_ms;
+       wp_reanchor_reset_all();
+   }
+   ```
+5. Both `is_new_batch` and arrival-in-past call `wp_reanchor_reset_all()`
+6. Re-anchor correction restarts from zero with each new batch
+
+**Notes for Jetson app:**
+- `0x005` (interpolation mode): sent **once** at streaming start
+- `0x002` (time sync): sent **before each batch**
+- `0x01B` (re-anchor interval): sent **before each batch** (or once at start)
+- Waypoints: 2ms delay between frames (prevents MCP2515 TX buffer overflow)
+
+**Recommended: Batch Sequence Number** (future enhancement)
+
+For long streaming sessions, a monotonic `batch_seq` counter in the time sync frame (0x002) helps diagnose out-of-order delivery and stale batch detection:
+
+```
+0x002 Time Sync frame (proposed extension):
+  Byte 0-3: uint32_t host_time_ms  (existing)
+  Byte 4-5: uint16_t batch_seq     (monotonic, wraps at 65535)
+  Byte 6-7: Reserved
+```
+
+Firmware can detect: (a) gaps in `batch_seq` → missed batch, (b) `batch_seq <= last_batch_seq` → stale/redelivered. Currently unused — bytes 4-7 of the time sync frame are reserved.
+
+### 5.4 Timing Parameters
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Inter-waypoint delay | 2 ms | Prevents MCP2515 TX buffer overflow |
+| Min lead time | 15 ms | WPs with lead < 15ms are skipped |
+| Max consecutive late | 10 | 10 consecutive late WPs → abort batch |
+| Initial offset (1st WP t_offset) | 50 ms | Margin for CAN latency + processing |
+| Waypoint rate (typical) | 100 Hz | 10ms between consecutive WP targets |
+| Firmware buffer | 2000 WP/DOF | ~20s of buffer at 100 Hz |
+| Consume loop | 500 Hz | Core1, every 2ms |
+
+**Lead time calculation for Jetson:**
+```
+Batch send time = num_waypoints × inter_wp_delay = 100 WP × 2ms = 200ms
+If batch duration = 1000ms and initial_offset = 50ms:
+  - First WP: 50ms lead
+  - Last WP: sent at T+200ms, t_arrival = 1050ms → lead = 850ms
+  - All WPs arrive in time
+```
+
+### 5.5 Jetson Reference Implementation
+
+```python
+import can
+import struct
+import time
+
+JOINT_ID = 0x04  # e.g., ANKLE_RIGHT (from joint_config.json)
+CAN_ID_WP = 0x380 + JOINT_ID
+UNUSED_DOF = 0x7FFF
+BATCH_DURATION_S = 1.0
+INTER_WP_DELAY_S = 0.002
+INITIAL_OFFSET_MS = 50
+REANCHOR_INTERVAL = 20
+
+bus = can.interface.Bus(channel='can0', bustype='socketcan')
+
+def send_frame(can_id, data):
+    msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
+    bus.send(msg)
+
+def send_time_sync():
+    ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    send_frame(0x002, struct.pack('<I', ts) + bytes(4))
+
+def send_interpolation_mode(mode=0):  # 0=LINEAR
+    send_frame(0x005, bytes([mode]) + bytes(7))
+
+def send_reanchor_interval(interval):
+    send_frame(0x01B, struct.pack('<H', interval) + bytes(6))
+
+def send_waypoint(angle_deg, t_offset_ms, dof=0):
+    angles = [UNUSED_DOF, UNUSED_DOF, UNUSED_DOF]
+    angles[dof] = int(round(angle_deg * 100))
+    data = struct.pack('<hhhH', angles[0], angles[1], angles[2], t_offset_ms)
+    send_frame(CAN_ID_WP, data)
+
+def stream_trajectory(trajectory_points):
+    """
+    trajectory_points: list of (angle_deg, time_s) sorted by time
+    """
+    send_interpolation_mode(0)  # LINEAR, once
+
+    batch_start_idx = 0
+    batch_start_time = trajectory_points[0][1]
+
+    while batch_start_idx < len(trajectory_points):
+        # Pre-batch: sync + reanchor
+        send_time_sync()
+        time.sleep(0.001)
+        send_reanchor_interval(REANCHOR_INTERVAL)
+        time.sleep(0.001)
+
+        # Send WPs for current batch
+        batch_end_time = batch_start_time + BATCH_DURATION_S
+        i = batch_start_idx
+
+        while i < len(trajectory_points) and trajectory_points[i][1] < batch_end_time:
+            angle, t_abs = trajectory_points[i]
+            t_offset = INITIAL_OFFSET_MS + int((t_abs - batch_start_time) * 1000)
+            send_waypoint(angle, t_offset)
+            time.sleep(INTER_WP_DELAY_S)
+            i += 1
+
+        # Prepare next batch
+        batch_send_elapsed = (i - batch_start_idx) * INTER_WP_DELAY_S
+        batch_start_idx = i
+        if i < len(trajectory_points):
+            batch_start_time = trajectory_points[i][1]
+
+        # Wait until current batch is nearly consumed before sending next
+        wait_s = BATCH_DURATION_S - batch_send_elapsed - 0.1  # 100ms overlap
+        if wait_s > 0:
+            time.sleep(wait_s)
+```
+
+---
+
+## 6. Controller-Side Implementation
+
+### 6.1 Waypoint Buffer
+
+```cpp
+#define WAYPOINT_BUFFER_DEPTH 2000  // ~20s at 100 Hz
+
+struct WaypointEntry {
+    uint8_t  dof_index;
+    float    target_angle_deg;
+    uint32_t t_arrival_ms;
+    uint8_t  mode;
+};
+
+enum WaypointState {
+    IDLE,      // No waypoints, no motion
+    MOVING,    // Executing trajectory
+    HOLDING,   // Holding position (buffer empty but not stopped)
+    ERROR      // Error condition
 };
 ```
 
-**Movement Execution** (future implementation):
+**Memory footprint**: ~20 bytes per entry x 2000 = ~40 KB per DOF. With 3 DOFs: ~120 KB (23% of RP2350 RAM).
+
+### 6.2 Execution Logic (Cascade Control)
+
+The main control loop uses a **dual-loop cascade architecture**: outer PID @ configurable rate (default 500 Hz), inner motor control @ 500 Hz.
+
+**Design philosophy**: The controller uses **linear interpolation** (or cosine, configurable via 0x005) between consecutive waypoints. Smoothness comes from **waypoint density** (50-100 Hz from host), not from complex on-controller trajectory generation.
+
 ```cpp
-// Consume waypoints and generate smooth motion
-void updateTrajectory_Linear() {
-  for (int dof = 0; dof < DOF_COUNT; dof++) {
-    WaypointEntry* next = waypoint_buffer_peek(dof);
-    if (!next) {
-      // Hold last position
-      continue;
-    }
-    
+void updateTrajectory(uint8_t dof) {
+    WaypointBuffer *buf = &waypoint_buffers[dof];
     uint32_t t_now = getAbsoluteTimeMs();
-    if (t_now >= next->t_arrival_ms) {
-      // Reached waypoint, pop and continue
-      waypoint_buffer_pop(dof);
-      continue;
+
+    // === CHECK WAYPOINT TRANSITION ===
+    if (buf->count > 0 && t_now >= buf->buffer[0].t_arrival_ms) {
+        float reached_angle = buf->buffer[0].target_angle_deg;
+        buf->prev_angle = reached_angle;
+        buf->prev_time = buf->buffer[0].t_arrival_ms;
+        shift_buffer(buf);
+        buf->count--;
+
+        if (buf->count == 0) {
+            buf->state = HOLDING;
+        }
     }
-    
-    // Linear interpolation
-    float progress = (t_now - prev_time) / (next->t_arrival_ms - prev_time);
-    float q_des = prev_angle + (next->target_angle_deg - prev_angle) * progress;
-    
-    // Send to outer PID loop
-    // ...
-  }
+
+    // === OUTER LOOP (Joint PID) ===
+    float q_des;
+    if (buf->state == MOVING && buf->count > 0) {
+        // Linear interpolation
+        WaypointEntry *next_wp = &buf->buffer[0];
+        uint32_t effective_arrival = next_wp->t_arrival_ms
+                                   + wp_reanchor_correction_ms[dof];
+        float time_total = effective_arrival - buf->prev_time;
+        float time_elapsed = t_now - buf->prev_time;
+        float progress = clamp(time_elapsed / time_total, 0.0f, 1.0f);
+        q_des = buf->prev_angle
+              + (next_wp->target_angle_deg - buf->prev_angle) * progress;
+    } else {
+        q_des = getCurrentAngle(dof);  // HOLDING: maintain position
+    }
+
+    // Outer PID → delta_theta → motor references
+    float error = q_des - getCurrentAngle(dof);
+    float delta_theta = computeOuterPID(dof, error);
+    computeMotorReferences(dof, delta_theta);
+
+    // === INNER LOOP @ 500 Hz (Motor Control) ===
+    executeMotorControl(dof);
+}
+```
+
+### 6.3 State Machine
+
+```
+         ┌──────────┐
+         │   IDLE   │ (No waypoints in buffer)
+         └────┬─────┘
+              │ First waypoint arrives
+              ▼
+         ┌──────────┐
+    ┌───│  MOVING  │◄───┐
+    │   └────┬─────┘    │ New waypoint arrives
+    │        │           │
+    │        │ Buffer    │
+    │        │ empty     │
+    │        ▼           │
+    │   ┌──────────┐    │
+    └──►│ HOLDING  │────┘
+        └──────────┘
+             │
+             │ Timeout / error
+             ▼
+        ┌──────────┐
+        │  ERROR   │
+        └──────────┘
+```
+
+### 6.4 Time Synchronization
+
+```cpp
+volatile int32_t clock_offset_ms = 0;
+volatile bool clock_synced = false;
+
+void onTimeSyncReceived(const uint8_t *data) {
+    uint32_t t_host_ms = 0;
+    memcpy(&t_host_ms, data, sizeof(uint32_t));
+    uint32_t t_local = millis();
+    clock_offset_ms = static_cast<int32_t>(t_host_ms) - static_cast<int32_t>(t_local);
+    clock_synced = true;
+}
+
+uint32_t getAbsoluteTimeMs() {
+    if (!clock_synced) return millis();
+    return millis() + clock_offset_ms;
 }
 ```
 
 ---
 
-## 6. System Integration
+## 7. Jetson-to-CAN Architecture (D028)
 
-### 6.1 Jetson Setup
+### 7.1 Why Jetson Drives CAN Directly
+
+**Decision D028** (2026-02-15): Adopt Jetson direct CAN architecture, defer Pico RP2040 dispatcher.
+
+The Jetson sends CAN frames directly to joint controllers via SPI-connected MCP2515 expansion boards. No intermediate bare-metal MCU is required.
+
+**Rationale**: With **batch anchor timing** (firmware captures `millis()` on the first WP and schedules the entire batch from that anchor) and **consume-side re-anchor** (periodic drift compensation), the firmware is immune to sender-side jitter. Whether the sender is a browser, Python host, or Jetson under GPU load, waypoints are consumed at 500 Hz with deterministic firmware-side timing.
+
+A dedicated Pico RP2040 dispatcher would add hardware complexity (board, firmware, power, debug surface) without measurable benefit — determinism is already guaranteed at the receiver.
+
+**Open door**: If empirical Jetson tests reveal scheduling stalls exceeding the buffer lead time (~20s at 100 Hz), or if multi-bus CAN fanout is needed (e.g., >8 joints on one bus), a Pico dispatcher can be reintroduced as a transparent CAN relay without firmware changes.
+
+### 7.2 Jetson Setup (SocketCAN)
 
 **Hardware Requirements:**
 - **Jetson Orin Nano** or **Orin NX** (recommended)
-- **3x CAN Expansion Boards** (20 channels total)
-- **SPI connections**: SPI0, SPI1, SPI2 (or use I2C for additional boards)
+- **4x CAN Expansion Boards** (32 channels, 20-26 used)
+- **SPI connections**: SPI0, SPI1, SPI2, SPI3
 
-**Software Requirements:**
+**Software Setup:**
 ```bash
 # Install dependencies
 sudo apt update
 sudo apt install can-utils python3-can
 
-# Enable SPI
-sudo raspi-config  # Enable SPI0, SPI1, SPI2
-
 # Load MCP2515 kernel module
 sudo modprobe mcp251x
 
-# Configure CAN interfaces (example for can0)
+# Configure CAN interface
 sudo ip link set can0 type can bitrate 1000000
 sudo ip link set can0 up
 
@@ -1185,31 +894,31 @@ candump can0
 
 / {
     compatible = "nvidia,jetson-orin-nano";
-    
+
     fragment@0 {
         target = <&spi0>;
         __overlay__ {
             #address-cells = <1>;
             #size-cells = <0>;
-            
+
             can0: mcp2515@0 {
                 compatible = "microchip,mcp2515";
                 reg = <0>;
                 spi-max-frequency = <10000000>;
                 interrupt-parent = <&gpio>;
-                interrupts = <25 0x2>;  // GPIO25, falling edge
+                interrupts = <25 0x2>;
                 clocks = <&can0_osc>;
             };
         };
     };
-    
+
     fragment@1 {
         target-path = "/";
         __overlay__ {
             can0_osc: can0-osc {
                 compatible = "fixed-clock";
                 #clock-cells = <0>;
-                clock-frequency = <8000000>;  // 8 MHz crystal
+                clock-frequency = <8000000>;
             };
         };
     };
@@ -1220,588 +929,392 @@ candump can0
 ```bash
 dtc -@ -I dts -O dtb -o mcp2515-can0.dtbo mcp2515-can0.dts
 sudo cp mcp2515-can0.dtbo /boot/overlays/
-sudo nano /boot/config.txt
-# Add: dtoverlay=mcp2515-can0
+# Add to config: dtoverlay=mcp2515-can0
 sudo reboot
 ```
 
-### 6.2 Real-Time Kernel (Optional but Recommended)
+### 7.3 Gateway as Future Option
 
-**Purpose**: Reduce jitter from ±2ms to ±0.5ms
+If the direct Jetson approach proves insufficient under real workloads, a CAN Gateway can be reintroduced:
 
-**Installation:**
-```bash
-# Download RT kernel for Jetson
-wget https://developer.nvidia.com/embedded/l4t/r35_release_v1.0/sources/public_sources.tbz2
-
-# Extract and build
-tar xjf public_sources.tbz2
-cd Linux_for_Tegra/source/public/kernel/kernel-5.10/
-./scripts/rt-patch.sh apply-patches
-
-# Configure for PREEMPT_RT
-make menuconfig
-# Select: General setup -> Preemption Model -> Fully Preemptible Kernel (RT)
-
-# Build and install
-make -j8
-sudo make modules_install
-sudo make install
-sudo reboot
+```
+┌───────────┐  USB CDC  ┌───────────────┐  CAN Bus  ┌──────────┐
+│   JETSON  │──────────▶│ CAN Gateway   │──────────▶│ Pico 1-N │
+│           │           │ (RP2350)      │           │ Joints   │
+└───────────┘           │ Core0: USB RX │           └──────────┘
+                        │ Core1: CAN TX │
+                        └───────────────┘
 ```
 
-**Verify RT kernel:**
-```bash
-uname -a
-# Should show: PREEMPT_RT
-```
+**Quantitative Go/No-Go Criteria** (measure during Jetson integration tests):
 
-**Python RT scheduling:**
-```python
-import os
-import ctypes
+| Metric | Threshold (go/no-go) | How to Measure |
+|--------|----------------------|----------------|
+| Late WP ratio | > 1% of WPs arrive past scheduled time | Firmware counter: `wp_late_count / wp_consumed_count` |
+| Re-anchor correction magnitude | > 20 ms sustained (>10 consecutive) | Firmware telemetry: `reanchor_correction_ms` |
+| Frame loss rate | > 0.1% (CAN TX errors / total TX) | Host-side `python-can` error counters |
+| Buffer underrun events | > 0 in 60s steady-state streaming | Firmware counter: `buffer_underrun_count` |
+| Batch gap (inter-batch silence) | > 500 ms (buffer drains to <10%) | Firmware: `wp_buffer_fill` telemetry |
 
-# Set real-time priority
-libc = ctypes.CDLL('libc.so.6')
-SCHED_FIFO = 1
+If **any** metric exceeds its threshold under sustained GPU load (e.g., inference + trajectory planning), the gateway path should be prototyped.
 
-class sched_param(ctypes.Structure):
-    _fields_ = [('sched_priority', ctypes.c_int)]
+**Cost**: ~38.50 EUR (Pico 2 + 3x MCP2515 + connectors)
 
-param = sched_param()
-param.sched_priority = 50  # 1-99, higher = more priority
-
-libc.sched_setscheduler(0, SCHED_FIFO, ctypes.byref(param))
-```
-
-### 6.3 Wiring and Assembly
-
-**CAN Bus Wiring (per joint):**
-```
-[Jetson] → [CAN Expansion Board] → [Pico] → [4x Motors]
-   SPI         CAN (CANH/CANL)       CAN      CAN
-```
-
-**Cable Lengths:**
-- **Jetson ↔ Expansion Board**: 10-20 cm (short SPI cable)
-- **Expansion Board ↔ Pico**: 0.5-2 m (CAN bus, depends on robot size)
-- **Pico ↔ Motors**: 0.2-0.5 m (CAN bus, local to joint)
-
-**Power Distribution:**
-- **Jetson**: 12-19V input (barrel jack or USB-C PD)
-- **CAN Expansion Boards**: 5V from Jetson GPIO or external PSU
-- **Picos**: 5V from USB or external PSU
-- **Motors**: 24-48V (separate high-power bus)
-
-**Grounding:**
-- **Common ground** for all CAN buses (critical!)
-- **Star grounding** topology (all grounds to central point)
-- **Avoid ground loops** (use isolated power supplies if needed)
+The gateway would act as a **transparent CAN relay** — no firmware changes needed on the joint controllers.
 
 ---
 
-## 7. Performance Specifications
+## 8. Error Handling
 
-### 7.1 Latency Budget
+### 8.1 Timeout Detection
+
+```cpp
+#define COMMAND_TIMEOUT_MS  100  // 2x worst update rate @ 50Hz
+
+// Controller side:
+if (millis() - last_command_time > COMMAND_TIMEOUT_MS) {
+    emergency_stop_all_motors();
+    send_error_status(ERROR_COMMAND_TIMEOUT);
+}
+
+// Host side:
+if (time.time() - last_status_time[joint_id] > STATUS_TIMEOUT_MS / 1000.0) {
+    mark_joint_offline(joint_id);
+    trigger_safe_mode();
+}
+```
+
+### 8.2 Clock Drift Detection
+
+```cpp
+#define RESYNC_INTERVAL_MS  30000
+
+void periodic_sync_check() {
+    if (millis() - last_sync_time > RESYNC_INTERVAL_MS) {
+        send_time_sync_broadcast();
+        last_sync_time = millis();
+    }
+}
+```
+
+### 8.3 Buffer Overflow
+
+```cpp
+if (buffer_full) {
+    LOG_WARN("Buffer full, rejecting waypoint");
+    set_status_flag(STATUS_BUFFER_FULL);
+    notify_host_buffer_full();
+}
+```
+
+Host should throttle waypoint publish rate when `STATUS_BUFFER_FULL` is seen, retry once flag clears, alert operator if flag persists > `COMMAND_TIMEOUT_MS`.
+
+### 8.4 CAN Controller Faults
+
+- Monitor MCP2515 TX/RX error counters via `readRxTxErrorCount()`. If either exceeds 96, issue soft reset.
+- If a controller performs >3 resets in <10s, raise `STATUS_ERROR` and notify host.
+- Host keeps a rolling log of CAN errors to correlate with wiring issues or power dips.
+
+### 8.5 Runtime Telemetry Contract
+
+The following telemetry signals form the **minimum observability contract** between firmware and host. These should be streamable on demand (gated by a CAN command, similar to PID diagnostics).
+
+#### Firmware → Host (per joint, via Host CAN):
+
+| Signal | Type | Update Rate | Description |
+|--------|------|-------------|-------------|
+| `wp_buffer_fill` | uint16_t | 10 Hz | Waypoints remaining in buffer (per DOF, worst-case) |
+| `wp_late_count` | uint16_t | per batch | WPs consumed past their scheduled time |
+| `wp_consumed_total` | uint32_t | per batch | Total WPs consumed since last reset |
+| `reanchor_correction_ms` | int16_t | per event | Last re-anchor correction applied (ms) |
+| `buffer_underrun_count` | uint8_t | 1 Hz | Buffer empty events since last reset |
+| `can_tx_error_count` | uint8_t | 1 Hz | Host CAN MCP2515 TX error counter |
+| `can_rx_error_count` | uint8_t | 1 Hz | Host CAN MCP2515 RX error counter |
+| `motor_can_tx_errors` | uint8_t | 1 Hz | Motor CAN MCP2515 TX error counter |
+| `loop_overrun_count` | uint8_t | 1 Hz | Core1 control loops exceeding 2ms deadline |
+
+#### Host → Firmware (global):
+
+| Signal | Type | Description |
+|--------|------|-------------|
+| `batch_seq` | uint16_t | Monotonic batch counter (in time sync, see §5.3) |
+| `telemetry_enable` | uint8_t | Bitmask enabling/disabling telemetry streams |
+
+**CAN IDs**: Not yet assigned. Recommended: reserve 0x4D0+joint for telemetry frames (2-3 frames per joint, packed).
+
+**Implementation status**: Specification only — firmware counters partially exist (e.g., `wp_consumed_count`), but no CAN streaming path is implemented yet.
+
+---
+
+## 9. Performance Specifications
+
+### 9.1 Latency Budget
 
 | Stage | Latency | Notes |
 |-------|---------|-------|
-| **Host: Trajectory Planning** | 0-10 ms | Depends on complexity |
-| **Host: CAN Frame Preparation** | < 50 µs | Python overhead |
-| **Jetson SPI → MCP2515** | < 50 µs | SPI @ 10 MHz |
-| **MCP2515 → CAN Bus** | < 100 µs | 8 bytes @ 1 Mbps |
-| **Pico: CAN RX Processing** | < 20 µs | Interrupt-driven |
-| **Pico: Waypoint Buffer Push** | < 10 µs | Simple FIFO |
-| **Pico: Trajectory Interpolation** | < 50 µs | Linear interpolation |
-| **Pico: PID Calculation** | < 100 µs | Cascade control |
-| **Pico: Motor CAN TX** | < 100 µs | 8 bytes @ 1 Mbps |
-| **Motor: Command Processing** | < 500 µs | LKM servo firmware |
-| **TOTAL (Host → Motor)** | **< 1 ms** | **Excellent!** ✅ |
+| Host: Trajectory Planning | 0-10 ms | Depends on complexity |
+| Host: CAN Frame Preparation | < 50 us | Python overhead |
+| Jetson SPI → MCP2515 | < 50 us | SPI @ 10 MHz |
+| MCP2515 → CAN Bus | < 100 us | 8 bytes @ 1 Mbps |
+| Pico: CAN RX Processing | < 20 us | Interrupt-driven |
+| Pico: Waypoint Buffer Push | < 10 us | Simple FIFO |
+| Pico: Trajectory Interpolation | < 50 us | Linear interpolation |
+| Pico: PID Calculation | < 100 us | Cascade control |
+| Pico: Motor CAN TX | < 100 us | 8 bytes @ 1 Mbps |
+| Motor: Command Processing | < 500 us | LKM servo firmware |
+| **TOTAL (single frame transit)** | **< 1 ms** | See note below |
 
-**End-to-End Latency:**
-- **Best case**: 1 ms (direct command)
-- **Typical**: 2-5 ms (with buffering)
-- **Worst case**: 10 ms (with jitter)
+**Latency vs Lead Time**: The < 1 ms figure is the **transit time** for a single CAN frame from host to motor actuation. This is NOT the waypoint-to-motion latency — waypoints are pre-buffered with a configurable initial offset (typically 50 ms, see Section 5.4) to absorb jitter and scheduling variance. The effective command-to-motion latency is `initial_offset + transit` ~ 50 ms for the first waypoint of a batch.
 
-**Comparison:**
-- **Atlas (EtherCAT)**: < 1 ms ⬆️ (better)
-- **Optimus (CAN FD)**: 1-5 ms ≈ (similar)
-- **Figure 01 (CAN 2.0)**: 2-10 ms ≈ (similar)
-- **Unitree (RS485)**: 1-5 ms ≈ (similar)
-
-### 7.2 Jitter Analysis
+### 9.2 Jitter Analysis
 
 **Sources of Jitter:**
-1. **Python scheduling**: ±1-2 ms (Linux non-RT)
-2. **CAN arbitration**: ±50-100 µs (bus collisions)
-3. **SPI transaction**: ±10 µs (negligible)
-4. **Pico interrupt latency**: ±5 µs (negligible)
+1. Python scheduling: +/- 1-2 ms (Linux non-RT) — **mitigated by batch anchor**
+2. CAN arbitration: +/- 50-100 us (bus collisions)
+3. SPI transaction: +/- 10 us (negligible)
+4. Pico interrupt latency: +/- 5 us (negligible)
 
-**Total Jitter:**
-- **Without RT kernel**: ±2 ms ⚠️
-- **With RT kernel**: ±0.5 ms ✅
+**Effective jitter at motor level**: +/- 50-100 us (batch anchor eliminates sender jitter)
 
-**Mitigation Strategies:**
-1. **Use RT kernel** (PREEMPT_RT)
-2. **Set high priority** for CAN threads (`SCHED_FIFO`)
-3. **Pre-buffer waypoints** (10-20 waypoints ahead)
-4. **Use absolute timestamps** (not relative delays)
+**Mitigation (optional):**
+1. RT kernel (PREEMPT_RT) on Jetson — reduces sender jitter further
+2. `SCHED_FIFO` for CAN threads
+3. Pre-buffer waypoints (2000 WP = ~20s ahead)
 
-### 7.3 Synchronization Accuracy
+### 9.3 Synchronization Accuracy
 
 **Time Sync Protocol:**
-- **Frequency**: 10 Hz (every 100 ms)
-- **Latency**: < 200 µs (CAN transmission)
-- **Drift**: < 1 ms per second (RP2350 crystal accuracy)
-- **Correction**: Every 100 ms (sufficient for < 1 ms drift)
+- **Frequency**: Before each batch + periodic 10 Hz
+- **Latency**: < 200 us (CAN transmission)
+- **Drift**: < 1 ms per second (RP2350 crystal)
+- **Correction**: Batch anchor resets drift every batch boundary
 
 **Multi-Joint Coordination:**
-- **Waypoint arrival time**: Absolute timestamp (synchronized)
-- **Coordination error**: < 2 ms (jitter-limited)
-- **Acceptable for humanoid**: ✅ (< 5 ms is imperceptible)
-
-**Comparison:**
-- **EtherCAT**: < 1 µs (hardware sync) ⬆️
-- **CAN-based**: < 2 ms (software sync) ✅
-- **RS485**: < 5 ms (software sync) ⬇️
+- Coordination error: < 2 ms (jitter-limited)
+- Acceptable for humanoid: < 5 ms is imperceptible
 
 ---
 
-## 8. Scalability and Future Upgrades
+## 10. Scalability and Future Upgrades
 
-### 8.1 Current Capacity
+### 10.1 Current Capacity
 
-**20 Joint Controllers:**
-- **3x CAN Expansion Boards** (8 + 8 + 4 channels)
+- **4x CAN Expansion Boards** (8 channels each, 20-26 used)
 - **20x RP2350 Pico 2**
 - **80x Motors** (4 per joint)
-- **Total Cost**: ~€610 (communication hardware only)
+- **Total Cost**: ~900 EUR (communication hardware only, see Section 11)
 
-### 8.2 Expansion Options
+### 10.2 Expansion Options
 
-**Option 1: Add More Joints (up to 24)**
-- **Add 1x CAN Expansion Board** (4 more channels)
-- **Cost**: +€124
-- **Jetson SPI**: Use I2C-to-SPI bridge for 4th board
+| Option | Details | Cost |
+|--------|---------|------|
+| Add more joints (up to 24) | +1 CAN Expansion Board | +124 EUR |
+| Upgrade to CAN FD | Replace MCP2515 with MCP2518FD, 5 Mbps | +100 EUR |
+| Migrate to EtherCAT | Professional-grade, < 1 ms deterministic | +10,000 EUR |
 
-**Option 2: Upgrade to CAN FD**
-- **Replace MCP2515 with MCP2518FD** (CAN FD controller)
-- **Replace TJA1050 with TJA1051T/3** (CAN FD transceiver)
-- **Bandwidth**: 5 Mbps (5x increase)
-- **Cost**: +€100 (for 20 channels)
-- **Benefit**: Support 1 kHz control frequency
+### 10.3 Recommended Upgrade Path
 
-**Option 3: Migrate to EtherCAT**
-- **Replace CAN with EtherCAT slaves** (e.g., Beckhoff EL6695)
-- **Bandwidth**: 100 Mbps
-- **Latency**: < 1 ms (deterministic)
-- **Cost**: +€10,000+ (€500 per node)
-- **Benefit**: Professional-grade performance (Atlas-level)
-
-### 8.3 Recommended Upgrade Path
-
-**Phase 1 (Current): CAN 2.0 @ 1 Mbps** ✅
-- **Target**: Proof-of-concept, 6-12 joints
-- **Cost**: €300-600
-- **Timeline**: 2024 Q4 - 2025 Q1
-
-**Phase 2: CAN 2.0 @ 1 Mbps, Full Robot**
-- **Target**: 20 joints, complete humanoid
-- **Cost**: €610
-- **Timeline**: 2025 Q2-Q3
-
-**Phase 3 (Optional): CAN FD @ 5 Mbps**
-- **Target**: Higher frequency control (1 kHz)
-- **Cost**: +€100
-- **Timeline**: 2025 Q4+
-
-**Phase 4 (Future): EtherCAT**
-- **Target**: Commercial-grade performance
-- **Cost**: +€10,000
-- **Timeline**: 2026+
+1. **Current**: CAN 2.0 @ 1 Mbps — proof-of-concept, 6-12 joints
+2. **Next**: CAN 2.0 @ 1 Mbps, full robot (20 joints)
+3. **Optional**: CAN FD @ 5 Mbps (1 kHz control)
+4. **Future**: EtherCAT (commercial-grade)
 
 ---
 
-## 9. Cost Analysis
+## 11. Cost Analysis
 
-### 9.1 Bill of Materials (20 Joints)
+### 11.1 Bill of Materials (20 Joints)
 
 | Component | Quantity | Unit Cost (EUR) | Total (EUR) |
 |-----------|----------|-----------------|-------------|
 | **CAN Expansion Boards** | | | |
-| PCB (4-layer, 8ch) | 3 | €30 | €90 |
-| MCP2515 | 20 | €6 | €120 |
-| TJA1050 | 20 | €2.50 | €50 |
-| 74HC4051 (SPI mux) | 3 | €1 | €3 |
-| Connectors | 30 | €2 | €60 |
-| Passives (R, C, etc.) | - | €15 | €15 |
-| **Subtotal Expansion Boards** | | | **€338** |
-| | | | |
+| PCB (4-layer, 8ch) | 4 | 30 | 120 |
+| MCP2515 | 32 | 6 | 192 |
+| CAN Transceiver (*) | 32 | 2.50 | 80 |
+| 74HC4051 (SPI mux) | 4 | 1 | 4 |
+| Connectors | 40 | 2 | 80 |
+| Passives | - | 20 | 20 |
+| **Subtotal Expansion Boards** | | | **496** |
 | **Pico Controllers** | | | |
-| RP2350 Pico 2 | 20 | €5 | €100 |
-| MCP2515 (motor CAN) | 20 | €6 | €120 |
-| TJA1050 (motor CAN) | 20 | €2.50 | €50 |
-| **Subtotal Picos** | | | **€270** |
-| | | | |
+| RP2350 Pico 2 | 20 | 5 | 100 |
+| MCP2515 (motor CAN) | 20 | 6 | 120 |
+| TJA1050 (motor CAN) | 20 | 2.50 | 50 |
+| **Subtotal Picos** | | | **270** |
 | **Cabling** | | | |
-| CAN cables (2m each) | 20 | €5 | €100 |
-| SPI cables (0.2m each) | 3 | €3 | €9 |
-| Power cables | - | €20 | €20 |
-| **Subtotal Cabling** | | | **€129** |
-| | | | |
-| **Optional** | | | |
-| USB Hub (for debugging) | 1 | €40 | €40 |
-| CAN analyzer | 1 | €50 | €50 |
-| **Subtotal Optional** | | | **€90** |
-| | | | |
-| **GRAND TOTAL** | | | **€737** |
-| **TOTAL (without optional)** | | | **€647** |
+| CAN cables (2m each) | 20 | 5 | 100 |
+| SPI cables (0.2m each) | 4 | 3 | 12 |
+| Power cables | - | 20 | 20 |
+| **Subtotal Cabling** | | | **132** |
+| **GRAND TOTAL** | | | **898 EUR** |
 
-### 9.2 Cost Comparison
+### 11.2 Cost Comparison
 
-| Architecture | Cost (EUR) | Joints | Cost/Joint | Notes |
-|--------------|------------|--------|------------|-------|
-| **Our CAN 2.0 Multi-Bus** | €647 | 20 | €32 | Excellent value ✅ |
-| **Single CAN FD Bus** | €200 | 20 | €10 | Risky (single point of failure) |
-| **EtherCAT** | €10,000+ | 20 | €500+ | Professional-grade |
-| **USB Hub + CANable** | €750 | 20 | €38 | Less reliable |
-
-### 9.3 Return on Investment
-
-**Compared to EtherCAT:**
-- **Savings**: €10,000 - €647 = **€9,353** (93% cheaper!)
-- **Performance**: 80% of EtherCAT (sufficient for humanoid)
-- **Development Time**: 50% faster (no FPGA/ASIC expertise needed)
-
-**Compared to Single CAN FD:**
-- **Additional Cost**: €647 - €200 = **€447**
-- **Benefit**: Isolated buses (no single point of failure)
-- **Reliability**: 10x better (one bus failure doesn't stop robot)
+| Architecture | Cost (EUR) | Cost/Joint | Notes |
+|--------------|------------|------------|-------|
+| **Our CAN 2.0 Multi-Bus** | 898 | 45 | See Section 11.1 BOM |
+| Single CAN FD Bus | 200 | 10 | Single point of failure |
+| EtherCAT | 10,000+ | 500+ | Professional-grade |
 
 ---
 
-## 10. Risk Analysis
-
-### 10.1 Technical Risks
+## 12. Risk Analysis
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| **CAN bus collision** | Low | Medium | Multi-bus architecture (isolated) |
-| **Jitter > 5ms** | Medium | Medium | RT kernel, high-priority threads |
-| **PCB manufacturing defect** | Low | High | Order from reputable manufacturer (JLCPCB) |
-| **MCP2515 chip shortage** | Medium | Medium | Order in bulk, consider MCP2518FD |
-| **Jetson SPI limitation** | Low | High | Use I2C-to-SPI bridge for >3 boards |
-| **Cable length > 40m** | Low | Low | CAN supports up to 40m @ 1 Mbps |
-| **EMI interference** | Low | Medium | Use shielded cables, proper grounding |
-
-### 10.2 Mitigation Strategies
-
-**CAN Bus Collision:**
-- **Solution**: Multi-bus architecture (each joint has dedicated bus)
-- **Backup**: CAN ID priority (Emergency Stop = highest)
-
-**Jitter:**
-- **Solution**: RT kernel (PREEMPT_RT)
-- **Backup**: Pre-buffer waypoints (10-20 ahead)
-
-**PCB Defects:**
-- **Solution**: Order from reputable manufacturer
-- **Backup**: Order 1 spare board (4 total instead of 3)
-
-**Chip Shortage:**
-- **Solution**: Order MCP2515 in bulk (50+ units)
-- **Backup**: Design PCB to support both MCP2515 and MCP2518FD
-
-**SPI Limitation:**
-- **Solution**: Use I2C-to-SPI bridge (SC18IS602B)
-- **Backup**: Use 2nd Jetson or Raspberry Pi for additional boards
+| CAN bus collision | Low | Medium | Multi-bus architecture (isolated) |
+| Jitter > 5ms (sender) | Medium | Low | Batch anchor timing (firmware immune) |
+| PCB manufacturing defect | Low | High | Reputable manufacturer (JLCPCB) |
+| MCP2515 chip shortage | Medium | Medium | Order in bulk, MCP2518FD fallback |
+| Jetson SPI limitation | Low | High | Current design uses 4 SPI buses; I2C-to-SPI bridge for >4 boards |
+| EMI interference | Low | Medium | Shielded cables, proper grounding |
+| **R14: Jetson scheduling stalls** | Low | Medium | 20s buffer absorbs stalls; Pico gateway fallback (D028) |
 
 ---
 
-## 11. Testing and Validation
+## 13. Testing and Validation
 
-### 11.1 Unit Tests
+### 13.1 Unit Tests
 
 **CAN Expansion Board:**
 - [ ] SPI communication (loopback test)
 - [ ] CAN transmission (loopback mode)
-- [ ] CAN reception (external CAN analyzer)
 - [ ] All 8 channels functional
-- [ ] Termination resistors working
 - [ ] Power consumption < 500 mA
 
 **Pico Controller:**
 - [ ] CAN reception (Time Sync, Waypoint, E-Stop)
-- [ ] Waypoint buffer (push/pop/peek)
-- [ ] Time synchronization (< 2ms error)
+- [ ] Waypoint buffer (push/pop/peek, depth 2000)
+- [ ] Batch anchor timing accuracy
+- [ ] Re-anchor correction accuracy
 - [ ] Motor commands (500 Hz)
 - [ ] Emergency stop (< 1ms response)
 
 **Host Software:**
 - [ ] Multi-bus connection (20 buses)
-- [ ] Time sync broadcast (10 Hz)
+- [ ] Time sync broadcast
 - [ ] Waypoint streaming (50-100 Hz)
 - [ ] Emergency stop (all buses)
-- [ ] Status monitoring (optional)
 
-### 11.2 Integration Tests
+### 13.2 Integration Tests
 
-**Single Joint:**
-- [ ] Host → Pico latency < 1ms
-- [ ] Waypoint streaming 100 Hz
-- [ ] Motor control 500 Hz
-- [ ] Emergency stop < 1ms
-- [ ] Time sync accuracy < 2ms
+- [ ] Single joint: Host → Pico latency < 1ms
+- [ ] Multi-joint (6): coordinated movement, sync < 2ms
+- [ ] Full robot (20): all buses functional, bandwidth < 40%
+- [ ] Batch boundary: seamless transition between consecutive batches
+- [ ] Long streaming: 30+ seconds continuous, no drift accumulation
 
-**Multi-Joint (6 joints):**
-- [ ] Coordinated movement (all joints synchronized)
-- [ ] Waypoint streaming to all joints
-- [ ] Emergency stop (all joints stop)
-- [ ] No CAN bus collisions
-- [ ] Jitter < 2ms (< 0.5ms with RT kernel)
+### 13.3 Performance Metrics
 
-**Full Robot (20 joints):**
-- [ ] All 20 buses functional
-- [ ] Coordinated movement (walking, arm motion)
-- [ ] Emergency stop (all joints stop)
-- [ ] Bandwidth < 40% per bus
-- [ ] Latency < 5ms end-to-end
-
-### 11.3 Performance Benchmarks
-
-**Target Metrics:**
-| Metric | Target | Measured | Status |
-|--------|--------|----------|--------|
-| Latency (Host → Pico) | < 1ms | TBD | - |
-| Jitter (without RT) | < 2ms | TBD | - |
-| Jitter (with RT) | < 0.5ms | TBD | - |
-| Waypoint frequency | 50-100 Hz | TBD | - |
-| Motor control frequency | 500 Hz | TBD | - |
-| Time sync accuracy | < 2ms | TBD | - |
-| Bandwidth usage | < 40% | TBD | - |
-| Emergency stop response | < 1ms | TBD | - |
+| Metric | Target | Status |
+|--------|--------|--------|
+| Latency (Host → Pico) | < 1ms | TBD |
+| Jitter (at motor, with batch anchor) | < 100us | TBD |
+| Waypoint frequency | 50-100 Hz | TBD |
+| Motor control frequency | 500 Hz | TBD |
+| Time sync accuracy | < 2ms | TBD |
+| Bandwidth usage per bus | < 40% | TBD |
+| Emergency stop response | < 1ms | TBD |
 
 ---
 
-## 12. Timeline and Milestones
+## 14. References
 
-### 12.1 Phase 1: Prototyping (Q4 2024 - Q1 2025)
-
-**Milestone 1.1: PCB Design (2 weeks)**
-- [ ] Schematic design (CAN Expansion Board)
-- [ ] PCB layout (4-layer, 8 channels)
-- [ ] Design review
-- [ ] Order PCB + components
-
-**Milestone 1.2: Assembly and Testing (2 weeks)**
-- [ ] PCB assembly (1 board)
-- [ ] Unit tests (SPI, CAN loopback)
-- [ ] Integration test (Jetson + 1 board + 1 Pico)
-- [ ] Validation (single joint movement)
-
-**Milestone 1.3: Software Development (4 weeks)**
-- [ ] Host software (CanManager, TrajectoryPlanner)
-- [ ] Firmware updates (waypoint consumption)
-- [ ] Integration tests (6 joints)
-- [ ] Performance benchmarks
-
-### 12.2 Phase 2: Production (Q2 2025)
-
-**Milestone 2.1: PCB Production (4 weeks)**
-- [ ] Order 3x CAN Expansion Boards (+ 1 spare)
-- [ ] Order components (MCP2515, TJA1050, etc.)
-- [ ] Assembly (4 boards)
-- [ ] Quality control (all boards tested)
-
-**Milestone 2.2: System Integration (4 weeks)**
-- [ ] Install all boards on Jetson
-- [ ] Cable all 20 Picos
-- [ ] Software configuration (20 buses)
-- [ ] Full system test (20 joints)
-
-**Milestone 2.3: Validation (4 weeks)**
-- [ ] Performance benchmarks (20 joints)
-- [ ] Reliability testing (24h continuous operation)
-- [ ] Safety testing (emergency stop, fault tolerance)
-- [ ] Documentation (user manual, troubleshooting)
-
-### 12.3 Phase 3: Deployment (Q3 2025)
-
-**Milestone 3.1: Robot Integration (8 weeks)**
-- [ ] Install on Alia robot
-- [ ] Calibration (all 20 joints)
-- [ ] Movement testing (walking, arm motion)
-- [ ] Optimization (PID tuning, trajectory planning)
-
-**Milestone 3.2: Public Release (Q4 2025)**
-- [ ] Open-source release (hardware + software)
-- [ ] Documentation (assembly guide, BOM)
-- [ ] Video demonstration
-- [ ] Community support (forum, Discord)
-
----
-
-## 13. References
-
-### 13.1 Standards and Protocols
+### 14.1 Standards and Protocols
 
 - **CAN 2.0 Specification**: ISO 11898-1:2015
 - **CAN FD Specification**: ISO 11898-1:2015 (Amendment 1)
 - **MCP2515 Datasheet**: Microchip DS21801E
 - **TJA1050 Datasheet**: NXP TJA1050
 - **RP2350 Datasheet**: Raspberry Pi RP2350 (Pico 2)
-- **RP2040 Datasheet**: Raspberry Pi RP2040 (legacy reference)
 
-### 13.2 Related Projects
+### 14.2 Codebase References
 
-- **Figure 01**: CAN-based humanoid robot
-- **Tesla Optimus**: CAN FD multi-bus architecture
-- **Boston Dynamics Atlas**: EtherCAT-based control
-- **Unitree H1**: RS485 + CAN hybrid
-- **Agility Digit**: EtherCAT-based control
+| Component | File |
+|-----------|------|
+| CAN IDs (definitions) | `firmware/.../src/core1.cpp` |
+| Batch anchor logic | `firmware/.../src/core1.cpp` |
+| Re-anchor consume logic | `firmware/.../src/JointController_Waypoint.cpp` |
+| Waypoint buffer config | `firmware/.../include/waypoint_buffer.h` |
+| Host CAN manager | `host/can_manager.py` |
+| Host routes | `host/routes.py` |
+| UI + JS | `host/templates/index.html`, `host/static/js/scripts.js` |
+| Serial protocol | `firmware/.../PROTOCOL.md` |
 
-### 13.3 Software Libraries
+### 14.3 Software Libraries
 
 - **python-can**: https://python-can.readthedocs.io/
 - **mcp_can (Arduino)**: https://github.com/coryjfowler/MCP_CAN_lib
 - **SocketCAN (Linux)**: https://www.kernel.org/doc/html/latest/networking/can.html
-- **PREEMPT_RT**: https://wiki.linuxfoundation.org/realtime/start
 
-### 13.4 Hardware Suppliers
+### 14.4 Hardware Suppliers
 
 - **PCB Manufacturing**: JLCPCB, PCBWay
 - **Components**: Mouser, DigiKey, LCSC
-- **CAN Cables**: Belden, Alpha Wire
-- **Jetson**: Nvidia Developer Store
 
 ---
 
-## 14. Appendices
+## Appendix A: CAN ID Allocation Table
 
-### Appendix A: CAN ID Allocation Table
+Each joint controller has two physically separate CAN buses:
+- **Host CAN** (MCP2515, CS=GP8): Expansion board channel — Host ↔ Controller
+- **Motor CAN** (MCP2515, CS=GP9): Local to joint — Controller ↔ Motors (LKM protocol)
 
-| ID (Hex) | ID (Dec) | Purpose | Direction | Priority |
-|----------|----------|---------|-----------|----------|
-| 0x000 | 0 | Emergency Stop | Host → All | Highest |
-| 0x001 | 1 | Reserved | - | - |
-| 0x002 | 2 | Time Sync | Host → All | High |
-| 0x003 | 3 | Encoder Stream Control | Host → Ctrl | High |
-| **0x004** | 4 | **PID Diag Control** | Host → Ctrl | High |
-| **0x005** | 5 | **Interpolation Mode** (linear/smooth) | Host → Ctrl | High |
-| **0x006** | 6 | **Loop Frequency Config** (inner/outer) | Host → Ctrl | High |
-| **0x007** | 7 | **PID Diag Stream Frequency** | Host → Ctrl | High |
-| **0x008** | 8 | **Joint Identify Request** (broadcast) | Host → Ctrl | High |
-| **0x009** | 9 | **Startup Sequence** (recalc + HOLDING) | Host → Ctrl | High |
-| **0x00A** | 10 | **Get Encoder Offsets** (query) | Host → Ctrl | High |
-| **0x00B** | 11 | **Set Zero** (current position) | Host → Ctrl | High |
-| **0x00C** | 12 | **Pretension** (single DOF) | Host → Ctrl | High |
-| **0x00D** | 13 | **Pretension All** DOFs | Host → Ctrl | High |
-| **0x00E** | 14 | **Release** (single DOF) | Host → Ctrl | High |
-| **0x00F** | 15 | **Release All** DOFs | Host → Ctrl | High |
-| **0x010** | 16 | **Recalc Motor Offsets** | Host → Ctrl | High |
-| **0x011** | 17 | **Save PID to Flash** | Host → Ctrl | High |
-| **0x012** | 18 | **Load PID from Flash** | Host → Ctrl | High |
-| **0x013** | 19 | **Set Inner PID** (multi-frame, 4 seq) | Host → Ctrl | High |
-| **0x014** | 20 | **Set Outer PID** (multi-frame, 5 seq) | Host → Ctrl | High |
-| **0x015** | 21 | **Cascade Speed Scaling** (per-param) | Host → Ctrl | High |
-| **0x016** | 22 | **Start Auto-Mapping** (all DOFs) | Host → Ctrl | High |
-| **0x017** | 23 | **Stop Auto-Mapping** | Host → Ctrl | High |
-| **0x018** | 24 | **Save Linear Eq to Flash** | Host → Ctrl | High |
-| **0x019** | 25 | **Load Linear Eq from Flash** | Host → Ctrl | High |
-| **0x01A** | 26 | **Set Auto-Start on Boot** | Host → Ctrl | High |
-| 0x01B-0x13F | 27-319 | Reserved (Future High Priority) | - | - |
-| 0x140-0x1FF | 320-511 | Motor Commands | Ctrl → Motors | **Level 2** (High) |
-| 0x200-0x2FF | 512-767 | Reserved | - | - |
-| 0x300-0x37F | 768-895 | Reserved | - | - |
-| **0x380** | 896 | **Multi-DOF Waypoint Joint 0** (Ankle R) | Host → Ctrl | **Level 3** (Medium) |
-| **0x381** | 897 | **Multi-DOF Waypoint Joint 1** (Ankle L) | Host → Ctrl | **Level 3** (Medium) |
-| **0x382** | 898 | **Multi-DOF Waypoint Joint 2** (Knee R) | Host → Ctrl | **Level 3** (Medium) |
-| **0x383** | 899 | **Multi-DOF Waypoint Joint 3** (Knee L) | Host → Ctrl | **Level 3** (Medium) |
-| ... | ... | ... | ... | ... |
-| **0x393** | 915 | **Multi-DOF Waypoint Joint 19** | Host → Ctrl | **Level 3** (Medium) |
-| 0x394-0x3FF | 916-1023 | Reserved Waypoints | - | - |
-| 0x400-0x40F | 1024-1039 | Status/Feedback | Ctrl → Host | **Level 4** (Low) |
-| **0x410** | 1040 | **Encoder Stream Data** | Ctrl → Host | **Level 4** (Low) |
-| **0x420-0x42F** | 1056-1071 | **PID Diag: Target + Error** (per joint) | Ctrl → Host | **Level 4** (Low) |
-| **0x430-0x43F** | 1072-1087 | **PID Diag: Torque A + B** (per joint) | Ctrl → Host | **Level 4** (Low) |
-| **0x440+j\*3+d** | 1088+ | **Movement Metrics** (per joint per DOF) | Ctrl → Host | **Level 4** (Low) |
-| **0x460+j\*3+d** | 1120+ | **Smoothness Metrics** (per joint per DOF) | Ctrl → Host | **Level 4** (Low) |
-| **0x470-0x47F** | 1136-1151 | **PID Diag: Inner PID Terms** (P/I/D/FF, optional) | Ctrl → Host | **Level 4** (Low) |
-| **0x480-0x48F** | 1152-1167 | **PID Diag: Outer PID Terms** (P/I/D/output, optional) | Ctrl → Host | **Level 4** (Low) |
-| **0x490+joint** | 1168+ | **Startup Status Events** | Ctrl → Host | **Level 4** (Low) |
-| **0x4A0+joint** | 1184+ | **Joint Announce/Discovery** | Ctrl → Host | **Level 4** (Low) |
-| **0x4B0+joint** | 1200+ | **Encoder Offsets Response** | Ctrl → Host | **Level 4** (Low) |
-| **0x4C0+joint** | 1216+ | **Zero Complete Notification** | Ctrl → Host | **Level 4** (Low) |
-| 0x4D0-0x4FF | 1232-1279 | Reserved Status | - | - |
+### Host CAN IDs
 
-**Encoder Stream Control (0x003):**
-```
-Byte 0:   uint8_t  action (0x01 = start, 0x00 = stop)
-Byte 1-7: Reserved (0x00)
-```
+| ID (Hex) | Purpose | Direction | Priority |
+|----------|---------|-----------|----------|
+| 0x000 | Emergency Stop | Host → All | Highest |
+| 0x002 | Time Sync | Host → All | High |
+| 0x003 | Encoder Stream Control | Host → Ctrl | High |
+| 0x004 | PID Diag Control | Host → Ctrl | High |
+| 0x005 | Interpolation Mode (linear/cosine) | Host → Ctrl | High |
+| 0x006 | Loop Frequency Config (inner/outer) | Host → Ctrl | High |
+| 0x007 | PID Diag Stream Frequency | Host → Ctrl | High |
+| 0x008 | Joint Identify Request (broadcast) | Host → Ctrl | High |
+| 0x009 | Startup Sequence (recalc + HOLDING) | Host → Ctrl | High |
+| 0x00A | Get Encoder Offsets (query) | Host → Ctrl | High |
+| 0x00B | Set Zero (current position) | Host → Ctrl | High |
+| 0x00C | Pretension (single DOF) | Host → Ctrl | High |
+| 0x00D | Pretension All DOFs | Host → Ctrl | High |
+| 0x00E | Release (single DOF) | Host → Ctrl | High |
+| 0x00F | Release All DOFs | Host → Ctrl | High |
+| 0x010 | Recalc Motor Offsets | Host → Ctrl | High |
+| 0x011 | Save PID to Flash | Host → Ctrl | High |
+| 0x012 | Load PID from Flash | Host → Ctrl | High |
+| 0x013 | Set Inner PID (multi-frame, 4 seq) | Host → Ctrl | High |
+| 0x014 | Set Outer PID (multi-frame, 5 seq) | Host → Ctrl | High |
+| 0x015 | Cascade Speed Scaling | Host → Ctrl | High |
+| 0x016 | Start Auto-Mapping (all DOFs) | Host → Ctrl | High |
+| 0x017 | Stop Auto-Mapping | Host → Ctrl | High |
+| 0x018 | Save Linear Eq to Flash | Host → Ctrl | High |
+| 0x019 | Load Linear Eq from Flash | Host → Ctrl | High |
+| 0x01A | Set Auto-Start on Boot | Host → Ctrl | High |
+| **0x01B** | **Re-anchor Interval** | Host → Ctrl | High |
+| 0x01C-0x13F | Reserved (Future High Priority) | - | - |
+| 0x380-0x393 | Multi-DOF Waypoint Joint 0-19 | Host → Ctrl | Level 3 |
+| 0x400-0x40F | Status/Feedback | Ctrl → Host | Level 4 |
+| 0x410 | Encoder Stream Data | Ctrl → Host | Level 4 |
+| 0x420+joint | PID Diag: Target + Error | Ctrl → Host | Level 4 |
+| 0x430+joint | PID Diag: Torque A + B | Ctrl → Host | Level 4 |
+| 0x440+j*3+d | Movement Metrics | Ctrl → Host | Level 4 |
+| 0x460+j*3+d | Smoothness Metrics | Ctrl → Host | Level 4 |
+| 0x470+joint | PID Inner Terms (optional) | Ctrl → Host | Level 4 |
+| 0x480+joint | PID Outer Terms (optional) | Ctrl → Host | Level 4 |
+| 0x490+joint | Startup Status Events | Ctrl → Host | Level 4 |
+| 0x4A0+joint | Joint Announce/Discovery | Ctrl → Host | Level 4 |
+| 0x4B0+joint | Encoder Offsets Response | Ctrl → Host | Level 4 |
+| 0x4C0+joint | Zero Complete Notification | Ctrl → Host | Level 4 |
 
-**Encoder Stream Data (0x410):**
-```
-Byte 0:     uint8_t   joint_id
-Byte 1-2:   int16_t   angle_dof0 (0.01° resolution)
-Byte 3-4:   int16_t   angle_dof1 (0.01° resolution, 0x7FFF = unused)
-Byte 5-6:   int16_t   angle_dof2 (0.01° resolution, 0x7FFF = unused)
-Byte 7:     uint8_t   timestamp_offset (ms since last packet, wraps at 255)
-```
-**Frequency**: 50 Hz (20ms interval)
-**Purpose**: Real-time encoder feedback for UI visualization and debugging
+### Motor CAN IDs
 
-**PID Diag Control (0x004):**
-```
-Byte 0:   uint8_t  action (0x01 = start streaming, 0x00 = stop)
-Byte 1:   uint8_t  terms_enabled (0x01 = enable P/I/D breakdown frames, 0x00 = disable)
-Byte 2-7: Reserved (0x00)
-```
+| ID (Hex) | Purpose | Direction | Notes |
+|----------|---------|-----------|-------|
+| 0x140-0x144 | Torque Command (Motor 0-3) | Ctrl → Motor | LKM protocol, 500 Hz |
+| 0x240-0x244 | Status Reply (Motor 0-3) | Motor → Ctrl | LKM auto-reply |
 
-**PID Diag: Target + Error (0x420 + joint_id):**
-```
-Byte 0-1:  int16_t  target_angle (0.01° resolution)
-Byte 2-3:  int16_t  actual_angle (0.01° resolution)
-Byte 4-5:  int16_t  error (0.01° resolution)
-Byte 6-7:  Reserved
-```
-**Frequency**: Control loop rate (when streaming enabled)
+Motor CAN IDs follow the LKM servo protocol. Each joint's motor bus is electrically isolated — no traffic crosses between joints or to the host.
 
-**PID Diag: Torque A + B (0x430 + joint_id):**
-```
-Byte 0-1:  int16_t  torque_agonist (raw torque command)
-Byte 2-3:  int16_t  torque_antagonist (raw torque command)
-Byte 4-5:  int16_t  torque_agonist_filtered (after rate limiter)
-Byte 6-7:  int16_t  torque_antagonist_filtered (after rate limiter)
-```
-
-**PID Diag: Inner PID Terms (0x470 + joint_id) — OPTIONAL, DOF 0 only:**
-```
-Byte 0-1:  int16_t  p_term (proportional increment)
-Byte 2-3:  int16_t  i_term (integral term)
-Byte 4-5:  int16_t  d_term (filtered derivative term)
-Byte 6-7:  int16_t  ff_term (feedforward term)
-```
-**Condition**: Only sent when `terms_enabled = 1` in PID Diag Control
-
-**PID Diag: Outer PID Terms (0x480 + joint_id) — OPTIONAL, DOF 0 only:**
-```
-Byte 0-1:  int16_t  p_term (proportional increment)
-Byte 2-3:  int16_t  i_term (integral term)
-Byte 4-5:  int16_t  d_term (filtered derivative term)
-Byte 6-7:  int16_t  output_x100 (delta_theta × 100)
-```
-**Condition**: Only sent when `terms_enabled = 1` in PID Diag Control
-
-**Multi-DOF Waypoint Format (0x380-0x39F):**
-```
-Byte 0-1:  int16_t  dof0_angle (0.01° resolution)
-Byte 2-3:  int16_t  dof1_angle (0.01° resolution, 0x7FFF = unused)
-Byte 4-5:  int16_t  dof2_angle (0.01° resolution, 0x7FFF = unused)
-Byte 6-7:  uint16_t t_offset_ms (offset from last time sync)
-```
-
-### Appendix B: Pinout Diagrams
+## Appendix B: Pinout Diagrams
 
 **CAN Expansion Board Connector:**
 ```
@@ -1809,14 +1322,11 @@ Jetson SPI Header (2x13 pin):
 Pin 1:  3.3V
 Pin 2:  5V
 Pin 3:  SPI0_MOSI
-Pin 4:  5V
 Pin 5:  SPI0_MISO
 Pin 6:  GND
 Pin 7:  SPI0_SCK
 Pin 8:  SPI0_CS0
-Pin 9:  GND
 Pin 10: SPI0_CS1
-...
 ```
 
 **Pico CAN Connector (JST-XH 3-pin):**
@@ -1826,50 +1336,29 @@ Pin 2: CANL (Green)
 Pin 3: GND (Black)
 ```
 
-### Appendix C: Troubleshooting Guide
+## Appendix C: Troubleshooting
 
-**Problem: CAN bus not detected**
+**CAN bus not detected:**
 - Check SPI connections (MOSI, MISO, SCK, CS)
 - Verify MCP2515 power (3.3V)
 - Check crystal oscillator (8 MHz)
 - Test with loopback mode
 
-**Problem: High jitter (> 5ms)**
-- Install RT kernel (PREEMPT_RT)
-- Set high priority for CAN threads
-- Reduce system load (close unnecessary processes)
+**High jitter (> 5ms at sender):**
+- Verify batch anchor is active (check firmware logs)
+- Consider RT kernel (PREEMPT_RT) if needed
+- Reduce system load on Jetson
 
-**Problem: CAN bus collisions**
+**CAN bus collisions:**
 - Verify multi-bus architecture (each joint has dedicated bus)
 - Check CAN ID allocation (no duplicates)
-- Verify termination resistors (120Ω at both ends)
+- Verify termination resistors (120 ohm at both ends)
 
-**Problem: Time sync drift**
-- Increase sync frequency (10 Hz → 20 Hz)
+**Time sync drift:**
+- Increase sync frequency (send before each batch)
 - Check RP2350 crystal accuracy
-- Verify CAN latency (< 200 µs)
-
----
-
-## 15. Conclusion
-
-This document describes a **comprehensive, scalable, and cost-effective** CAN-based communication architecture for the Alia humanoid robot. The design is:
-
-✅ **Proven**: Similar to commercial robots (Figure 01, Tesla Optimus)  
-✅ **Reliable**: Multi-bus architecture with fault isolation  
-✅ **Performant**: 500 Hz control, < 5ms latency, < 2ms jitter  
-✅ **Economical**: €647 for 20 joints (93% cheaper than EtherCAT)  
-✅ **Scalable**: Easy to expand to 24+ joints or upgrade to CAN FD  
-✅ **Open-Source**: All hardware and software will be released publicly  
-
-**Next Steps:**
-1. Review and approve this design specification
-2. Proceed with PCB design (CAN Expansion Board)
-3. Order components and begin prototyping
-4. Develop host software (Python CanManager)
-5. Integrate with existing firmware (RP2350 Pico 2)
+- Verify re-anchor interval is set
 
 ---
 
 **Document End**
-
