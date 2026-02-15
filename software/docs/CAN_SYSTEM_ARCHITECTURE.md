@@ -71,7 +71,7 @@ This document describes the complete CAN-based communication architecture for th
 │  └─ SPI3 → CAN Expansion Board #4 (8ch: Right Arm)              │
 └────┬─────────┬─────────┬─────────┬─────────┬─────────┬──────────┘
      │         │         │         │         │         │
-  CAN ch0  CAN ch1  CAN ch2  CAN ch3  CAN ch4  CAN ch5  ... (20-26x)
+  CAN ch0  CAN ch1  CAN ch2  CAN ch3  CAN ch4  CAN ch5  ... (v1: 20, max 26)
      │         │         │         │         │         │
 ┌────▼────┐┌───▼────┐┌───▼────┐┌───▼────┐┌───▼────┐┌───▼────┐
 │ Pico 1  ││ Pico 2 ││ Pico 3 ││ Pico 4 ││ Pico 5 ││ Pico 6 │ ...
@@ -100,7 +100,7 @@ Each joint controller has a **dedicated CAN channel** on the expansion board (po
 
 ### 2.3 CAN Bus Allocation (Current Plan)
 
-**Total CAN Buses: ~20-26 (indicative, subject to change)**
+**v1 Baseline: 20 CAN channels** (one per joint). Expansion capacity: up to 26 channels (6 spare across 4 boards).
 
 #### Lower Body (12 channels):
 ```
@@ -479,13 +479,15 @@ These buses are electrically isolated. Bandwidth must be analyzed separately.
 
 | Message Type | Dir | Freq (Hz) | Frame/s | Bandwidth | Notes |
 |--------------|-----|-----------|---------|-----------|-------|
-| Time Sync | H→C | 10 | 10 | 0.14% | Broadcast |
+| Time Sync | H→C | 10 | 10 | 0.14% | Per-channel fan-out (*) |
 | Multi-DOF Waypoint | H→C | 100 | 100 | 1.4% | All 3 DOFs in 1 frame |
 | Config/Commands | H→C | sporadic | <10 | <0.14% | PID set, interpolation, etc. |
 | Encoder Stream | C→H | 100 | 100 | 1.4% | Optional |
 | PID Diagnostics | C→H | 50-100 | 100-200 | 1.4-2.8% | Optional (2-4 frames) |
 | Status/Feedback | C→H | 10 | 10 | 0.14% | Heartbeat |
 | **TOTAL** | | | **~330-430** | **~4.7-6.1%** | **~94% margin** |
+
+(*) "Per-channel fan-out": each channel is point-to-point (no physical broadcast bus). The Jetson sends the same Time Sync frame to each MCP2515 channel separately via SPI. The term "broadcast" refers to the logical intent (all joints receive the same clock), not to the physical topology.
 
 #### Motor CAN (per joint, local bus):
 
@@ -1199,7 +1201,7 @@ The following telemetry signals form the **minimum observability contract** betw
 
 - [ ] Single joint: Host → Pico latency < 1ms
 - [ ] Multi-joint (6): coordinated movement, sync < 2ms
-- [ ] Full robot (20): all buses functional, bandwidth < 40%
+- [ ] Full robot (20): all buses functional, Host CAN < 40%, Motor CAN < 60%
 - [ ] Batch boundary: seamless transition between consecutive batches
 - [ ] Long streaming: 30+ seconds continuous, no drift accumulation
 
@@ -1212,7 +1214,8 @@ The following telemetry signals form the **minimum observability contract** betw
 | Waypoint frequency | 50-100 Hz | TBD |
 | Motor control frequency | 500 Hz | TBD |
 | Time sync accuracy | < 2ms | TBD |
-| Bandwidth usage per bus | < 40% | TBD |
+| Bandwidth: Host CAN per channel | < 40% | TBD |
+| Bandwidth: Motor CAN per joint | < 60% | TBD |
 | Emergency stop response | < 1ms | TBD |
 
 ---
