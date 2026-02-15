@@ -948,14 +948,15 @@ class CanManager:
             Byte 0-1: int16_t dof0_angle (0.01° resolution, 0x7FFF = unused)
             Byte 2-3: int16_t dof1_angle (0.01° resolution, 0x7FFF = unused)
             Byte 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF = unused)
-            Byte 6-7: uint16_t t_offset_ms (offset from CURRENT time, like single-DOF)
-        
+            Byte 6-7: uint16_t t_offset_ms (offset from batch start, firmware-anchored)
+
         Args:
             joint_name: Host joint key (e.g., 'KNEE_LEFT')
             angles_deg: List of target angles [dof0, dof1, dof2] in degrees.
                         Use None for unused DOFs.
-            t_offset_ms: Time offset from current time in milliseconds (0-65535).
-                        Same semantics as single-DOF arrival_offset_ms.
+            t_offset_ms: Time offset from batch start in milliseconds (0-65535).
+                        Firmware anchors to the local clock at the first WP
+                        arrival and computes arrival = anchor + t_offset_ms.
         
         Returns:
             Dict with frame details for debugging.
@@ -1036,27 +1037,29 @@ class CanManager:
         A small delay between waypoints prevents CAN buffer overflow.
         A per-joint lock prevents concurrent batches to the same joint.
 
-        TIMING COMPENSATION:
-        The t_offset_ms from JS represents "desired arrival time from batch start".
-        Since each waypoint takes time to send, we adjust t_offset based on
-        actual elapsed time since the first waypoint was sent:
-
-            adjusted_t_offset = original_t_offset - elapsed_since_first_wp
-
-        This ensures accurate timing regardless of CAN/system delays.
+        TIMING MODEL (batch-anchor):
+        The t_offset_ms from JS represents "desired arrival time from batch
+        start".  These offsets are sent to the firmware **unchanged**.
+        The firmware anchors them: when the first waypoint of a batch
+        arrives, the controller saves ``anchor_local_ms = millis()`` and
+        computes every arrival time as ``anchor_local_ms + t_offset_ms``.
+        This eliminates per-frame jitter caused by sampling millis() on
+        each CAN receive — all inter-waypoint deltas are exact.
 
         LATE WAYPOINT POLICY:
-        If adjusted_t_offset drops below min_lead_ms the waypoint is "late"
-        and is skipped (the firmware interpolates from the previous to the
-        next waypoint).  If MAX_CONSECUTIVE_LATE consecutive waypoints are
-        late, the batch is aborted — the system cannot keep up.
+        A waypoint is considered "late" when the time remaining before
+        its intended arrival (``t_offset - elapsed``) drops below
+        *min_lead_ms*.  Late waypoints are skipped (the firmware
+        interpolates from the previous to the next waypoint).  If
+        MAX_CONSECUTIVE_LATE consecutive waypoints are late, the batch
+        is aborted — the system cannot keep up.
 
         Args:
             joint_name: Joint name (e.g., 'ANKLE_RIGHT')
             waypoints: List of dicts with 'angles_deg' and 't_offset_ms'
             inter_waypoint_delay_ms: Delay between waypoints (default 2ms)
             batch_id: Optional batch identifier for traceability
-            min_lead_ms: Minimum adjusted t_offset to consider on-time (default 15)
+            min_lead_ms: Minimum remaining lead to consider on-time (default 15)
 
         Returns:
             Dict with batch statistics
@@ -1089,7 +1092,7 @@ class CanManager:
             # Socket.IO progress throttle
             PROGRESS_INTERVAL = 50
 
-            # Track actual elapsed time for accurate timing compensation
+            # Track elapsed time for late-waypoint detection
             batch_start_time = time.perf_counter()
 
             for i, wp in enumerate(waypoints):
@@ -1097,21 +1100,23 @@ class CanManager:
                     angles = wp.get('angles_deg', [None, None, None])
                     original_t_offset = wp.get('t_offset_ms', 0)
 
-                    # Calculate actual elapsed time since batch start (in ms)
+                    # Elapsed time since batch start (ms)
                     elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
 
-                    # Adjust t_offset: compensate for time already spent sending
-                    # previous waypoints.
-                    adjusted_t_offset = max(0, int(original_t_offset - elapsed_ms))
+                    # Remaining lead: how far in the future is this waypoint?
+                    # The firmware anchors all offsets to the first-WP arrival
+                    # time, so the effective lead shrinks as transmission
+                    # progresses.
+                    remaining_lead_ms = original_t_offset - elapsed_ms
 
-                    # Track timing drift: how much offset was lost
-                    offset_loss = max(0.0, elapsed_ms - original_t_offset)
+                    # Track timing drift (informational)
+                    offset_loss = max(0.0, -remaining_lead_ms)
                     if offset_loss > max_timing_drift_ms:
                         max_timing_drift_ms = offset_loss
 
                     # --- Late waypoint policy ---
                     # First waypoint (i==0) is always sent regardless of lead
-                    if adjusted_t_offset < min_lead_ms and i > 0:
+                    if remaining_lead_ms < min_lead_ms and i > 0:
                         consecutive_late += 1
                         total_late += 1
                         if consecutive_late >= MAX_CONSECUTIVE_LATE:
@@ -1122,21 +1127,24 @@ class CanManager:
                             aborted = True
                             break
                         self.logger.warning(
-                            f"Waypoint {i} {tag} late: adjusted_t_offset="
-                            f"{adjusted_t_offset}ms < min_lead={min_lead_ms}ms, skipping"
+                            f"Waypoint {i} {tag} late: remaining_lead="
+                            f"{remaining_lead_ms:.0f}ms < min_lead={min_lead_ms}ms, skipping"
                         )
                         skipped_indices.append(i)
                         continue  # Skip — firmware interpolates from prev to next
 
                     consecutive_late = 0  # Reset on successful send
 
-                    self.send_multi_dof_waypoint(joint_name, angles, adjusted_t_offset)
+                    # Send original t_offset — firmware uses batch-anchor
+                    self.send_multi_dof_waypoint(
+                        joint_name, angles, original_t_offset
+                    )
                     success_count += 1
 
                     if batch_id:
                         self.logger.debug(
-                            f"{tag}:{i} sent t_off={adjusted_t_offset}ms "
-                            f"(orig={original_t_offset})"
+                            f"{tag}:{i} sent t_off={original_t_offset}ms "
+                            f"(remaining_lead={remaining_lead_ms:.0f}ms)"
                         )
 
                     # Small delay to prevent CAN buffer overflow

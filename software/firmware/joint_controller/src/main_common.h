@@ -835,5 +835,9 @@ void setup_common();
 void core0_main_loop();  // Core0 loop - serial communication (implemented in core0.cpp)
 void core1_loop();       // Core1 loop - hardware operations (implemented in core1.cpp)
 
+// Waypoint trajectory dump (Core1 records, Core0 prints)
+extern volatile int8_t wp_dump_pending_dof;
+void wp_dump_print_from_core0();
+
 #endif // MAIN_COMMON_H
 

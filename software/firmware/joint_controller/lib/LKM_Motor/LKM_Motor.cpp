@@ -161,10 +161,7 @@ bool LKM_Motor::setTorque(int torque) {
   unsigned char buf[8]   = {0xA1, 0, 0, 0, 0, 0, 0, 0};
   buf[4]                 = torque & 0xFF;
   buf[5]                 = (torque >> 8) & 0xFF;
-  // Non-blocking send: load TX buffer and return immediately.
-  // The MCP2515 transmits in background while we continue computing.
-  // This saves ~130-200 µs per call (no busy-wait for TX complete).
-  if (_can->sendMsgBufNoWait(targetID, 0, 8, buf) == CAN_OK) {
+  if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
     return true;
   }
   LOG_C1_ERROR("Error sending SET_TORQUE.");

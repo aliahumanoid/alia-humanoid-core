@@ -242,24 +242,64 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   }
 
   // Parse Multi-DOF waypoint
-  // Format matches single-DOF behavior: t_offset_ms is relative to current time
-  // This allows the same JS logic to work for both formats
+  // Format: 3× int16 angles (0.01° resolution, 0x7FFF = unused) + uint16 t_offset_ms
+  // t_offset_ms is the desired arrival time relative to batch start (not compensated).
+  // The firmware anchors all offsets to a single local timestamp captured at the
+  // first waypoint of each batch, eliminating per-frame millis() jitter.
   struct {
     int16_t dof0_angle;    // 0.01° resolution, 0x7FFF = unused
     int16_t dof1_angle;    // 0.01° resolution, 0x7FFF = unused
     int16_t dof2_angle;    // 0.01° resolution, 0x7FFF = unused
-    uint16_t t_offset_ms;  // Offset from CURRENT host time (same as single-DOF arrival_offset)
+    uint16_t t_offset_ms;  // Offset from batch start (host sends original, uncompensated)
   } __attribute__((packed)) multi_wp;
 
   memcpy(&multi_wp, data, sizeof(multi_wp));
 
-  // Calculate absolute arrival time from offset
-  // Like single-DOF: the host sends (current_host_time + offset), we convert to local
-  // But here we receive just the offset, so we add it to current sync reference
-  // To match single-DOF behavior: arrival_time = host_now + offset
-  // Since we don't have host_now, we use: local_now + offset (clocks are synced)
   uint32_t t_now = getAbsoluteTimeMs();
-  uint32_t t_arrival_local = t_now + multi_wp.t_offset_ms;
+
+  // --- Batch anchor timing ---
+  // The host sends t_offset_ms as the desired arrival time relative to
+  // batch start (uncompensated).  The firmware anchors all offsets to a
+  // single local timestamp captured when the first waypoint of a batch
+  // arrives, giving exact inter-WP spacing regardless of per-frame
+  // millis() jitter.
+  //
+  // Anchor reset triggers:
+  //   1. Any DOF transitioning IDLE/HOLDING → MOVING (new movement)
+  //   2. Candidate arrival in the past (new streaming chunk whose
+  //      t_offsets restart from a small lead value)
+  static uint32_t batch_anchor_local_ms = 0;
+  static bool batch_anchor_valid = false;
+
+  // Check if any active DOF in this frame needs init (new batch)
+  bool is_new_batch = false;
+  {
+    uint8_t dc = waypoint_buffers_get_dof_count();
+    int16_t raw_angles[3] = {multi_wp.dof0_angle, multi_wp.dof1_angle, multi_wp.dof2_angle};
+    for (uint8_t d = 0; d < 3 && d < dc; d++) {
+      if (raw_angles[d] == MULTI_DOF_UNUSED) continue;
+      WaypointState st = waypoint_buffer_state(d);
+      if (st == WaypointState::IDLE || st == WaypointState::HOLDING) {
+        is_new_batch = true;
+        break;
+      }
+    }
+  }
+
+  if (is_new_batch || !batch_anchor_valid) {
+    batch_anchor_local_ms = t_now;
+    batch_anchor_valid = true;
+  }
+
+  // Candidate arrival based on current anchor
+  uint32_t t_arrival_local = batch_anchor_local_ms + multi_wp.t_offset_ms;
+
+  // If the candidate arrival is already in the past, this is a new
+  // streaming chunk whose t_offsets are relative to "now" — re-anchor.
+  if ((int32_t)(t_now - t_arrival_local) > 0) {
+    batch_anchor_local_ms = t_now;
+    t_arrival_local = t_now + multi_wp.t_offset_ms;
+  }
 
   // Get DOF count for this joint
   uint8_t dof_count = waypoint_buffers_get_dof_count();
@@ -345,7 +385,11 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
         if (dt_s > 0.001f) {
           float vel_deg_s = fabsf(entry.target_angle_deg - last_angle) / dt_s;
 
-          // HARD CAP: 150 deg/s (same as checkWaypointSafety)
+          // HARD CAP: 150 deg/s — matches host-side validation in
+          // waypoint_types.py.  Batch-anchor timing eliminates the
+          // per-frame millis() jitter that previously required a 20%
+          // margin (was 180).  All arrival times are now computed from
+          // a single reference point, so inter-WP dt is exact.
           const float ABSOLUTE_MAX_VELOCITY_DEG_S = 150.0f;
           if (vel_deg_s > ABSOLUTE_MAX_VELOCITY_DEG_S) {
             LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +

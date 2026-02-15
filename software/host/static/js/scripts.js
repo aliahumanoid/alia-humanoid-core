@@ -2929,6 +2929,16 @@ function sendCanWaypointCommand() {
         data: JSON.stringify({ mode: interpolationMode }),
         async: false  // Ensure mode is set before waypoint
     });
+
+    // Refresh time sync so waypoint preflight doesn't reject as stale
+    $.ajax({
+        url: '/can/time_sync',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({}),
+        async: false
+    });
+
     const modeLabel = interpolationMode === 'cosine' ? 'SMOOTH' : 'LINEAR';
 
     // Build Multi-DOF format: set only the target DOF, null for others
@@ -2997,13 +3007,15 @@ function sendMultiWaypointSmoothCurve() {
         return;
     }
     
-    // Calculate required initial velocity to check for dangerous jumps
+    // Calculate peak velocity of the cosine S-curve to check for dangerous movements
+    // For a cosine S-curve: angle(t) = start + delta * 0.5*(1 - cos(pi*t/T))
+    // Peak velocity = delta * pi / (2 * T)  (at t = T/2, midpoint of the curve)
     const angleDelta = Math.abs(targetAngle - startAngle);
-    const firstSegmentTimeMs = deltaT; // Time for first waypoint
-    const initialVelocity = (angleDelta / firstSegmentTimeMs) * 1000; // deg/s
-    
-    if (initialVelocity > MAX_SAFE_VELOCITY_DEG_S * 0.8) {
-        appendStatusMessage(`⚠️ WARNING: Initial velocity ${initialVelocity.toFixed(1)}°/s is high (limit: ${MAX_SAFE_VELOCITY_DEG_S}°/s)`);
+    const totalTimeSec = totalTimeMs / 1000;
+    const peakVelocity = angleDelta * Math.PI / (2 * totalTimeSec); // deg/s
+
+    if (peakVelocity > MAX_SAFE_VELOCITY_DEG_S * 0.8) {
+        appendStatusMessage(`⚠️ WARNING: Peak velocity ${peakVelocity.toFixed(1)}°/s is high (limit: ${MAX_SAFE_VELOCITY_DEG_S}°/s)`);
         appendStatusMessage(`💡 Consider: increase time, reduce angle delta, or move joint closer to target first`);
     }
 
@@ -3018,11 +3030,20 @@ function sendMultiWaypointSmoothCurve() {
         async: false
     });
 
+    // Refresh time sync so waypoint batch preflight doesn't reject as stale
+    $.ajax({
+        url: '/can/time_sync',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({}),
+        async: false
+    });
+
     // Generate waypoints following COSINE S-curve
     const waypoints = [];
     const actualDeltaT = totalTimeMs / numPoints;
-    
-    // Small fixed lead-in; backend compensates for actual elapsed time
+
+    // Small fixed lead-in; firmware batch-anchor uses this as reference
     const initialOffset = 50;
 
     for (let i = 0; i <= numPoints; i++) {
@@ -3035,7 +3056,7 @@ function sendMultiWaypointSmoothCurve() {
         const angle = startAngle + (targetAngle - startAngle) * smoothT;
         
         // Calculate desired arrival time from batch start
-        // Backend compensates for actual elapsed time when sending each waypoint
+        // Firmware anchors all offsets to the first-WP arrival time
         const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
         
         // Build waypoint
@@ -3076,30 +3097,107 @@ function sendMultiWaypointSmoothCurve() {
     // Mark trajectory as active before sending
     markTrajectoryActive();
 
-    // Send as batch
-    $.ajax({
-        url: '/can/waypoint_batch',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
-    }).done(response => {
-        if (response.status === 'success' || response.status === 'partial') {
-            if (response.status === 'partial') {
-                const r = response.result || {};
-                appendStatusMessage(`⚠️ Partial batch: ${r.sent}/${r.total} waypoints sent`);
+    // Chunk size: 0 = single batch (all WPs in one HTTP request)
+    const chunkSize = parseInt($("#multiWpChunkSize").val(), 10) || 0;
+
+    if (chunkSize <= 0 || chunkSize >= dedupedWaypoints.length) {
+        // --- Single batch (original path) ---
+        $.ajax({
+            url: '/can/waypoint_batch',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
+        }).done(response => {
+            if (response.status === 'success' || response.status === 'partial') {
+                if (response.status === 'partial') {
+                    const r = response.result || {};
+                    appendStatusMessage(`⚠️ Partial batch: ${r.sent}/${r.total} waypoints sent`);
+                }
+                appendStatusMessage(`✅ Multi-WP batch sent: ${dedupedWaypoints.length} waypoints [LINEAR interp]`);
+                lastWaypointBatch.sent = true;
+                updateWaypointViewBtn();
+            } else {
+                appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
+                waypointTrajectoryActive = false;
             }
-            appendStatusMessage(`✅ Multi-WP batch sent: ${dedupedWaypoints.length} waypoints [LINEAR interp]`);
-            lastWaypointBatch.sent = true;
-            updateWaypointViewBtn();
-        } else {
-            appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
-            waypointTrajectoryActive = false;  // Clear on error
+        }).fail(xhr => {
+            const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+            appendStatusMessage(`❌ Batch error: ${message}`);
+            waypointTrajectoryActive = false;
+        });
+    } else {
+        // --- Chunked batch: split WPs into chunks, send sequentially ---
+        // Each chunk gets t_offset_ms rebased to a small lead from "now",
+        // so the firmware batch-anchor resets per chunk (streaming pattern).
+        const CHUNK_LEAD_MS = 50;  // lead time for first WP of each chunk
+        const chunks = [];
+        for (let i = 0; i < dedupedWaypoints.length; i += chunkSize) {
+            chunks.push(dedupedWaypoints.slice(i, i + chunkSize));
         }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Batch error: ${message}`);
-        waypointTrajectoryActive = false;  // Clear on error
-    });
+        appendStatusMessage(`📦 Chunked send: ${chunks.length} chunks of ≤${chunkSize} WPs`);
+
+        // Send chunks sequentially with timed delays
+        const batchStartTime = performance.now();
+        let totalSent = 0;
+        let chunkIdx = 0;
+
+        function sendNextChunk() {
+            if (chunkIdx >= chunks.length) {
+                appendStatusMessage(`✅ All ${chunks.length} chunks sent (${totalSent}/${dedupedWaypoints.length} WPs)`);
+                lastWaypointBatch.sent = true;
+                updateWaypointViewBtn();
+                return;
+            }
+
+            const chunk = chunks[chunkIdx];
+            // The original t_offset_ms of the first WP in this chunk tells us
+            // when it should arrive in the overall timeline (relative to batch
+            // start).  We wait until that time minus CHUNK_LEAD_MS, then send
+            // the chunk with rebased offsets starting at CHUNK_LEAD_MS.
+            const firstOrigOffset = chunk[0].t_offset_ms;   // timeline position
+            const elapsedMs = performance.now() - batchStartTime;
+            const waitMs = Math.max(0, firstOrigOffset - CHUNK_LEAD_MS - elapsedMs);
+
+            setTimeout(function() {
+                // Refresh time sync before each chunk
+                $.ajax({
+                    url: '/can/time_sync',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({}),
+                    async: false
+                });
+
+                // Rebase t_offset_ms: make offsets relative to "now" for this chunk.
+                // The delta between consecutive WPs is preserved exactly.
+                const chunkBaseOffset = chunk[0].t_offset_ms;
+                const rebasedChunk = chunk.map(wp => ({
+                    angles_deg: wp.angles_deg,
+                    t_offset_ms: CHUNK_LEAD_MS + (wp.t_offset_ms - chunkBaseOffset)
+                }));
+
+                $.ajax({
+                    url: '/can/waypoint_batch',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ joint: joint, waypoints: rebasedChunk })
+                }).done(response => {
+                    const sent = response.result ? response.result.sent : rebasedChunk.length;
+                    totalSent += sent;
+                    const status = response.status === 'success' ? '✓' : '⚠';
+                    appendStatusMessage(`  ${status} chunk ${chunkIdx + 1}/${chunks.length}: ${sent}/${rebasedChunk.length} WPs`);
+                    chunkIdx++;
+                    sendNextChunk();
+                }).fail(xhr => {
+                    const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
+                    appendStatusMessage(`❌ Chunk ${chunkIdx + 1} error: ${message}`);
+                    waypointTrajectoryActive = false;
+                });
+            }, waitMs);
+        }
+
+        sendNextChunk();
+    }
 }
 
 /**
@@ -3225,10 +3323,20 @@ function sendCanWaypointSequence() {
         data: JSON.stringify({ mode: 'linear' }),
         async: false
     });
+
+    // Refresh time sync so waypoint batch preflight doesn't reject as stale
+    $.ajax({
+        url: '/can/time_sync',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({}),
+        async: false
+    });
+
     appendStatusMessage(`⚙️ Interpolation: LINEAR (sinusoid)`);
 
     // Calculate timing parameters for batch sending
-    // Small fixed lead-in; backend compensates for actual elapsed time
+    // Small fixed lead-in; firmware batch-anchor uses this as reference
     const initialOffset = 50;
     
     // Generate waypoints for all active DOFs
@@ -3423,6 +3531,16 @@ function sendCosineOscillation() {
         data: JSON.stringify({ mode: 'linear' }),
         async: false
     });
+
+    // Refresh time sync so waypoint batch preflight doesn't reject as stale
+    $.ajax({
+        url: '/can/time_sync',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({}),
+        async: false
+    });
+
     appendStatusMessage(`⚙️ Interpolation: LINEAR (S-curve in waypoints)`);
 
     // Calculate timing parameters (same approach as Multi-WP)
@@ -3435,7 +3553,7 @@ function sendCosineOscillation() {
     
     // Estimate total waypoints for batch timing
     const estimatedTotalWaypoints = Math.round(waypointRate * totalDurationSeconds);
-    // Small fixed lead-in; backend compensates for actual elapsed time
+    // Small fixed lead-in; firmware batch-anchor uses this as reference
     const initialOffset = 50;
     
     // Warn if exceeding host batch limit (MAX_BATCH_SIZE=1800 in waypoint_types.py)
@@ -4498,6 +4616,15 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         type: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({ mode: 'linear' }),
+        async: false
+    });
+
+    // Refresh time sync so waypoint batch preflight doesn't reject as stale
+    $.ajax({
+        url: '/can/time_sync',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({}),
         async: false
     });
 
@@ -8443,6 +8570,15 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
         // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
         const dedupedWaypoints = deduplicateWaypoints(waypoints);
 
+        // Refresh time sync so waypoint batch preflight doesn't reject as stale
+        $.ajax({
+            url: '/can/time_sync',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({}),
+            async: false
+        });
+
         // Send batch
         $.ajax({
             url: '/can/waypoint_batch',
@@ -8501,6 +8637,15 @@ async function sendMultiWaypointSmoothCurveAsync(joint, dofIndex, targetAngle, t
 
         // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
         const dedupedWaypoints = deduplicateWaypoints(waypoints);
+
+        // Refresh time sync so waypoint batch preflight doesn't reject as stale
+        $.ajax({
+            url: '/can/time_sync',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({}),
+            async: false
+        });
 
         $.ajax({
             url: '/can/waypoint_batch',

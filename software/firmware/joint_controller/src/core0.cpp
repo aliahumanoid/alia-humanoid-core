@@ -382,56 +382,10 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
 
     SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
 
-    // --- Phase 1: Try applying saved offsets (fast path) ---
-    LOG_INFO("DOF " + String(dof) + ": trying saved offsets from flash...");
-    shared_data_ext.flag = 0;
-
-    {
-      int next_buf = (active_buffer + 1) % 2;
-      while (buffer_ready[next_buf]) { sleep_us(100); }
-      command_buffer[next_buf].joint_id = ACTIVE_JOINT;
-      command_buffer[next_buf].dof_index = dof;
-      pending_command_type = CMD_APPLY_SAVED_OFFSETS;
-      buffer_ready[next_buf] = true;
-      active_buffer = next_buf;
-    }
-
-    // Poll for Core1 completion
-    bool dof_timeout = false;
-    while (shared_data_ext.flag == 0) {
-      updateSharedDofAngles();
-      if (emergency_stop_requested) { dof_timeout = true; break; }
-      if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
-        dof_timeout = true; emergency_stop_requested = true; break;
-      }
-      delay(10);
-    }
-
-    if (dof_timeout) {
-      LOG_ERROR("Startup timed out during saved offset check on DOF " + String(dof));
-      SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
-      pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_GLOBAL_TIMEOUT,
-                       (uint16_t)(millis() - startup_start_time));
-      shared_data_ext.flag = 0;
-      all_success = false;
-      break;
-    }
-
-    if (shared_data_ext.flag == CMD1_END_MOVE) {
-      // Saved offsets valid — skip full recalc
-      last_successful_dof = dof;
-      LOG_INFO("DOF " + String(dof) + " SKIP recalc: " + String(shared_data_ext.message));
-      SERIAL_COM_LN("EVT:STARTUP_DOF_SKIP(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
-      pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
-                       (uint16_t)(millis() - startup_start_time));
-      shared_data_ext.flag = 0;
-      continue;  // Next DOF
-    }
-
-    // --- Phase 2: Saved offsets invalid — full recalc (original path) ---
-    LOG_INFO("DOF " + String(dof) + " saved offsets invalid (" +
-             String(shared_data_ext.message) + "), running full recalc...");
-    SERIAL_COM_LN("EVT:STARTUP_DOF_RECALC(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+    // --- Phase 1: DISABLED (BUG-2: validateSavedOffsets hangs Core1) ---
+    // Smart startup bypassed — always do full recalc
+    // TODO: re-enable when BUG-0 (SPI1 deadlock in getMultiAngleSync) is fixed
+    LOG_INFO("DOF " + String(dof) + ": smart startup disabled, running full recalc...");
     shared_data_ext.flag = 0;
 
     int pretension = (custom_torque > 0) ? (int)custom_torque : 0;
@@ -450,7 +404,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     }
 
     // Poll for Core1 completion
-    dof_timeout = false;
+    bool dof_timeout = false;
     while (shared_data_ext.flag == 0) {
       updateSharedDofAngles();
       if (emergency_stop_requested) { dof_timeout = true; break; }
@@ -745,6 +699,11 @@ void core0_main_loop() {
 
   // Drain Core1 log queue — print queued messages safely from Core0
   drainCore1LogQueue();
+
+  // Print waypoint trajectory dump if Core1 signaled one is ready
+  if (wp_dump_pending_dof >= 0) {
+    wp_dump_print_from_core0();
+  }
 
   // NOTE: CAN polling has been moved to Core1 to avoid SPI1 conflicts
   // Core1 now handles all CAN communication (Host + Motor)

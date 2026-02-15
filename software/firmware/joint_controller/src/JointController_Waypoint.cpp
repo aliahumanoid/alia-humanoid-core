@@ -128,6 +128,18 @@ static const float OSC_MIN_ERROR_TO_CHECK = 1.0f;    // Don't check if error is 
 static bool wp_first_read[MAX_DOFS] = {true, true, true};
 static CANErrorTracker wp_canErrorTracker;
 
+// === WAYPOINT TRAJECTORY DUMP (debug diagnostic) ===
+// Records consumed waypoints for post-movement validation.
+// Stores angle + arrival_ms for each consumed waypoint per DOF.
+static const uint16_t WP_DUMP_MAX = 250;  // max waypoints to record per DOF
+struct WpDumpEntry {
+  float angle_deg;
+  uint32_t t_arrival_ms;
+};
+static WpDumpEntry wp_dump[MAX_DOFS][WP_DUMP_MAX];
+static uint16_t wp_dump_count[MAX_DOFS] = {0};
+volatile int8_t wp_dump_pending_dof = -1;  // -1 = no dump pending, 0..2 = DOF to dump
+
 // === MOTOR POINTER CACHE ===
 // Cache motor pointers to avoid searching every cycle (saves ~10µs per DOF per cycle)
 static LKM_Motor* cached_agonist[MAX_DOFS] = {nullptr};
@@ -253,7 +265,12 @@ bool JointController::executeWaypointMovement() {
 
       LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " bumpless init (IDLE → MOVING) at " + String(q_init, 1) + "°");
     }
-    
+
+    // === TRAJECTORY DUMP: Reset on new movement ===
+    if (prev_dof_state[dof] != WaypointState::MOVING && dof_state == WaypointState::MOVING) {
+      wp_dump_count[dof] = 0;
+    }
+
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
     // Detect when a new movement starts:
     // - IDLE → MOVING: first movement ever
@@ -289,6 +306,12 @@ bool JointController::executeWaypointMovement() {
         // Waypoint reached - pop from buffer and update prev state
         waypoint_buffer_pop(dof);
         waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms);
+
+        // Record consumed waypoint for trajectory dump
+        if (dof < MAX_DOFS && wp_dump_count[dof] < WP_DUMP_MAX) {
+          wp_dump[dof][wp_dump_count[dof]] = {next_waypoint.target_angle_deg, next_waypoint.t_arrival_ms};
+          wp_dump_count[dof]++;
+        }
         
         // NOTE: Periodic waypoint progress logging removed to reduce serial overhead
         // Only log significant events (LAST waypoint, errors)
@@ -657,9 +680,24 @@ bool JointController::executeWaypointMovement() {
           // Get the holding target for this DOF
           float holding_target = waypoint_buffer_prev_angle(dof);
           LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
-          
+
           // Send structured message for UI display
           SERIAL_C1_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
+
+          // === TRAJECTORY DUMP: Signal Core0 to print the detailed dump ===
+          // Core1 must NOT do heavy serial I/O — it blocks CAN polling.
+          // Set a flag so Core0 prints the dump at its own pace.
+          if (wp_dump_count[dof] > 0) {
+            // Quick 1-line summary is safe from Core1 (single print)
+            char sum[100];
+            uint32_t total_dt = wp_dump[dof][wp_dump_count[dof]-1].t_arrival_ms
+                              - wp_dump[dof][0].t_arrival_ms;
+            snprintf(sum, sizeof(sum), "[WP_DUMP] DOF %d: %d pts, total_dt=%lums — dump pending on Core0",
+                     dof, wp_dump_count[dof], (unsigned long)total_dt);
+            LOG_C1_INFO(sum);
+            // Signal Core0 to print the full dump
+            wp_dump_pending_dof = dof;
+          }
           
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
@@ -1512,4 +1550,38 @@ bool JointController::executeWaypointMovement() {
 #endif
   
   return any_movement;
+}
+
+// === Core0-safe trajectory dump ===
+// Called from Core0 main loop when wp_dump_pending_dof >= 0.
+// Prints the full waypoint table over serial at Core0's pace.
+void wp_dump_print_from_core0() {
+  int8_t dof = wp_dump_pending_dof;
+  if (dof < 0 || dof >= MAX_DOFS) return;
+  wp_dump_pending_dof = -1;  // clear immediately to avoid re-entry
+
+  uint16_t count = wp_dump_count[dof];
+  if (count == 0) return;
+
+  SERIAL_COM_LN("INFO: [WP_DUMP] DOF " + String(dof) + ": " + String(count) + " waypoints consumed");
+  SERIAL_COM_LN("INFO: [WP_DUMP] idx | angle_deg | t_arrival_ms | dt_ms | vel_deg_s");
+
+  for (uint16_t i = 0; i < count; i++) {
+    float angle = wp_dump[dof][i].angle_deg;
+    uint32_t t_arr = wp_dump[dof][i].t_arrival_ms;
+    char buf[90];
+    if (i == 0) {
+      snprintf(buf, sizeof(buf), "INFO: [WP_DUMP] %3d | %8.2f | %10lu |   --- |       ---",
+               i, angle, (unsigned long)t_arr);
+    } else {
+      float prev_angle = wp_dump[dof][i-1].angle_deg;
+      uint32_t prev_t = wp_dump[dof][i-1].t_arrival_ms;
+      uint32_t dt_ms = t_arr - prev_t;
+      float vel = (dt_ms > 0) ? fabsf(angle - prev_angle) / ((float)dt_ms / 1000.0f) : 0.0f;
+      snprintf(buf, sizeof(buf), "INFO: [WP_DUMP] %3d | %8.2f | %10lu | %5lu | %9.1f",
+               i, angle, (unsigned long)t_arr, (unsigned long)dt_ms, vel);
+    }
+    SERIAL_COM_LN(buf);
+  }
+  SERIAL_COM_LN("INFO: [WP_DUMP] END");
 }
