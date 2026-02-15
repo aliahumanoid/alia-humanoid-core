@@ -345,6 +345,8 @@ bool JointController::executeWaypointMovement() {
               LOG_C1_INFO("[Reanchor] DOF " + String(dof) + " correction=" +
                           String(new_correction) + "ms after " + String(interval) + " WPs");
             } else {
+              // Drift gone or negative: clear any stale positive correction
+              wp_reanchor_correction_ms[dof] = 0;
               LOG_C1_INFO("[Reanchor] DOF " + String(dof) + " no drift (delta=" +
                           String(new_correction) + "ms) after " + String(interval) + " WPs");
             }
