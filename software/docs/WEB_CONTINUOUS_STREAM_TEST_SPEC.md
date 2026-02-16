@@ -229,6 +229,8 @@ Response:
     "actual_rate_hz": 99.4,
     "scheduler_drift_ms_p95": 1.7,
     "chunks_sent": 3720,
+    "chunks_confirmed": 3706,
+    "chunks_failed": 0,
     "chunks_dropped": 0,
     "chunks_deferred": 3,
     "waypoints_sent": 7440,
@@ -236,7 +238,7 @@ Response:
     "http_status_counts": {"200": 3698, "207": 8, "409": 12, "502": 2},
     "retries": 14,
     "queue_fill_max": {"KNEE_LEFT": 2},
-    "late_ratio": 0.0008,
+    "partial_ratio": 0.0022,
     "sync_refresh_count": 2,
     "last_error": null
   }
@@ -379,7 +381,8 @@ Data source:
 - Pass:
   - `actual_rate_hz >= 49.0`,
   - `chunks_dropped = 0`,
-  - `late_ratio <= 0.1%`.
+  - `partial_ratio <= 0.1%` (HTTP 207 count / chunks sent),
+  - `chunks_failed = 0`.
 
 ### S2 Nominal 100 Hz
 
@@ -387,7 +390,8 @@ Data source:
 - Pass:
   - `actual_rate_hz >= 98.0`,
   - `chunks_dropped = 0`,
-  - `late_ratio <= 0.3%`.
+  - `partial_ratio <= 0.3%` (HTTP 207 count / chunks sent),
+  - `chunks_failed = 0`.
 
 ### S3 Multi-joint
 

@@ -318,7 +318,9 @@ class StreamMetrics:
         self._lock = threading.Lock()
 
         # Counters
-        self._chunks_sent: int = 0
+        self._chunks_sent: int = 0          # enqueued (attempted)
+        self._chunks_confirmed: int = 0     # COMPLETE or PARTIAL
+        self._chunks_failed: int = 0        # FAILED_HARD
         self._chunks_dropped: int = 0
         self._chunks_deferred: int = 0
         self._waypoints_sent: int = 0
@@ -362,6 +364,14 @@ class StreamMetrics:
     def inc_partial(self, wp_count: int) -> None:
         with self._lock:
             self._waypoints_partial += wp_count
+
+    def inc_confirmed(self) -> None:
+        with self._lock:
+            self._chunks_confirmed += 1
+
+    def inc_failed(self) -> None:
+        with self._lock:
+            self._chunks_failed += 1
 
     def inc_sync_refresh(self) -> None:
         with self._lock:
@@ -407,15 +417,17 @@ class StreamMetrics:
             for code, cnt in self._extra_status_counts.items():
                 merged_status[code] = merged_status.get(code, 0) + cnt
 
-            # late ratio from WaypointClient status counts
-            late_count = merged_status.get(207, 0)  # partials as proxy
-            late_ratio = late_count / max(1, self._chunks_sent)
+            # partial ratio: HTTP 207 count / attempted chunks
+            partial_count = merged_status.get(207, 0)
+            partial_ratio = partial_count / max(1, self._chunks_sent)
 
             return {
                 "target_rate_hz": self._target_rate,
                 "actual_rate_hz": round(actual_rate, 1),
                 "scheduler_drift_ms_p95": round(p95, 2),
                 "chunks_sent": self._chunks_sent,
+                "chunks_confirmed": self._chunks_confirmed,
+                "chunks_failed": self._chunks_failed,
                 "chunks_dropped": self._chunks_dropped,
                 "chunks_deferred": self._chunks_deferred,
                 "waypoints_sent": self._waypoints_sent,
@@ -423,7 +435,7 @@ class StreamMetrics:
                 "http_status_counts": merged_status,
                 "retries": self._retries,
                 "queue_fill_max": dict(self._queue_fill_max),
-                "late_ratio": round(late_ratio, 4),
+                "partial_ratio": round(partial_ratio, 4),
                 "sync_refresh_count": self._sync_refresh_count,
                 "last_error": self._last_error,
             }
@@ -677,11 +689,22 @@ class _StreamSession:
             # ============================================================
             # STREAMING PHASE
             # ============================================================
+            # Fresh time sync right before streaming — preposition may
+            # have consumed > MAX_SYNC_AGE_MS (2000ms).
+            if not self._fault.suppress_sync:
+                ok = transport.send_time_sync()
+                if ok:
+                    self.events.emit("INFO", "time_sync", detail="pre-stream refresh")
+                else:
+                    self.events.emit("WARN", "time_sync_fail", detail="pre-stream refresh failed")
+
             self.state = SessionState.RUNNING
             period_s = 1.0 / rate_hz
             next_tick = time.monotonic()
             tick = 0
-            sync_interval_ticks = int(30 * rate_hz)
+            # Refresh time sync well within MAX_SYNC_AGE_MS (2000ms).
+            # At 50 Hz → every 50 ticks (1s), at 100 Hz → every 100 ticks (1s).
+            sync_interval_ticks = max(1, int(1.0 * rate_hz))
             metrics_interval_ticks = int(rate_hz)  # every 1s
             max_ticks = int(duration_s * rate_hz)
             sync_fail_start: Optional[float] = None
@@ -771,7 +794,7 @@ class _StreamSession:
                 # Update queue fill metrics
                 self.metrics.update_queue_fill(joint, bp.fill)
 
-                # Periodic time sync (every 30s)
+                # Periodic time sync (every ~1s)
                 if (tick > 0
                         and tick % sync_interval_ticks == 0
                         and not self._fault.suppress_sync):
@@ -842,12 +865,16 @@ class _StreamSession:
             record = client.get_batch_status(batch_id)
             if record and record.completed_at is not None:
                 self._backpressure[joint].on_done()
-                if record.state == BatchState.PARTIAL:
-                    result = record.result or {}
-                    total = result.get("total", 0)
-                    sent = result.get("sent", 0)
-                    failed_wp = max(0, total - sent)
-                    self.metrics.inc_partial(failed_wp)
+                if record.state == BatchState.FAILED_HARD:
+                    self.metrics.inc_failed()
+                else:
+                    self.metrics.inc_confirmed()
+                    if record.state == BatchState.PARTIAL:
+                        result = record.result or {}
+                        total = result.get("total", 0)
+                        sent = result.get("sent", 0)
+                        failed_wp = max(0, total - sent)
+                        self.metrics.inc_partial(failed_wp)
                 completed.append(batch_id)
         for bid in completed:
             del self._pending_batches[bid]

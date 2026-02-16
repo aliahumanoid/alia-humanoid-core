@@ -686,9 +686,10 @@ class TestMetrics:
         snap = m.snapshot()
         required_keys = [
             "target_rate_hz", "actual_rate_hz", "scheduler_drift_ms_p95",
-            "chunks_sent", "chunks_dropped", "chunks_deferred",
+            "chunks_sent", "chunks_confirmed", "chunks_failed",
+            "chunks_dropped", "chunks_deferred",
             "waypoints_sent", "waypoints_partial", "http_status_counts",
-            "retries", "queue_fill_max", "late_ratio",
+            "retries", "queue_fill_max", "partial_ratio",
             "sync_refresh_count", "last_error",
         ]
         for key in required_keys:

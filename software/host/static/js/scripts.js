@@ -9184,9 +9184,11 @@ function _updateStreamKPI(m) {
         m.scheduler_drift_ms_p95 != null ? m.scheduler_drift_ms_p95.toFixed(2) + 'ms' : '-'
     );
     $('#streamKpiLate').text(
-        m.late_ratio != null ? (m.late_ratio * 100).toFixed(2) + '%' : '-'
+        m.partial_ratio != null ? (m.partial_ratio * 100).toFixed(2) + '%' : '-'
     );
     $('#streamKpiSent').text(m.chunks_sent || 0);
+    $('#streamKpiConfirmed').text(m.chunks_confirmed || 0);
+    $('#streamKpiFailed').text(m.chunks_failed || 0);
     $('#streamKpiDropped').text(m.chunks_dropped || 0);
     $('#streamKpiDeferred').text(m.chunks_deferred || 0);
     $('#streamKpiRetries').text(m.retries || 0);
@@ -9233,8 +9235,9 @@ function _evaluateStreamVerdict(m) {
 
     const hzOk = m.actual_rate_hz != null && m.actual_rate_hz >= minHz;
     const dropOk = (m.chunks_dropped || 0) === 0;
-    const lateOk = m.late_ratio != null && m.late_ratio <= maxLate;
-    const pass = hzOk && dropOk && lateOk;
+    const partialOk = m.partial_ratio != null && m.partial_ratio <= maxLate;
+    const failedOk = (m.chunks_failed || 0) === 0;
+    const pass = hzOk && dropOk && partialOk && failedOk;
 
     el.removeClass('hidden');
     if (pass) {
@@ -9243,7 +9246,8 @@ function _evaluateStreamVerdict(m) {
         let reasons = [];
         if (!hzOk) reasons.push('Hz < ' + minHz);
         if (!dropOk) reasons.push('drops > 0');
-        if (!lateOk) reasons.push('late > ' + (maxLate * 100).toFixed(1) + '%');
+        if (!partialOk) reasons.push('partial > ' + (maxLate * 100).toFixed(1) + '%');
+        if (!failedOk) reasons.push('failed chunks: ' + (m.chunks_failed || 0));
         el.html('<span class="text-red-600 bg-red-50 px-2 py-1 rounded">&#x274C; ' + reasons.join(', ') + '</span>');
     }
 }
