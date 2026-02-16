@@ -76,7 +76,7 @@ This directory contains authoritative technical specifications for all mechanica
 
 | Location | Content |
 |----------|---------|
-| `../CAN_SYSTEM_ARCHITECTURE.md` | CAN architecture, protocol, and streaming |
+| `../../software/docs/CAN_SYSTEM_ARCHITECTURE.md` | CAN architecture, protocol, and streaming |
 | `../../hardware/mechanical/BOM.csv` | Bill of Materials |
 | `../../software/firmware/` | Controller firmware |
 

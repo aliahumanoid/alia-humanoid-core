@@ -4,12 +4,13 @@ Embedded firmware for the Alia humanoid joint control system, migrated and integ
 
 ## Projects
 
-- **`joint_controller/`** — CAN motor control and PID loops (Raspberry Pi Pico 2 / RP2350)
-- **`joint_encoders/`** — MT6835 magnetic encoder reader via SPI + SPI slave interface (Raspberry Pi Pico 2 / RP2350)
+- **`joint_controller/`** — Dual CAN motor control, waypoint streaming, and PID loops (Raspberry Pi Pico 2 / RP2350)
+
+> **Note**: The `joint_encoders/` project was eliminated (D021, Dec 2025). MT6835 encoders are now read directly by the joint controller via SPI0.
 
 ## Board Selection
 
-**Current target**: Raspberry Pi Pico 2 (RP2350) for both firmware projects.
+**Current target**: Raspberry Pi Pico 2 (RP2350).
 
 The RP2350 provides:
 - Dual Cortex-M33 cores @ 150MHz
@@ -22,8 +23,10 @@ The RP2350 provides:
 ```bash
 # From software/ directory
 make run MODE=firmware-controller ENV=pico2
-make run MODE=firmware-encoders ENV=rpipico2
+
+# Or directly with PlatformIO
+cd joint_controller && ~/.platformio/penv/bin/pio run
 ```
 
-See individual project READMEs for detailed build instructions, protocol documentation, and safety considerations.
+See `joint_controller/README.md` for detailed build instructions, protocol documentation, and safety considerations.
 

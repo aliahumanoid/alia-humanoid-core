@@ -81,7 +81,7 @@ PIO=host/.venv/bin/pio make run MODE=firmware-controller ENV=pico
 ### Flash & Monitor via VS Code
 
 Use PlatformIO extension in VS Code:
-1. Open `software/firmware/joint_controller` or `joint_encoders`
+1. Open `software/firmware/joint_controller`
 2. Use PIO toolbar to upload and monitor
 
 ## Environment Variables

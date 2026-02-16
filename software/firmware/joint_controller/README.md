@@ -19,18 +19,19 @@ Notes:
 - This project targets Raspberry Pi Pico 2 (RP2350) with dual Cortex-M33 cores.
 
 ## Overview
-This firmware implements the control system for a tendon‑driven robotic joint actuated by two LKM motors. It runs on a Raspberry Pi Pico 2 (RP2350) and controls motors over CAN.
+This firmware implements the control system for a tendon‑driven robotic joint actuated by up to 4 LKM motors. It runs on a Raspberry Pi Pico 2 (RP2350) and controls motors over CAN.
 
 ## System Architecture
 
 ### Hardware
 - **Microcontroller**: Raspberry Pi Pico 2 (RP2350)
-- **Motors**: 2x LKM motors (CAN)
-- **Joint Encoder**: external magnetic encoder for absolute joint angle
+- **Motors**: Up to 4x LKM motors (Motor CAN bus)
+- **Joint Encoders**: Up to 3x MT6835 magnetic encoders via SPI0 (direct reading, one per DOF)
 - **Communication**:
-   - CAN bus for motors
-   - SPI for the joint encoder
-   - Serial (USB CDC) to PC/Raspberry Pi
+   - **Host CAN** (MCP2515, GP08 CS): Waypoints, commands, telemetry (Host/Jetson ↔ Controller)
+   - **Motor CAN** (MCP2515, GP09 CS): Torque commands, status (Controller ↔ Motors)
+   - **SPI0**: Direct encoder reading (MT6835)
+   - **Serial** (USB CDC): Diagnostics only (disconnected in production)
 
 ### Main Software Components
 

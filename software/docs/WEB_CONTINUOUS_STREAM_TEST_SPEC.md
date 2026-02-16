@@ -10,8 +10,9 @@
 
 Define a robust, repeatable, web-driven test mode that is as close as possible to the production architecture:
 
-- Production target: `Jetson policy -> USB CDC -> RP2350 CAN Gateway -> CAN -> Joint controllers`
-- Current bench path: `Web UI -> Flask -> CanManager -> CAN -> Joint controllers`
+- Production target (D028): `Jetson → SPI → MCP2515 (CAN Expansion Board) → CAN → Joint controllers`
+- Current bench path: `Web UI → Flask → CanManager → CAN → Joint controllers`
+- Deferred gateway path: `Jetson → USB CDC → RP2350 Gateway → CAN → Joint controllers` (see CAN_SYSTEM_ARCHITECTURE.md §7.3)
 
 This spec introduces a **continuous streaming test service** that emulates gateway-like constraints and backpressure while running in the current Flask host environment.
 
@@ -52,7 +53,7 @@ This spec introduces a **continuous streaming test service** that emulates gatew
 
 Server-side logic must emulate production constraints:
 
-- small per-joint effective buffer (`buffer_depth_sim`, default 2),
+- small per-joint effective buffer (`buffer_depth_sim`, default 2 — deliberately low to simulate gateway backpressure; firmware actual buffer is 2000 WP/DOF),
 - limited in-flight work per joint,
 - fixed cadence publish loop (50/100 Hz),
 - optional fault profiles (delay, drop, burst, sync issues).

@@ -325,7 +325,7 @@ software/host/
 
 ## 🎓 Key Learnings
 
-1. **SPI Conflicts**: Initial dual-CAN design had SPI contention issues. Solution: Single CAN bus with Core1 exclusive access.
+1. **SPI Conflicts**: Initial dual-CAN design had SPI contention issues. Solution: Core1 has exclusive access to both CAN buses (Host CAN + Motor CAN) via SPI1 with separate CS pins.
 2. **Timing Critical**: 500 Hz control requires precise timing (`busy_wait_until`), not just `delay()`.
 3. **Safety First**: Multi-level safety checks (preventive, runtime, periodic) are essential for reliable operation.
 4. **State Management**: Explicit state machine (IDLE/MOVING/HOLDING) simplifies logic and debugging.
