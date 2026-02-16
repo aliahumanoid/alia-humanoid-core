@@ -25,7 +25,7 @@ Phase 0 is early-stage, but we're building a foundation for genuine collaboratio
 ## Ground Rules
 
 - Use English for code comments, documentation, and issues
-- No CAD / STL uploads yet (Phase 0 — releasing soon with clear licensing)
+- STL files are released under CC BY-NC-ND; CAD source files planned for Phase 2+ (see `hardware/LICENSE.md`)
 - Keep commits small and logically scoped
 - Be respectful and constructive in discussions
 

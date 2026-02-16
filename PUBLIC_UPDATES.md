@@ -51,7 +51,8 @@ This is the first of 8 planned joint design logs documenting the full humanoid r
 
 **Software released:**
 - Joint controller firmware (RP2040 dual-core): real-time control, auto joint mapping, PID loops, safety limits
-- Joint encoder firmware (MT6835 magnetic sensors): SPI communication, angle readout
+  *(Note: firmware target migrated to RP2350 in Oct 2025; encoder firmware eliminated in Dec 2025 — encoders now read directly by joint controller via SPI0)*
+- Joint encoder firmware (MT6835 magnetic sensors): SPI communication, angle readout *(since eliminated — see note above)*
 - Python Flask host application: web UI, serial protocol, trajectory control, joint configuration
 
 **Electronics released:**
