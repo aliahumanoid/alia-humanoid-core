@@ -53,8 +53,7 @@ This spec introduces a **continuous streaming test service** that emulates gatew
 
 Server-side logic must emulate production constraints:
 
-- small per-joint effective buffer (`buffer_depth_sim`, default 2 — deliberately low to simulate gateway backpressure; firmware actual buffer is 2000 WP/DOF),
-- limited in-flight work per joint,
+- limited in-flight work per joint (`max_inflight_per_joint`, default 1),
 - fixed cadence publish loop (50/100 Hz),
 - optional fault profiles (delay, drop, burst, sync issues).
 
@@ -150,7 +149,6 @@ Request:
   "rate_hz": 100,
   "duration_s": 120,
   "horizon_ms": 250,
-  "buffer_depth_sim": 2,
   "max_inflight_per_joint": 1,
   "trajectory": {
     "type": "sinusoid",
@@ -238,9 +236,15 @@ Response:
     "http_status_counts": {"200": 3698, "207": 8, "409": 12, "502": 2},
     "retries": 14,
     "queue_fill_max": {"KNEE_LEFT": 2},
+    "max_inflight_per_joint": 1,
     "partial_ratio": 0.0022,
+    "waypoints_late": 0,
+    "late_ratio": 0.0,
     "sync_refresh_count": 2,
-    "last_error": null
+    "last_error": null,
+    "fw_wp_accepted": 7440,
+    "fw_wp_dropped": 0,
+    "fw_buffer_fill": 12
   }
 }
 ```
@@ -313,15 +317,22 @@ Rules:
 
 ### 8.3 Backpressure policy
 
-Per joint:
+Per joint, gating is based solely on `max_inflight_per_joint`:
 
 - if in-flight >= `max_inflight_per_joint`: defer current chunk,
-- if queue occupancy >= `buffer_depth_sim`: drop or defer per policy,
 - default policy:
   - first overload: defer,
   - repeated overload (>3 ticks): drop oldest unsent chunk.
 
 All defer/drop actions must emit event and increment counters.
+
+### 8.4 Firmware telemetry (on-demand)
+
+During a stream test, the host polls firmware waypoint buffer telemetry
+every ~1s via CAN request/response (0x01C → 0x4D0+joint).  The response
+contains `wp_accepted`, `wp_dropped_full`, `wp_dropped_guard`, and
+`buffer_fill`.  These are exposed in the metrics snapshot as
+`fw_wp_accepted`, `fw_wp_dropped`, `fw_buffer_fill`.
 
 ---
 
@@ -382,6 +393,7 @@ Data source:
   - `actual_rate_hz >= 49.0`,
   - `chunks_dropped = 0`,
   - `partial_ratio <= 0.1%` (HTTP 207 count / chunks sent),
+  - `late_ratio <= 0.1%` (late waypoints / waypoints sent),
   - `chunks_failed = 0`.
 
 ### S2 Nominal 100 Hz
@@ -391,6 +403,7 @@ Data source:
   - `actual_rate_hz >= 98.0`,
   - `chunks_dropped = 0`,
   - `partial_ratio <= 0.3%` (HTTP 207 count / chunks sent),
+  - `late_ratio <= 0.3%` (late waypoints / waypoints sent),
   - `chunks_failed = 0`.
 
 ### S3 Multi-joint

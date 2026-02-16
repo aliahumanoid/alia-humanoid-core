@@ -160,10 +160,9 @@ class TrajectoryGenerator:
 # Per-Joint Backpressure
 # ---------------------------------------------------------------------------
 class _JointBackpressure:
-    """Track inflight batches and simulated buffer depth for one joint."""
+    """Track inflight batches for one joint."""
 
-    def __init__(self, buffer_depth: int, max_inflight: int):
-        self._buffer_depth = buffer_depth
+    def __init__(self, max_inflight: int):
         self._max_inflight = max_inflight
         self._inflight: int = 0
         self._consecutive_full: int = 0
@@ -202,6 +201,11 @@ class _JointBackpressure:
         """Current queue fill level for UI gauges."""
         with self._lock:
             return self._inflight
+
+    @property
+    def max_capacity(self) -> int:
+        with self._lock:
+            return self._max_inflight
 
 
 # ---------------------------------------------------------------------------
@@ -307,14 +311,61 @@ class _EventLog:
 
 
 # ---------------------------------------------------------------------------
+# Firmware Telemetry Poller (background thread)
+# ---------------------------------------------------------------------------
+class _TelemetryPoller:
+    """Background daemon that polls firmware telemetry on its own schedule.
+
+    The publish loop reads the cached result without blocking.
+    Modeled after CanManager._listen_loop daemon pattern.
+    """
+
+    def __init__(self, transport: Any, joint: str, interval_s: float = 1.0):
+        self._transport = transport
+        self._joint = joint
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._cached: Optional[dict] = None
+        self._thread = threading.Thread(
+            target=self._poll_loop,
+            name=f"telemetry-poller-{joint}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def get_cached(self) -> Optional[dict]:
+        """Non-blocking read of latest telemetry. Returns None if never received."""
+        with self._lock:
+            return self._cached
+
+    def _poll_loop(self) -> None:
+        while not self._stop.wait(timeout=self._interval_s):
+            try:
+                telem = self._transport.request_wp_telemetry(self._joint)
+                if telem is not None:
+                    with self._lock:
+                        self._cached = telem
+            except Exception:
+                pass  # Best-effort, don't crash the poller
+
+
+# ---------------------------------------------------------------------------
 # Stream Metrics
 # ---------------------------------------------------------------------------
 class StreamMetrics:
     """Aggregate metrics for a streaming session (spec section 6.4)."""
 
-    def __init__(self, target_rate_hz: float, joints: List[str]):
+    def __init__(self, target_rate_hz: float, joints: List[str],
+                 max_inflight: int = 1):
         self._target_rate = target_rate_hz
         self._joints = joints
+        self._max_inflight = max_inflight
         self._lock = threading.Lock()
 
         # Counters
@@ -325,6 +376,7 @@ class StreamMetrics:
         self._chunks_deferred: int = 0
         self._waypoints_sent: int = 0
         self._waypoints_partial: int = 0
+        self._waypoints_late: int = 0
         self._sync_refresh_count: int = 0
         self._last_error: Optional[str] = None
 
@@ -338,6 +390,18 @@ class StreamMetrics:
         self._http_status_counts: Dict[int, int] = {}
         self._extra_status_counts: Dict[int, int] = {}  # conflict spike etc.
         self._retries: int = 0
+
+        # Firmware telemetry (from 0x4D0 on-demand response)
+        # Wrap-aware accumulation: CAN frame sends low 16 bits of uint32 counters
+        self._fw_wp_accepted: int = 0
+        self._fw_wp_dropped: int = 0
+        self._fw_buffer_fill: int = 0
+        self._fw_prev_accepted: int = 0
+        self._fw_prev_dropped_full: int = 0
+        self._fw_prev_dropped_guard: int = 0
+        self._fw_accum_accepted: int = 0
+        self._fw_accum_dropped: int = 0
+        self._fw_telemetry_initialized: bool = False
 
         # Rate calculation
         self._start_time: float = time.monotonic()
@@ -373,6 +437,10 @@ class StreamMetrics:
         with self._lock:
             self._chunks_failed += 1
 
+    def inc_late(self, count: int) -> None:
+        with self._lock:
+            self._waypoints_late += count
+
     def inc_sync_refresh(self) -> None:
         with self._lock:
             self._sync_refresh_count += 1
@@ -399,6 +467,42 @@ class StreamMetrics:
             self._http_status_counts = client_metrics.get("status_counts", {})
             self._retries = client_metrics.get("retries", 0)
 
+    def update_fw_telemetry(self, telem: dict) -> None:
+        """Update firmware-side telemetry with uint16 wrap handling.
+
+        CAN frame sends low 16 bits of uint32 counters.  At 1s poll interval
+        and 300 wp/s max, delta per interval is ~300, well under 65535.
+        """
+        with self._lock:
+            raw_acc = telem.get("wp_accepted", 0)
+            raw_df = telem.get("wp_dropped_full", 0)
+            raw_dg = telem.get("wp_dropped_guard", 0)
+
+            if not self._fw_telemetry_initialized:
+                # First poll: just record prev values, don't accumulate
+                self._fw_prev_accepted = raw_acc
+                self._fw_prev_dropped_full = raw_df
+                self._fw_prev_dropped_guard = raw_dg
+                self._fw_telemetry_initialized = True
+                self._fw_buffer_fill = telem.get("buffer_fill", 0)
+                return
+
+            # Delta with 16-bit wrap handling
+            d_acc = (raw_acc - self._fw_prev_accepted) & 0xFFFF
+            d_df = (raw_df - self._fw_prev_dropped_full) & 0xFFFF
+            d_dg = (raw_dg - self._fw_prev_dropped_guard) & 0xFFFF
+
+            self._fw_prev_accepted = raw_acc
+            self._fw_prev_dropped_full = raw_df
+            self._fw_prev_dropped_guard = raw_dg
+
+            self._fw_accum_accepted += d_acc
+            self._fw_accum_dropped += d_df + d_dg
+
+            self._fw_wp_accepted = self._fw_accum_accepted
+            self._fw_wp_dropped = self._fw_accum_dropped
+            self._fw_buffer_fill = telem.get("buffer_fill", 0)
+
     def snapshot(self) -> dict:
         with self._lock:
             elapsed = time.monotonic() - self._start_time
@@ -421,6 +525,9 @@ class StreamMetrics:
             partial_count = merged_status.get(207, 0)
             partial_ratio = partial_count / max(1, self._chunks_sent)
 
+            # late ratio: real late waypoints / total waypoints sent
+            late_ratio = self._waypoints_late / max(1, self._waypoints_sent)
+
             return {
                 "target_rate_hz": self._target_rate,
                 "actual_rate_hz": round(actual_rate, 1),
@@ -432,12 +539,18 @@ class StreamMetrics:
                 "chunks_deferred": self._chunks_deferred,
                 "waypoints_sent": self._waypoints_sent,
                 "waypoints_partial": self._waypoints_partial,
+                "waypoints_late": self._waypoints_late,
                 "http_status_counts": merged_status,
                 "retries": self._retries,
                 "queue_fill_max": dict(self._queue_fill_max),
+                "max_inflight_per_joint": self._max_inflight,
                 "partial_ratio": round(partial_ratio, 4),
+                "late_ratio": round(late_ratio, 6),
                 "sync_refresh_count": self._sync_refresh_count,
                 "last_error": self._last_error,
+                "fw_wp_accepted": self._fw_wp_accepted,
+                "fw_wp_dropped": self._fw_wp_dropped,
+                "fw_buffer_fill": self._fw_buffer_fill,
             }
 
 
@@ -468,7 +581,6 @@ class _StreamSession:
         joint = config["joints"][0]
         rate_hz = config["rate_hz"]
         horizon_ms = config.get("horizon_ms", 250)
-        buffer_depth = config.get("buffer_depth_sim", 2)
         max_inflight = config.get("max_inflight_per_joint", 1)
         fault_profile = config.get("fault_profile", {"mode": "none"})
 
@@ -488,11 +600,11 @@ class _StreamSession:
             ),
         }
         self._backpressure: Dict[str, _JointBackpressure] = {
-            joint: _JointBackpressure(buffer_depth, max_inflight),
+            joint: _JointBackpressure(max_inflight),
         }
 
         self._fault = _FaultInjector(fault_profile)
-        self.metrics = StreamMetrics(rate_hz, [joint])
+        self.metrics = StreamMetrics(rate_hz, [joint], max_inflight=max_inflight)
         self.events = _EventLog()
 
         # Batch completion tracking
@@ -552,9 +664,10 @@ class _StreamSession:
                 base_backoff_500_s=0.5,
                 base_backoff_timeout_s=0.2,
             ),
-            max_queue_size=config.get("buffer_depth_sim", 2),
+            max_queue_size=config.get("max_inflight_per_joint", 1),
         )
         client = WaypointClient(transport, config=client_config)
+        telemetry_poller = _TelemetryPoller(transport, joint)
 
         try:
             # Initial time sync
@@ -699,6 +812,7 @@ class _StreamSession:
                     self.events.emit("WARN", "time_sync_fail", detail="pre-stream refresh failed")
 
             self.state = SessionState.RUNNING
+            telemetry_poller.start()
             period_s = 1.0 / rate_hz
             next_tick = time.monotonic()
             tick = 0
@@ -817,6 +931,10 @@ class _StreamSession:
                 # Periodic metrics merge + emit (every 1s)
                 if tick % max(1, metrics_interval_ticks) == 0:
                     self.metrics.merge_client_metrics(client.get_metrics())
+                    # Read cached firmware telemetry (non-blocking)
+                    telem = telemetry_poller.get_cached()
+                    if telem:
+                        self.metrics.update_fw_telemetry(telem)
                     self._emit_metrics()
 
                 tick += 1
@@ -837,6 +955,8 @@ class _StreamSession:
             self.events.emit("ERROR", "session_crash", detail=str(exc))
             self.state = SessionState.FAILED
         finally:
+            # Stop telemetry poller
+            telemetry_poller.stop()
             # Drain pending and shutdown client
             try:
                 client.shutdown(timeout_s=5.0)
@@ -869,8 +989,12 @@ class _StreamSession:
                     self.metrics.inc_failed()
                 else:
                     self.metrics.inc_confirmed()
+                    result = record.result or {}
+                    # Extract real late_count from can_manager response
+                    late = result.get("late_count", 0)
+                    if late > 0:
+                        self.metrics.inc_late(late)
                     if record.state == BatchState.PARTIAL:
-                        result = record.result or {}
                         total = result.get("total", 0)
                         sent = result.get("sent", 0)
                         failed_wp = max(0, total - sent)

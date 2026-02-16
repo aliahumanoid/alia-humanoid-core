@@ -88,8 +88,10 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_LOAD_LINEAR_EQ 0x019       // Load linear equations from flash (Host → Controller)
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
 #define CAN_ID_WP_REANCHOR_INTERVAL 0x01B // Set waypoint re-anchor interval (Host → Controller)
+#define CAN_ID_WP_TELEMETRY_REQUEST 0x01C // Waypoint buffer telemetry request (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
+#define CAN_ID_WP_TELEMETRY_DATA 0x4D0   // Waypoint buffer telemetry (Controller → Host, + joint_id)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -215,6 +217,7 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
 
   if (!clock_synced) {
     LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: clock not synchronized");
+    wp_telemetry.wp_dropped_guard++;
     return;
   }
   
@@ -225,6 +228,7 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   if (!uptime_check_passed) {
     if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
       LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: system startup");
+      wp_telemetry.wp_dropped_guard++;
       return;
     }
     uptime_check_passed = true;
@@ -233,12 +237,14 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
   // SAFETY: Drop waypoints during startup injection (Core0 writing to buffer)
   if (__atomic_load_n(&startup_injecting_waypoints, __ATOMIC_ACQUIRE)) {
     LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: startup injection in progress");
+    wp_telemetry.wp_dropped_guard++;
     return;
   }
 
   // SAFETY: Verify system is ready for movement
   if (active_joint_controller != nullptr && !active_joint_controller->isSystemReadyForMovement()) {
     LOG_C1_ERROR("[CAN] Multi-DOF Waypoint REJECTED: System not ready - run recalcOffset first!");
+    wp_telemetry.wp_dropped_guard++;
     return;
   }
 
@@ -1133,6 +1139,31 @@ void pollHostCan() {
         wp_reanchor_interval = applied_interval;
         LOG_C1_INFO("[CAN_HOST] WP re-anchor interval set to: " + String(applied_interval) +
                     (applied_interval == 0 ? " (disabled)" : " WPs"));
+      }
+    } else if (rx_id == CAN_ID_WP_TELEMETRY_REQUEST) {
+      // Waypoint buffer telemetry: on-demand request/response
+      // Frame in: [joint_id, ...]
+      // Frame out on CAN_ID_WP_TELEMETRY_DATA + joint_id:
+      //   [accepted_lo, accepted_hi, dropped_full_lo, dropped_full_hi,
+      //    dropped_guard_lo, dropped_guard_hi, buf_fill_lo, buf_fill_hi]
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        uint8_t frame[8];
+        // Report maximum buffer fill across DOFs (active DOF's actual level)
+        uint16_t buf_fill = 0;
+        for (uint8_t d = 0; d < waypoint_buffers_get_dof_count(); d++) {
+          uint16_t c = waypoint_buffer_count(d);
+          if (c > buf_fill) buf_fill = c;
+        }
+        // Truncate uint32_t counters to low 16 bits for the 8-byte CAN frame.
+        // Host detects wraps via delta = (new - prev) & 0xFFFF.
+        uint16_t acc_lo = (uint16_t)(wp_telemetry.wp_accepted & 0xFFFF);
+        uint16_t df_lo  = (uint16_t)(wp_telemetry.wp_dropped_full & 0xFFFF);
+        uint16_t dg_lo  = (uint16_t)(wp_telemetry.wp_dropped_guard & 0xFFFF);
+        memcpy(&frame[0], &acc_lo, 2);
+        memcpy(&frame[2], &df_lo, 2);
+        memcpy(&frame[4], &dg_lo, 2);
+        memcpy(&frame[6], &buf_fill, 2);
+        CAN_HOST.sendMsgBuf(CAN_ID_WP_TELEMETRY_DATA + ACTIVE_JOINT, 0, 8, frame);
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame

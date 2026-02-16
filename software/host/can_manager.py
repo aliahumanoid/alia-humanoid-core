@@ -52,6 +52,7 @@ Priority Level 4 (Status Feedback - Lowest):
 - 0x4A0+joint: Joint Announce/Discovery
 - 0x4B0+joint: Encoder Offsets Response
 - 0x4C0+joint: Zero Complete Notification
+- 0x4D0+joint: Waypoint Buffer Telemetry (on-demand)
 
 Note: Motor commands have higher priority than waypoints to ensure PID loop stability.
 """
@@ -119,6 +120,10 @@ class CanManager:
 
         # CAN set-zero completion event
         self._zero_complete_event = threading.Event()
+
+        # Waypoint buffer telemetry (on-demand request/response)
+        self._wp_telemetry: Dict[str, Dict[str, Any]] = {}
+        self._wp_telemetry_event = threading.Event()
 
         # Time sync tracking (for preflight gating)
         self._last_time_sync_ts: Optional[float] = None
@@ -429,6 +434,44 @@ class CanManager:
             )
 
         return result
+
+    def request_wp_telemetry(
+        self, joint_name: str, timeout: float = 0.5
+    ) -> Optional[Dict[str, Any]]:
+        """Request waypoint buffer telemetry from a joint controller.
+
+        Sends a request frame (0x01C) and waits for the response (0x4D0+joint).
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            timeout: Seconds to wait for the response
+
+        Returns:
+            Dict with wp_accepted, wp_dropped_full, wp_dropped_guard, buffer_fill,
+            or None if no response.
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+
+        with self._lock:
+            self._wp_telemetry_event.clear()
+
+        request_ts = time.time()
+        payload = bytes([joint_id]) + bytes(7)
+        self._send_frame(0x01C, payload, context=f"WP telemetry request joint={joint_name}")
+
+        arrived = self._wp_telemetry_event.wait(timeout=timeout)
+        if not arrived:
+            return None  # Timeout: don't return stale cache
+
+        with self._lock:
+            entry = self._wp_telemetry.get(joint_name)
+            if entry is None:
+                return None
+            # Guard: only return if response arrived after our request
+            if entry.get("timestamp", 0) < request_ts:
+                return None
+            return entry
 
     def validate_encoder_offsets(self, joint_name: str) -> Dict[str, Any]:
         """Query firmware encoder offsets and validate against saved host copy.
@@ -1522,6 +1565,24 @@ class CanManager:
                 f"Zero complete: joint={joint_id} encoders={enc_count}"
             )
             self._zero_complete_event.set()
+            return
+
+        # Waypoint buffer telemetry (0x4D0-0x4DF) - on-demand response
+        if 0x4D0 <= arb_id <= 0x4DF and len(data) >= 8:
+            joint_id = arb_id - 0x4D0
+            accepted, dropped_full, dropped_guard, buf_fill = struct.unpack_from(
+                "<HHHH", data
+            )
+            joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+            with self._lock:
+                self._wp_telemetry[joint_name] = {
+                    "wp_accepted": accepted,
+                    "wp_dropped_full": dropped_full,
+                    "wp_dropped_guard": dropped_guard,
+                    "buffer_fill": buf_fill,
+                    "timestamp": time.time(),
+                }
+            self._wp_telemetry_event.set()
             return
 
         # Debug: log any received CAN frame (throttled)

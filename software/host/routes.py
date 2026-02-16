@@ -1209,6 +1209,26 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
                 "message": f"Unable to set re-anchor interval: {exc}"
             }), 500
 
+    @app.route('/can/wp_telemetry', methods=['GET'])
+    def get_wp_telemetry():
+        """Request waypoint buffer telemetry from firmware (on-demand 0x4D0)."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        joint = request.args.get('joint')
+        if not joint:
+            return jsonify({"status": "error", "message": "Missing 'joint' param"}), 400
+
+        try:
+            result = can_manager.request_wp_telemetry(joint)
+            if result is None:
+                return jsonify({"status": "error", "message": "No response from firmware"}), 504
+            return jsonify({"status": "success", "result": result})
+        except Exception as exc:
+            logger.exception("Failed to get WP telemetry")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
         popped = serial_manager.pop_status_message()

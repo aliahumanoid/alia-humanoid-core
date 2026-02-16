@@ -215,6 +215,21 @@ class HttpTransport:
         except (requests.Timeout, requests.ConnectionError):
             return False
 
+    def request_wp_telemetry(self, joint: str) -> Optional[dict]:
+        """Request firmware waypoint buffer telemetry via Flask route."""
+        import requests                         # noqa: local import
+        try:
+            resp = self._get_session().get(
+                f"{self._base_url}/can/wp_telemetry",
+                params={"joint": joint},
+                timeout=2.0,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("result")
+            return None
+        except (requests.Timeout, requests.ConnectionError):
+            return None
+
     def check_health(self) -> HealthStatus:
         import requests                         # noqa: local import
         try:

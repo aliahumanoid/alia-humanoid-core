@@ -1062,17 +1062,28 @@ The following telemetry signals form the **minimum observability contract** betw
 | `batch_seq` | uint16_t | Monotonic batch counter (in time sync, see §5.3) |
 | `telemetry_enable` | uint8_t | Bitmask enabling/disabling telemetry streams |
 
-**CAN IDs**: Not yet assigned. Recommended: reserve 0x4D0+joint for telemetry frames (2-3 frames per joint, packed).
+**CAN IDs**:
+- **Request**: `0x01C` (Host → Controller) — byte 0 = joint_id
+- **Response**: `0x4D0+joint` (Controller → Host) — 8 bytes:
+
+| Bytes | Field | Type |
+|-------|-------|------|
+| 0-1 | wp_accepted | uint16_t LE |
+| 2-3 | wp_dropped_full | uint16_t LE |
+| 4-5 | wp_dropped_guard | uint16_t LE |
+| 6-7 | buffer_fill (min across DOFs) | uint16_t LE |
+
+Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0) to avoid SPI1 bus contention with periodic motor CAN reads.
 
 **Implementation roadmap**:
 
 | Step | Scope | Status |
 |------|-------|--------|
-| 1. Firmware counters | Add missing counters (`wp_late_count`, `buffer_underrun_count`, `loop_overrun_count`) | Partial — `wp_consumed_count` exists |
-| 2. CAN ID assignment | Assign 0x4D0+joint (or alternative range), define frame packing | Not started |
-| 3. Firmware TX path | Stream telemetry frames on Host CAN, gated by `telemetry_enable` | Not started |
-| 4. Host RX + logging | Parse telemetry in `can_manager.py`, expose via Flask/SocketIO | Not started |
-| 5. Dashboard | Real-time telemetry display in UI (buffer fill, late ratio, errors) | Not started |
+| 1. Firmware counters | `WaypointTelemetry` struct: accepted, dropped_full, dropped_guard | Done |
+| 2. CAN ID assignment | Request 0x01C, response 0x4D0+joint | Done |
+| 3. Firmware TX path | On-demand response in CAN dispatch (pollHostCan) | Done |
+| 4. Host RX + logging | `can_manager.request_wp_telemetry()` + 0x4D0 handler | Done |
+| 5. Dashboard | FW accepted/dropped/buffer_fill in stream test KPI panel | Done |
 
 ---
 
@@ -1321,7 +1332,8 @@ Each joint controller has two physically separate CAN buses:
 | 0x019 | Load Linear Eq from Flash | Host → Ctrl | High |
 | 0x01A | Set Auto-Start on Boot | Host → Ctrl | High |
 | **0x01B** | **Re-anchor Interval** | Host → Ctrl | High |
-| 0x01C-0x13F | Reserved (Future High Priority) | - | - |
+| **0x01C** | **WP Telemetry Request** | Host → Ctrl | High |
+| 0x01D-0x13F | Reserved (Future High Priority) | - | - |
 | 0x380-0x393 | Multi-DOF Waypoint Joint 0-19 | Host → Ctrl | Level 3 |
 | 0x400-0x40F | Status/Feedback | Ctrl → Host | Level 4 |
 | 0x410 | Encoder Stream Data | Ctrl → Host | Level 4 |
@@ -1335,6 +1347,7 @@ Each joint controller has two physically separate CAN buses:
 | 0x4A0+joint | Joint Announce/Discovery | Ctrl → Host | Level 4 |
 | 0x4B0+joint | Encoder Offsets Response | Ctrl → Host | Level 4 |
 | 0x4C0+joint | Zero Complete Notification | Ctrl → Host | Level 4 |
+| **0x4D0+joint** | **WP Buffer Telemetry** | Ctrl → Host | Level 4 |
 
 ### Motor CAN IDs
 

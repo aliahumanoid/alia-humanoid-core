@@ -2,6 +2,9 @@
 
 #include <algorithm>
 
+// Telemetry counters (Core1 only)
+WaypointTelemetry wp_telemetry = {0, 0, 0};
+
 // ============================================================================
 // WAYPOINT BUFFER — Single-core implementation (Core1 only)
 // ============================================================================
@@ -53,13 +56,15 @@ bool waypoint_buffer_push(uint8_t dof_index, const WaypointEntry &entry) {
 
   WaypointBuffer &buf = buffer_for(dof_index);
   if (buf.count >= WAYPOINT_BUFFER_DEPTH) {
+    wp_telemetry.wp_dropped_full++;
     return false;  // Buffer full
   }
-  
+
   // Ring buffer push: write at tail, advance tail
   buf.buffer[buf.tail] = entry;
   buf.tail = (buf.tail + 1) % WAYPOINT_BUFFER_DEPTH;
   buf.count++;
+  wp_telemetry.wp_accepted++;
 
   // Track last pushed entry for monotonicity & velocity checks
   buf.last_pushed_time_ms = entry.t_arrival_ms;

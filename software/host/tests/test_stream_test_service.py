@@ -35,6 +35,7 @@ from stream_test_service import (
     _FaultInjector,
     _JointBackpressure,
     _StreamSession,
+    _TelemetryPoller,
 )
 from waypoint_client import BatchRecord, BatchResponse, BatchState
 
@@ -606,26 +607,26 @@ class TestPreposition:
 class TestBackpressure:
 
     def test_defer_when_full(self):
-        bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
+        bp = _JointBackpressure(max_inflight=1)
         bp.on_send()
         assert not bp.can_send()
 
     def test_allows_after_done(self):
-        bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
+        bp = _JointBackpressure(max_inflight=1)
         bp.on_send()
         assert not bp.can_send()
         bp.on_done()
         assert bp.can_send()
 
     def test_drop_after_consecutive_threshold(self):
-        bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
+        bp = _JointBackpressure(max_inflight=1)
         bp.on_send()
         for _ in range(4):
             assert not bp.can_send()
         assert bp.should_drop
 
     def test_consecutive_reset_on_success(self):
-        bp = _JointBackpressure(buffer_depth=2, max_inflight=1)
+        bp = _JointBackpressure(max_inflight=1)
         bp.on_send()
         bp.can_send()
         bp.can_send()
@@ -688,9 +689,12 @@ class TestMetrics:
             "target_rate_hz", "actual_rate_hz", "scheduler_drift_ms_p95",
             "chunks_sent", "chunks_confirmed", "chunks_failed",
             "chunks_dropped", "chunks_deferred",
-            "waypoints_sent", "waypoints_partial", "http_status_counts",
-            "retries", "queue_fill_max", "partial_ratio",
+            "waypoints_sent", "waypoints_partial", "waypoints_late",
+            "http_status_counts",
+            "retries", "queue_fill_max", "max_inflight_per_joint",
+            "partial_ratio", "late_ratio",
             "sync_refresh_count", "last_error",
+            "fw_wp_accepted", "fw_wp_dropped", "fw_buffer_fill",
         ]
         for key in required_keys:
             assert key in snap, f"Missing key: {key}"
@@ -826,3 +830,153 @@ class TestServiceAPI:
 
             svc.stop(result["session_id"])
             time.sleep(0.5)
+
+
+# =======================================================================
+# J. Telemetry Poller
+# =======================================================================
+class TestTelemetryPoller:
+
+    def test_cached_is_none_before_start(self):
+        transport = MagicMock()
+        poller = _TelemetryPoller(transport, "KNEE_LEFT", interval_s=0.05)
+        assert poller.get_cached() is None
+
+    def test_polls_and_caches(self):
+        """Poller fetches from transport and caches the result."""
+        transport = MagicMock()
+        transport.request_wp_telemetry.return_value = {"wp_accepted": 42}
+        poller = _TelemetryPoller(transport, "KNEE_LEFT", interval_s=0.05)
+        poller.start()
+        time.sleep(0.2)
+        poller.stop()
+        cached = poller.get_cached()
+        assert cached is not None
+        assert cached["wp_accepted"] == 42
+        assert transport.request_wp_telemetry.call_count >= 1
+
+    def test_none_response_keeps_previous_cache(self):
+        """If transport returns None, cached value is not overwritten."""
+        transport = MagicMock()
+        call_count = [0]
+
+        def side_effect(joint):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"wp_accepted": 10}
+            return None
+
+        transport.request_wp_telemetry.side_effect = side_effect
+        poller = _TelemetryPoller(transport, "KNEE_LEFT", interval_s=0.05)
+        poller.start()
+        time.sleep(0.25)
+        poller.stop()
+        cached = poller.get_cached()
+        assert cached is not None
+        assert cached["wp_accepted"] == 10
+
+    def test_exception_does_not_crash(self):
+        """Transport exception is swallowed — poller keeps running."""
+        transport = MagicMock()
+        transport.request_wp_telemetry.side_effect = ConnectionError("fail")
+        poller = _TelemetryPoller(transport, "KNEE_LEFT", interval_s=0.05)
+        poller.start()
+        time.sleep(0.15)
+        poller.stop()
+        assert poller.get_cached() is None
+        assert transport.request_wp_telemetry.call_count >= 1
+
+    def test_stop_is_idempotent(self):
+        transport = MagicMock()
+        transport.request_wp_telemetry.return_value = None
+        poller = _TelemetryPoller(transport, "KNEE_LEFT", interval_s=0.05)
+        poller.start()
+        time.sleep(0.1)
+        poller.stop()
+        poller.stop()  # second stop should not raise
+
+    def test_get_cached_is_nonblocking(self):
+        """get_cached must return in << 1ms regardless of transport state."""
+        transport = MagicMock()
+        transport.request_wp_telemetry.return_value = {"wp_accepted": 1}
+        poller = _TelemetryPoller(transport, "KNEE_LEFT", interval_s=10.0)
+        poller.start()
+        t0 = time.monotonic()
+        poller.get_cached()
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        poller.stop()
+        assert elapsed_ms < 5.0, f"get_cached took {elapsed_ms:.1f}ms"
+
+
+# =======================================================================
+# K. Firmware Telemetry Wrap-Aware Accumulation
+# =======================================================================
+class TestFwTelemetryWrap:
+
+    def test_first_poll_initializes_only(self):
+        """First call to update_fw_telemetry should not accumulate."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.update_fw_telemetry({"wp_accepted": 100, "wp_dropped_full": 5,
+                               "wp_dropped_guard": 2, "buffer_fill": 10})
+        snap = m.snapshot()
+        assert snap["fw_wp_accepted"] == 0
+        assert snap["fw_wp_dropped"] == 0
+        assert snap["fw_buffer_fill"] == 10
+
+    def test_second_poll_accumulates_delta(self):
+        """Second poll computes delta from first."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.update_fw_telemetry({"wp_accepted": 100, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 5})
+        m.update_fw_telemetry({"wp_accepted": 250, "wp_dropped_full": 1,
+                               "wp_dropped_guard": 2, "buffer_fill": 8})
+        snap = m.snapshot()
+        assert snap["fw_wp_accepted"] == 150
+        assert snap["fw_wp_dropped"] == 3
+        assert snap["fw_buffer_fill"] == 8
+
+    def test_multiple_polls_accumulate(self):
+        """Multiple polls accumulate correctly."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.update_fw_telemetry({"wp_accepted": 0, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 0})
+        m.update_fw_telemetry({"wp_accepted": 100, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 5})
+        m.update_fw_telemetry({"wp_accepted": 300, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 1, "buffer_fill": 3})
+        snap = m.snapshot()
+        assert snap["fw_wp_accepted"] == 300
+        assert snap["fw_wp_dropped"] == 1
+
+    def test_uint16_wrap_accepted(self):
+        """Counter wrapping around 65535 is handled correctly."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.update_fw_telemetry({"wp_accepted": 65500, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 0})
+        # 65500 + 100 = 65600 → low 16 bits = 64
+        m.update_fw_telemetry({"wp_accepted": 64, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 0})
+        snap = m.snapshot()
+        assert snap["fw_wp_accepted"] == 100
+
+    def test_uint16_wrap_dropped(self):
+        """Dropped counters also handle wrap."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.update_fw_telemetry({"wp_accepted": 0, "wp_dropped_full": 65530,
+                               "wp_dropped_guard": 65530, "buffer_fill": 0})
+        m.update_fw_telemetry({"wp_accepted": 0, "wp_dropped_full": 4,
+                               "wp_dropped_guard": 4, "buffer_fill": 0})
+        snap = m.snapshot()
+        # (4 - 65530) & 0xFFFF = 10 each
+        assert snap["fw_wp_dropped"] == 20
+
+    def test_zero_delta_no_change(self):
+        """Same values between polls → no accumulation."""
+        m = StreamMetrics(target_rate_hz=50, joints=["J"])
+        m.update_fw_telemetry({"wp_accepted": 50, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 3})
+        m.update_fw_telemetry({"wp_accepted": 50, "wp_dropped_full": 0,
+                               "wp_dropped_guard": 0, "buffer_fill": 3})
+        snap = m.snapshot()
+        assert snap["fw_wp_accepted"] == 0
+        assert snap["fw_wp_dropped"] == 0

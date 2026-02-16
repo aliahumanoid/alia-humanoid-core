@@ -9183,8 +9183,12 @@ function _updateStreamKPI(m) {
     $('#streamKpiDrift').text(
         m.scheduler_drift_ms_p95 != null ? m.scheduler_drift_ms_p95.toFixed(2) + 'ms' : '-'
     );
-    $('#streamKpiLate').text(
+    $('#streamKpiPartialRatio').text(
         m.partial_ratio != null ? (m.partial_ratio * 100).toFixed(2) + '%' : '-'
+    );
+    $('#streamKpiLateWp').text(m.waypoints_late || 0);
+    $('#streamKpiLateRatio').text(
+        m.late_ratio != null ? (m.late_ratio * 100).toFixed(4) + '%' : '-'
     );
     $('#streamKpiSent').text(m.chunks_sent || 0);
     $('#streamKpiConfirmed').text(m.chunks_confirmed || 0);
@@ -9200,18 +9204,24 @@ function _updateStreamKPI(m) {
     $('#streamKpi502').text(v502);
     $('#streamKpiSync').text(m.sync_refresh_count || 0);
 
+    // Firmware telemetry
+    $('#streamKpiFwAccepted').text(m.fw_wp_accepted != null ? m.fw_wp_accepted : '-');
+    $('#streamKpiFwDropped').text(m.fw_wp_dropped != null ? m.fw_wp_dropped : '-');
+    $('#streamKpiFwBufFill').text(m.fw_buffer_fill != null ? m.fw_buffer_fill : '-');
+
     // Queue fill per joint
     const qf = m.queue_fill_max || {};
+    const capacity = m.max_inflight_per_joint || 1;
     let qhtml = '';
     for (const [joint, fill] of Object.entries(qf)) {
-        const pct = Math.min(fill / 2 * 100, 100);  // buffer_depth_sim=2
+        const pct = Math.min(fill / capacity * 100, 100);
         qhtml += `<div class="flex justify-between items-center">
             <span class="text-gray-500">${joint}</span>
             <div class="flex items-center gap-1">
                 <div class="w-16 h-2 bg-gray-200 rounded overflow-hidden">
                     <div class="h-full bg-teal-500 rounded" style="width:${pct}%"></div>
                 </div>
-                <span class="w-6 text-right">${fill}/2</span>
+                <span class="w-6 text-right">${fill}/${capacity}</span>
             </div>
         </div>`;
     }
@@ -9231,13 +9241,15 @@ function _evaluateStreamVerdict(m) {
 
     const is100 = m.target_rate_hz >= 100;
     const minHz = is100 ? 98.0 : 49.0;
-    const maxLate = is100 ? 0.003 : 0.001;
+    const maxPartialRatio = is100 ? 0.003 : 0.001;  // S1: 0.1%, S2: 0.3%
+    const maxLateRatio    = is100 ? 0.003 : 0.001;
 
-    const hzOk = m.actual_rate_hz != null && m.actual_rate_hz >= minHz;
-    const dropOk = (m.chunks_dropped || 0) === 0;
-    const partialOk = m.partial_ratio != null && m.partial_ratio <= maxLate;
-    const failedOk = (m.chunks_failed || 0) === 0;
-    const pass = hzOk && dropOk && partialOk && failedOk;
+    const hzOk      = m.actual_rate_hz != null && m.actual_rate_hz >= minHz;
+    const dropOk    = (m.chunks_dropped || 0) === 0;
+    const partialOk = m.partial_ratio != null && m.partial_ratio <= maxPartialRatio;
+    const lateOk    = m.late_ratio != null && m.late_ratio <= maxLateRatio;
+    const failedOk  = (m.chunks_failed || 0) === 0;
+    const pass = hzOk && dropOk && partialOk && lateOk && failedOk;
 
     el.removeClass('hidden');
     if (pass) {
@@ -9246,7 +9258,8 @@ function _evaluateStreamVerdict(m) {
         let reasons = [];
         if (!hzOk) reasons.push('Hz < ' + minHz);
         if (!dropOk) reasons.push('drops > 0');
-        if (!partialOk) reasons.push('partial > ' + (maxLate * 100).toFixed(1) + '%');
+        if (!partialOk) reasons.push('partial > ' + (maxPartialRatio * 100).toFixed(1) + '%');
+        if (!lateOk) reasons.push('late > ' + (maxLateRatio * 100).toFixed(1) + '%');
         if (!failedOk) reasons.push('failed chunks: ' + (m.chunks_failed || 0));
         el.html('<span class="text-red-600 bg-red-50 px-2 py-1 rounded">&#x274C; ' + reasons.join(', ') + '</span>');
     }

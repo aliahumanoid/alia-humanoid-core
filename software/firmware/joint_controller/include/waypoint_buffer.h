@@ -78,5 +78,15 @@ void waypoint_buffer_set_prev(uint8_t dof_index, float angle_deg, uint32_t time_
 uint32_t waypoint_buffer_last_pushed_time(uint8_t dof_index);
 float waypoint_buffer_last_pushed_angle(uint8_t dof_index);
 
+// Telemetry counters (Core1 only — no locking needed)
+// uint32_t to avoid rollover in long tests; CAN frame sends low 16 bits,
+// host accumulates deltas with wrap handling.
+struct WaypointTelemetry {
+  uint32_t wp_accepted;       // Total waypoints pushed successfully
+  uint32_t wp_dropped_full;   // Buffer full drops
+  uint32_t wp_dropped_guard;  // Clock/startup/system-not-ready drops
+};
+extern WaypointTelemetry wp_telemetry;
+
 #endif // WAYPOINT_BUFFER_H
 

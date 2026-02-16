@@ -2547,7 +2547,15 @@
                                 </div>
                                 <div class="flex justify-between">
                                     <span class="text-gray-600">Partial ratio</span>
-                                    <span id="streamKpiLate">-</span>
+                                    <span id="streamKpiPartialRatio">-</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Late waypoints</span>
+                                    <span id="streamKpiLateWp" class="text-orange-500">0</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Late ratio</span>
+                                    <span id="streamKpiLateRatio">-</span>
                                 </div>
                                 <hr class="border-teal-100">
                                 <div class="flex justify-between">
@@ -2586,6 +2594,19 @@
                                 <div class="flex justify-between">
                                     <span class="text-gray-600">Sync refreshes</span>
                                     <span id="streamKpiSync">0</span>
+                                </div>
+                                <hr class="border-teal-100">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">FW accepted</span>
+                                    <span id="streamKpiFwAccepted" class="text-green-600">-</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">FW dropped</span>
+                                    <span id="streamKpiFwDropped" class="text-red-500">-</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">FW buffer fill</span>
+                                    <span id="streamKpiFwBufFill">-</span>
                                 </div>
                                 <!-- Queue fill per joint -->
                                 <div id="streamKpiQueues" class="mt-1"></div>
