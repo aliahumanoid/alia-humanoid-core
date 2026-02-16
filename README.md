@@ -89,7 +89,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 | **Software** | ✅ Public | MIT | Python host + C++ firmware (RP2350 Pico 2) |
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | Assembly guides, BOM, design specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
-| **Electronics** | ✅ Public | CC BY-NC-ND | Dual RP2040/RP2350 controller board (Gerber files + KiCad source) |
+| **Electronics** | ✅ Public | CC BY-NC-ND | RP2350 controller board (Gerber files + KiCad source) |
 | **CAD Source** | 📅 Phase 2+ (TBD) | CC BY-SA | Full parametric Fusion 360 timeline |
 
 See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-source transition.
