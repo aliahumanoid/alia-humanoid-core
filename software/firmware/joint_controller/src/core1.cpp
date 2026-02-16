@@ -1117,12 +1117,22 @@ void pollHostCan() {
         can_set_auto_start_requested = true;
       }
     } else if (rx_id == CAN_ID_WP_REANCHOR_INTERVAL) {
-      // Re-anchor interval: byte 0-1 = uint16_t interval (0 = disabled)
+      // Re-anchor interval: byte 0-1 = uint16_t interval
+      // 0 = disabled, otherwise clamp to [1, WAYPOINT_BUFFER_DEPTH].
       if (len >= 2) {
-        uint16_t interval = buf[0] | (buf[1] << 8);
-        wp_reanchor_interval = interval;
-        LOG_C1_INFO("[CAN_HOST] WP re-anchor interval set to: " + String(interval) +
-                    (interval == 0 ? " (disabled)" : " WPs"));
+        uint16_t requested_interval = buf[0] | (buf[1] << 8);
+        uint16_t applied_interval = requested_interval;
+
+        if (requested_interval > WAYPOINT_BUFFER_DEPTH) {
+          applied_interval = WAYPOINT_BUFFER_DEPTH;
+          LOG_C1_WARN("[CAN_HOST] WP re-anchor interval clamped: " +
+                      String(requested_interval) + " -> " +
+                      String((uint16_t)WAYPOINT_BUFFER_DEPTH));
+        }
+
+        wp_reanchor_interval = applied_interval;
+        LOG_C1_INFO("[CAN_HOST] WP re-anchor interval set to: " + String(applied_interval) +
+                    (applied_interval == 0 ? " (disabled)" : " WPs"));
       }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
@@ -1831,4 +1841,3 @@ void core1_loop() {
     sleep_us(100);
   }
 }
-

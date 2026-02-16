@@ -1189,12 +1189,17 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
                     "status": "error",
                     "message": "Missing 'interval' field"
                 }), 400
-            interval = int(data['interval'])
-            result = can_manager.set_reanchor_interval(interval)
+            requested_interval = int(data['interval'])
+            result = can_manager.set_reanchor_interval(requested_interval)
+            applied_interval = int(result.get("interval", requested_interval))
+            clamped = bool(result.get("clamped", False))
+            message = f"WP re-anchor interval set to: {applied_interval}" + \
+                      (" (disabled)" if applied_interval == 0 else " WPs")
+            if clamped:
+                message += f" [clamped from {requested_interval}]"
             return jsonify({
                 "status": "success",
-                "message": f"WP re-anchor interval set to: {interval}" +
-                           (" (disabled)" if interval == 0 else " WPs"),
+                "message": message,
                 "result": result
             })
         except Exception as exc:

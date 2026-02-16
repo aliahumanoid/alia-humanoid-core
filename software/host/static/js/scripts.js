@@ -132,6 +132,8 @@ const MAX_SAFE_VELOCITY_DEG_S = 150;
 
 // CAN waypoint angle resolution: int16 / 100 → 0.01° per count
 const WAYPOINT_ANGLE_RESOLUTION = 100;
+const REANCHOR_INTERVAL_DEFAULT = 50;
+const REANCHOR_INTERVAL_MAX = 2000;  // Must match firmware WAYPOINT_BUFFER_DEPTH
 
 /**
  * Remove consecutive waypoints that quantize to the same angle values.
@@ -164,6 +166,41 @@ function deduplicateWaypoints(waypoints) {
         }
     }
     return result;
+}
+
+/**
+ * Read re-anchor interval from UI and clamp to firmware-supported range.
+ * 0 disables re-anchor; 1..REANCHOR_INTERVAL_MAX enables periodic correction.
+ */
+function getReanchorIntervalFromUI() {
+    let rawValue = parseInt($("#multiWpReanchor").val(), 10);
+    if (Number.isNaN(rawValue)) {
+        rawValue = REANCHOR_INTERVAL_DEFAULT;
+    }
+
+    const clampedValue = Math.max(0, Math.min(REANCHOR_INTERVAL_MAX, rawValue));
+    if (clampedValue !== rawValue) {
+        appendStatusMessage(`⚠️ Re-anchor clamped to ${clampedValue} (valid range: 0-${REANCHOR_INTERVAL_MAX})`);
+    }
+
+    $("#multiWpReanchor").val(clampedValue);
+    $("#multiWpReanchorValue").text(String(clampedValue));
+    return clampedValue;
+}
+
+/**
+ * Push current re-anchor setting to firmware synchronously.
+ */
+function pushReanchorIntervalSetting() {
+    const reanchorInterval = getReanchorIntervalFromUI();
+    $.ajax({
+        url: '/can/reanchor_interval',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ interval: reanchorInterval }),
+        async: false
+    });
+    return reanchorInterval;
 }
 
 /**
@@ -3040,14 +3077,7 @@ function sendMultiWaypointSmoothCurve() {
     });
 
     // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-    const reanchorInterval = parseInt($("#multiWpReanchor").val(), 10) || 0;
-    $.ajax({
-        url: '/can/reanchor_interval',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ interval: reanchorInterval }),
-        async: false
-    });
+    const reanchorInterval = pushReanchorIntervalSetting();
     if (reanchorInterval > 0) {
         appendStatusMessage(`Re-anchor every ${reanchorInterval} WPs`);
     }
@@ -3269,14 +3299,7 @@ function sendCanWaypointSequence() {
     });
 
     // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-    const reanchorInterval = parseInt($("#multiWpReanchor").val(), 10) || 0;
-    $.ajax({
-        url: '/can/reanchor_interval',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ interval: reanchorInterval }),
-        async: false
-    });
+    const reanchorInterval = pushReanchorIntervalSetting();
     if (reanchorInterval > 0) {
         appendStatusMessage(`🔄 Re-anchor every ${reanchorInterval} WPs`);
     }
@@ -4577,14 +4600,7 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
     });
 
     // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-    const reanchorInterval = parseInt($("#multiWpReanchor").val(), 10) || 0;
-    $.ajax({
-        url: '/can/reanchor_interval',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ interval: reanchorInterval }),
-        async: false
-    });
+    const reanchorInterval = pushReanchorIntervalSetting();
     if (reanchorInterval > 0) {
         appendStatusMessage(`🔄 Re-anchor every ${reanchorInterval} WPs`);
     }
@@ -8541,14 +8557,7 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
         });
 
         // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-        const reanchorInterval = parseInt($("#multiWpReanchor").val(), 10) || 0;
-        $.ajax({
-            url: '/can/reanchor_interval',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ interval: reanchorInterval }),
-            async: false
-        });
+        pushReanchorIntervalSetting();
 
         // Send batch
         $.ajax({
@@ -8619,14 +8628,7 @@ async function sendMultiWaypointSmoothCurveAsync(joint, dofIndex, targetAngle, t
         });
 
         // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-        const reanchorInterval = parseInt($("#multiWpReanchor").val(), 10) || 0;
-        $.ajax({
-            url: '/can/reanchor_interval',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ interval: reanchorInterval }),
-            async: false
-        });
+        pushReanchorIntervalSetting();
 
         $.ajax({
             url: '/can/waypoint_batch',
@@ -9278,4 +9280,3 @@ if (typeof socket !== 'undefined') {
         }
     });
 }
-

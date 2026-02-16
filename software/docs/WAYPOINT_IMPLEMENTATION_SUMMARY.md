@@ -3,6 +3,10 @@
 **Date**: 18 November 2025  
 **Status**: ✅ Complete - Ready for Testing
 
+> **Note (2026-02 update)**: This document is a historical implementation summary.
+> For current protocol/architecture details (including re-anchor policy and CAN IDs),
+> refer to `CAN_SYSTEM_ARCHITECTURE.md`.
+
 ---
 
 ## 🎯 Overview
@@ -16,18 +20,18 @@ This document summarizes the complete implementation of the waypoint-based movem
 ### 1. **Firmware (RP2350 Pico)**
 
 #### Core Architecture
-- ✅ **Single CAN Bus Design**: Core1 has exclusive access to CAN hardware (MCP2515)
+- ✅ **Dual CAN per Joint**: Core1 handles Host CAN (commands/waypoints) and Motor CAN (torque/status) on separate MCP2515 CS lines
 - ✅ **Dual-Core Operation**: Core0 (serial/commands) + Core1 (CAN/motor control @ 500 Hz)
 - ✅ **Time Synchronization**: NTP-like protocol for host-Pico clock alignment
 
 #### Waypoint System
 - ✅ **Waypoint Buffer** (`waypoint_buffer.cpp/h`)
-  - Circular buffer per DOF (configurable size, default 10)
+  - Circular buffer per DOF (configurable size, default 2000)
   - State machine: IDLE → MOVING → HOLDING
   - Thread-safe operations for dual-core access
   
-- ✅ **Waypoint Reception** (`core1.cpp::handleWaypointFrame()`)
-  - CAN frame parsing (8 bytes: DOF, angle, timestamp, mode)
+- ✅ **Waypoint Reception** (`core1.cpp::handleMultiDofWaypointFrame()`)
+  - CAN frame parsing (8 bytes: DOF0/1/2 angles + `t_offset_ms`)
   - Comprehensive safety checks before buffering
   - Automatic state transitions (IDLE → MOVING on first waypoint)
   
@@ -36,6 +40,7 @@ This document summarizes the complete implementation of the waypoint-based movem
   - Linear interpolation between waypoints
   - Smooth transitions (no stops between waypoints)
   - HOLDING mode when buffer empty (maintains position)
+  - Re-anchor policy: default interval `50`, `0` disables periodic re-anchor, clamp max `2000`
 
 #### Safety System (3 Levels)
 - ✅ **Level 1: Preventive** (at waypoint reception)
@@ -79,7 +84,7 @@ This document summarizes the complete implementation of the waypoint-based movem
   - `0x000`: Emergency Stop (highest priority)
   - `0x002`: Time Sync
   - `0x140-0x280`: Motor Commands (higher priority than waypoints)
-  - `0x300-0x31F`: Waypoint Commands
+  - `0x380-0x39F`: Multi-DOF Waypoint Commands
   - `0x400-0x4FF`: Status Feedback
 
 #### Web UI (`templates/index.html` + `static/js/scripts.js`)
@@ -186,7 +191,7 @@ This document summarizes the complete implementation of the waypoint-based movem
 | **Outer Loop Frequency** | 100 Hz | ✅ 100 Hz (10ms period) |
 | **Waypoint Update Rate** | 50-100 Hz | ✅ Supported (host-side) |
 | **Time Sync Accuracy** | <5ms | ✅ <2ms typical |
-| **Buffer Depth** | 2-10 waypoints | ✅ 10 (configurable) |
+| **Buffer Depth** | 2000 waypoints/DOF | ✅ 2000 (configurable via `WAYPOINT_BUFFER_DEPTH`) |
 | **CAN Bus Speed** | 1 Mbps | ✅ 1 Mbps |
 | **Safety Check Latency** | <10ms | ✅ <10ms (100 Hz) |
 
@@ -196,11 +201,11 @@ This document summarizes the complete implementation of the waypoint-based movem
 
 ### Waypoint Reception Flow
 ```
-1. Host sends waypoint via CAN (0x300 + joint_id)
+1. Host sends waypoint via CAN (0x380 + joint_id, Multi-DOF format)
    ↓
-2. Core1 polls CAN bus (pollUnifiedCan)
+2. Core1 polls host CAN bus (`pollHostCan`)
    ↓
-3. handleWaypointFrame() parses frame
+3. `handleMultiDofWaypointFrame()` parses frame
    ↓
 4. checkWaypointSafety() validates waypoint
    ↓ (if safe)
@@ -345,4 +350,3 @@ software/host/
 **System Status**: ✅ **READY FOR TESTING** 🚀
 
 Last Updated: 18 November 2025
-

@@ -64,7 +64,8 @@ volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, sam
 volatile uint16_t torque_ramp_time_ms = 100;    // Time for 0→max torque (default: 100ms, 0=disabled)
 volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold (default: 100ms)
 // Waypoint re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-volatile uint16_t wp_reanchor_interval = 0;
+// Default is enabled at 50 WPs for stable long-running streams.
+volatile uint16_t wp_reanchor_interval = 50;
 // CAN error detection: time-window based (more robust to EMI glitches)
 volatile uint16_t can_error_window_ms = 50;      // 50ms window (default)
 volatile uint8_t can_error_threshold = 5;         // 5 errors in window = emergency stop

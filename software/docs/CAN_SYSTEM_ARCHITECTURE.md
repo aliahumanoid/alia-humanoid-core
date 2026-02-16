@@ -1,9 +1,16 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 2.0
+**Document Version:** 2.1
 **Date:** 2026-02-15
 **Status:** Design Specification (Indicative)
 **Authors:** Alia Robotics Team
+
+**Changelog v2.1:**
+- **Re-anchor policy aligned to implementation**:
+  - Firmware default `wp_reanchor_interval = 50`
+  - `0 = disabled`
+  - Values above `WAYPOINT_BUFFER_DEPTH` are clamped (currently 2000)
+  - Host UI/API aligned to range `0..2000`
 
 **Changelog v2.0:**
 - **Consolidated**: Merged `CAN_CONTROL_PROTOCOL.md` and `jetson-streaming-can.md` into this document
@@ -404,11 +411,20 @@ Sent once before the first waypoint batch. Determines interpolation curve betwee
 #### 4.2.6 Re-anchor Interval (ID: 0x01B)
 
 ```
-Byte 0-1: uint16_t interval (0 = disabled, N = re-anchor every N waypoints consumed)
+Byte 0-1: uint16_t interval
+          - 0 = disabled
+          - 1..2000 = re-anchor every N consumed waypoints
+          - >2000 values are clamped to 2000 in firmware/host
 Byte 2-7: Reserved
 ```
 
 Sent before each batch. Controls consume-side drift compensation frequency. See Section 5.2.
+
+**Current implementation policy**:
+- Firmware default at boot: `50` waypoints
+- UI default: `50`
+- Host/API and firmware clamp maximum to `WAYPOINT_BUFFER_DEPTH` (currently `2000`)
+- **Coupling note**: Host constants must stay aligned with firmware `WAYPOINT_BUFFER_DEPTH`
 
 #### 4.2.7 Multi-DOF Waypoint (ID: 0x380-0x39F)
 
@@ -614,6 +630,9 @@ T~29s    Batch 30: last batch                   Last WP → DOF → HOLDING
 - `0x005` (interpolation mode): sent **once** at streaming start
 - `0x002` (time sync): sent **before each batch**
 - `0x01B` (re-anchor interval): sent **before each batch** (or once at start)
+  - Recommended default: `50`
+  - `0` disables periodic re-anchor
+  - Valid range: `0..2000` (values above are clamped)
 - Waypoints: 2ms delay between frames (prevents MCP2515 TX buffer overflow)
 
 **Recommended: Batch Sequence Number** (future enhancement)
@@ -638,6 +657,7 @@ Firmware can detect: (a) gaps in `batch_seq` → missed batch, (b) `batch_seq <=
 | Max consecutive late | 10 | 10 consecutive late WPs → abort batch |
 | Initial offset (1st WP t_offset) | 50 ms | Margin for CAN latency + processing |
 | Waypoint rate (typical) | 100 Hz | 10ms between consecutive WP targets |
+| Re-anchor interval | 50 (default) | 0 = disabled, clamp max = 2000 |
 | Firmware buffer | 2000 WP/DOF | ~20s of buffer at 100 Hz |
 | Consume loop | 500 Hz | Core1, every 2ms |
 
@@ -663,7 +683,7 @@ UNUSED_DOF = 0x7FFF
 BATCH_DURATION_S = 1.0
 INTER_WP_DELAY_S = 0.002
 INITIAL_OFFSET_MS = 50
-REANCHOR_INTERVAL = 20
+REANCHOR_INTERVAL = 50  # default policy (0 disables periodic re-anchor)
 
 bus = can.interface.Bus(channel='can0', bustype='socketcan')
 

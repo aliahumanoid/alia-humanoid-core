@@ -78,6 +78,7 @@ class CanManager:
     """High-level helper that manages python-can Bus lifecycle and protocol helpers."""
 
     DEFAULT_BITRATE = 1_000_000  # 1 Mbps (maximum speed test)
+    REANCHOR_INTERVAL_MAX = 2000  # Must match firmware WAYPOINT_BUFFER_DEPTH
 
     def __init__(self, socketio=None, comm_logger: Optional[SerialLogger] = None) -> None:
         if can is None:
@@ -882,12 +883,18 @@ class CanManager:
         Sends control command (0x01B) to set re-anchor interval.
         """
         self._ensure_connection()
-        interval = max(0, min(65535, interval))
-        payload = struct.pack('<H', interval) + bytes(6)
-        self._send_frame(0x01B, payload, context=f"WP re-anchor interval={interval}")
-        self._log_can_info(f"WP re-anchor interval set to: {interval}" +
-                           (" (disabled)" if interval == 0 else " WPs"))
-        return {"interval": interval}
+        requested_interval = int(interval)
+        applied_interval = max(0, min(self.REANCHOR_INTERVAL_MAX, requested_interval))
+        payload = struct.pack('<H', applied_interval) + bytes(6)
+        self._send_frame(0x01B, payload, context=f"WP re-anchor interval={applied_interval}")
+        self._log_can_info(f"WP re-anchor interval set to: {applied_interval}" +
+                           (" (disabled)" if applied_interval == 0 else " WPs"))
+        return {
+            "interval": applied_interval,
+            "requested_interval": requested_interval,
+            "clamped": applied_interval != requested_interval,
+            "max_interval": self.REANCHOR_INTERVAL_MAX,
+        }
 
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
@@ -2063,4 +2070,3 @@ class CanManager:
     def _log_can_error(self, message: str) -> None:
         if self.comm_logger:
             self.comm_logger.log_error(f"[CAN] {message}")
-

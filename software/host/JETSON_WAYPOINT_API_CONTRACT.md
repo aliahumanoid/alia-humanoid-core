@@ -1,7 +1,7 @@
 # Waypoint Batch API Contract v1.0
 
 > **Owner:** alia-humanoid-core/software/host
-> **Last updated:** 2026-02-13
+> **Last updated:** 2026-02-16
 > **Consumers:** Web UI (scripts.js), Jetson client (waypoint_client.py)
 
 ---
@@ -217,6 +217,34 @@ Sends a time synchronization frame to firmware.
 }
 ```
 
+### POST /can/reanchor_interval
+
+Set firmware consume-side re-anchor interval (CAN ID `0x01B`).
+
+**Request:**
+```json
+{"interval": 50}
+```
+
+**Behavior:**
+- `0` = disabled
+- `1..2000` = re-anchor every N consumed waypoints
+- Values outside range are clamped server-side before CAN send
+
+**Response (200):**
+```json
+{
+    "status": "success",
+    "message": "WP re-anchor interval set to: 50 WPs",
+    "result": {
+        "interval": 50,
+        "requested_interval": 50,
+        "clamped": false,
+        "max_interval": 2000
+    }
+}
+```
+
 ### GET /can/status
 
 Returns CAN bus connection status. The `state` object contains fields from
@@ -246,6 +274,8 @@ Returns CAN bus connection status. The `state` object contains fields from
 | MAX_BATCH_SIZE | 1800 | Max waypoints per batch (safety margin vs 2000 firmware buffer) |
 | MAX_VELOCITY_DEG_S | 150.0 | Absolute velocity cap per DOF |
 | T_OFFSET_MAX | 65535 | uint16 range for t_offset_ms |
+| REANCHOR_DEFAULT | 50 | Default re-anchor interval |
+| REANCHOR_MAX | 2000 | Must match firmware `WAYPOINT_BUFFER_DEPTH` |
 | ANGLE_RESOLUTION | 100 | int16 multiplier (0.01 deg per count) |
 | MAX_SYNC_AGE_MS | 2000.0 | Time sync freshness threshold |
 | MIN_LEAD_MS | 15.0 | Minimum adjusted t_offset to not be "late" |

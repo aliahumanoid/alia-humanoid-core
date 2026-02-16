@@ -30,6 +30,7 @@ This guide provides step-by-step instructions for testing the waypoint-based mov
 - ✅ Joint configuration file (`joint_config.json`) with correct DOF count
 - ✅ Auto-mapping completed for at least 1 DOF
 - ✅ PID parameters tuned (or using defaults)
+- ✅ Re-anchor interval policy verified: default `50`, `0 = disabled`, valid range `0..2000`
 
 ---
 
@@ -73,7 +74,8 @@ This guide provides step-by-step instructions for testing the waypoint-based mov
 **Steps**:
 1. Ensure CAN is connected and time-synced
 2. Select target joint and DOF 0
-3. Click **"Send Test Sequence"** button
+3. Verify re-anchor interval in UI is set to **50** (recommended default)
+4. Click **"Send Test Sequence"** button
 
 **Expected Result**:
 - ✅ Status messages showing 5 waypoints sent:
@@ -181,7 +183,7 @@ This guide provides step-by-step instructions for testing the waypoint-based mov
 ### Issue: "Waypoint buffer full"
 **Solution**: 
 - Reduce waypoint send rate
-- Increase buffer size in `waypoint_buffer.h` (default: 10)
+- Increase buffer size in `waypoint_buffer.h` (default: 2000)
 - Ensure waypoints are being consumed (check timing)
 
 ### Issue: "Invalid encoder reading"
@@ -252,4 +254,3 @@ Overall Result: [ ] PASS  [ ] FAIL
 ---
 
 **Good luck with testing! 🚀**
-

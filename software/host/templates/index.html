@@ -2144,9 +2144,9 @@
                                 </div>
                                 <div class="flex-shrink-0">
                                     <label for="multiWpReanchor" class="block text-xs font-medium text-amber-700 mb-1">
-                                        Re-anchor: <span id="multiWpReanchorValue">0</span>
+                                        Re-anchor: <span id="multiWpReanchorValue">50</span>
                                     </label>
-                                    <input type="number" id="multiWpReanchor" value="0" min="0" max="65535" step="1"
+                                    <input type="number" id="multiWpReanchor" value="50" min="0" max="2000" step="1"
                                         class="w-16 px-1 py-1 text-xs border border-amber-300 rounded text-center"
                                         oninput="$('#multiWpReanchorValue').text(this.value || '0')" />
                                 </div>
@@ -2156,7 +2156,7 @@
                                 </button>
                             </div>
                             <p class="text-xs text-amber-600 mt-1">
-                                COSINE S-curve + LINEAR interp (Δt = 1000/rate) — Re-anchor 0 = disabled
+                                COSINE S-curve + LINEAR interp (Δt = 1000/rate) — Default 50, 0 = disabled
                             </p>
                         </div>
 
