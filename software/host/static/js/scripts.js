@@ -8991,7 +8991,10 @@ function _updateStreamTestSafeLimits() {
     } else {
         $('#streamTestSafeLimitsInfo').addClass('hidden');
         $('#streamTestNoSafeLimits').removeClass('hidden');
-        $('#streamTestStartBtn').prop('disabled', true);
+        // Allow Start even without firmware safe limits (manual range used as override)
+        if (!_streamSessionId) {
+            $('#streamTestStartBtn').prop('disabled', false);
+        }
     }
 }
 
@@ -9044,8 +9047,9 @@ function startStreamTest() {
         return;
     }
     if (!config.safe_limits) {
-        alert('No safe limits for this DOF. Run CHECK_OFFSETS first.');
-        return;
+        // No firmware safe limits — use manual min/max as user-trusted range
+        console.warn('[StreamTest] No firmware safe limits — using manual range as override');
+        config.safe_limits = { min: config.min_deg, max: config.max_deg };
     }
     if (isNaN(config.min_deg) || isNaN(config.max_deg) || isNaN(config.frequency_hz)) {
         alert('All numeric fields must be valid numbers.');

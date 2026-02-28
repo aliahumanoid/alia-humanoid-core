@@ -700,6 +700,22 @@ void core0_main_loop() {
   // Drain Core1 log queue — print queued messages safely from Core0
   drainCore1LogQueue();
 
+  // Emit safe limits when requested by Core1 (e.g. on encoder stream start)
+  if (emit_safe_limits_requested) {
+    emit_safe_limits_requested = false;
+    if (active_joint_controller != nullptr) {
+      for (uint8_t dof = 0; dof < ACTIVE_JOINT_CONFIG.dof_count; dof++) {
+        DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
+        if (eq != nullptr && eq->calculated && eq->limits_valid) {
+          char buf[80];
+          snprintf(buf, sizeof(buf), "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
+                   ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
+          SERIAL_COM_LN(buf);
+        }
+      }
+    }
+  }
+
   // Print waypoint trajectory dump if Core1 signaled one is ready
   if (wp_dump_pending_dof >= 0) {
     wp_dump_print_from_core0();

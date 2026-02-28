@@ -140,6 +140,9 @@ extern unsigned long last_encoder_test_time;
 extern volatile bool encoder_stream_can_active;
 extern volatile uint32_t encoder_stream_last_send_us;
 
+// Core1 → Core0 flag: request safe limits emission via Serial
+extern volatile bool emit_safe_limits_requested;
+
 // Joint identification broadcast (triggered via CAN, emitted on Serial + CAN)
 extern volatile bool identify_broadcast_active;
 extern volatile uint32_t identify_broadcast_start_ms;

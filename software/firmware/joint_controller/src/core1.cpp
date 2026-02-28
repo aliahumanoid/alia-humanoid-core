@@ -92,6 +92,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 #define CAN_ID_WP_TELEMETRY_DATA 0x4D0   // Waypoint buffer telemetry (Controller → Host, + joint_id)
+#define CAN_ID_SAFE_LIMITS_DATA  0x4E0   // Safe limits per DOF (Controller → Host, + joint_id)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -776,6 +777,24 @@ void pollHostCan() {
           // Reset timer to ensure immediate first send
           encoder_stream_last_send_us = time_us_32() - ENCODER_STREAM_INTERVAL_US - 1;
           LOG_C1_INFO("[CAN_HOST] Encoder streaming STARTED @ 50Hz");
+
+          // Emit safe limits via Host CAN (0x4E0 + joint_id, one frame per DOF)
+          // Also request Core0 to emit via Serial (for dev/debug convenience)
+          emit_safe_limits_requested = true;
+          for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+            DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
+            if (eq != nullptr && eq->calculated && eq->limits_valid) {
+              // Frame: [dof(1B), 0(1B), min_i16(2B LE), max_i16(2B LE)]  — deg×100
+              int16_t min_i16 = (int16_t)(eq->joint_safe_min * 100.0f);
+              int16_t max_i16 = (int16_t)(eq->joint_safe_max * 100.0f);
+              uint8_t sl_frame[6] = {
+                dof, 0,
+                (uint8_t)(min_i16 & 0xFF), (uint8_t)((min_i16 >> 8) & 0xFF),
+                (uint8_t)(max_i16 & 0xFF), (uint8_t)((max_i16 >> 8) & 0xFF)
+              };
+              CAN_HOST.sendMsgBuf(CAN_ID_SAFE_LIMITS_DATA + ACTIVE_JOINT, 0, 6, sl_frame);
+            }
+          }
         } else {
           LOG_C1_INFO("[CAN_HOST] Encoder streaming STOPPED");
         }

@@ -173,27 +173,27 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="min_deg"):
             svc.start(cfg)
 
-    def test_safe_limits_required(self):
-        """P1: safe_limits must be present — omitting it must raise."""
+    def test_safe_limits_missing_uses_manual_range(self):
+        """When safe_limits is absent, manual min/max range is used as fallback."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
         cfg = {**MINIMAL_CONFIG}
         del cfg["safe_limits"]
-        with pytest.raises(ValueError, match="safe_limits"):
-            svc.start(cfg)
+        # Should NOT raise — falls back to manual range [min_deg, max_deg]
+        svc.start(cfg)
 
-    def test_safe_limits_null_rejected(self):
-        """P1: safe_limits=None must raise."""
+    def test_safe_limits_null_uses_manual_range(self):
+        """When safe_limits is None, manual min/max range is used as fallback."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
         cfg = {**MINIMAL_CONFIG, "safe_limits": None}
-        with pytest.raises(ValueError, match="safe_limits"):
-            svc.start(cfg)
+        # Should NOT raise — falls back to manual range
+        svc.start(cfg)
 
-    def test_safe_limits_incomplete_rejected(self):
-        """safe_limits without 'max' key must raise ValueError, not KeyError."""
+    def test_safe_limits_incomplete_uses_manual_range(self):
+        """safe_limits without 'max' key falls back to manual range."""
         svc = StreamTestService(base_url="http://127.0.0.1:5001")
         cfg = {**MINIMAL_CONFIG, "safe_limits": {"min": 0.0}}
-        with pytest.raises(ValueError, match="min.*max"):
-            svc.start(cfg)
+        # Should NOT raise — falls back to manual range
+        svc.start(cfg)
 
     def test_n_dof_mismatch_raises(self):
         """n_dof must match real joint DOF count from config.JOINTS."""
@@ -408,19 +408,19 @@ class TestTrajectoryGen:
             assert wp["angles_deg"][2] is None
 
     def test_chunk_shape(self):
-        """Chunks should have 2-4 waypoints with correct structure."""
+        """Each chunk is exactly 1 waypoint (1 WP per tick, no overlap)."""
         gen = TrajectoryGenerator(
             min_deg=20.0, max_deg=80.0, start_at="min",
             frequency_hz=0.5, rate_hz=50, horizon_ms=250,
             active_dof=0, n_dof=1,
         )
-        chunk = gen.next_chunk(0.0)
-        assert 2 <= len(chunk) <= 4
-        for wp in chunk:
-            assert "angles_deg" in wp
-            assert "t_offset_ms" in wp
-            assert isinstance(wp["angles_deg"], list)
-            assert isinstance(wp["t_offset_ms"], int)
+        chunk = gen.next_chunk(0.0, lead_ms=250.0)
+        assert len(chunk) == 1
+        wp = chunk[0]
+        assert "angles_deg" in wp
+        assert "t_offset_ms" in wp
+        assert isinstance(wp["angles_deg"], list)
+        assert isinstance(wp["t_offset_ms"], int)
 
     def test_t_offset_monotonically_increasing(self):
         gen = TrajectoryGenerator(
@@ -465,10 +465,11 @@ class TestTrajectoryGen:
             frequency_hz=1.0, rate_hz=1000, horizon_ms=10,
             active_dof=0, n_dof=1,
         )
-        # Get first two waypoints at t=0 (1ms apart at 1000Hz)
-        chunk = gen.next_chunk(0.0, lead_ms=10.0)
-        a0 = chunk[0]["angles_deg"][0]
-        a1 = chunk[1]["angles_deg"][0]
+        # Get two consecutive single-WP chunks (1ms apart at 1000Hz)
+        c0 = gen.next_chunk(0.0, lead_ms=10.0)
+        c1 = gen.next_chunk(1.0, lead_ms=10.0)
+        a0 = c0[0]["angles_deg"][0]
+        a1 = c1[0]["angles_deg"][0]
         # Angular velocity should be very small at start
         velocity_deg_per_ms = abs(a1 - a0)
         assert velocity_deg_per_ms < 1.0, (

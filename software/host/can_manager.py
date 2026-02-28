@@ -53,6 +53,7 @@ Priority Level 4 (Status Feedback - Lowest):
 - 0x4B0+joint: Encoder Offsets Response
 - 0x4C0+joint: Zero Complete Notification
 - 0x4D0+joint: Waypoint Buffer Telemetry (on-demand)
+- 0x4E0+joint: Safe Limits per DOF (on encoder stream start)
 
 Note: Motor commands have higher priority than waypoints to ensure PID loop stability.
 """
@@ -1583,6 +1584,26 @@ class CanManager:
                     "timestamp": time.time(),
                 }
             self._wp_telemetry_event.set()
+            return
+
+        # Safe limits per DOF (0x4E0-0x4EF) - emitted on encoder stream start
+        if 0x4E0 <= arb_id <= 0x4EF and len(data) >= 6:
+            joint_id = arb_id - 0x4E0
+            dof = data[0]
+            min_i16 = struct.unpack_from("<h", data, 2)[0]
+            max_i16 = struct.unpack_from("<h", data, 4)[0]
+            safe_min = min_i16 / 100.0
+            safe_max = max_i16 / 100.0
+            joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+            self._log_can_info(
+                f"Safe limits [{joint_name}] DOF {dof}: [{safe_min:.1f}, {safe_max:.1f}]"
+            )
+            if self.socketio:
+                self.socketio.emit(
+                    "safe_limits",
+                    {"joint_id": joint_id, "dof": dof, "min": safe_min, "max": safe_max},
+                    namespace="/movement",
+                )
             return
 
         # Debug: log any received CAN frame (throttled)

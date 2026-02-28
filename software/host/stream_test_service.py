@@ -115,45 +115,41 @@ class TrajectoryGenerator:
         self._period_ms = 1000.0 / rate_hz
 
     def next_chunk(self, t_base_ms: float, lead_ms: float = 0.0) -> List[Dict[str, Any]]:
-        """Generate a short chunk of 2-4 waypoints starting at *t_base_ms*.
+        """Generate a single waypoint at *t_base_ms* with *lead_ms* lookahead.
+
+        One WP per scheduler tick — no overlap between consecutive calls.
 
         ``t_base_ms`` is the *absolute* session time used for cosine phase.
-        ``lead_ms`` is the base lead-time offset added to each waypoint's
-        ``t_offset_ms`` (which is relative to "now", not absolute).
+        ``lead_ms`` is the lead-time offset for the waypoint's
+        ``t_offset_ms`` (relative to "now").
 
         Returns list of ``{"angles_deg": [...], "t_offset_ms": int}``.
         """
-        n_wp = max(2, min(4, int(self._horizon_ms / self._period_ms)))
-        chunk: List[Dict[str, Any]] = []
-        for i in range(n_wp):
-            t_abs_ms = t_base_ms + i * self._period_ms
-            t_s = t_abs_ms / 1000.0
+        t_s = t_base_ms / 1000.0
 
-            # Bounded cosine oscillation:
-            #   cos(0) = 1  → at t=0: center ± amplitude = extreme
-            #   Derivative of cos at t=0 is 0 → zero initial velocity
-            if self._start_at == "max":
-                angle = self._center + self._amplitude * math.cos(
-                    2 * math.pi * self._freq * t_s
-                )
-            else:  # start_at == "min"
-                angle = self._center - self._amplitude * math.cos(
-                    2 * math.pi * self._freq * t_s
-                )
+        # Bounded cosine oscillation:
+        #   cos(0) = 1  → at t=0: center ± amplitude = extreme
+        #   Derivative of cos at t=0 is 0 → zero initial velocity
+        if self._start_at == "max":
+            angle = self._center + self._amplitude * math.cos(
+                2 * math.pi * self._freq * t_s
+            )
+        else:  # start_at == "min"
+            angle = self._center - self._amplitude * math.cos(
+                2 * math.pi * self._freq * t_s
+            )
 
-            # Build angles_deg: active DOF gets angle, others are None
-            angles_deg: List[Optional[float]] = [None] * self._n_dof
-            angles_deg[self._active_dof] = round(angle, 2)
+        # Build angles_deg: active DOF gets angle, others are None
+        angles_deg: List[Optional[float]] = [None] * self._n_dof
+        angles_deg[self._active_dof] = round(angle, 2)
 
-            # t_offset_ms = relative lead from "now" (uint16, max 65535)
-            relative_ms = lead_ms + i * self._period_ms
-            t_offset = max(1, min(65535, int(relative_ms)))
+        # t_offset_ms = lead time from "now" (uint16, max 65535)
+        t_offset = max(1, min(65535, int(lead_ms)))
 
-            chunk.append({
-                "angles_deg": angles_deg,
-                "t_offset_ms": t_offset,
-            })
-        return chunk
+        return [{
+            "angles_deg": angles_deg,
+            "t_offset_ms": t_offset,
+        }]
 
 
 # ---------------------------------------------------------------------------
@@ -866,8 +862,16 @@ class _StreamSession:
 
                         # Generate chunk
                         t_base_ms = tick * period_s * 1000
-                        lead_ms = config.get("horizon_ms", 250)
-                        chunk = self._trajectory[joint].next_chunk(t_base_ms, lead_ms)
+                        # Cumulative t_offset: each WP needs a unique,
+                        # increasing offset relative to the firmware batch
+                        # anchor (set when buffer was empty at tick 0).
+                        # lead_ms = base lookahead + elapsed ticks.
+                        base_lead_ms = config.get("horizon_ms", 250)
+                        tick_period_ms = 1000.0 / rate_hz
+                        cumulative_lead_ms = base_lead_ms + tick * tick_period_ms
+                        chunk = self._trajectory[joint].next_chunk(
+                            t_base_ms, lead_ms=cumulative_lead_ms,
+                        )
 
                         # Send via WaypointClient
                         try:
@@ -1113,12 +1117,12 @@ class StreamTestService:
         if min_deg >= max_deg:
             raise ValueError("min_deg must be < max_deg")
 
-        # safe_limits — required (firmware SAFE_LIMITS from CHECK_OFFSETS)
+        # safe_limits — use firmware limits if available, otherwise accept manual range
         safe = config.get("safe_limits")
-        if not safe or not isinstance(safe, dict):
-            raise ValueError("'safe_limits' is required (run CHECK_OFFSETS first)")
-        if "min" not in safe or "max" not in safe:
-            raise ValueError("'safe_limits' must contain 'min' and 'max' keys")
+        if not safe or not isinstance(safe, dict) or "min" not in safe or "max" not in safe:
+            # No firmware safe limits — trust the manual min/max from UI
+            logger.warning("No firmware safe_limits — using manual range [%s, %s]", min_deg, max_deg)
+            safe = {"min": min_deg, "max": max_deg}
         if min_deg < safe["min"] or max_deg > safe["max"]:
             raise ValueError(
                 f"Range [{min_deg}, {max_deg}] exceeds safe limits "
