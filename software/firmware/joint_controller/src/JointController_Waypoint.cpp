@@ -333,6 +333,12 @@ bool JointController::executeWaypointMovement() {
           wp_dump_count[dof]++;
         }
 
+        // Update metrics target to latest consumed WP so overshoot is
+        // measured against the current trajectory position, not the first WP.
+        if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
+          metrics_tracker[dof].target_angle_deg = next_waypoint.target_angle_deg;
+        }
+
         // Re-anchor interval check: every N consumed WPs, recompute correction
         wp_reanchor_consumed_count[dof]++;
         uint16_t interval = wp_reanchor_interval;  // Read volatile once
@@ -758,7 +764,10 @@ bool JointController::executeWaypointMovement() {
               metrics_target = mt.abort_target_deg;
             }
             mt.target_angle_deg = metrics_target;
-            
+            // Recalculate direction for final target (initial direction was
+            // based on first WP which may differ for multi-WP trajectories)
+            mt.movement_direction = (metrics_target > mt.start_angle_deg) ? 1.0f : -1.0f;
+
             // Finalize and store metrics
             MovementMetrics m = mt.finalize();
             m.dof_index = dof;
