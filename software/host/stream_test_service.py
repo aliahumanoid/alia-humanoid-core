@@ -714,15 +714,21 @@ class _StreamSession:
 
             current_angle = encoder_angles[active_dof]
 
-            # 2. Cosine S-curve ramp: 20 waypoints over 2s
+            # 2. Ramp to preposition target: 20 waypoints over 2s
+            # Use linear profile for slow ramps, cosine S-curve for fast ones
             ramp_duration_s = 2.0
             ramp_steps = 20
             delta_t_ms = int(ramp_duration_s / ramp_steps * 1000)
+            slow_threshold = 15.0  # deg/s — matches JS SLOW_MOTION_THRESHOLD_DEG_S
+            ramp_peak_vel = abs(prepos_target - current_angle) * math.pi / (2 * ramp_duration_s)
 
             ramp_waypoints = []
             for i in range(ramp_steps):
                 t = (i + 1) / ramp_steps  # 0.05 to 1.0
-                smooth_t = 0.5 * (1 - math.cos(t * math.pi))
+                if ramp_peak_vel < slow_threshold:
+                    smooth_t = t  # Linear: constant velocity
+                else:
+                    smooth_t = 0.5 * (1 - math.cos(t * math.pi))  # Cosine S-curve
                 angle = current_angle + (prepos_target - current_angle) * smooth_t
 
                 angles = [None] * n_dof

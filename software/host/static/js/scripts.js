@@ -130,6 +130,11 @@ const DEFAULT_PARAMS = {
 // Safety limit for waypoint velocity (must match firmware ABSOLUTE_MAX_VELOCITY_DEG_S)
 const MAX_SAFE_VELOCITY_DEG_S = 150;
 
+// Below this peak velocity, use linear profile instead of cosine S-curve.
+// At low speeds the cosine wastes waypoints at start/end (Δangle < CAN resolution)
+// and creates stick-slip zones. Linear gives constant velocity, every WP meaningful.
+const SLOW_MOTION_THRESHOLD_DEG_S = 15;
+
 // CAN waypoint angle resolution: int16 / 100 → 0.01° per count
 const WAYPOINT_ANGLE_RESOLUTION = 100;
 const REANCHOR_INTERVAL_DEFAULT = 50;
@@ -166,6 +171,24 @@ function deduplicateWaypoints(waypoints) {
         }
     }
     return result;
+}
+
+/**
+ * Choose interpolation profile based on peak velocity of the movement.
+ *
+ * For slow movements (peak velocity < SLOW_MOTION_THRESHOLD_DEG_S), returns
+ * linear progress (t) — constant velocity, no zero-step waste at boundaries.
+ * For fast movements, returns cosine S-curve — smooth acceleration/deceleration.
+ *
+ * @param {number} t - Normalized time progress (0.0 to 1.0)
+ * @param {number} peakVelocityDegS - Peak velocity of the cosine profile (deg/s)
+ * @returns {number} Smoothed progress (0.0 to 1.0)
+ */
+function interpolationProfile(t, peakVelocityDegS) {
+    if (peakVelocityDegS < SLOW_MOTION_THRESHOLD_DEG_S) {
+        return t;  // Linear: constant velocity, every WP carries meaningful delta
+    }
+    return 0.5 * (1 - Math.cos(t * Math.PI));  // Cosine S-curve
 }
 
 /**
@@ -3056,7 +3079,9 @@ function sendMultiWaypointSmoothCurve() {
         appendStatusMessage(`💡 Consider: increase time, reduce angle delta, or move joint closer to target first`);
     }
 
+    const profileName = peakVelocity < SLOW_MOTION_THRESHOLD_DEG_S ? 'LINEAR' : 'COSINE';
     appendStatusMessage(`🔬 Multi-WP: ${startAngle.toFixed(1)}° → ${targetAngle}° @ ${waypointRate} pts/s (${numPoints} pts, Δt=${deltaT}ms)`);
+    appendStatusMessage(`Profile: ${profileName} (peak ${peakVelocity.toFixed(1)}°/s, threshold ${SLOW_MOTION_THRESHOLD_DEG_S}°/s)`);
 
     // Force LINEAR interpolation (the COSINE curve is in the waypoints themselves)
     $.ajax({
@@ -3082,7 +3107,7 @@ function sendMultiWaypointSmoothCurve() {
         appendStatusMessage(`Re-anchor every ${reanchorInterval} WPs`);
     }
 
-    // Generate waypoints following COSINE S-curve
+    // Generate waypoints (COSINE S-curve for fast moves, LINEAR for slow moves)
     const waypoints = [];
     const actualDeltaT = totalTimeMs / numPoints;
 
@@ -3091,9 +3116,9 @@ function sendMultiWaypointSmoothCurve() {
 
     for (let i = 0; i <= numPoints; i++) {
         const t = i / numPoints; // 0.0 to 1.0
-        
-        // COSINE interpolation formula (same as firmware)
-        const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+
+        // Adaptive profile: linear for slow movements, cosine for fast
+        const smoothT = interpolationProfile(t, peakVelocity);
         
         // Calculate interpolated angle
         const angle = startAngle + (targetAngle - startAngle) * smoothT;
@@ -3512,8 +3537,6 @@ function sendCosineOscillation() {
         async: false
     });
 
-    appendStatusMessage(`⚙️ Interpolation: LINEAR (S-curve in waypoints)`);
-
     // Calculate timing parameters (same approach as Multi-WP)
     // waypointRate is points per second, convert to points per half-cycle
     const halfCycleSeconds = cycleDurationSeconds / 2;
@@ -3521,33 +3544,38 @@ function sendCosineOscillation() {
     const totalHalfCycles = numCycles * 2;
     const pointsPerHalfCycle = Math.round(waypointRate * halfCycleSeconds);
     const deltaT = 1000 / waypointRate;  // Time between points = 1000ms / rate
-    
+
+    // Peak velocity for half-cycle (max across all active DOFs)
+    const maxDeltaAngle = Math.max(...activeDofs.map(d => Math.abs(d.maxAngle - d.minAngle)));
+    const halfCyclePeakVelocity = maxDeltaAngle * Math.PI / (2 * halfCycleSeconds);
+    const profileName = halfCyclePeakVelocity < SLOW_MOTION_THRESHOLD_DEG_S ? 'LINEAR' : 'COSINE';
+    appendStatusMessage(`⚙️ Interpolation: LINEAR (${profileName} profile in waypoints, peak ${halfCyclePeakVelocity.toFixed(1)}°/s)`);
+
     // Estimate total waypoints for batch timing
     const estimatedTotalWaypoints = Math.round(waypointRate * totalDurationSeconds);
     // Small fixed lead-in; firmware batch-anchor uses this as reference
     const initialOffset = 50;
-    
+
     // Warn if exceeding host batch limit (MAX_BATCH_SIZE=1800 in waypoint_types.py)
     if (estimatedTotalWaypoints > 1800) {
         appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds batch limit (1800). Reduce rate or cycles.`);
     }
-    
-    // Generate waypoints using same approach as Multi-WP
-    // Each half-cycle (min→max or max→min) follows a COSINE S-curve
+
+    // Generate waypoints (COSINE for fast half-cycles, LINEAR for slow)
     const testSequence = [];
-    
+
     for (let halfCycle = 0; halfCycle < totalHalfCycles; halfCycle++) {
         const isGoingToMax = (halfCycle % 2 === 0);
-        
+
         // Generate points for this half-cycle (same as Multi-WP: 0 to pointsPerHalfCycle inclusive)
         const startIndex = (halfCycle === 0) ? 0 : 1;  // Skip only first point of subsequent half-cycles
-        
+
         for (let p = startIndex; p <= pointsPerHalfCycle; p++) {
-            // Progress within this half-cycle (0.0 to 1.0) - SAME AS MULTI-WP
+            // Progress within this half-cycle (0.0 to 1.0)
             const t = p / pointsPerHalfCycle;
-            
-            // Apply COSINE S-curve: smooth start and end (IDENTICAL TO MULTI-WP)
-            const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+
+            // Adaptive profile: linear for slow movements, cosine for fast
+            const smoothT = interpolationProfile(t, halfCyclePeakVelocity);
             
             // Calculate angles for each DOF
             const angles = [null, null, null];
@@ -4579,7 +4607,16 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         return;
     }
 
+    // Peak velocity = max across both DOFs (cosine profile)
+    const totalTimeSec = totalTimeMs / 1000;
+    const peakVelocity = Math.max(
+        Math.abs(targetAngle0 - startAngle0),
+        Math.abs(targetAngle1 - startAngle1)
+    ) * Math.PI / (2 * totalTimeSec);
+    const profileName = peakVelocity < SLOW_MOTION_THRESHOLD_DEG_S ? 'LINEAR' : 'COSINE';
+
     appendStatusMessage(`🔬 Dual-DOF WP: (${startAngle0.toFixed(1)}°,${startAngle1.toFixed(1)}°) → (${targetAngle0}°,${targetAngle1}°) @ ${waypointRate} pts/s`);
+    appendStatusMessage(`Profile: ${profileName} (peak ${peakVelocity.toFixed(1)}°/s, threshold ${SLOW_MOTION_THRESHOLD_DEG_S}°/s)`);
 
     // Force LINEAR interpolation
     $.ajax({
@@ -4605,14 +4642,14 @@ function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
         appendStatusMessage(`🔄 Re-anchor every ${reanchorInterval} WPs`);
     }
 
-    // Generate waypoints for both DOFs with COSINE S-curve
+    // Generate waypoints for both DOFs (COSINE for fast, LINEAR for slow)
     const waypoints = [];
     const actualDeltaT = totalTimeMs / numPoints;
     const initialOffset = 50;
 
     for (let i = 0; i <= numPoints; i++) {
         const t = i / numPoints;
-        const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+        const smoothT = interpolationProfile(t, peakVelocity);
         
         const angle0 = startAngle0 + (targetAngle0 - startAngle0) * smoothT;
         const angle1 = startAngle1 + (targetAngle1 - startAngle1) * smoothT;
@@ -8524,15 +8561,22 @@ async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTi
         // Get current angles
         let startAngle0 = getCurrentEncoderAngle(joint, 0) ?? 0;
         let startAngle1 = getCurrentEncoderAngle(joint, 1) ?? 0;
-        
+
+        // Peak velocity for adaptive profile selection
+        const totalTimeSec = totalTimeMs / 1000;
+        const peakVelocity = Math.max(
+            Math.abs(targetAngle0 - startAngle0),
+            Math.abs(targetAngle1 - startAngle1)
+        ) * Math.PI / (2 * totalTimeSec);
+
         // Generate waypoints
         const waypoints = [];
         const actualDeltaT = totalTimeMs / numPoints;
         const initialOffset = 50;
-        
+
         for (let i = 0; i <= numPoints; i++) {
             const t = i / numPoints;
-            const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+            const smoothT = interpolationProfile(t, peakVelocity);
             const angle0 = startAngle0 + (targetAngle0 - startAngle0) * smoothT;
             const angle1 = startAngle1 + (targetAngle1 - startAngle1) * smoothT;
             const desiredArrival = initialOffset + (i * actualDeltaT);
@@ -8594,14 +8638,18 @@ async function sendMultiWaypointSmoothCurveAsync(joint, dofIndex, targetAngle, t
         const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
         
         let startAngle = getCurrentEncoderAngle(joint, dofIndex) ?? 0;
-        
+
+        // Peak velocity for adaptive profile selection
+        const totalTimeSec = totalTimeMs / 1000;
+        const peakVelocity = Math.abs(targetAngle - startAngle) * Math.PI / (2 * totalTimeSec);
+
         const waypoints = [];
         const actualDeltaT = totalTimeMs / numPoints;
         const initialOffset = 50;
-        
+
         for (let i = 0; i <= numPoints; i++) {
             const t = i / numPoints;
-            const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
+            const smoothT = interpolationProfile(t, peakVelocity);
             const angle = startAngle + (targetAngle - startAngle) * smoothT;
             const desiredArrival = initialOffset + (i * actualDeltaT);
             
