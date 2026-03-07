@@ -49,7 +49,7 @@ These scripts are located in `firmware/joint_controller/scripts/` and are automa
 
 **Purpose**: Post-build hook to automatically regenerate `joint_config.json` after firmware build.
 
-**When it runs**: Automatically after successful firmware compilation (any environment: pico2, pico2_debug, rpipico2, rpipico2_debug)
+**When it runs**: Automatically after successful firmware compilation (any environment: pico2, pico2_debug)
 
 **What it does**:
 1. Runs after firmware `.elf` is built
@@ -88,4 +88,3 @@ When adding utility scripts to this directory:
 Python 3.7+ (uses `pathlib`, f-strings)
 
 No external dependencies required for current scripts.
-

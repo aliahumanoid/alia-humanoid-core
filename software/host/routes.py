@@ -374,7 +374,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
         
         Expected JSON:
             {
-                "config": "{\"interface\":\"slcan\",\"channel\":\"/dev/cu.usbmodem...\"}"
+                "config": "{\"interface\":\"slcan\",\"channel\":\"/dev/ttyUSB0\"}"
             }
         
         Returns:

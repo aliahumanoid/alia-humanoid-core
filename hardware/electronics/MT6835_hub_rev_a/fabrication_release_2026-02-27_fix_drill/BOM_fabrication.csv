@@ -1,0 +1,3 @@
+"Item #","*Designator","*Qty","Manufacturer","*Mfg Part #","Description / Value","*Package/Footprint","Mounting Type","Your Instructions / Notes"
+"1","J0","1","Amphenol","RJHSE5380","RJ45 8P8C shielded connector","Connector_RJ:RJ45_Amphenol_RJHSE5380","THT","IFACE verso joint_controller J2 (encoder)"
+"2","J1-J3","3","Molex","53398-0671","6-pin PicoBlade vertical header 1.25mm","Connector_Molex:Molex_PicoBlade_53398-0671_1x06-1MP_P1.25mm_Vertical","SMD","Ingressi encoder MT6835"

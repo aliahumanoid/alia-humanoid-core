@@ -10,7 +10,7 @@
 
 Define a robust, repeatable, web-driven test mode that is as close as possible to the production architecture:
 
-- Production target (D028): `Jetson → SPI → MCP2515 (CAN Expansion Board) → CAN → Joint controllers`
+- Production target: `Jetson → SPI → MCP2515 (CAN Expansion Board) → CAN → Joint controllers`
 - Current bench path: `Web UI → Flask → CanManager → CAN → Joint controllers`
 - Deferred gateway path: `Jetson → USB CDC → RP2350 Gateway → CAN → Joint controllers` (see CAN_SYSTEM_ARCHITECTURE.md §7.3)
 
@@ -498,4 +498,3 @@ For each test run store:
 Suggested output directory:
 
 - `software/host/logs/stream_test/<session_id>/`
-

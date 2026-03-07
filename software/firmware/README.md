@@ -6,7 +6,7 @@ Embedded firmware for the Alia humanoid joint control system, migrated and integ
 
 - **`joint_controller/`** — Dual CAN motor control, waypoint streaming, and PID loops (Raspberry Pi Pico 2 / RP2350)
 
-> **Note**: The `joint_encoders/` project was eliminated (D021, Dec 2025). MT6835 encoders are now read directly by the joint controller via SPI0.
+> **Note**: The legacy `joint_encoders/` project has been retired. MT6835 encoders are now read directly by the joint controller via SPI0.
 
 ## Board Selection
 
@@ -29,4 +29,3 @@ cd joint_controller && ~/.platformio/penv/bin/pio run
 ```
 
 See `joint_controller/README.md` for detailed build instructions, protocol documentation, and safety considerations.
-

@@ -47,7 +47,8 @@ See `software/docs/JOINT_CONFIG_SYNC.md` for details.
 - `templates/` - HTML templates (Alia Joint Controller UI)
 - `static/` - JavaScript, CSS, images
 - `logs/` - Session logs (gitignored)
-- `mapping_data/` - Auto-mapping data storage (gitignored)
+- `mapping_data/` - Auto-mapping data storage (local runtime data, gitignored)
+- `can_config.json` - Saved CAN interface selection (created locally, gitignored)
 
 ## Development Workflows
 
@@ -69,13 +70,12 @@ This automatically creates venv, installs dependencies, and runs the server.
 
 Build firmware from the same Makefile:
 ```bash
-make run MODE=firmware-controller ENV=pico
-make run MODE=firmware-encoders ENV=rpipico2
+make run MODE=firmware-controller ENV=pico2
 ```
 
 If PlatformIO is not in PATH, specify venv:
 ```bash
-PIO=host/.venv/bin/pio make run MODE=firmware-controller ENV=pico
+PIO=host/.venv/bin/pio make run MODE=firmware-controller ENV=pico2
 ```
 
 ### Flash & Monitor via VS Code
@@ -95,6 +95,7 @@ Use PlatformIO extension in VS Code:
 
 - Logs are written under `logs/` (gitignored)
 - `mapping_data/` stores auto-mapping results (gitignored)
+- `can_config.json` is created after a successful CAN connection and remains local (gitignored)
 - Dev server uses `allow_unsafe_werkzeug=True` for Flask-SocketIO compatibility (local dev only)
 
 ## License

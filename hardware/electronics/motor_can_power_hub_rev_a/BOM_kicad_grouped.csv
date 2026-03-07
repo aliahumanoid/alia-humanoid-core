@@ -1,0 +1,4 @@
+"Designator","Value","Footprint","Datasheet","Description","Qty","DNP"
+"J_CAN_IN1","Conn_01x03","TerminalBlock_Phoenix:TerminalBlock_Phoenix_MPT-0,5-3-2.54_1x03_P2.54mm_Horizontal","~","Generic connector, single row, 01x03, script generated (kicad-library-utils/schlib/autogen/connector/)","1",""
+"J_MOTOR1-J_MOTOR5","JST","Connector_JST:JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical","~","Generic connector, single row, 01x06, script generated","5",""
+"J_PWR_IN1","Conn_01x02_Pin","Connector_AMASS:AMASS_XT60PW-M_1x02_P7.20mm_Horizontal","~","Generic connector, single row, 01x02, script generated","1",""

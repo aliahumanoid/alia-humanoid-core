@@ -1,0 +1,74 @@
+(version 1)
+
+# ============================================================
+# Fabrication Design Rules
+# Based on the fabrication baseline validated during board bring-up
+# ============================================================
+
+# --- Minimum drill hole diameter ---
+# Keep >= 0.2 mm for drilling stability and plating quality.
+# 0.1 mm test holes were flagged as too small during manufacturing review.
+
+(rule "Fabrication: Min drill hole diameter"
+	(constraint hole_size (min 0.2mm))
+)
+
+# --- Minimum via hole diameter ---
+# Same constraint applied specifically to vias.
+
+(rule "Fabrication: Min via drill"
+	(constraint hole_size (min 0.2mm))
+	(condition "A.Type == 'Via'")
+)
+
+# --- Minimum track width ---
+# Fabrication baseline: >= 0.127 mm (5 mil).
+
+(rule "Fabrication: Min track width"
+	(constraint track_width (min 0.127mm))
+)
+
+# --- Minimum clearance (copper to copper) ---
+# Fabrication baseline: >= 0.127 mm (5 mil).
+
+(rule "Fabrication: Min copper clearance"
+	(constraint clearance (min 0.127mm))
+)
+
+# --- Minimum annular ring ---
+# Fabrication baseline: >= 0.127 mm (5 mil).
+
+(rule "Fabrication: Min annular ring"
+	(constraint annular_width (min 0.127mm))
+)
+
+# --- Hole to hole clearance ---
+# Fabrication baseline: >= 0.254 mm (10 mil).
+
+(rule "Fabrication: Min hole-to-hole clearance"
+	(constraint hole_clearance (min 0.254mm))
+)
+
+# --- Minimum silkscreen clearance ---
+# Fabrication baseline: >= 0.15 mm between silk elements.
+
+(rule "Fabrication: Min silkscreen clearance"
+	(constraint silk_clearance (min 0.15mm))
+)
+
+# --- Minimum solder mask bridge ---
+# Keep >= 0.19 mm solder mask bridge between pads.
+# MAX6369 SOT-23-8 initially had a 0.15 mm gap and required
+# pad height reduction from 0.50 mm to 0.45 mm to reach 0.20 mm.
+# Note: physical_clearance on mask layers checks the gap between
+# solder mask openings (i.e., the bridge width).
+
+(rule "Fabrication: Min solder mask bridge"
+	(layer "F.Mask")
+	(constraint physical_clearance (min 0.19mm))
+)
+
+(rule "Fabrication: Min solder mask bridge back"
+	(layer "B.Mask")
+	(constraint physical_clearance (min 0.19mm))
+)

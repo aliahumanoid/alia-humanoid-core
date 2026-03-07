@@ -1,0 +1,4 @@
+"Item #","*Designator","*Qty","Manufacturer","*Mfg Part #","Description / Value","*Package/Footprint","Mounting Type","Your Instructions / Notes"
+"1","J_PWR_IN1","1","AMASS","XT60PW-M","XT60 PCB male horizontal 2-pin","Connector_AMASS:AMASS_XT60PW-M_1x02_P7.20mm_Horizontal","THT","Ingresso alimentazione V++/V--"
+"2","J_CAN_IN1","1","Phoenix Contact","1725656","3-pin terminal block 2.54mm (MPT-0,5)","TerminalBlock_Phoenix:TerminalBlock_Phoenix_MPT-0,5-3-2.54_1x03_P2.54mm_Horizontal","THT","Ingresso CAN_GND/CAN_L/CAN_H"
+"3","J_MOTOR1-J_MOTOR5","5","JST","B6B-ZR(LF)(SN)","ZH 6-pin vertical header 1.5mm","Connector_JST:JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical","THT","Uscite motori (pinout da schema)"

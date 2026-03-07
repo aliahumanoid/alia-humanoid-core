@@ -1,6 +1,0 @@
-{
-  "interface": "serial",
-  "channel": "/dev/cu.usbmodem204F31A052301",
-  "bitrate": 1000000,
-  "channel_info": "Serial interface: /dev/cu.usbmodem204F31A052301"
-}

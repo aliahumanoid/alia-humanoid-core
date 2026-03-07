@@ -30,8 +30,10 @@ hardware/
 │   ├── ankle/         → 2-DOF ankle joint (validated Phase 0)
 │   └── foot/          → Foot base + phalanges (5 toes)
 │
-└── electronics/       → PCB designs (Gerbers, schematics, BOM)
-    └── joint_controller_board/  → RP2350 control board with hardware safety (Rev B)
+└── electronics/       → Public PCB designs (controller logic board + passive hubs)
+    ├── joint_controller_board/  → RP2350 controller logic board (`rev_d_logic`)
+    ├── MT6835_hub_rev_a/        → Passive encoder SPI hub
+    └── motor_can_power_hub_rev_a/ → Passive CAN/power distribution hub
 ```
 
 ---
@@ -130,4 +132,3 @@ Hardware contributions follow same guidelines as software (see root `CONTRIBUTIN
 2. Follow naming conventions strictly
 3. Include BOM + assembly docs for new components
 4. Test prints before submitting (if applicable)
-

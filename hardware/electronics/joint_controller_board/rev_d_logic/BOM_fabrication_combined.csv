@@ -1,0 +1,44 @@
+Designator,Footprint,Quantity,Manufacturer Part Number,Manufacturer,Description,Assembly_Type,Populate,Sourcing,Notes
+U_CAN1,SOIC-18W_7.5x11.6mm_P1.27mm,1,MCP2515-E/SO,Microchip,Stand-alone CAN controller with SPI interface,SMD,YES,LCSC / preferred source,CAN1 controller
+U_CAN2,SOIC-18W_7.5x11.6mm_P1.27mm,1,MCP2515-E/SO,Microchip,Stand-alone CAN controller with SPI interface,SMD,YES,LCSC / preferred source,CAN2 controller
+U_TRX1,SOIC-8_3.9x4.9mm_P1.27mm,1,SN65HVD230DR,Texas Instruments,3.3V CAN transceiver,SMD,YES,LCSC / preferred source,CAN1 transceiver
+U_TRX2,SOIC-8_3.9x4.9mm_P1.27mm,1,SN65HVD230DR,Texas Instruments,3.3V CAN transceiver,SMD,YES,LCSC / preferred source,CAN2 transceiver
+U_WDT1,SOT-23-8,1,MAX6369KA+T,Analog Devices / Maxim,Pin-selectable watchdog timer,SMD,YES,LCSC / preferred source,Hardware watchdog
+U4,VSSOP-8_2.4x2.1mm_P0.5mm,1,SN74LVC2G08DCUR,Texas Instruments,Dual AND gate 1.65V to 5.5V,SMD,YES,LCSC / preferred source,Safety gating logic
+D1,SOT-23,1,PESD2CAN24XLT-Q,Nexperia,Automotive CAN ESD protection diode,SMD,YES,LCSC / preferred source,CAN1 TVS
+D2,SOT-23,1,PESD2CAN24XLT-Q,Nexperia,Automotive CAN ESD protection diode,SMD,YES,LCSC / preferred source,CAN2 TVS
+D_PWR1,D_SMA,1,SS24,Multiple,Schottky diode 2A 40V SMA,SMD,YES,LCSC / preferred source,5V input OR-ing / reverse backfeed protection
+Y1,Crystal_SMD_3225-4Pin_3.2x2.5mm,1,3225 8M 12PF 10PPM,SOSET / Equivalent,8MHz SMD crystal 3225-4P,SMD,YES,LCSC / preferred source,CAN1 clock crystal
+Y2,Crystal_SMD_3225-4Pin_3.2x2.5mm,1,3225 8M 12PF 10PPM,SOSET / Equivalent,8MHz SMD crystal 3225-4P,SMD,YES,LCSC / preferred source,CAN2 clock crystal
+C2,C_0805_2012Metric,1,CL21B104KBCNNNC,Samsung,100nF 50V X7R 0805 capacitor,SMD,YES,LCSC / preferred source,Decoupling
+C6,C_0805_2012Metric,1,CL21B104KBCNNNC,Samsung,100nF 50V X7R 0805 capacitor,SMD,YES,LCSC / preferred source,Decoupling
+C_CAN1_VDD1,C_0805_2012Metric,1,CL21B104KBCNNNC,Samsung,100nF 50V X7R 0805 capacitor,SMD,YES,LCSC / preferred source,CAN1 MCP decoupling
+C_CAN1_TRX1,C_0805_2012Metric,1,CL21B104KBCNNNC,Samsung,100nF 50V X7R 0805 capacitor,SMD,YES,LCSC / preferred source,CAN1 transceiver decoupling
+C_CAN2_VDD2,C_0805_2012Metric,1,CL21B104KBCNNNC,Samsung,100nF 50V X7R 0805 capacitor,SMD,YES,LCSC / preferred source,CAN2 MCP decoupling
+C_CAN2_TRX2,C_0805_2012Metric,1,CL21B104KBCNNNC,Samsung,100nF 50V X7R 0805 capacitor,SMD,YES,LCSC / preferred source,CAN2 transceiver decoupling
+C_CAN1_BULK1,C_0805_2012Metric,1,CL21A105KBQNNNE,Samsung,1uF 50V X5R 0805 capacitor,SMD,YES,LCSC / preferred source,CAN1 local bulk
+C_CAN2_BULK2,C_0805_2012Metric,1,CL21A105KBQNNNE,Samsung,1uF 50V X5R 0805 capacitor,SMD,YES,LCSC / preferred source,CAN2 local bulk
+C_CAN1_OSC1,C_0805_2012Metric,1,CL21C180JBANNNC,Samsung,18pF C0G 50V 0805 capacitor,SMD,YES,LCSC / preferred source,CAN1 crystal load
+C_CAN1_OSC2,C_0805_2012Metric,1,CL21C180JBANNNC,Samsung,18pF C0G 50V 0805 capacitor,SMD,YES,LCSC / preferred source,CAN1 crystal load
+C_CAN2_OSC3,C_0805_2012Metric,1,CL21C180JBANNNC,Samsung,18pF C0G 50V 0805 capacitor,SMD,YES,LCSC / preferred source,CAN2 crystal load
+C_CAN2_OSC4,C_0805_2012Metric,1,CL21C180JBANNNC,Samsung,18pF C0G 50V 0805 capacitor,SMD,YES,LCSC / preferred source,CAN2 crystal load
+R1,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,Watchdog network
+R2,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,Watchdog network
+R3,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,Watchdog network
+R4,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,Watchdog network
+R5,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,Watchdog network
+R_CAN1_RST1,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,CAN1 reset pull-up
+R_CAN2_RST2,R_0805_2012Metric,1,RC0805FR-0710KL,Yageo,10k Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,CAN2 reset pull-up
+R_CAN1_RS1,R_0805_2012Metric,1,RC0805JR-070RL,Yageo,0 Ohm 0805 jumper resistor,SMD,YES,LCSC / preferred source,CAN1 RS strap
+R_CAN2_RS2,R_0805_2012Metric,1,RC0805JR-070RL,Yageo,0 Ohm 0805 jumper resistor,SMD,YES,LCSC / preferred source,CAN2 RS strap
+R_SO_SPI1,R_0805_2012Metric,1,RC0805FR-0722RL,Yageo,22 Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,SPI SO damping
+R_SO_SPI2,R_0805_2012Metric,1,RC0805FR-0722RL,Yageo,22 Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,SPI SO damping
+R_TERM_CAN1,R_0805_2012Metric,1,RC0805FR-07120RL,Yageo,120 Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,CAN1 termination
+R_TERM_CAN2,R_0805_2012Metric,1,RC0805FR-07120RL,Yageo,120 Ohm 1% 0805 resistor,SMD,YES,LCSC / preferred source,CAN2 termination
+SJ_TERM_CAN1,SolderJumper-2_P1.3mm_Open_TrianglePad1.0x1.5mm,1,PCB_FEATURE,NA,Solder jumper footprint on PCB,PCB,YES,PCB fabrication only,Do not add as assembled component
+SJ_TERM_CAN2,SolderJumper-2_P1.3mm_Open_TrianglePad1.0x1.5mm,1,PCB_FEATURE,NA,Solder jumper footprint on PCB,PCB,YES,PCB fabrication only,Do not add as assembled component
+J1,RJ45_Amphenol_RJHSE5380,1,RJHSE5380,Amphenol ICC,RJ45 8P8C right-angle THT connector,THT,YES,Consigned recommended,IFACE connector
+J2,RJ45_Amphenol_RJHSE5380,1,RJHSE5380,Amphenol ICC,RJ45 8P8C right-angle THT connector,THT,YES,Consigned recommended,Encoder connector
+J_CAN1_IN1,"TerminalBlock_Phoenix_MPT-0,5-3-2.54_1x03_P2.54mm_Horizontal",1,1725669,Phoenix Contact,3-pin pluggable terminal block 2.54mm pitch,THT,YES,LCSC / preferred source,CAN1 connector
+J_CAN2_IN2,"TerminalBlock_Phoenix_MPT-0,5-3-2.54_1x03_P2.54mm_Horizontal",1,1725669,Phoenix Contact,3-pin pluggable terminal block 2.54mm pitch,THT,YES,LCSC / preferred source,CAN2 connector
+U1,RaspberryPi_Pico_Common_THT,2,PPTC201LFBN-RC,Sullins / Equivalent,Female socket strip 1x20 2.54mm THT,THT,YES,Consigned or equivalent,ASSEMBLE ONLY 2x female socket strips on U1 footprint; DO NOT PLACE Raspberry Pi Pico module (customer supplied, plug-in after delivery)

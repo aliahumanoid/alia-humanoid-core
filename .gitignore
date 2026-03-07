@@ -1,4 +1,5 @@
 .DS_Store
+.vscode/
 *.log
 tmp/
 dist/
@@ -19,12 +20,19 @@ software/firmware/**/include/version.h
 
 # Host virtual environment and runtime logs
 software/host/.venv/
+software/host/venv/
+software/host/.pytest_cache/
+software/host/__pycache__/
+software/host/.vscode/
 software/host/logs/
 software/host/serial_communication_*.log
 software/host/calibration_data/
+software/host/can_config.json
+software/host/mapping_data/*.json
 
 # Local debug notes/artifacts
 docs/debug/
+docs/media/**/*.mov
 software/firmware/**/.cache/
 
 # GitHub social preview (uploaded manually, not committed)
@@ -32,8 +40,40 @@ social-preview.png
 
 # KiCad generated/backup files
 hardware/**/*-backups/
+hardware/**/*.kicad_prl
 hardware/**/fp-info-cache
 hardware/**/~*.lck
+hardware/electronics/**/*.kicad_pcb.bak*
+hardware/electronics/**/netlist.xml
+hardware/electronics/**/*current.xml
+hardware/electronics/**/*drc*.json
+hardware/electronics/**/*drc*.txt
+hardware/electronics/**/*erc*.txt
+hardware/electronics/**/*drc*.rpt
+hardware/electronics/**/*erc*.rpt
+hardware/electronics/**/gerbers/
+hardware/electronics/**/ORDER_NOTES.txt
+hardware/electronics/**/*FAB_NOTES.md
+
+# Hidden electronics revisions / internal support files
+hardware/electronics/_shared_3dmodels/
+hardware/electronics/joint_controller_board/docs/
+hardware/electronics/joint_controller_board/rev_a/
+hardware/electronics/joint_controller_board/rev_b/
+hardware/electronics/joint_controller_board/rev_c/
+hardware/electronics/joint_controller_board/rev_d_power/
+hardware/electronics/joint_controller_board/rev_d_logic/release_*2026-02-22/
+hardware/electronics/joint_controller_board/rev_d_logic/release_*_wdt_padfix.zip
+hardware/electronics/MT6835_hub_rev_a/CABLE_HARNESS_SPEC.md
+hardware/electronics/MT6835_hub_rev_a/MT6835_MODULE_PROCUREMENT_NOTE.md
+hardware/electronics/MT6835_hub_rev_a/*CABLE_RFQ_25cm.md
+hardware/electronics/MT6835_hub_rev_a/*FAB*2026-02-26/
+hardware/electronics/MT6835_hub_rev_a/*FAB*2026-02-27/
+hardware/electronics/MT6835_hub_rev_a/*MT6835_SOLDERING_NOTE.md
+hardware/electronics/motor_can_power_hub_rev_a/CONNECTOR_VERIFICATION_NOTES.md
+hardware/electronics/motor_can_power_hub_rev_a/*FAB*2026-02-26/
+hardware/electronics/motor_can_power_hub_rev_a/*FAB*2026-02-27/
+hardware/electronics/motor_can_power_hub_rev_a/3dmodels/Connector_AMASS.3dshapes/AMASS_XT60PW-F_1x02_P7.20mm_Horizontal.step
 
 # PlatformIO compile database (generated)
 software/**/compile_commands.json

@@ -61,7 +61,7 @@ Next time you build, `FW_VERSION` will automatically be `0.1.1` (or whatever you
 
 ```bash
 # Click build button in Cursor
-# OR: cd software && make fw-build-controller ENV=pico
+# OR: cd software && make fw-build-controller ENV=pico2
 ```
 
 ### 4. Verify the version
@@ -286,4 +286,3 @@ git tag v0.2.0      # Final release
 - Git tagging: https://git-scm.com/book/en/v2/Git-Basics-Tagging
 - Semantic Versioning: https://semver.org/
 - Conventional Commits: https://www.conventionalcommits.org/
-

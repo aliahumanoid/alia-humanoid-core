@@ -14,7 +14,7 @@
 
 **Changelog v2.0:**
 - **Consolidated**: Merged `CAN_CONTROL_PROTOCOL.md` and `jetson-streaming-can.md` into this document
-- **D028**: Updated architecture to reflect Jetson direct CAN (no Pico dispatcher for production)
+- **Updated architecture**: Jetson direct CAN path with no Pico dispatcher in the production path
 - **Batch anchor timing**: Documented firmware-side anchor + consume-side re-anchor
 - **Buffer depth**: Updated from 2 to 2000 (20s @ 100 Hz)
 - **CAN ID 0x01B**: Added Re-anchor Interval command
@@ -44,7 +44,7 @@ This document describes the complete CAN-based communication architecture for th
 - **Protocol**: CAN 2.0 @ 1 Mbps (upgradeable to CAN FD)
 - **Control Frequency**: 500 Hz (motor PID), 50-100 Hz (waypoint streaming)
 - **Latency**: < 1 ms single frame transit; ~50 ms waypoint-to-motion (pre-buffered, see §9.1)
-- **Hardware Platform**: Nvidia Jetson direct CAN (D028) + 4x CAN Expansion Boards (8ch each)
+- **Hardware Platform**: Nvidia Jetson direct CAN + 4x CAN Expansion Boards (8ch each)
 - **Timing**: Batch anchor timing on firmware — immune to sender-side jitter
 
 ### v1 Test Baseline (frozen config):
@@ -215,7 +215,7 @@ Recommendation: Option A (separate legs)
 (*) Prototype: TJA1050 (5V, requires level shifting). Target: SN65HVD230 (3.3V native).
 
 **Production:**
-- **PCB Manufacturer**: JLCPCB, PCBWay
+- **PCB Manufacturer**: Reputable quick-turn PCB vendor
 - **Assembly**: PCBA service or DIY
 - **Lead Time**: 2-3 weeks
 - **Quantity**: 4 boards (20-26 channels used)
@@ -870,11 +870,11 @@ uint32_t getAbsoluteTimeMs() {
 
 ---
 
-## 7. Jetson-to-CAN Architecture (D028)
+## 7. Jetson-to-CAN Architecture
 
 ### 7.1 Why Jetson Drives CAN Directly
 
-**Decision D028** (2026-02-15): Adopt Jetson direct CAN architecture, defer Pico RP2040 dispatcher.
+Current architecture (2026-02-15): the Jetson drives CAN directly. No intermediate RP2040 dispatcher is required in the current production path.
 
 The Jetson sends CAN frames directly to joint controllers via SPI-connected MCP2515 expansion boards. No intermediate bare-metal MCU is required.
 
@@ -1204,11 +1204,11 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 |------|-------------|--------|------------|
 | CAN bus collision | Low | Medium | Multi-bus architecture (isolated) |
 | Jitter > 5ms (sender) | Medium | Low | Batch anchor timing (firmware immune) |
-| PCB manufacturing defect | Low | High | Reputable manufacturer (JLCPCB) |
+| PCB manufacturing defect | Low | High | Reputable manufacturer with DFM review |
 | MCP2515 chip shortage | Medium | Medium | Order in bulk, MCP2518FD fallback |
 | Jetson SPI limitation | Low | High | Current design uses 4 SPI buses; I2C-to-SPI bridge for >4 boards |
 | EMI interference | Low | Medium | Shielded cables, proper grounding |
-| **R14: Jetson scheduling stalls** | Low | Medium | 20s buffer absorbs stalls; Pico gateway fallback (D028) |
+| **R14: Jetson scheduling stalls** | Low | Medium | 20s buffer absorbs stalls; bare-metal CAN gateway fallback |
 
 ---
 
@@ -1290,7 +1290,7 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 
 ### 14.4 Hardware Suppliers
 
-- **PCB Manufacturing**: JLCPCB, PCBWay
+- **PCB Manufacturing**: Reputable quick-turn PCB vendor
 - **Components**: Mouser, DigiKey, LCSC
 
 ---
