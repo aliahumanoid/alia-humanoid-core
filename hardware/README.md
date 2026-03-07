@@ -1,9 +1,9 @@
 # Alia Humanoid Hardware
 
-**Phase**: 0 → 1 Transition  
+**Project Phase**: 0 (public lower-body validation)  
 **Status**: Lower leg assets preparation (ankle validated)  
-**Release Scope Phase 1**: Lower leg + Ankle + Foot  
-**License**: CC BY-NC-ND 4.0 (Phase 1) → See [LICENSE.md](LICENSE.md)
+**Current Public Hardware Release**: STL/docs/BOM only  
+**License**: CC BY-NC-ND 4.0 → See [LICENSE.md](LICENSE.md)
 
 ---
 
@@ -127,8 +127,12 @@ mechanical/{joint}/{side}/
 
 ## Contributing
 
-Hardware contributions follow same guidelines as software (see root `CONTRIBUTING.md`):
-1. Git sign-off required (`git commit -s`)
-2. Follow naming conventions strictly
-3. Include BOM + assembly docs for new components
-4. Test prints before submitting (if applicable)
+For the current STL-only release, hardware feedback is welcome but canonical hardware geometry changes are not part of the active PR surface yet.
+
+Current in-scope contributions:
+1. Replication feedback with measurements, photos, and failure notes
+2. Documentation fixes and clarifications
+3. BOM corrections or missing-public-data corrections
+4. Issues that identify manufacturability or assembly problems
+
+When STEP/CAD sources are released, hardware geometry collaboration will expand. See the root [CONTRIBUTING.md](../CONTRIBUTING.md) and [LICENSE.md](LICENSE.md) for the current boundary.

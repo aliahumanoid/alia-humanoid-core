@@ -1,7 +1,7 @@
 # Ankle Joint Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Validated  
-> **Last Updated**: 2025-12-16  
+> **Last Updated**: 2026-03-07  
 > **Validation**: ✅ Biomechanics validated for 25kg robot, slow walking gait
 
 ---
@@ -210,5 +210,4 @@ The ankle is a **2-DOF joint** using **antagonistic tendon-driven actuation** wi
 **Document Control**:
 - Version: 1.0
 - Extracted from: project-specs-master.md (sections 1.1-1.5)
-- Next Review: 2026-01-15
-
+- Next Review: After next lower-body validation checkpoint

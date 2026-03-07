@@ -82,7 +82,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 
 ---
 
-## Current Status (Phase 0 — January 2026)
+## Current Status (Phase 0 — March 2026)
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
@@ -101,7 +101,7 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 - 📺 **[YouTube Channel](https://www.youtube.com/@aliahumanoid)** — Design logs, demos, technical breakdowns
 - 🐦 **[X/Twitter (@AliaHumanoid)](https://x.com/AliaHumanoid)** — Project updates, iteration logs
 - 🌐 **[Website](https://aliahumanoid.com)** — Project overview and roadmap
-- 📝 **[Public Updates](PUBLIC_UPDATES.md)** — Monthly transparent progress log
+- 📝 **[Public Updates](PUBLIC_UPDATES.md)** — Public milestone log and release notes
 - 📖 **[Documentation](software/README.md)** — Software architecture, protocols, build guides
 - 📐 **[Technical Specs](docs/specs/README.md)** — Joint specifications, motor specs, tendon specs
 
@@ -111,15 +111,16 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 
 We document **both successes and failures** transparently.
 
-**Current validation: Right ankle prototype**
+**Current validation snapshot: ankle and knee mechanics validated individually; integrated lower-body work still in progress**
 
 ### ✅ Validated (Phase 0)
 
 - Ankle kinematics achieve target ROM (2 DOF within human envelope)
+- Knee ROM and tendon-driven position control validated (0-100 degrees)
 - Flat-braided 3-strand UHMWPE tendons (1mm diameter each) validated for load capacity and pulley compatibility
 - Motor pulleys engineered for minimal footprint and closest distance to motor flange (reduces bearing wear)
 - Tendon routing functional with minimal friction losses
-- PA12 structure withstands walking gait loads
+- PA12 structure passes current static/load validation
 - Peak torque matches biomechanics requirements
 - Auto joint mapping with linear equations
 - Simultaneous control of both DOF (coupled plantarflexion/dorsiflexion + inversion/eversion)
@@ -127,6 +128,7 @@ We document **both successes and failures** transparently.
 
 ### ⚠️ Still Iterating
 
+- Walking gait as an integrated lower-body system remains in progress
 - Intelligent adaptive joint mapping and calibration adjustment in progress
 - Real-time trajectory control refinement ongoing
 - Multi-joint coordination (knee + ankle + foot) in progress
@@ -158,20 +160,26 @@ We document **both successes and failures** transparently.
 
 ---
 
-## Get Involved
+## Follow Progress
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+This repository documents Phase 0 validation work in public. Small software/docs improvements and evidence-based feedback are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the current collaboration boundary.
 
 **Ground Rules:**
 - All commits require DCO sign-off: `git commit -s`
 - Use English for code/comments/issues
 - Follow conventional commit format (`feat:`, `fix:`, `docs:`, etc.)
 
-**Current Contribution Areas:**
+**Current Accepted PR Scope:**
 - 🐛 Bug reports and fixes
 - 📖 Documentation improvements (clarity, examples, translations)
-- 🧪 Testing and validation (especially hardware replication)
+- 🧪 Testing and validation reports (especially hardware replication)
 - 💡 Feature proposals (via issues first)
+
+**Not Yet Open As PR Surface:**
+- Hardware geometry changes to STL/CAD assets
+- Canonical hardware design modifications while the public hardware release remains STL-only
+
+For hardware design ideas, replication findings, and geometry feedback, open an issue first with evidence, measurements, or photos.
 
 ---
 
@@ -203,7 +211,7 @@ This implementation is an independent engineering development released under the
 - **Software:** [MIT License](LICENSE)
 - **Hardware:** See [hardware/LICENSE.md](hardware/LICENSE.md) for phased licensing roadmap
 
-By contributing code, you license it under MIT. By contributing hardware designs, you agree to the phased licensing transition (contributions remain attributed).
+By contributing code, you license it under MIT. Hardware design feedback is welcome now; canonical hardware geometry changes will open later as the hardware release surface expands.
 
 ---
 
@@ -227,7 +235,6 @@ This asserts compliance with the [Developer Certificate of Origin](https://devel
 
 ---
 
-**Project Status:** Phase 0 active development | Last updated: January 2026
+**Project Status:** Phase 0 active development | Last updated: March 2026
 
 ---
-

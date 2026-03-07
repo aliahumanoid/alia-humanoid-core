@@ -2,30 +2,42 @@
 
 Thanks for your interest in contributing! 
 
-## Why Contribute to Alia?
+## Current Contribution Scope (March 2026)
 
-Alia is exploring humanoid mechanics with **radical transparency**: we document what works ✅ and what doesn't ⚠️, inside real human constraints.
+Alia is publicly documented, but the contribution surface is intentionally narrow during the current Phase 0 validation cycle.
 
-**What makes this project different:**
-- **Honesty over hype** — We share failures and iterations, not just successes
-- **Real constraints** — Building inside human proportions forces innovative solutions
-- **Progressive open source** — Phased licensing roadmap toward full collaboration
-- **Engineering depth** — Tendon-driven actuation, biomechanics validation, hardware iteration
+**Accepted now:**
+- Software and firmware bug fixes
+- Documentation improvements and clarifications
+- Reproducible bug reports
+- Hardware replication feedback, measurements, and validation notes
+- Small tooling or test improvements that support the current stack
 
-Phase 0 is early-stage, but we're building a foundation for genuine collaboration. If you value:
-- Transparent engineering process
-- Bio-inspired robotics design
-- Open hardware with clear governance
-- Community-driven development
+**Feedback first, not PRs yet:**
+- Hardware geometry changes
+- STL modifications
+- New CAD assets intended as canonical project hardware
 
-...then Alia might be a project worth your time.
+Why: the public hardware release is still STL-only under CC BY-NC-ND, so hardware design feedback is valuable, but hardware geometry changes are not part of the active PR surface yet. See `hardware/LICENSE.md` for the current release boundary.
+
+## Who This Repo Is Useful For Right Now
+
+Alia is exploring humanoid mechanics with **radical transparency**: we document what works and what does not, inside real human constraints.
+
+This repository is most useful today if you want to:
+- Follow a real lower-body humanoid validation effort as it evolves
+- Report bugs, unclear documentation, or missing technical context
+- Share replication findings, measurements, or hardware validation notes
+- Track the project early before the collaboration surface expands
+
+Phase 0 is still a high-barrier prototype stage. That means the most valuable external input right now is usually precise feedback, reproducible issues, and evidence from partial replication rather than large integrated PRs.
 
 ---
 
 ## Ground Rules
 
 - Use English for code comments, documentation, and issues
-- STL files are released under CC BY-NC-ND; CAD source files planned for Phase 2+ (see `hardware/LICENSE.md`)
+- Hardware design files are currently STL-only under CC BY-NC-ND; feedback is welcome, but hardware geometry changes are not accepted as PRs yet
 - Keep commits small and logically scoped
 - Be respectful and constructive in discussions
 
@@ -59,27 +71,33 @@ Example branch names:
 
 ## Opening a Pull Request
 
-1. **Create an issue first** (if non-trivial change)
-   - Describe the problem or improvement
-   - Reference related decisions (if known)
-   - Wait for feedback before major work
+1. **Check whether the change is in scope**
+   - Direct PRs are welcome for small documentation fixes and narrow software/firmware fixes
+   - Open an issue first for non-trivial changes, new features, refactors, or anything affecting public hardware direction
+   - For hardware geometry ideas, open an issue with evidence and rationale instead of a PR
 
-2. **Fork and branch**
+2. **Create an issue first** (if non-trivial change)
+   - Describe the problem or improvement
+   - Include reproduction steps, data, logs, measurements, or photos when relevant
+   - Wait for maintainer feedback before major work
+
+3. **Fork and branch**
    - Fork the repo
    - Create feature branch: `git checkout -b feature/your-topic`
 
-3. **Make changes**
+4. **Make changes**
    - Follow style guidelines (see below)
    - Include tests if applicable
    - Update docs if behavior changes
 
-4. **Sign your commits**
+5. **Sign your commits**
    - Always use `git commit -s`
    - Check: `git log -1` should show `Signed-off-by: Your Name <your@email.com>`
 
-5. **Open PR**
+6. **Open PR**
    - Reference issue: "Closes #123" or "Related to #456"
    - Describe what changed and why
+   - Include any manual test evidence if hardware was involved
    - Request review
 
 ---
@@ -153,6 +171,7 @@ We don't have automated tests yet (Phase 0), but manual validation is expected.
 - Performance measurements
 - Edge case testing
 - Calibration procedure validation
+- Photos, logs, and measured deltas versus expected behavior
 
 ### 📖 Documentation
 - Clarity improvements
@@ -172,11 +191,18 @@ We don't have automated tests yet (Phase 0), but manual validation is expected.
 - New features (discuss first in issue)
 - Refactoring (keep PRs focused)
 
+### 🛠️ Maintainer-Friendly Improvements
+- Build fixes that preserve current behavior
+- Test coverage for existing behavior
+- Developer tooling that reduces setup or debugging friction
+- Small examples that help reproduce real issues
+
 ---
 
 ## What NOT to Contribute (Yet)
 
-- ❌ **CAD files / STL modifications** — Phase 0 hardware not yet released
+- ❌ **Canonical hardware geometry changes** — use issues for now while hardware remains STL-only
+- ❌ **CAD files / STL modifications intended for merge** — wait for STEP/CAD release stages
 - ❌ **Large binary assets** — Use external hosting and link instead
 - ❌ **Breaking API changes** — Discuss in issue first
 - ❌ **Unrelated features** — Stay focused on Phase 0 scope
@@ -211,9 +237,11 @@ We document failures and limitations transparently — that's a feature, not wea
 
 ## Questions?
 
-- **GitHub Issues:** Technical questions, bug reports, feature proposals
+- **GitHub Issues:** Technical questions, bug reports, feature proposals, hardware feedback
 - **Email:** info@aliahumanoid.com (for non-technical inquiries)
 - **Social:** [@AliaHumanoid](https://x.com/AliaHumanoid) on X/Twitter (project updates)
+
+GitHub Discussions are not enabled on this repository at the moment, so Issues are the primary async channel.
 
 ---
 

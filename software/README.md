@@ -1,11 +1,11 @@
 # Software Stack
 
-This directory will host the public software for the Alia project.
+This directory contains the public software stack for the Alia project.
 
 Structure
 ```
 software/
-├─ host/                 # Python host application (to be migrated)
+├─ host/                 # Python host application (Flask + Socket.IO)
 └─ firmware/             # Embedded firmware projects (PlatformIO)
 ```
 

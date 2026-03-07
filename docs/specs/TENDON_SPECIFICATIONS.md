@@ -1,7 +1,7 @@
 # Tendon Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Internal Reference  
-> **Last Updated**: 2025-12-16  
+> **Last Updated**: 2026-03-07  
 > **Robot**: H = 175 cm, m = **25 kg**
 
 ---
@@ -285,5 +285,4 @@ UHMWPE fibers are generally inert; main hazards are mechanical:
 **Document Control**:
 - Version: 2.0 (Unified from dual sections)
 - Created: 2025-12-16
-- Next Review: 2026-01-15
-
+- Next Review: After next lower-body validation checkpoint

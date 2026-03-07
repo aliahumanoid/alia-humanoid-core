@@ -1,7 +1,7 @@
 # Technical Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Reference Documentation  
-> **Last Updated**: 2025-12-16
+> **Last Updated**: 2026-03-07
 
 ---
 
@@ -11,8 +11,8 @@ This directory contains authoritative technical specifications for all mechanica
 
 **Purpose**:
 - Internal documentation consistency
-- Public content creation (Phase 1+)
-- Contributor onboarding
+- Public technical reference and content creation
+- Future collaborator onboarding
 - BOM management
 
 ---
@@ -41,11 +41,11 @@ This directory contains authoritative technical specifications for all mechanica
 
 ## Validation Status
 
-| Joint | ROM | Torque | Control | Gait |
-|-------|-----|--------|---------|------|
+| Joint | ROM | Torque | Control | Integration |
+|-------|-----|--------|---------|-------------|
 | Ankle | ✅ | ✅ | ✅ | 🔄 In progress |
 | Knee | ✅ | ✅ | ✅ | 🔄 In progress |
-| Hip | — | — | — | ⏳ Phase 2 |
+| Hip | — | — | — | ⏳ Planning |
 
 ---
 
@@ -91,5 +91,4 @@ Specification updates require:
 
 ---
 
-**Next Review**: 2026-01-15 (post-Phase 0 validation)
-
+**Next Review**: After next lower-body validation checkpoint

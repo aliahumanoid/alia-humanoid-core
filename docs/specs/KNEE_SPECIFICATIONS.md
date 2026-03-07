@@ -1,7 +1,7 @@
 # Knee Joint Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Validated (December 2025)  
-> **Last Updated**: 2025-12-16  
+> **Last Updated**: 2026-03-07  
 > **Validation**: ✅ ROM, position control, CAN communication verified
 
 ---
@@ -128,5 +128,4 @@ The knee is a **1-DOF joint** using **antagonistic tendon-driven actuation** wit
 **Document Control**:
 - Version: 1.0
 - Source: project-specs-master.md (section 5.1)
-- Next Review: 2026-01-15
-
+- Next Review: After next lower-body validation checkpoint

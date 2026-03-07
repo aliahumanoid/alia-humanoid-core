@@ -2,6 +2,8 @@
 
 Structured log of outward-facing progress notes. Updates published as milestones are reached, maintaining transparency without revealing premature details.
 
+> Note (2026-03-07): Entries below retain their original publication context. Where timeline or release-roadmap assumptions later changed, an inline update note has been added rather than rewriting the historical snapshot.
+
 ---
 
 ## 2026-01-26 — Joint Design Log #002 published
@@ -21,7 +23,9 @@ Structured log of outward-facing progress notes. Updates published as milestones
 
 **Announcement:** [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
 
-Next joint: hip (3 DOF). Phase 1 (full CAD release under CC BY-SA) still targeted ~6 months from project start.
+Next joint: hip (3 DOF).
+
+**Update 2026-03-07:** The original "~6 months from project start" target for Phase 1 did not hold. The project remains in Phase 0 lower-body validation. The current release plan is: next release step = STEP files under CC BY-NC-SA when validation permits; full CAD source under CC BY-SA comes later.
 
 ---
 
@@ -38,7 +42,9 @@ Next joint: hip (3 DOF). Phase 1 (full CAD release under CC BY-SA) still targete
 
 **Watch:** [Joint Design Log #001 on YouTube](https://youtu.be/1Z9GlTnYEFs)
 
-This is the first of 8 planned joint design logs documenting the full humanoid robot assembly. Phase 0 — validate mechanics, document honestly. Phase 1 (targeted ~6 months) will open full CAD files under CC BY-SA for community contributions.
+This is the first of 8 planned joint design logs documenting the full humanoid robot assembly. Phase 0 — validate mechanics, document honestly.
+
+**Update 2026-03-07:** The timing and licensing roadmap referenced in this November 2025 note has since been revised. The project is still in Phase 0 validation; the next release step is STEP files under CC BY-NC-SA, while full CAD source release under CC BY-SA is planned later.
 
 ---
 
@@ -65,6 +71,8 @@ This is the first of 8 planned joint design logs documenting the full humanoid r
 - Gallery: CAD renders, prototype photos, internal mechanism cutaways
 - Contributing guidelines with DCO enforcement
 - Phase 0-3 licensing roadmap (CC BY-NC-ND → CC BY-SA → CLA → open-core)
+
+**Update 2026-03-07:** The hardware release roadmap has since been refined. See `hardware/LICENSE.md` for the current sequence: STL-only now, STEP as the next release step, and full CAD source later.
 
 **License:** Hardware under CC BY-NC-ND 4.0, Software under MIT
 

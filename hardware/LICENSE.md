@@ -1,9 +1,10 @@
 # Alia Humanoid Hardware License
 
-## Phase 1: STL Release (CC BY-NC-ND 4.0)
+## Current Public Hardware Release: STL Files (CC BY-NC-ND 4.0)
 
 **Effective Date**: November 2025  
-**Current Phase**: Phase 1 — Initial Mechanical Asset Release
+**Project Context**: Phase 0 public validation  
+**Current Hardware Release State**: STL/docs/BOM release only
 
 ---
 
@@ -42,7 +43,7 @@ When sharing or referencing these designs, you must provide:
 
 ---
 
-## Why This License? (Phase 1 Rationale)
+## Why This License? (Current Release Rationale)
 
 ### Design Maturity
 Our hardware is in **early iteration** (Revision A). We're releasing STL files to enable:
@@ -65,7 +66,7 @@ STL files alone make **significant modifications impractical** (see technical no
 
 ## Transition Roadmap
 
-### Phase 1b (Target: Q2-Q3 2026)
+### Next Release Step (Target: Q2-Q3 2026)
 **License**: CC BY-NC-SA 4.0  
 **Assets Released**: STL + **STEP files** (parametric CAD interchange)  
 **Rationale**: STEP enables modifications → ShareAlike ensures improvements return to community
@@ -75,7 +76,7 @@ STL files alone make **significant modifications impractical** (see technical no
 - Community feedback integrated
 - Confidence design is "stable enough" for parametric release
 
-### Phase 2 (Target: 2027+)
+### Later Release Step (Target: 2027+)
 **License**: CC BY-SA 4.0 (full open)  
 **Assets Released**: STL + STEP + **Fusion 360 sources** (.f3d with parametric history)  
 **Rationale**: Complete timeline enables efficient collaborative development
@@ -116,7 +117,7 @@ We're open to discussing terms that work for research, startups, and established
 - Loss of design precision (mesh approximation)
 - No efficient way to share/iterate on improvements
 
-**When we release STEP files** (Phase 1b), modifications become practical because STEP preserves:
+**When we release STEP files** in the next release step, modifications become practical because STEP preserves:
 - ✅ Parametric surfaces (cylinders, planes, spheres)
 - ✅ Recognizable features (holes, extrusions, fillets)
 - ✅ Modifiable geometry (though not full timeline)
@@ -145,7 +146,7 @@ Software and hardware licenses are independent:
 ❌ **No**, commercial use requires a commercial license. Contact us.
 
 ### Can I modify the STL in Blender for my needs?
-❌ **Technically possible but against license**. Also impractical (mesh editing ≠ parametric design). Wait for Phase 1b (STEP release) for practical modifications.
+❌ **Technically possible but against license**. Also impractical (mesh editing ≠ parametric design). Wait for the STEP release stage for practical modifications.
 
 ### Can a startup use these designs?
 ⚠️ **Depends on use case**:
@@ -159,7 +160,7 @@ Software and hardware licenses are independent:
 ✅ **Yes**, planned for 2027. We're phasing to ensure quality, not to stay closed.
 
 ### Can I contribute improvements?
-🔄 **Not yet with STL-only**. Contributions will be meaningful when we release STEP (Phase 1b) or Fusion sources (Phase 2). For now, feedback via GitHub Issues is valuable.
+🔄 **Not yet as hardware geometry PRs while the release is STL-only**. Contributions will be more practical when we release STEP and later CAD sources. For now, feedback via GitHub Issues is valuable and encouraged.
 
 ### Why not release everything now?
 ⏱️ **Design is Rev A** (early iteration). Releasing parametric sources prematurely would create:
@@ -174,7 +175,7 @@ Phasing protects quality and ensures stable foundation for collaboration.
 ## Feedback & Questions
 
 **Found a design issue?** Open a GitHub Issue with `hardware:feedback` label  
-**Licensing questions?** Open a GitHub Discussion in "Licensing" category  
+**Licensing questions?** Open a GitHub Issue or email info@aliahumanoid.com  
 **Commercial inquiries?** Email info@aliahumanoid.com
 
 ---
@@ -192,4 +193,3 @@ https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
 **License Version**: CC BY-NC-ND 4.0  
 **Transition Plan**: See roadmap above  
 **Questions**: info@aliahumanoid.com
-
