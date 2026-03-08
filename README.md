@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/media/alia-banner.png" alt="Alia - Humanoid Design" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/alia-banner-dark.png">
+    <img src="docs/media/alia-banner-light.png" alt="Alia - Humanoid Design" width="100%">
+  </picture>
 </p>
 
 # Alia Humanoid
