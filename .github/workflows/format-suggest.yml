@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - 'software/firmware/**'
-      - '.clang-format'
+      - 'software/firmware/.clang-format'
   workflow_dispatch: {}
 
 jobs:
@@ -59,4 +59,3 @@ jobs:
       - name: No changes detected
         if: steps.format.outputs.has_changes != 'true'
         run: echo "No formatting changes suggested."
-
