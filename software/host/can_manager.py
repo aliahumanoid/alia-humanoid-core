@@ -655,6 +655,11 @@ class CanManager:
         self._send_frame(0x012, payload, context=f"Load PID {joint_name}")
         return {"success": True}
 
+    # MCP2515 has only 2 receive buffers.  Back-to-back frames at 250 kbps
+    # can overflow the RX FIFO before the firmware polls.  A short pause
+    # between frames gives the 500 Hz control loop time to drain the buffer.
+    _MULTI_FRAME_DELAY_S = 0.003  # 3 ms — ~1.5 control-loop iterations
+
     def set_pid_via_can(self, joint_name: str, dof_index: int, motor_type: int,
                         kp: float, ki: float, kd: float, tau: float) -> Dict[str, Any]:
         """Send SET_PID via CAN (0x013) — 4 sequential frames.
@@ -668,6 +673,8 @@ class CanManager:
         self._ensure_connection()
         joint_id = JOINTS[joint_name]["id"]
         for seq, val in enumerate([kp, ki, kd, tau]):
+            if seq > 0:
+                time.sleep(self._MULTI_FRAME_DELAY_S)
             payload = struct.pack("<BBBBf", joint_id, dof_index, motor_type, seq, val)
             self._send_frame(0x013, payload,
                              context=f"SET_PID seq={seq} val={val:.4f}")
@@ -688,6 +695,8 @@ class CanManager:
         self._ensure_connection()
         joint_id = JOINTS[joint_name]["id"]
         for seq, val in enumerate([kp, ki, kd, stiffness, influence]):
+            if seq > 0:
+                time.sleep(self._MULTI_FRAME_DELAY_S)
             payload = struct.pack("<BBBBf", joint_id, dof_index, seq, 0, val)
             self._send_frame(0x014, payload,
                              context=f"SET_PID_OUTER seq={seq} val={val:.4f}")
@@ -718,14 +727,19 @@ class CanManager:
             "fric_en": 12, "fric_torque": 13, "fric_speed": 14,
         }
 
+        first = True
         for name, value in params.items():
             pid = param_map.get(name)
             if pid is not None:
+                if not first:
+                    time.sleep(self._MULTI_FRAME_DELAY_S)
+                first = False
                 payload = struct.pack("<BBf", joint_id, pid, float(value)) + bytes(2)
                 self._send_frame(0x015, payload,
                                  context=f"CASCADE param={name} val={value}")
 
         # Send apply marker
+        time.sleep(self._MULTI_FRAME_DELAY_S)
         payload = struct.pack("<BBf", joint_id, 0xFF, 0.0) + bytes(2)
         self._send_frame(0x015, payload, context="CASCADE apply")
         return {"success": True}

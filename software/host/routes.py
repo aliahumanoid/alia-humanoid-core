@@ -1532,7 +1532,7 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
                     handler.set_outer_pid_for_joint_dof(joint, dof_index, kp, ki, kd, stiffness, cascade)
                     message = f"Outer PID set via serial for {joint} DOF {dof_index}"
             elif cmd == "load-pid-all":
-                # Load PID is operational → CAN first, serial fallback
+                # Load PID from flash and refresh UI
                 if can_manager and can_manager.is_connected():
                     can_manager.load_pid_via_can(joint)
                     message = f"PID load from flash via CAN for {joint}"
@@ -1552,6 +1552,19 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
                         handler.get_pid_for_joint_dof(joint, dof_index, 1)
                         handler.get_pid_for_joint_dof(joint, dof_index, 2)
                         handler.get_outer_pid_for_joint_dof(joint, dof_index)
+            elif cmd == "refresh-pid-all":
+                # Read current PID values from firmware (no flash load, no overwrite)
+                for dof_index in range(3):
+                    is_valid_dof = False
+                    if joint in JOINTS:
+                        joint_info = JOINTS[joint]
+                        if 'dofs' in joint_info and dof_index < len(joint_info['dofs']):
+                            is_valid_dof = True
+                    if is_valid_dof:
+                        handler.get_pid_for_joint_dof(joint, dof_index, 1)
+                        handler.get_pid_for_joint_dof(joint, dof_index, 2)
+                        handler.get_outer_pid_for_joint_dof(joint, dof_index)
+                message = f"PID values refreshed for {joint}"
             elif cmd == "save-pid":
                 # Save PID is operational → CAN first, serial fallback
                 if can_manager and can_manager.is_connected():

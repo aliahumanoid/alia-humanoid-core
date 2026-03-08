@@ -4054,10 +4054,16 @@ function updateDofTabsAvailability(jointName) {
     console.log(`Updated DOF tabs for ${jointName}: ${dofCount} DOF(s) available`);
 }
 
-// Function to load all PIDs for current joint
-function loadAllPids() {
+// Read current PID values from firmware (no flash overwrite)
+function refreshAllPids() {
+    sendCommand('refresh-pid-all');
+    appendStatusMessage("PID values refresh requested");
+}
+
+// Load PID from flash (overwrites current firmware values with saved ones)
+function loadAllPidsFromFlash() {
     sendCommand('load-pid-all');
-    appendStatusMessage("All PID request sent");
+    appendStatusMessage("PID loaded from flash");
 }
 
 function updateOuterPidForDof(dof) {

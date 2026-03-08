@@ -1227,14 +1227,18 @@
                             <input id="kdInput" type="number">
                         </div>
 
-                        <!-- Button to load all PIDs -->
-                        <button onclick="loadAllPids()"
+                        <!-- PID persistence buttons -->
+                        <button onclick="refreshAllPids()"
                             class="mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded">
-                            <i class="fas fa-download mr-2"></i>Load All PID Values
+                            <i class="fas fa-sync-alt mr-2"></i>Refresh All PID Values
                         </button>
                         <button onclick="sendCommand('save-pid')"
                             class="mt-2 w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded">
                             <i class="fas fa-save mr-2"></i>Save PID & Cascade to Flash
+                        </button>
+                        <button onclick="loadAllPidsFromFlash()"
+                            class="mt-2 w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-4 rounded">
+                            <i class="fas fa-download mr-2"></i>Load PID from Flash
                         </button>
                         </div>
                     </div>
