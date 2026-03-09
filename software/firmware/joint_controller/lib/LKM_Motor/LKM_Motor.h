@@ -474,7 +474,7 @@ public:
   /**
    * @brief Initialize revolution tracking from absolute position
    * @param absMotorAngle_centideg Absolute motor angle from 0x92 in 0.01° units (motor shaft)
-   * @param currentEncoder Current encoder value from 0xA1 response (0-16383 for 14-bit)
+   * @param currentEncoder Current motor-side encoder value from 0xA1 response (0-65535 for 18-bit)
    *
    * Must be called once (typically on IDLE→MOVING transition) before
    * setTorquePairPipelined() can return valid tracked angles.
@@ -485,9 +485,9 @@ public:
 
   /**
    * @brief Update tracked angle from new 0xA1 encoder reading
-   * @param currentEncoder New encoder value from 0xA1 response (0-16383)
+   * @param currentEncoder New motor-side encoder value from 0xA1 response (0-65535 for 18-bit)
    *
-   * Detects encoder wrap-arounds (crossing 0/16383 boundary) and updates
+   * Detects encoder wrap-arounds (crossing 0/max boundary) and updates
    * the revolution counter accordingly. Safe at 500Hz — motor can't rotate
    * more than ~7° between cycles even at maximum speed.
    */
@@ -620,7 +620,7 @@ public:
   int8_t motorTemperature2;      ///< Motor temperature (°C)
   int16_t motorTorqueCurrent;    ///< Torque current (Iq)
   int16_t motorSpeed;            ///< Motor speed (dps)
-  uint16_t motorEncoderPosition; ///< Encoder position (0-16383)
+  uint16_t motorEncoderPosition; ///< Encoder position (motor-side, 0-65535 for 18-bit)
 
   // ---------------------------------------------------------------
   // MOTOR STATE 3 (from command 0x9D)
