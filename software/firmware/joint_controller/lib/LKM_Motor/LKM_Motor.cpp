@@ -29,6 +29,11 @@ LKM_Motor::LKM_Motor(MCP_CAN *canInterface, unsigned int motorID, float reductio
   _maxTorque     = 2048;  // Default, overridden by setMaxTorque()
   invertEncoder  = invert;
   offsetEncoder  = 0.0;
+  // Revolution tracking defaults
+  _encoderCountsPerRev = 65536;  // 18-bit encoder (MG4005-i10 V2 default)
+  _revolutions         = 0;
+  _prevEncoder         = 0;
+  _revTrackInit        = false;
 }
 
 /**
@@ -68,6 +73,88 @@ float LKM_Motor::getReductionGear() const {
 
 void LKM_Motor::setInvertEncoder(bool invert) {
   invertEncoder = invert;
+}
+
+void LKM_Motor::setEncoderCountsPerRev(uint32_t counts) {
+  _encoderCountsPerRev = counts;
+}
+
+// ===================================================================
+// REVOLUTION TRACKING
+// ===================================================================
+
+/**
+ * Initialize revolution tracking from absolute 0x92 reading + 0xA1 encoder.
+ *
+ * Uses round() to compute the integer revolution count that's consistent
+ * with both the absolute angle (from 0x92) and the current encoder position
+ * (from 0xA1). Safe even if motor moved slightly between the two reads,
+ * as long as it didn't move more than ±180° motor shaft.
+ */
+void LKM_Motor::initRevTracking(int64_t absMotorAngle_centideg, uint16_t currentEncoder) {
+  double motorAngle_deg = absMotorAngle_centideg / 100.0;
+  double encoderAngle_deg = (double)currentEncoder / (double)_encoderCountsPerRev * 360.0;
+
+  // Compute revolution count consistent with both readings
+  _revolutions = (int32_t)round((motorAngle_deg - encoderAngle_deg) / 360.0);
+  _prevEncoder = currentEncoder;
+  _revTrackInit = true;
+
+  // Verify consistency
+  double trackedAngle = (double)_revolutions * 360.0 + encoderAngle_deg;
+  double error = fabs(trackedAngle - motorAngle_deg);
+  if (error > 5.0) {
+    LOG_C1_WARN("[RevTrack] Motor " + String(_motorID) + " init discrepancy: " +
+                String(error, 2) + "° (0x92=" + String(motorAngle_deg, 2) +
+                " tracked=" + String(trackedAngle, 2) + ")");
+  }
+}
+
+/**
+ * Update tracked angle from new 0xA1 encoder reading.
+ *
+ * Detects wrap-arounds by checking if the encoder delta exceeds half
+ * the encoder range. At 500Hz, even at maximum motor speed (~5000 rpm),
+ * the motor can only rotate ~7° per cycle — well within the ±180° threshold.
+ */
+void LKM_Motor::updateRevTracking(uint16_t currentEncoder) {
+  if (!_revTrackInit) return;
+
+  int32_t halfRange = (int32_t)(_encoderCountsPerRev / 2);
+  int32_t delta = (int32_t)currentEncoder - (int32_t)_prevEncoder;
+
+  // Wrap detection
+  if (delta > halfRange) {
+    _revolutions--;  // Wrapped backward (e.g., 100 → 65400 for 18-bit)
+  } else if (delta < -halfRange) {
+    _revolutions++;  // Wrapped forward (e.g., 65400 → 100 for 18-bit)
+  }
+
+  _prevEncoder = currentEncoder;
+}
+
+/**
+ * Get tracked angle in output degrees (same coordinate system as getMultiAngleSync).
+ *
+ * Combines revolution count with current encoder position,
+ * applies reduction gear, offset, and inversion.
+ */
+float LKM_Motor::getTrackedAngle() const {
+  float motorAngle_deg = (float)_revolutions * 360.0f +
+                         (float)_prevEncoder / (float)_encoderCountsPerRev * 360.0f;
+  float outputAngle = motorAngle_deg / _reductionGear;
+  outputAngle = (outputAngle - offsetEncoder) * (invertEncoder ? -1.0f : 1.0f);
+  return outputAngle;
+}
+
+bool LKM_Motor::isRevTrackInit() const {
+  return _revTrackInit;
+}
+
+void LKM_Motor::resetRevTracking() {
+  _revTrackInit = false;
+  _revolutions = 0;
+  _prevEncoder = 0;
 }
 
 // ===================================================================
@@ -787,6 +874,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
   MultiAngleData data;
   data.angle    = 0.0;
   data.waitTime = 0;
+  data.rawMotorAngle_centideg = 0;
 
   unsigned long targetID = 0x140 + _motorID;
   unsigned char cmd[8]   = {0x94, 0, 0, 0, 0, 0, 0, 0};
@@ -840,6 +928,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   MultiAngleData data;
   data.angle    = NAN;  // Use NAN to indicate error (distinguishable from valid angles)
   data.waitTime = 0;
+  data.rawMotorAngle_centideg = 0;
 
   unsigned long targetID = 0x140 + _motorID;
   unsigned long expectedResponseID = targetID;  // LKM motors respond with same ID
@@ -900,6 +989,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
                             ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
                             ((uint64_t)rcvBuf[1]);
             int64_t motorAngle = ((int64_t)temp << 8) >> 8;
+            data.rawMotorAngle_centideg = motorAngle;
             // motorAngle is in 0.01° units; convert to degrees and apply reduction
             data.angle = (motorAngle / 100.0) / _reductionGear;
             if (applyOffset) {
@@ -936,8 +1026,10 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
   PipelinedAngleData result;
   result.dataA.angle    = NAN;
   result.dataA.waitTime = 0;
+  result.dataA.rawMotorAngle_centideg = 0;
   result.dataB.angle    = NAN;
   result.dataB.waitTime = 0;
+  result.dataB.rawMotorAngle_centideg = 0;
   result.totalTime      = 0;
 
   MCP_CAN *can = motorA->_can;  // Shared bus
@@ -1002,6 +1094,7 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
                             ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
                             ((uint64_t)rcvBuf[1]);
             int64_t motorAngle = ((int64_t)temp << 8) >> 8;
+            data.rawMotorAngle_centideg = motorAngle;
             data.angle = (motorAngle / 100.0) / motor->_reductionGear;
             data.angle = (data.angle - motor->offsetEncoder) * (motor->invertEncoder ? -1 : 1);
           };
@@ -1035,6 +1128,183 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
     LOG_C1_WARN("[CAN PIPE] Timeout: A=" + String(!isnan(result.dataA.angle) ? "OK" : "FAIL") +
                 " B=" + String(!isnan(result.dataB.angle) ? "OK" : "FAIL"));
     last_pipe_timeout_log = millis();
+  }
+  return result;
+}
+
+// ===================================================================
+// PIPELINED TORQUE SEND + RESPONSE READ
+// ===================================================================
+
+/**
+ * Send torque commands to two motors and read their state responses
+ * in a single pipelined CAN transaction.
+ *
+ * The 0xA1 command sends the torque value; the motor responds with its
+ * current state (temperature, iq current, speed, encoder position).
+ * Unlike fire-and-forget setTorque(), this captures the response data
+ * for revolution tracking and motor state monitoring.
+ *
+ * Response format (LK CAN Protocol V2.35):
+ *   DATA[0] = 0xA1 (command echo)
+ *   DATA[1] = temperature (int8_t, 1°C/LSB)
+ *   DATA[2-3] = iq torque current (int16_t, little-endian)
+ *   DATA[4-5] = motor speed (int16_t, 1dps/LSB, little-endian)
+ *   DATA[6-7] = encoder position (uint16_t, little-endian)
+ *              14-bit: 0-16383, 15-bit: 0-32767, 18-bit: 0-65535
+ *
+ * If revolution tracking is initialized, the tracked angle is computed
+ * from the encoder reading and stored in the response data.
+ */
+PipelinedTorqueResponseData LKM_Motor::setTorquePairPipelined(
+    LKM_Motor *motorA, int torqueA,
+    LKM_Motor *motorB, int torqueB) {
+
+  PipelinedTorqueResponseData result;
+  result.dataA.valid = false;
+  result.dataA.angle = NAN;
+  result.dataB.valid = false;
+  result.dataB.angle = NAN;
+  result.totalTime = 0;
+
+  MCP_CAN *can = motorA->_can;  // Shared bus
+  unsigned long idA = 0x140 + motorA->_motorID;
+  unsigned long idB = 0x140 + motorB->_motorID;
+
+  // Apply torque limits and inversion for motor A
+  int ta = torqueA;
+  if (ta > motorA->_maxTorque) ta = motorA->_maxTorque;
+  else if (ta < -motorA->_maxTorque) ta = -motorA->_maxTorque;
+  if (motorA->invertEncoder) ta = -ta;
+
+  // Apply torque limits and inversion for motor B
+  int tb = torqueB;
+  if (tb > motorB->_maxTorque) tb = motorB->_maxTorque;
+  else if (tb < -motorB->_maxTorque) tb = -motorB->_maxTorque;
+  if (motorB->invertEncoder) tb = -tb;
+
+  // Prepare CAN frames
+  unsigned char bufA[8] = {0xA1, 0, 0, 0, 0, 0, 0, 0};
+  bufA[4] = ta & 0xFF;
+  bufA[5] = (ta >> 8) & 0xFF;
+
+  unsigned char bufB[8] = {0xA1, 0, 0, 0, 0, 0, 0, 0};
+  bufB[4] = tb & 0xFF;
+  bufB[5] = (tb >> 8) & 0xFF;
+
+  unsigned long t0 = micros();
+
+  // --- Helper: drain any pending RX messages ---
+  auto flushRx = [&](int maxDrain) {
+    int n = 0;
+    while (can->checkReceive() == CAN_MSGAVAIL && n < maxDrain) {
+      unsigned long dId; unsigned char dLen; unsigned char dBuf[8];
+      can->readMsgBuf(&dId, &dLen, dBuf);
+      n++;
+    }
+    return n;
+  };
+
+  // --- Flush stale messages before first attempt ---
+  int flushed = flushRx(5);
+  if (flushed >= 3) {
+    static uint32_t last_flush_log = 0;
+    if (millis() - last_flush_log > 10000) {
+      LOG_C1_WARN("[CAN TRQ PIPE] Flushed " + String(flushed) + " stale messages");
+      last_flush_log = millis();
+    }
+  }
+
+  const int MAX_RETRIES = 2;
+
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+
+    // --- [P2 fix] Fresh timeout per retry attempt ---
+    unsigned long t_retry = micros();
+
+    // --- Send torque to motor A (non-blocking) ---
+    if (can->sendMsgBufNoWait(idA, 0, 8, bufA) != CAN_OK) {
+      if (retry == MAX_RETRIES - 1) {
+        LOG_C1_ERROR("[CAN TRQ PIPE] Send failed motor A (id " + String(motorA->_motorID) + ")");
+      }
+      delayMicroseconds(100);
+      continue;
+    }
+
+    // --- Send torque to motor B (non-blocking, back-to-back) ---
+    if (can->sendMsgBufNoWait(idB, 0, 8, bufB) != CAN_OK) {
+      if (retry == MAX_RETRIES - 1) {
+        LOG_C1_ERROR("[CAN TRQ PIPE] Send failed motor B (id " + String(motorB->_motorID) + ")");
+      }
+      // [P1 fix] Motor A was sent — drain its pending response before retrying
+      // to prevent stale A response from pairing with fresh B response on next attempt
+      delayMicroseconds(300);  // Allow A's response to arrive
+      flushRx(3);
+      continue;
+    }
+
+    // --- Single poll loop for both responses ---
+    bool gotA = false, gotB = false;
+
+    while (micros() - t_retry < 2500) {  // [P2 fix] per-retry 2.5ms window
+      if (can->checkReceive() == CAN_MSGAVAIL) {
+        unsigned long canId;
+        unsigned char len;
+        unsigned char rcvBuf[8];
+        if (can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK && rcvBuf[0] == 0xA1) {
+
+          auto parseResponse = [&](LKM_Motor *motor, TorqueResponseData &data) {
+            data.temperature   = (int8_t)rcvBuf[1];
+            data.torqueCurrent = ((int16_t)rcvBuf[3] << 8) | rcvBuf[2];
+            data.motorSpeed    = ((int16_t)rcvBuf[5] << 8) | rcvBuf[4];
+            data.encoder       = ((uint16_t)rcvBuf[7] << 8) | rcvBuf[6];
+            data.valid = true;
+
+            // Update revolution tracking if initialized
+            if (motor->_revTrackInit) {
+              motor->updateRevTracking(data.encoder);
+              data.angle = motor->getTrackedAngle();
+            } else {
+              data.angle = NAN;
+            }
+
+            // Update motor state variables (same fields as readMotorState2)
+            motor->motorTemperature2    = data.temperature;
+            motor->motorTorqueCurrent   = data.torqueCurrent;
+            motor->motorSpeed           = data.motorSpeed;
+            motor->motorEncoderPosition = data.encoder;
+          };
+
+          if (canId == idA && !gotA) {
+            parseResponse(motorA, result.dataA);
+            gotA = true;
+          } else if (canId == idB && !gotB) {
+            parseResponse(motorB, result.dataB);
+            gotB = true;
+          }
+
+          if (gotA && gotB) {
+            result.totalTime = micros() - t0;
+            return result;  // Both received
+          }
+        }
+      }
+    }
+
+    // Timeout on this attempt — drain any partial responses before retrying
+    // [P1 fix] Prevents stale partial response from corrupting next attempt
+    if (retry < MAX_RETRIES - 1) {
+      flushRx(3);
+    }
+  }
+
+  // All retries failed
+  result.totalTime = micros() - t0;
+  static uint32_t last_trq_timeout_log = 0;
+  if (millis() - last_trq_timeout_log > 5000) {
+    LOG_C1_WARN("[CAN TRQ PIPE] Timeout: A=" + String(result.dataA.valid ? "OK" : "FAIL") +
+                " B=" + String(result.dataB.valid ? "OK" : "FAIL"));
+    last_trq_timeout_log = millis();
   }
   return result;
 }

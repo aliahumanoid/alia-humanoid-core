@@ -136,6 +136,16 @@ public:
    */
   void setInvertEncoder(bool invert);
 
+  /**
+   * @brief Set motor encoder counts per revolution for revolution tracking
+   * @param counts Encoder counts per revolution (65536 for 18-bit, 32768 for 15-bit, 16384 for 14-bit)
+   *
+   * Determines the wrap-around threshold for revolution tracking.
+   * Must match the motor's actual encoder resolution (as reported in 0xA1 response).
+   * Default is 65536 (18-bit encoder, used by MG4005/MG series).
+   */
+  void setEncoderCountsPerRev(uint32_t counts);
+
   // ---------------------------------------------------------------
   // BASIC MOTOR CONTROL
   // ---------------------------------------------------------------
@@ -433,10 +443,79 @@ public:
   static PipelinedAngleData getMultiAnglePairPipelined(
       LKM_Motor *motorA, LKM_Motor *motorB);
 
+  /**
+   * @brief Send torque commands to two motors and read back their state in one pipelined operation
+   * @param motorA Pointer to first motor (agonist)
+   * @param torqueA Torque command for motor A (before limiting/inversion)
+   * @param motorB Pointer to second motor (antagonist)
+   * @param torqueB Torque command for motor B (before limiting/inversion)
+   * @return PipelinedTorqueResponseData with both motor states and tracked angles
+   *
+   * Sends 0xA1 torque commands to both motors and reads back their state
+   * (temperature, iq current, speed, encoder position) in a single pipelined
+   * CAN transaction — capturing response data that setTorque() discards.
+   *
+   * Phase 1 (shadow mode): called alongside getMultiAnglePairPipelined() for
+   * revolution tracking validation. 0x92 remains the angle source of truth.
+   * Phase 2 (after validation): can replace the separate 0x92 read + setTorque()
+   * calls, reducing CAN transactions from 4 to 2 per cycle.
+   *
+   * Revolution tracking must be initialized via initRevTracking() before the
+   * tracked angle in the response will be valid.
+   */
+  static PipelinedTorqueResponseData setTorquePairPipelined(
+      LKM_Motor *motorA, int torqueA,
+      LKM_Motor *motorB, int torqueB);
+
+  // ---------------------------------------------------------------
+  // REVOLUTION TRACKING (for 0xA1 response-based angle reading)
+  // ---------------------------------------------------------------
+
+  /**
+   * @brief Initialize revolution tracking from absolute position
+   * @param absMotorAngle_centideg Absolute motor angle from 0x92 in 0.01° units (motor shaft)
+   * @param currentEncoder Current encoder value from 0xA1 response (0-16383 for 14-bit)
+   *
+   * Must be called once (typically on IDLE→MOVING transition) before
+   * setTorquePairPipelined() can return valid tracked angles.
+   * Uses the absolute 0x92 reading to determine the revolution count,
+   * and the 0xA1 encoder for sub-revolution position.
+   */
+  void initRevTracking(int64_t absMotorAngle_centideg, uint16_t currentEncoder);
+
+  /**
+   * @brief Update tracked angle from new 0xA1 encoder reading
+   * @param currentEncoder New encoder value from 0xA1 response (0-16383)
+   *
+   * Detects encoder wrap-arounds (crossing 0/16383 boundary) and updates
+   * the revolution counter accordingly. Safe at 500Hz — motor can't rotate
+   * more than ~7° between cycles even at maximum speed.
+   */
+  void updateRevTracking(uint16_t currentEncoder);
+
+  /**
+   * @brief Get the tracked multi-turn angle in output degrees
+   * @return Angle with offset and inversion applied (same as getMultiAngleSync)
+   *
+   * Combines revolution count with current encoder position, applies
+   * reduction gear, offset, and inversion — identical output to 0x92 reading.
+   */
+  float getTrackedAngle() const;
+
+  /**
+   * @brief Check if revolution tracking has been initialized
+   */
+  bool isRevTrackInit() const;
+
+  /**
+   * @brief Reset revolution tracking (e.g., on motor power cycle or state reset)
+   */
+  void resetRevTracking();
+
   // ---------------------------------------------------------------
   // CALIBRATION & UTILITIES
   // ---------------------------------------------------------------
-  
+
   /**
    * @brief Set maximum torque limit
    * @param maxTorque Maximum torque value (-2048 to 2048)
@@ -556,11 +635,20 @@ private:
   // ---------------------------------------------------------------
   // PRIVATE MEMBERS
   // ---------------------------------------------------------------
-  
+
   MCP_CAN *_can;            ///< Pointer to CAN interface
   unsigned int _motorID;    ///< Motor CAN ID (1-32)
   float _reductionGear;     ///< Reduction ratio (e.g. 10.0 for 10:1)
   int16_t _maxTorque;       ///< Per-instance torque limit (default 2048)
+
+  // ---------------------------------------------------------------
+  // REVOLUTION TRACKING STATE
+  // ---------------------------------------------------------------
+
+  uint32_t _encoderCountsPerRev; ///< Encoder counts per motor revolution (65536 for 18-bit, 32768 for 15-bit, 16384 for 14-bit)
+  int32_t _revolutions;          ///< Tracked full motor revolutions
+  uint16_t _prevEncoder;         ///< Previous encoder reading from 0xA1 response
+  bool _revTrackInit;            ///< Whether revolution tracking has been initialized
 };
 
 #endif // LKM_MOTOR_H

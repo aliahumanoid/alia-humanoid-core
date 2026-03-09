@@ -9,6 +9,7 @@
 struct MultiAngleData {
   float angle;            // Actual angle in degrees (after reduction gear division)
   unsigned long waitTime; // Response time in microseconds
+  int64_t rawMotorAngle_centideg; // Raw motor angle in 0.01° units (for revolution tracking init)
 };
 
 /**
@@ -21,6 +22,38 @@ struct PipelinedAngleData {
   MultiAngleData dataA;
   MultiAngleData dataB;
   unsigned long totalTime;  // Total pipeline duration in microseconds
+};
+
+/**
+ * @brief Motor torque command response data (from 0xA1 response)
+ *
+ * Contains motor state returned after a torque command:
+ * temperature, torque current (iq), speed, and encoder position.
+ * Used by setTorquePairPipelined() to combine torque send with angle read.
+ */
+struct TorqueResponseData {
+  float angle;              // Tracked multi-turn angle in output degrees (NAN if tracking not init)
+  int16_t torqueCurrent;    // Iq current feedback (raw, -2048 to 2048)
+  int16_t motorSpeed;       // Motor speed in dps (raw motor shaft)
+  int8_t temperature;       // Motor temperature in °C
+  uint16_t encoder;         // Raw encoder value (0-16383 for 14-bit)
+  bool valid;               // True if response was received and parsed
+};
+
+/**
+ * @brief Pipelined dual-motor torque send + response read result
+ *
+ * Used by setTorquePairPipelined() to send torque commands to both motors
+ * and read back their state in a single pipelined CAN transaction.
+ *
+ * Phase 1 (shadow mode): used alongside 0x92 reads for revolution tracking
+ * validation. Phase 2 (future): can replace separate getMultiAnglePairPipelined()
+ * + setTorque() calls, reducing CAN transactions from 4 to 2 per cycle.
+ */
+struct PipelinedTorqueResponseData {
+  TorqueResponseData dataA;
+  TorqueResponseData dataB;
+  uint32_t totalTime;       // Total operation time in µs
 };
 
 /**

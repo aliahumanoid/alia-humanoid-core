@@ -128,6 +128,16 @@ static const float OSC_MIN_ERROR_TO_CHECK = 1.0f;    // Don't check if error is 
 static bool wp_first_read[MAX_DOFS] = {true, true, true};
 static CANErrorTracker wp_canErrorTracker;
 
+// === SHADOW MODE: Revolution tracking validation ===
+// Tracks motor angles from 0xA1 torque responses in parallel with 0x92 reads.
+// Phase 1 (shadow): 0x92 remains source of truth, 0xA1 tracked angles are compared.
+// Phase 2 (future): swap to 0xA1-only feedback after validation, use 0x92 as watchdog.
+static bool wp_rev_track_init[MAX_DOFS] = {false, false, false};
+static int wp_prev_torque_A[MAX_DOFS] = {0};
+static int wp_prev_torque_B[MAX_DOFS] = {0};
+static uint32_t wp_shadow_log_timer = 0;     // Throttle shadow comparison logs
+static uint32_t wp_shadow_resync_timer = 0;  // Periodic resync watchdog
+
 // === WAYPOINT TRAJECTORY DUMP (debug diagnostic) ===
 // Records consumed waypoints for post-movement validation.
 // Stores angle + arrival_ms for each consumed waypoint per DOF.
@@ -240,6 +250,10 @@ bool JointController::executeWaypointMovement() {
       ema_initialized[dof] = false;
       inner_tau_default_captured[dof] = false;
       joint_ema_initialized[dof] = false;
+      // Reset shadow mode state
+      wp_rev_track_init[dof] = false;
+      wp_prev_torque_A[dof] = 0;
+      wp_prev_torque_B[dof] = 0;
       continue; // Skip this DOF entirely
     }
 
@@ -275,6 +289,11 @@ bool JointController::executeWaypointMovement() {
       // Clear CAN error history for this DOF to prevent old errors from triggering false stops
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
+
+      // Reset shadow mode revolution tracking for clean start
+      wp_rev_track_init[dof] = false;
+      wp_prev_torque_A[dof] = 0;
+      wp_prev_torque_B[dof] = 0;
 
       LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " bumpless init (IDLE → MOVING) at " + String(q_init, 1) + "°");
     }
@@ -1457,12 +1476,60 @@ bool JointController::executeWaypointMovement() {
       }
     }
     
-    // Send torque commands to motors
+    // Send torque commands to motors via pipelined 0xA1 + read response (shadow mode)
+    // The 0xA1 response contains motor state (temp, iq, speed, encoder) which was
+    // previously discarded. We now parse it for revolution tracking validation.
 #if CONTROLLER_DEBUG
     uint32_t torque_start_us = time_us_32();
 #endif
-    agonist->setTorque((int)command_A);
-    antagonist->setTorque((int)command_B);
+    PipelinedTorqueResponseData trResp = LKM_Motor::setTorquePairPipelined(
+        agonist, (int)command_A, antagonist, (int)command_B);
+
+    // === SHADOW MODE: Revolution tracking initialization and validation ===
+    // Phase 1: 0x92 remains source of truth. Tracked angle from 0xA1 is compared.
+    // Phase 2 (future): swap to 0xA1-only, use 0x92 as periodic watchdog.
+    if (trResp.dataA.valid && trResp.dataB.valid) {
+      if (!wp_rev_track_init[dof]) {
+        // Bootstrap: initialize rev tracking from 0x92 absolute angle + 0xA1 encoder
+        agonist->initRevTracking(data_A.rawMotorAngle_centideg, trResp.dataA.encoder);
+        antagonist->initRevTracking(data_B.rawMotorAngle_centideg, trResp.dataB.encoder);
+        wp_rev_track_init[dof] = true;
+        LOG_C1_INFO("[Shadow] DOF " + String(dof) + " rev tracking init: encA=" +
+                    String(trResp.dataA.encoder) + " encB=" + String(trResp.dataB.encoder));
+      } else {
+        // Validation: compare tracked angle vs 0x92 angle
+        float tracked_A = agonist->getTrackedAngle();
+        float tracked_B = antagonist->getTrackedAngle();
+        float err_A = fabs(tracked_A - theta_A_curr);
+        float err_B = fabs(tracked_B - theta_B_curr);
+
+        // Log comparison periodically (every 5s, DOF 0 only to avoid spam)
+        if (dof == 0 && millis() - wp_shadow_log_timer > 5000) {
+          wp_shadow_log_timer = millis();
+          LOG_C1_INFO("[Shadow] A: 0x92=" + String(theta_A_curr, 3) +
+                      " tracked=" + String(tracked_A, 3) + " err=" + String(err_A, 4) +
+                      " spd=" + String(trResp.dataA.motorSpeed) +
+                      " iq=" + String(trResp.dataA.torqueCurrent));
+          LOG_C1_INFO("[Shadow] B: 0x92=" + String(theta_B_curr, 3) +
+                      " tracked=" + String(tracked_B, 3) + " err=" + String(err_B, 4) +
+                      " spd=" + String(trResp.dataB.motorSpeed) +
+                      " iq=" + String(trResp.dataB.torqueCurrent));
+        }
+
+        // Auto-resync if discrepancy exceeds 1° (output shaft)
+        // This catches power glitches, CAN corruption, or tracking drift
+        if (err_A > 1.0f || err_B > 1.0f) {
+          agonist->initRevTracking(data_A.rawMotorAngle_centideg, trResp.dataA.encoder);
+          antagonist->initRevTracking(data_B.rawMotorAngle_centideg, trResp.dataB.encoder);
+          static uint32_t last_resync_log = 0;
+          if (millis() - last_resync_log > 2000) {
+            LOG_C1_WARN("[Shadow] DOF " + String(dof) + " RESYNC: errA=" +
+                        String(err_A, 3) + "° errB=" + String(err_B, 3) + "°");
+            last_resync_log = millis();
+          }
+        }
+      }
+    }
 #if CONTROLLER_DEBUG
     {
       uint32_t torque_dt = time_us_32() - torque_start_us;
