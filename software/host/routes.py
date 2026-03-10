@@ -7,10 +7,11 @@ This module defines all HTTP endpoints for:
 - Serial communication (port assignment, status)
 - System configuration (joint limits, available commands)
 """
-from flask import jsonify, request, current_app, render_template
+from flask import jsonify, request, current_app, render_template, send_from_directory
 from typing import Dict, Any, List, Optional
 from serial_manager import SerialManager
 from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
+from motor_can_bench import DEFAULT_MOTOR_ID, DEFAULT_OUTPUT_RATIO, analyze_csv_log
 from waypoint_types import (
     WaypointBatch, ValidationResult,
     build_batch, validate_batch, deduplicate_batch, batch_to_dicts,
@@ -161,6 +162,230 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
         Serves the movement analysis page for CSV visualization.
         """
         return render_template('analysis.html')
+
+    @app.route('/motor_test')
+    def motor_test_page():
+        """
+        Serves the dedicated single-motor CAN bench page.
+        """
+        return render_template(
+            'motor_test.html',
+            motor_id=DEFAULT_MOTOR_ID,
+            output_ratio=DEFAULT_OUTPUT_RATIO,
+        )
+
+    @app.route('/motor_tuning')
+    def motor_tuning_page():
+        """
+        Serves the read-only single-motor CAN tuning page.
+        """
+        return render_template(
+            'motor_tuning.html',
+            motor_id=DEFAULT_MOTOR_ID,
+            output_ratio=DEFAULT_OUTPUT_RATIO,
+        )
+
+    @app.route('/api/motor_test/status', methods=['GET'])
+    def motor_test_status():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        output_ratio = request.args.get("output_ratio", DEFAULT_OUTPUT_RATIO, type=float)
+        try:
+            result = can_manager.get_motor_test_status(
+                motor_id=DEFAULT_MOTOR_ID,
+                output_ratio=output_ratio,
+            )
+        except Exception as exc:
+            current_app.logger.exception("Motor test status failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_tuning/status', methods=['GET'])
+    def motor_tuning_status():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        output_ratio = request.args.get("output_ratio", DEFAULT_OUTPUT_RATIO, type=float)
+        try:
+            result = can_manager.get_motor_tuning_status(
+                motor_id=DEFAULT_MOTOR_ID,
+                output_ratio=output_ratio,
+            )
+        except Exception as exc:
+            current_app.logger.exception("Motor tuning status failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_tuning/read', methods=['POST'])
+    def motor_tuning_read():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.json or {}
+        action = (data.get("action") or "").strip().lower()
+        timeout_s = float(data.get("timeout_s", 0.2))
+        output_ratio = float(data.get("output_ratio", DEFAULT_OUTPUT_RATIO))
+
+        if not action:
+            return jsonify({"status": "error", "message": "action is required"}), 400
+
+        try:
+            result = can_manager.motor_tuning_read(
+                action,
+                motor_id=DEFAULT_MOTOR_ID,
+                timeout_s=timeout_s,
+                output_ratio=output_ratio,
+            )
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except TimeoutError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 504
+        except Exception as exc:
+            current_app.logger.exception("Motor tuning read failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_test/action', methods=['POST'])
+    def motor_test_action():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.json or {}
+        action = (data.get("action") or "").strip().lower()
+        value = data.get("value")
+        timeout_s = float(data.get("timeout_s", 0.2))
+        output_ratio = float(data.get("output_ratio", DEFAULT_OUTPUT_RATIO))
+
+        if not action:
+            return jsonify({"status": "error", "message": "action is required"}), 400
+
+        try:
+            result = can_manager.motor_test_command(
+                action,
+                motor_id=DEFAULT_MOTOR_ID,
+                value=value,
+                timeout_s=timeout_s,
+                output_ratio=output_ratio,
+            )
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except TimeoutError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 504
+        except Exception as exc:
+            current_app.logger.exception("Motor test action failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_test/sweep', methods=['POST'])
+    def motor_test_sweep():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.json or {}
+        mode = (data.get("mode") or "torque").strip().lower()
+        profile = (data.get("profile") or "step").strip().lower()
+        extra_commands = data.get("extra_commands", [])
+
+        try:
+            result = can_manager.motor_test_run_sweep(
+                motor_id=DEFAULT_MOTOR_ID,
+                mode=mode,
+                profile=profile,
+                duration_s=float(data.get("duration_s", 3.0)),
+                rate_hz=float(data.get("rate_hz", 50.0)),
+                timeout_s=float(data.get("timeout_s", 0.1)),
+                output_ratio=float(data.get("output_ratio", DEFAULT_OUTPUT_RATIO)),
+                bias=float(data.get("bias", 0.0)),
+                amplitude=float(data.get("amplitude", 0.0)),
+                preload_s=float(data.get("preload_s", 0.0)),
+                frequency_hz=float(data.get("frequency_hz", 1.0)),
+                f0_hz=float(data.get("f0_hz", 0.2)),
+                f1_hz=float(data.get("f1_hz", 8.0)),
+                extra_commands=extra_commands,
+                label=data.get("label"),
+                stop_at_end=bool(data.get("stop_at_end", True)),
+                motor_on_before=bool(data.get("motor_on_before", True)),
+                power_off_at_end=bool(data.get("power_off_at_end", False)),
+            )
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except TimeoutError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 504
+        except Exception as exc:
+            current_app.logger.exception("Motor test sweep failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_test/logs', methods=['GET'])
+    def motor_test_logs():
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        limit = request.args.get("limit", 20, type=int)
+        try:
+            logs = can_manager.list_motor_test_logs(limit=limit)
+        except Exception as exc:
+            current_app.logger.exception("Motor test log listing failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", "logs": logs})
+
+    @app.route('/api/motor_test/logs/<path:filename>', methods=['GET'])
+    def motor_test_download_log(filename: str):
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        log_dir = can_manager.motor_test_log_dir()
+        return send_from_directory(str(log_dir), filename, as_attachment=True)
+
+    @app.route('/api/motor_test/logs/<path:filename>/analysis', methods=['GET'])
+    def motor_test_log_analysis(filename: str):
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        log_path = can_manager.motor_test_log_dir() / filename
+        if not log_path.is_file():
+            return jsonify({"status": "error", "message": "Log file not found"}), 404
+
+        try:
+            analysis = analyze_csv_log(log_path)
+        except Exception as exc:
+            current_app.logger.exception("Motor test log analysis failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", "filename": filename, **analysis})
+
+    @app.route('/api/motor_test/logs/<path:filename>', methods=['DELETE'])
+    def motor_test_delete_log(filename: str):
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        log_path = can_manager.motor_test_log_dir() / filename
+        if not log_path.is_file():
+            return jsonify({"status": "error", "message": "Log file not found"}), 404
+
+        try:
+            log_path.unlink()
+        except Exception as exc:
+            current_app.logger.exception("Motor test log deletion failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", "deleted": filename})
 
     @app.route('/serial_ports', methods=['GET'])
     def list_serial_ports():
@@ -2031,6 +2256,96 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
         after_seq = request.args.get("after_seq", 0, type=int)
         events = stream_test_service.get_events(session_id, after_seq)
         return jsonify({"status": "success", "events": events})
+
+    # ------------------------------------------------------------------
+    # Impedance control (Scenario B)
+    # ------------------------------------------------------------------
+
+    @app.route('/api/joints', methods=['GET'])
+    def api_joints():
+        """Return available joints and their config (for dynamic UI population)."""
+        return jsonify({"status": "success", "joints": JOINTS})
+
+    @app.route('/impedance_test')
+    def impedance_test_page():
+        """Serves the impedance control test page."""
+        return render_template('impedance_test.html')
+
+    @app.route('/api/impedance/target', methods=['POST'])
+    def impedance_target():
+        """Send SET_IMPEDANCE command to firmware."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.json or {}
+        required = ["joint_name", "dof_index", "q_target", "kp", "kd"]
+        missing = [k for k in required if k not in data]
+        if missing:
+            return jsonify({"status": "error",
+                            "message": f"Missing fields: {', '.join(missing)}"}), 400
+
+        try:
+            result = can_manager.send_impedance_target(
+                joint_name=data["joint_name"],
+                dof_index=int(data["dof_index"]),
+                q_target=float(data["q_target"]),
+                dq_target=float(data.get("dq_target", 0.0)),
+                stiffness=float(data.get("stiffness", 0.0)),
+                kp=float(data["kp"]),
+                kd=float(data["kd"]),
+                tau_ff=int(data.get("tau_ff", 0)),
+            )
+        except KeyError as exc:
+            return jsonify({"status": "error",
+                            "message": f"Unknown joint: {exc}"}), 400
+        except Exception as exc:
+            current_app.logger.exception("Impedance target failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/impedance/ctrl', methods=['POST'])
+    def impedance_ctrl():
+        """Send IMPEDANCE_CTRL command to firmware."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        data = request.json or {}
+        if "joint_name" not in data or "sub_cmd" not in data:
+            return jsonify({"status": "error",
+                            "message": "joint_name and sub_cmd required"}), 400
+
+        try:
+            result = can_manager.send_impedance_ctrl(
+                joint_name=data["joint_name"],
+                sub_cmd=int(data["sub_cmd"]),
+                param=int(data.get("param", 0)),
+            )
+        except KeyError as exc:
+            return jsonify({"status": "error",
+                            "message": f"Unknown joint: {exc}"}), 400
+        except Exception as exc:
+            current_app.logger.exception("Impedance ctrl failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/impedance/state', methods=['GET'])
+    def impedance_state():
+        """Get current joint state from JOINT_STATE broadcast."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+
+        try:
+            state = can_manager.get_joint_state()
+        except Exception as exc:
+            current_app.logger.exception("Joint state query failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", "joint_state": state})
 
     @app.route('/')
     def index():

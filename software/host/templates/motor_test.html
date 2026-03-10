@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alia Single Motor CAN Test</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #08111f;
+            --panel: #101c2f;
+            --panel-alt: #16263d;
+            --line: #29415f;
+            --text: #edf4ff;
+            --muted: #8ea2bf;
+            --accent: #0ea5e9;
+            --accent-2: #22c55e;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background:
+                radial-gradient(circle at top right, rgba(14, 165, 233, 0.14), transparent 28%),
+                radial-gradient(circle at left bottom, rgba(34, 197, 94, 0.10), transparent 24%),
+                var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .panel {
+            background: linear-gradient(180deg, rgba(22, 38, 61, 0.96), rgba(16, 28, 47, 0.98));
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+        }
+
+        .pill {
+            border: 1px solid rgba(142, 162, 191, 0.22);
+            background: rgba(142, 162, 191, 0.08);
+            border-radius: 999px;
+            padding: 0.35rem 0.7rem;
+            font-size: 0.82rem;
+        }
+
+        .field {
+            background: rgba(8, 17, 31, 0.62);
+            border: 1px solid var(--line);
+            color: var(--text);
+            border-radius: 12px;
+            padding: 0.7rem 0.85rem;
+            width: 100%;
+        }
+
+        .field:focus {
+            outline: 2px solid rgba(14, 165, 233, 0.35);
+            border-color: var(--accent);
+        }
+
+        .btn {
+            border-radius: 12px;
+            padding: 0.72rem 0.95rem;
+            font-weight: 600;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #0284c7, #0ea5e9);
+        }
+
+        .btn-secondary {
+            background: rgba(14, 165, 233, 0.12);
+            border: 1px solid rgba(14, 165, 233, 0.28);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #15803d, #22c55e);
+        }
+
+        .btn-warn {
+            background: linear-gradient(135deg, #b45309, #f59e0b);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #b91c1c, #ef4444);
+        }
+
+        .status-dot {
+            width: 0.75rem;
+            height: 0.75rem;
+            border-radius: 999px;
+            display: inline-block;
+        }
+
+        .status-dot.connected {
+            background: var(--accent-2);
+            box-shadow: 0 0 14px rgba(34, 197, 94, 0.7);
+        }
+
+        .status-dot.disconnected {
+            background: var(--danger);
+            box-shadow: 0 0 14px rgba(239, 68, 68, 0.55);
+        }
+
+        pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+    </style>
+</head>
+
+<body data-motor-id="{{ motor_id }}" data-output-ratio="{{ output_ratio }}">
+    <div class="max-w-7xl mx-auto px-4 py-6">
+        <header class="panel px-6 py-5 mb-6">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <div class="flex items-center gap-3 mb-2">
+                        <a href="/" class="text-slate-300 hover:text-white transition-colors">
+                            <i class="fas fa-arrow-left"></i>
+                        </a>
+                        <h1 class="text-2xl font-bold">Single Motor CAN Test</h1>
+                    </div>
+                    <p class="text-slate-300">Dedicated bench page for the spare motor on direct CAN using host-side connection and logging.</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <span class="pill mono">Motor ID {{ motor_id }}</span>
+                    <span class="pill mono">Output Ratio {{ output_ratio }}</span>
+                    <span class="pill mono">CAN host path</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid gap-6 lg:grid-cols-3">
+            <section class="panel p-5 lg:col-span-2">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Connection</h2>
+                    <button id="refreshStatusBtn" class="btn btn-secondary text-sm">
+                        <i class="fas fa-rotate mr-2"></i>Refresh
+                    </button>
+                </div>
+                <div class="grid gap-4 md:grid-cols-4">
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">CAN Status</div>
+                        <div class="flex items-center gap-2 font-semibold">
+                            <span id="statusDot" class="status-dot disconnected"></span>
+                            <span id="statusText">Disconnected</span>
+                        </div>
+                    </div>
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">Interface</div>
+                        <div id="statusInterface" class="mono text-sm">-</div>
+                    </div>
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">Channel</div>
+                        <div id="statusChannel" class="mono text-sm">-</div>
+                    </div>
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">Last RX</div>
+                        <div id="statusLastRx" class="mono text-sm">-</div>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 mt-5 md:grid-cols-3">
+                    <button data-action="on" class="btn btn-success motor-action">Motor On</button>
+                    <button data-action="stop" class="btn btn-warn motor-action">Motor Stop</button>
+                    <button data-action="off" class="btn btn-danger motor-action">Motor Off</button>
+                </div>
+
+                <div class="grid gap-4 mt-4 md:grid-cols-3">
+                    <button data-action="state2" class="btn btn-secondary motor-action">Read State2</button>
+                    <button data-action="single" class="btn btn-secondary motor-action">Read Single</button>
+                    <button data-action="multi" class="btn btn-secondary motor-action">Read Multi</button>
+                </div>
+            </section>
+
+            <section class="panel p-5">
+                <h2 class="text-xl font-semibold mb-4">One-Shot Command</h2>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="torqueValue">Torque Value</label>
+                        <div class="flex gap-2">
+                            <input id="torqueValue" class="field mono" type="number" value="0" step="1">
+                            <button id="sendTorqueBtn" class="btn btn-primary whitespace-nowrap">Send</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="speedValue">Speed (dps)</label>
+                        <div class="flex gap-2">
+                            <input id="speedValue" class="field mono" type="number" value="0" step="10">
+                            <button id="sendSpeedBtn" class="btn btn-primary whitespace-nowrap">Send</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="timeoutValue">Reply Timeout (s)</label>
+                        <input id="timeoutValue" class="field mono" type="number" value="0.1" step="0.01" min="0.01">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="outputRatio">Output Ratio</label>
+                        <input id="outputRatio" class="field mono" type="number" value="{{ output_ratio }}" step="0.1" min="0.1">
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-3 mt-6">
+            <section class="panel p-5 lg:col-span-2">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Sweep Runner</h2>
+                    <span class="text-sm text-slate-400 mono">CSV saved in host/logs/motor_can_bench</span>
+                </div>
+
+                <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4 mb-5">
+                    <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                        <div class="xl:max-w-xl">
+                            <h3 class="text-lg font-semibold">Bench Presets</h3>
+                            <p class="text-sm text-slate-300 mt-1">
+                                Load a validated preset before running a sweep. Presets set the full form to the values used during the motor validation campaign.
+                            </p>
+                        </div>
+                        <button id="clearPresetBtn" class="btn btn-secondary text-sm whitespace-nowrap">
+                            <i class="fas fa-eraser mr-2"></i>Clear Preset
+                        </button>
+                    </div>
+                    <div id="presetList" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3 mt-4">
+                        <div class="text-slate-500 text-sm">Loading presets...</div>
+                    </div>
+                    <div id="presetSummary" class="mt-4 rounded-2xl border border-slate-700/70 bg-slate-950/30 px-4 py-3 text-sm text-slate-300">
+                        No preset selected. Manual edits are still allowed.
+                    </div>
+                </div>
+
+                <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepMode">Mode</label>
+                        <select id="sweepMode" class="field">
+                            <option value="torque">torque</option>
+                            <option value="speed">speed</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepProfile">Profile</label>
+                        <select id="sweepProfile" class="field">
+                            <option value="step">step</option>
+                            <option value="hold">hold</option>
+                            <option value="square">square</option>
+                            <option value="chirp" selected>chirp</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepDuration">Duration (s)</label>
+                        <input id="sweepDuration" class="field mono" type="number" value="12" step="0.5" min="0.1">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepRate">Rate (Hz)</label>
+                        <input id="sweepRate" class="field mono" type="number" value="100" step="1" min="1">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepBias">Bias</label>
+                        <input id="sweepBias" class="field mono" type="number" value="25" step="1">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepAmplitude">Amplitude</label>
+                        <input id="sweepAmplitude" class="field mono" type="number" value="5" step="1">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepPreload">Preload (s)</label>
+                        <input id="sweepPreload" class="field mono" type="number" value="1" step="0.1" min="0">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepFrequency">Square Freq (Hz)</label>
+                        <input id="sweepFrequency" class="field mono" type="number" value="1" step="0.1" min="0">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepF0">Chirp F0 (Hz)</label>
+                        <input id="sweepF0" class="field mono" type="number" value="0.2" step="0.1" min="0">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepF1">Chirp F1 (Hz)</label>
+                        <input id="sweepF1" class="field mono" type="number" value="8" step="0.1" min="0">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="sweepLabel">CSV Label</label>
+                        <input id="sweepLabel" class="field mono" type="text" value="" placeholder="auto-generated if empty">
+                    </div>
+                    <div class="flex items-end">
+                        <label class="flex items-center gap-3 text-sm text-slate-300">
+                            <input id="stopAtEnd" type="checkbox" checked>
+                            Stop at end
+                        </label>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap gap-4 mt-4">
+                    <label class="flex items-center gap-3 text-sm text-slate-300">
+                        <input id="motorOnBefore" type="checkbox" checked>
+                        Motor on before sweep
+                    </label>
+                    <label class="flex items-center gap-3 text-sm text-slate-300">
+                        <input id="powerOffAtEnd" type="checkbox">
+                        Power off at end
+                    </label>
+                    <label class="flex items-center gap-3 text-sm text-slate-300">
+                        <input id="extraSingle" type="checkbox">
+                        Extra single read
+                    </label>
+                    <label class="flex items-center gap-3 text-sm text-slate-300">
+                        <input id="extraMulti" type="checkbox">
+                        Extra multi read
+                    </label>
+                </div>
+
+                <div class="mt-5 flex flex-wrap gap-3">
+                    <button id="runSweepBtn" class="btn btn-primary">
+                        <i class="fas fa-play mr-2"></i>Run Sweep
+                    </button>
+                    <button id="loadLogsBtn" class="btn btn-secondary">
+                        <i class="fas fa-folder-open mr-2"></i>Refresh Logs
+                    </button>
+                </div>
+            </section>
+
+            <section class="panel p-5">
+                <h2 class="text-xl font-semibold mb-4">Recent Logs</h2>
+                <div id="logList" class="space-y-2 text-sm text-slate-300">
+                    <div class="text-slate-500">No logs loaded yet.</div>
+                </div>
+            </section>
+        </div>
+
+        <div class="panel p-5 mt-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-semibold">Log Analysis</h2>
+                <div id="analysisFilename" class="mono text-sm text-slate-400">No log selected</div>
+            </div>
+            <div class="grid gap-6 xl:grid-cols-3">
+                <div class="xl:col-span-1">
+                    <pre id="analysisSummary" class="mono text-sm text-slate-200 bg-slate-950/40 rounded-2xl border border-slate-700/60 p-4 min-h-[16rem]">Click Analyze on a log.</pre>
+                </div>
+                <div class="xl:col-span-2 space-y-4">
+                    <div id="analysisPlotSpeed" class="bg-slate-950/25 rounded-2xl border border-slate-700/60 min-h-[18rem]"></div>
+                    <div id="analysisPlotPosition" class="bg-slate-950/25 rounded-2xl border border-slate-700/60 min-h-[18rem]"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-2 mt-6">
+            <section class="panel p-5">
+                <h2 class="text-xl font-semibold mb-4">Latest Motor Snapshot</h2>
+                <pre id="snapshotPanel" class="mono text-sm text-slate-200 bg-slate-950/40 rounded-2xl border border-slate-700/60 p-4 min-h-[18rem]">Loading...</pre>
+            </section>
+            <section class="panel p-5">
+                <h2 class="text-xl font-semibold mb-4">Last API Result</h2>
+                <pre id="resultPanel" class="mono text-sm text-slate-200 bg-slate-950/40 rounded-2xl border border-slate-700/60 p-4 min-h-[18rem]">Waiting for action.</pre>
+            </section>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/motor_test.js') }}"></script>
+</body>
+
+</html>

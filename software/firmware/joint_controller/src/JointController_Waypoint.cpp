@@ -236,10 +236,10 @@ bool JointController::executeWaypointMovement() {
   // Process each DOF independently
   for (uint8_t dof = 0; dof < config.dof_count; dof++) {
     
-    // === EARLY EXIT: Skip if DOF is IDLE (no waypoints ever received) ===
-    // This saves CPU time when no waypoint control is active
+    // === EARLY EXIT: Skip if DOF is IDLE and not in impedance mode ===
+    // This saves CPU time when no control is active
     WaypointState dof_state = waypoint_buffer_state(dof);
-    if (dof_state == WaypointState::IDLE) {
+    if (dof_state == WaypointState::IDLE && dof_control_mode[dof] != MODE_IMPEDANCE) {
       // Mark PID reset needed for when this DOF becomes active
       pid_reset_needed[dof] = true;
       inner_pid_init_needed[dof] = false;  // Clear any stale flag
@@ -392,6 +392,49 @@ bool JointController::executeWaypointMovement() {
       }
     }
     
+    // === IMPEDANCE MODE: Watchdog and PID init ===
+    // Check impedance watchdog BEFORE outer loop so timeout transitions happen promptly
+    if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+      if (impedance_target[dof].valid) {
+        uint32_t elapsed = t_now - impedance_target[dof].last_update_ms;
+        if (elapsed > impedance_watchdog_ms) {
+          // Watchdog timeout → hold at current position
+          dof_control_mode[dof] = MODE_WAYPOINT;
+          float q_curr_wd = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
+          waypoint_buffer_set_prev(dof, q_curr_wd, t_now);
+          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
+          impedance_target[dof].valid = false;
+          LOG_C1_WARN("[IMPEDANCE] DOF" + String(dof) + " watchdog timeout (" +
+                      String(elapsed) + "ms > " + String((uint32_t)impedance_watchdog_ms) +
+                      "ms) → HOLDING at " + String(q_curr_wd, 2) + "°");
+          // Fall through to waypoint path for this cycle
+        }
+      }
+
+      // Bumpless init on first impedance entry (from IDLE)
+      if (impedance_target[dof].valid && pid_reset_needed[dof]) {
+        float q_init = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
+        PID *outer_pid_init = getOuterPID(dof);
+        if (outer_pid_init) {
+          outer_pid_init->initializeState(q_init, q_init, 0.0f);
+        }
+        delta_theta[dof] = 0.0f;
+        delta_theta_prev[dof] = 0.0f;
+        pid_reset_needed[dof] = false;
+        inner_pid_init_needed[dof] = true;
+        wp_canErrorTracker.clearErrors(dof);
+        wp_first_read[dof] = true;
+        wp_rev_track_init[dof] = false;
+        wp_prev_torque_A[dof] = 0;
+        wp_prev_torque_B[dof] = 0;
+        LOG_C1_INFO("[IMPEDANCE] DOF " + String(dof) + " bumpless init at " + String(q_init, 1) + "°");
+      }
+    }
+
+    // Track impedance mode status for this DOF (used by both outer and inner loop)
+    bool impedance_active_this_dof = (dof_control_mode[dof] == MODE_IMPEDANCE &&
+                                       impedance_target[dof].valid);
+
     // === OUTER LOOP (Joint PID) ===
     // Execute outer loop every N inner cycles (configurable via outer_loop_divisor)
     if (outer_cycle_due) {
@@ -399,18 +442,39 @@ bool JointController::executeWaypointMovement() {
 #if CONTROLLER_DEBUG
       uint32_t outer_start_us = time_us_32();
 #endif
-      
+
       float q_des = 0.0f;
       float expected_velocity_deg_s = 0.0f;
       bool is_moving = false;
-      
+
       // Use last known waypoint as reference
       float prev_angle = waypoint_buffer_prev_angle(dof);
       uint32_t prev_time = waypoint_buffer_prev_time(dof);
-      
+      if (impedance_active_this_dof) {
+        q_des = impedance_target[dof].q_target_deg;
+        expected_velocity_deg_s = impedance_target[dof].dq_target_deg_s;
+        is_moving = true;
+        any_movement = true;
+
+        // Apply Kp/Kd from Jetson (bumpless via setTunings inside setOuterLoopParameters)
+        float cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence;
+        getOuterLoopParameters(dof, cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence);
+        // Only update if values changed (avoid unnecessary setTunings calls)
+        if (fabsf(cur_kp - impedance_target[dof].kp) > 0.001f ||
+            fabsf(cur_kd - impedance_target[dof].kd) > 0.001f ||
+            fabsf(cur_stiff - impedance_target[dof].stiffness_deg) > 0.001f) {
+          setOuterLoopParameters(dof,
+              impedance_target[dof].kp,
+              cur_ki,  // Keep Ki from config
+              impedance_target[dof].kd,
+              impedance_target[dof].stiffness_deg,
+              cur_influence);
+        }
+      }
+
       // Check if we have waypoints to process
       WaypointEntry current_target;
-      bool has_waypoints = waypoint_buffer_peek(dof, current_target);
+      bool has_waypoints = (!impedance_active_this_dof) && waypoint_buffer_peek(dof, current_target);
       if (has_waypoints) {
         // MOVING state - linear interpolation
         is_moving = true;
@@ -462,7 +526,7 @@ bool JointController::executeWaypointMovement() {
         // Interpolation: q_des = start + (end - start) × smooth_progress
         q_des = prev_angle + (target_angle - prev_angle) * smooth_progress;
         
-      } else {
+      } else if (!impedance_active_this_dof) {
         // HOLDING mode - maintain TARGET position (last waypoint target)
         // Use the last waypoint's target angle, NOT current encoder reading
         // This ensures the PID keeps trying to reach and hold the target
@@ -1024,11 +1088,14 @@ bool JointController::executeWaypointMovement() {
       continue;
     }
     
-    // Get current waypoint (or last position for HOLDING)
+    // Get current waypoint (or last position for HOLDING / impedance target)
     WaypointEntry current_target;
     float theta_0_joint; // Joint angle for theta_0 calculation
-    
-    if (waypoint_buffer_peek(dof, current_target)) {
+
+    if (impedance_active_this_dof) {
+      // IMPEDANCE: use target from Jetson directly
+      theta_0_joint = impedance_target[dof].q_target_deg;
+    } else if (waypoint_buffer_peek(dof, current_target)) {
       // MOVING: use interpolated position
       float prev_angle = waypoint_buffer_prev_angle(dof);
       uint32_t prev_time = waypoint_buffer_prev_time(dof);
@@ -1108,8 +1175,9 @@ bool JointController::executeWaypointMovement() {
     // === VELOCITY-DEPENDENT STIFFNESS SCALING ===
     // At low speeds, reduce co-contraction (stiffness) to avoid tendon-fighting oscillations.
     // delta_theta (tracking) stays at full cascade_influence for position accuracy.
+    // NOTE: In impedance mode, stiffness is set directly by Jetson — skip auto-scaling.
     float stiffness_eff = stiffness_ref;
-    if (cascade_speed_scaling_enabled) {
+    if (cascade_speed_scaling_enabled && !impedance_active_this_dof) {
       float speed = fabs(expected_velocity_cache[dof]);
       float stiffness_factor;
       if (speed <= cascade_speed_low) {
@@ -1345,6 +1413,15 @@ bool JointController::executeWaypointMovement() {
         uff_A = ff;       // Agonist: push in movement direction
         uff_B = -ff;      // Antagonist: opposite (tendon opposition)
       }
+    }
+
+    // === IMPEDANCE FEEDFORWARD TORQUE ===
+    // In impedance mode, add tau_ff from Jetson to the friction feedforward.
+    // tau_ff > 0 pushes agonist direction, distributed as agonist+, antagonist-.
+    if (impedance_active_this_dof && impedance_target[dof].tau_ff != 0) {
+      float tau_ff = (float)impedance_target[dof].tau_ff;
+      uff_A += tau_ff;
+      uff_B -= tau_ff;
     }
 
     // Inner PID for motors (compute torque commands)

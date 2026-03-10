@@ -65,9 +65,31 @@ import struct
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config import JOINTS
+from motor_can_bench import (
+    CONTROL_COMMANDS,
+    DEFAULT_MOTOR_ID,
+    DEFAULT_OUTPUT_RATIO,
+    READ_COMMANDS,
+    build_default_label,
+    build_control_frame,
+    build_read_frame,
+    build_zero_frame,
+    bytes_hex,
+    csv_fieldnames,
+    decode_feedback_frame,
+    decode_multi_frame,
+    decode_pid_frame,
+    decode_single_frame,
+    decode_acceleration_frame,
+    default_csv_path,
+    generate_target,
+    parse_extra_commands,
+    write_csv_rows,
+)
 from serial_logger import SerialLogger
 
 try:
@@ -81,6 +103,8 @@ class CanManager:
 
     DEFAULT_BITRATE = 1_000_000  # 1 Mbps (maximum speed test)
     REANCHOR_INTERVAL_MAX = 2000  # Must match firmware WAYPOINT_BUFFER_DEPTH
+    MOTOR_ID_BASE = 0x140
+    MOTOR_TEST_LOG_DIR = Path(__file__).resolve().parent / "logs" / "motor_can_bench"
 
     def __init__(self, socketio=None, comm_logger: Optional[SerialLogger] = None) -> None:
         if can is None:
@@ -131,6 +155,18 @@ class CanManager:
 
         # Per-joint batch locks (prevents concurrent batch sends to same joint)
         self._batch_locks: Dict[str, threading.Lock] = {}
+
+        # Single-motor direct CAN bench state
+        self._motor_test_lock = threading.Lock()
+        self._motor_response_condition = threading.Condition()
+        self._motor_recent_frames: Dict[tuple[int, int], Dict[str, Any]] = {}
+        self._motor_frame_history: deque = deque(maxlen=256)
+        self._motor_frame_seq = 0
+
+        # Impedance control — joint state feedback from firmware
+        # Format: {joint_name: {dof: {"q_deg": float, "dq_deg_s": float,
+        #          "tau_a": int, "tau_b": int, "status": int, "timestamp": float}}}
+        self._joint_state: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
         # Configuration persistence
         self._config_file = "can_config.json"
@@ -277,6 +313,9 @@ class CanManager:
                 self.logger.warning("Error while closing CAN bus: %s", exc)
         self._bus = None
         self._current_config = None
+        with self._motor_response_condition:
+            self._motor_recent_frames.clear()
+            self._motor_response_condition.notify_all()
 
     def is_connected(self) -> bool:
         """Return True if CAN bus is initialized."""
@@ -742,6 +781,77 @@ class CanManager:
         time.sleep(self._MULTI_FRAME_DELAY_S)
         payload = struct.pack("<BBf", joint_id, 0xFF, 0.0) + bytes(2)
         self._send_frame(0x015, payload, context="CASCADE apply")
+        return {"success": True}
+
+    # ================================================================
+    # IMPEDANCE CONTROL (Scenario B — SET_IMPEDANCE / IMPEDANCE_CTRL)
+    # ================================================================
+
+    def send_impedance_target(self, joint_name: str, dof_index: int,
+                               q_target: float, dq_target: float,
+                               stiffness: float, kp: float, kd: float,
+                               tau_ff: int) -> Dict[str, Any]:
+        """Send SET_IMPEDANCE via CAN (0x01D) — 2 sequential frames.
+
+        Frame 0 (seq=0): [joint_id, dof|seq<<4, q_hi, q_lo, dq_hi, dq_lo, stiff_hi, stiff_lo]
+        Frame 1 (seq=1): [joint_id, dof|seq<<4, Kp_hi, Kp_lo, Kd_hi, Kd_lo, tau_ff_hi, tau_ff_lo]
+
+        All int16 values use x100 scaling except tau_ff (raw motor units).
+
+        Args:
+            joint_name: Joint name (e.g. "KNEE_RIGHT")
+            dof_index: DOF index (0-2)
+            q_target: Target joint position (degrees)
+            dq_target: Target velocity for feedforward (deg/s)
+            stiffness: Co-contraction stiffness (degrees)
+            kp: Position gain for outer PID
+            kd: Velocity gain for outer PID
+            tau_ff: Feedforward torque (raw motor units, int16)
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+
+        # Frame 0: q, dq, stiffness (all int16 x100)
+        q_int = int(round(q_target * 100))
+        dq_int = int(round(dq_target * 100))
+        stiff_int = int(round(stiffness * 100))
+        seq0_byte = (0 << 4) | (dof_index & 0x0F)
+        payload0 = struct.pack("<BBhhh", joint_id, seq0_byte,
+                                q_int, dq_int, stiff_int)
+        # Pad to 8 bytes if needed
+        payload0 = payload0.ljust(8, b'\x00')
+
+        # Frame 1: Kp, Kd, tau_ff
+        kp_int = int(round(kp * 100))
+        kd_int = int(round(kd * 100))
+        tau_ff_int = int(round(tau_ff))
+        seq1_byte = (1 << 4) | (dof_index & 0x0F)
+        payload1 = struct.pack("<BBhhh", joint_id, seq1_byte,
+                                kp_int, kd_int, tau_ff_int)
+        payload1 = payload1.ljust(8, b'\x00')
+
+        self._send_frame(0x01D, payload0, context="SET_IMPEDANCE seq=0")
+        time.sleep(self._MULTI_FRAME_DELAY_S)
+        self._send_frame(0x01D, payload1, context="SET_IMPEDANCE seq=1")
+        return {"success": True}
+
+    def send_impedance_ctrl(self, joint_name: str, sub_cmd: int,
+                             param: int = 0) -> Dict[str, Any]:
+        """Send IMPEDANCE_CTRL via CAN (0x01E).
+
+        Args:
+            joint_name: Joint name
+            sub_cmd: 0x00=disable (all DOFs → HOLDING),
+                     0x01=enable (informational),
+                     0x02=set_watchdog_ms
+            param: Parameter for sub_cmd (e.g. watchdog timeout in ms)
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = struct.pack("<BBH", joint_id, sub_cmd, param)
+        payload = payload.ljust(8, b'\x00')
+        self._send_frame(0x01E, payload,
+                         context=f"IMPEDANCE_CTRL cmd=0x{sub_cmd:02X} param={param}")
         return {"success": True}
 
     def start_auto_mapping_via_can(self, joint_name: str,
@@ -1308,6 +1418,439 @@ class CanManager:
             "status_messages": list(self._status_messages),
         }
 
+    # ------------------------------------------------------------------
+    # Single motor direct CAN bench helpers
+    # ------------------------------------------------------------------
+    def motor_test_log_dir(self) -> Path:
+        return self.MOTOR_TEST_LOG_DIR
+
+    def list_motor_test_logs(self, limit: int = 20) -> list[Dict[str, Any]]:
+        log_dir = self.motor_test_log_dir()
+        if not log_dir.exists():
+            return []
+
+        files = sorted(
+            (path for path in log_dir.glob("*.csv") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        results = []
+        for path in files[: max(0, limit)]:
+            stat = path.stat()
+            results.append({
+                "name": path.name,
+                "size_bytes": stat.st_size,
+                "modified_ts": stat.st_mtime,
+            })
+        return results
+
+    def get_motor_test_status(
+        self,
+        *,
+        motor_id: int = DEFAULT_MOTOR_ID,
+        output_ratio: float = DEFAULT_OUTPUT_RATIO,
+    ) -> Dict[str, Any]:
+        state = self.get_connection_state()
+        recent: Dict[str, Any] = {}
+        with self._motor_response_condition:
+            recent_state2 = self._motor_recent_frames.get((motor_id, READ_COMMANDS["state2"]))
+            recent_single = self._motor_recent_frames.get((motor_id, READ_COMMANDS["single"]))
+            recent_multi = self._motor_recent_frames.get((motor_id, READ_COMMANDS["multi"]))
+            recent_torque = self._motor_recent_frames.get((motor_id, CONTROL_COMMANDS["torque"]))
+            recent_speed = self._motor_recent_frames.get((motor_id, CONTROL_COMMANDS["speed"]))
+            recent_on = self._motor_recent_frames.get((motor_id, CONTROL_COMMANDS["on"]))
+            recent_stop = self._motor_recent_frames.get((motor_id, CONTROL_COMMANDS["stop"]))
+            recent_off = self._motor_recent_frames.get((motor_id, CONTROL_COMMANDS["off"]))
+
+        recent.update({
+            "state2": self._decode_motor_response(recent_state2["data"], output_ratio=output_ratio) if recent_state2 else None,
+            "single": self._decode_motor_response(recent_single["data"], output_ratio=output_ratio) if recent_single else None,
+            "multi": self._decode_motor_response(recent_multi["data"], output_ratio=output_ratio) if recent_multi else None,
+            "torque": self._decode_motor_response(recent_torque["data"], output_ratio=output_ratio) if recent_torque else None,
+            "speed": self._decode_motor_response(recent_speed["data"], output_ratio=output_ratio) if recent_speed else None,
+            "echo": {
+                "on": self._serialize_motor_frame(recent_on) if recent_on else None,
+                "stop": self._serialize_motor_frame(recent_stop) if recent_stop else None,
+                "off": self._serialize_motor_frame(recent_off) if recent_off else None,
+            },
+        })
+        return {
+            **state,
+            "motor_id": motor_id,
+            "output_ratio": output_ratio,
+            "motor_recent": recent,
+            "log_dir": str(self.motor_test_log_dir()),
+            "recent_logs": self.list_motor_test_logs(limit=10),
+        }
+
+    def get_motor_tuning_status(
+        self,
+        *,
+        motor_id: int = DEFAULT_MOTOR_ID,
+        output_ratio: float = DEFAULT_OUTPUT_RATIO,
+    ) -> Dict[str, Any]:
+        state = self.get_connection_state()
+        with self._motor_response_condition:
+            recent_pid = self._motor_recent_frames.get((motor_id, READ_COMMANDS["pid"]))
+            recent_accel = self._motor_recent_frames.get((motor_id, READ_COMMANDS["acceleration"]))
+            recent_state2 = self._motor_recent_frames.get((motor_id, READ_COMMANDS["state2"]))
+            recent_single = self._motor_recent_frames.get((motor_id, READ_COMMANDS["single"]))
+            recent_multi = self._motor_recent_frames.get((motor_id, READ_COMMANDS["multi"]))
+        return {
+            **state,
+            "motor_id": motor_id,
+            "output_ratio": output_ratio,
+            "recent": {
+                "pid": self._decode_motor_response(recent_pid["data"], output_ratio=output_ratio) if recent_pid else None,
+                "acceleration": self._decode_motor_response(recent_accel["data"], output_ratio=output_ratio) if recent_accel else None,
+                "state2": self._decode_motor_response(recent_state2["data"], output_ratio=output_ratio) if recent_state2 else None,
+                "single": self._decode_motor_response(recent_single["data"], output_ratio=output_ratio) if recent_single else None,
+                "multi": self._decode_motor_response(recent_multi["data"], output_ratio=output_ratio) if recent_multi else None,
+            },
+        }
+
+    def motor_tuning_read(
+        self,
+        action: str,
+        *,
+        motor_id: int = DEFAULT_MOTOR_ID,
+        timeout_s: float = 0.2,
+        output_ratio: float = DEFAULT_OUTPUT_RATIO,
+    ) -> Dict[str, Any]:
+        allowed = {"pid", "acceleration", "state2", "single", "multi"}
+        if action not in allowed:
+            raise ValueError(f"Unsupported tuning read action: {action}")
+        return self.motor_test_command(
+            action,
+            motor_id=motor_id,
+            value=None,
+            timeout_s=timeout_s,
+            output_ratio=output_ratio,
+        )
+
+    def motor_tuning_probe(
+        self,
+        action: str,
+        *,
+        motor_id: int = DEFAULT_MOTOR_ID,
+        timeout_s: float = 0.3,
+        output_ratio: float = DEFAULT_OUTPUT_RATIO,
+    ) -> Dict[str, Any]:
+        allowed = {"pid", "acceleration"}
+        if action not in allowed:
+            raise ValueError(f"Unsupported tuning probe action: {action}")
+        self._ensure_connection()
+        arbitration_id = self.MOTOR_ID_BASE + int(motor_id)
+        payload = build_read_frame(action)
+        expected_cmd = READ_COMMANDS[action]
+
+        with self._motor_test_lock:
+            with self._motor_response_condition:
+                min_seq = self._motor_frame_seq
+            self._send_frame(
+                arbitration_id,
+                payload,
+                context=f"MotorTuning probe {action} motor={motor_id}",
+            )
+            deadline = time.monotonic() + timeout_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                with self._motor_response_condition:
+                    self._motor_response_condition.wait(timeout=min(remaining, 0.02))
+
+            with self._motor_response_condition:
+                frames = [
+                    dict(frame)
+                    for frame in self._motor_frame_history
+                    if frame["motor_id"] == motor_id and frame.get("seq", -1) > min_seq
+                ]
+
+        matched = next((frame for frame in frames if frame["command"] == expected_cmd), None)
+        return {
+            "action": action,
+            "motor_id": motor_id,
+            "arbitration_id": f"0x{arbitration_id:03X}",
+            "tx_hex": bytes_hex(payload),
+            "probe_timeout_s": timeout_s,
+            "frames_seen": len(frames),
+            "matched_expected": matched is not None,
+            "frames": [self._serialize_motor_frame(frame) for frame in frames],
+            "decoded_expected": (
+                self._decode_motor_response(matched["data"], output_ratio=output_ratio) if matched else None
+            ),
+        }
+
+    def motor_test_command(
+        self,
+        action: str,
+        *,
+        motor_id: int = DEFAULT_MOTOR_ID,
+        value: Optional[float] = None,
+        timeout_s: float = 0.2,
+        output_ratio: float = DEFAULT_OUTPUT_RATIO,
+    ) -> Dict[str, Any]:
+        self._ensure_connection()
+        arbitration_id = self.MOTOR_ID_BASE + int(motor_id)
+        with self._motor_test_lock:
+            if action in READ_COMMANDS:
+                payload = build_read_frame(action)
+                response = self._motor_exchange_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=payload,
+                    expected_cmd=READ_COMMANDS[action],
+                    timeout_s=timeout_s,
+                    context=f"MotorTest read {action} motor={motor_id}",
+                )
+                return self._motor_exchange_result(
+                    action=action,
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=payload,
+                    response=response,
+                    output_ratio=output_ratio,
+                )
+
+            if action in ("torque", "speed"):
+                if value is None:
+                    raise ValueError(f"value is required for action '{action}'")
+                payload = build_control_frame(action, float(value))
+                response = self._motor_exchange_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=payload,
+                    expected_cmd=CONTROL_COMMANDS[action],
+                    timeout_s=timeout_s,
+                    context=f"MotorTest {action}={value} motor={motor_id}",
+                )
+                return self._motor_exchange_result(
+                    action=action,
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=payload,
+                    response=response,
+                    output_ratio=output_ratio,
+                    target=value,
+                )
+
+            if action in ("on", "off", "stop"):
+                if action == "on":
+                    payload = build_zero_frame(CONTROL_COMMANDS[action])
+                    warning = None
+                    try:
+                        response = self._motor_exchange_locked(
+                            motor_id=motor_id,
+                            arbitration_id=arbitration_id,
+                            payload=payload,
+                            expected_cmd=CONTROL_COMMANDS[action],
+                            timeout_s=timeout_s,
+                            context=f"MotorTest {action} motor={motor_id}",
+                        )
+                    except TimeoutError:
+                        response = None
+                        warning = f"{action} echo timed out"
+                    result = {
+                        "action": action,
+                        "motor_id": motor_id,
+                        "arbitration_id": f"0x{arbitration_id:03X}",
+                        "tx_hex": bytes_hex(payload),
+                        "response": self._serialize_motor_frame(response) if response else None,
+                        "warning": warning,
+                    }
+                    return result
+
+                safe_stop = self._motor_safe_stop_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    timeout_s=timeout_s,
+                    power_off=(action in ("off", "stop")),
+                )
+                return {
+                    "action": action,
+                    "motor_id": motor_id,
+                    "arbitration_id": f"0x{arbitration_id:03X}",
+                    **safe_stop,
+                }
+
+        raise ValueError(f"Unsupported motor action: {action}")
+
+    def motor_test_run_sweep(
+        self,
+        *,
+        motor_id: int = DEFAULT_MOTOR_ID,
+        mode: str,
+        profile: str,
+        duration_s: float,
+        rate_hz: float,
+        timeout_s: float,
+        output_ratio: float = DEFAULT_OUTPUT_RATIO,
+        bias: float = 0.0,
+        amplitude: float = 0.0,
+        preload_s: float = 0.0,
+        frequency_hz: float = 1.0,
+        f0_hz: float = 0.2,
+        f1_hz: float = 8.0,
+        extra_commands: Optional[list[str]] = None,
+        label: Optional[str] = None,
+        stop_at_end: bool = True,
+        motor_on_before: bool = True,
+        power_off_at_end: bool = False,
+    ) -> Dict[str, Any]:
+        self._ensure_connection()
+        if duration_s <= 0:
+            raise ValueError("duration_s must be > 0")
+        if rate_hz <= 0:
+            raise ValueError("rate_hz must be > 0")
+        extras = parse_extra_commands(extra_commands)
+        fieldnames = csv_fieldnames(extras)
+        arbitration_id = self.MOTOR_ID_BASE + int(motor_id)
+        control_cmd = CONTROL_COMMANDS[mode]
+        rows: list[Dict[str, Any]] = []
+        total_samples = max(1, int(round(duration_s * rate_hz)))
+        start = time.perf_counter()
+        resolved_label = label or build_default_label(
+            motor_id=motor_id,
+            mode=mode,
+            profile=profile,
+            bias=bias,
+            amplitude=amplitude,
+            duration_s=duration_s,
+            rate_hz=rate_hz,
+            preload_s=preload_s,
+            frequency_hz=frequency_hz,
+            f0_hz=f0_hz,
+            f1_hz=f1_hz,
+        )
+
+        with self._motor_test_lock:
+            motor_on_warning = None
+            if motor_on_before:
+                on_payload = build_zero_frame(CONTROL_COMMANDS["on"])
+                on_result = self._motor_send_best_effort_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=on_payload,
+                    expected_cmd=CONTROL_COMMANDS["on"],
+                    timeout_s=timeout_s,
+                    context=f"MotorSweep on motor={motor_id}",
+                )
+                if on_result["timed_out"]:
+                    motor_on_warning = "motor on echo timed out"
+                time.sleep(min(0.05, timeout_s))
+
+            for index in range(total_samples):
+                loop_start = time.perf_counter()
+                t_s = loop_start - start
+                target = generate_target(
+                    profile=profile,
+                    t_s=t_s,
+                    duration_s=duration_s,
+                    bias=bias,
+                    amplitude=amplitude,
+                    preload_s=preload_s,
+                    frequency_hz=frequency_hz,
+                    f0_hz=f0_hz,
+                    f1_hz=f1_hz,
+                )
+                payload = build_control_frame(mode, target)
+                response = self._motor_exchange_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=payload,
+                    expected_cmd=control_cmd,
+                    timeout_s=timeout_s,
+                    context=f"MotorSweep {mode}={target:.3f}",
+                )
+                decoded = self._decode_motor_response(response["data"], output_ratio=output_ratio)
+                row: Dict[str, Any] = {
+                    "motor_id": motor_id,
+                    "output_ratio": output_ratio,
+                    "duration_s": duration_s,
+                    "rate_hz": rate_hz,
+                    "timeout_s": timeout_s,
+                    "bias": bias,
+                    "amplitude": amplitude,
+                    "preload_s": preload_s,
+                    "frequency_hz": frequency_hz,
+                    "f0_hz": f0_hz,
+                    "f1_hz": f1_hz,
+                    "label": resolved_label,
+                    "t_s": t_s,
+                    "mode": mode,
+                    "profile": profile,
+                    "target": target,
+                    **decoded,
+                }
+
+                for extra_name in extras:
+                    extra_payload = build_read_frame(extra_name)
+                    extra_response = self._motor_exchange_locked(
+                        motor_id=motor_id,
+                        arbitration_id=arbitration_id,
+                        payload=extra_payload,
+                        expected_cmd=READ_COMMANDS[extra_name],
+                        timeout_s=timeout_s,
+                        context=f"MotorSweep extra {extra_name}",
+                    )
+                    row.update(self._decode_motor_response(extra_response["data"], output_ratio=output_ratio))
+
+                rows.append(row)
+
+                next_deadline = start + ((index + 1) / rate_hz)
+                remaining = next_deadline - time.perf_counter()
+                if remaining > 0:
+                    time.sleep(remaining)
+
+            stop_warning = None
+            neutral_warning = None
+            if stop_at_end:
+                neutral_payload = build_control_frame(mode, 0.0)
+                neutral_result = self._motor_send_best_effort_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    payload=neutral_payload,
+                    expected_cmd=control_cmd,
+                    timeout_s=timeout_s,
+                    context=f"MotorSweep neutral {mode}=0 motor={motor_id}",
+                )
+                if neutral_result["timed_out"]:
+                    neutral_warning = f"{mode}=0 echo timed out"
+
+                time.sleep(min(0.05, timeout_s))
+
+                safe_stop = self._motor_safe_stop_locked(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    timeout_s=timeout_s,
+                    power_off=power_off_at_end,
+                )
+                stop_warning = safe_stop["warning"]
+
+        csv_path = default_csv_path(
+            self.motor_test_log_dir(),
+            mode=mode,
+            profile=profile,
+            label=resolved_label,
+        )
+        write_csv_rows(csv_path, rows, fieldnames)
+        return {
+            "status": "success",
+            "motor_id": motor_id,
+            "mode": mode,
+            "profile": profile,
+            "samples": len(rows),
+            "rate_hz": rate_hz,
+            "duration_s": duration_s,
+            "csv_path": str(csv_path),
+            "csv_name": csv_path.name,
+            "label": resolved_label,
+            "motor_on_warning": motor_on_warning,
+            "neutral_warning": neutral_warning,
+            "stop_warning": stop_warning,
+        }
+
     def clear_status_messages(self) -> None:
         """Utility for tests to clear buffered status messages."""
         with self._lock:
@@ -1494,6 +2037,11 @@ class CanManager:
         arb_id = message.arbitration_id
         data = bytes(message.data)
 
+        # Direct motor responses (0x140 + motor_id) for single-motor CAN bench.
+        if self.MOTOR_ID_BASE < arb_id < 0x200 and len(data) >= 1:
+            self._handle_motor_test_frame(arb_id, data, message.timestamp)
+            return
+
         # Encoder stream data (0x410-0x41F) - high-frequency, minimal logging
         # Each joint uses 0x410 + joint_id to allow filtering when multiple controllers on bus
         if 0x410 <= arb_id <= 0x41F and len(data) >= 8:
@@ -1620,6 +2168,12 @@ class CanManager:
                 )
             return
 
+        # Joint state broadcast (0x4F0-0x4FF) — impedance mode feedback
+        if 0x4F0 <= arb_id <= 0x4FF and len(data) >= 8:
+            joint_id = arb_id - 0x4F0
+            self._handle_joint_state(data, timestamp, joint_id)
+            return
+
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -1636,6 +2190,171 @@ class CanManager:
             with self._lock:
                 self._status_messages.appendleft({"type": "unknown", "frame": snippet})
             self._log_can_received(arb_id, data, context="Unknown frame")
+
+    def _handle_motor_test_frame(self, arbitration_id: int, data: bytes, timestamp: float) -> None:
+        motor_id = arbitration_id - self.MOTOR_ID_BASE
+        command = data[0]
+        frame = {
+            "motor_id": motor_id,
+            "command": command,
+            "arbitration_id": f"0x{arbitration_id:03X}",
+            "timestamp": timestamp,
+            "data": data,
+            "data_hex": bytes_hex(data),
+        }
+        with self._motor_response_condition:
+            self._motor_frame_seq += 1
+            frame["seq"] = self._motor_frame_seq
+            self._motor_recent_frames[(motor_id, command)] = frame
+            self._motor_frame_history.append(frame)
+            self._motor_response_condition.notify_all()
+        self._log_can_received(
+            arbitration_id,
+            data,
+            context=f"Motor frame motor={motor_id} cmd=0x{command:02X}",
+        )
+
+    def _motor_wait_for_response(self, motor_id: int, command: int, min_seq: int, timeout_s: float) -> Dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        with self._motor_response_condition:
+            while True:
+                frame = self._motor_recent_frames.get((motor_id, command))
+                if frame and frame.get("seq", -1) > min_seq:
+                    return dict(frame)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Timeout waiting for motor_id={motor_id} cmd=0x{command:02X}"
+                    )
+                self._motor_response_condition.wait(timeout=remaining)
+
+    def _motor_exchange_locked(
+        self,
+        *,
+        motor_id: int,
+        arbitration_id: int,
+        payload: bytes,
+        expected_cmd: int,
+        timeout_s: float,
+        context: str,
+    ) -> Dict[str, Any]:
+        with self._motor_response_condition:
+            min_seq = self._motor_frame_seq
+        self._send_frame(arbitration_id, payload, context=context)
+        return self._motor_wait_for_response(motor_id, expected_cmd, min_seq, timeout_s)
+
+    def _motor_send_best_effort_locked(
+        self,
+        *,
+        motor_id: int,
+        arbitration_id: int,
+        payload: bytes,
+        expected_cmd: Optional[int],
+        timeout_s: float,
+        context: str,
+    ) -> Dict[str, Any]:
+        with self._motor_response_condition:
+            min_seq = self._motor_frame_seq
+        self._send_frame(arbitration_id, payload, context=context)
+        if expected_cmd is None:
+            return {"timed_out": False, "response": None}
+        try:
+            response = self._motor_wait_for_response(motor_id, expected_cmd, min_seq, timeout_s)
+            return {"timed_out": False, "response": response}
+        except TimeoutError:
+            return {"timed_out": True, "response": None}
+
+    def _motor_safe_stop_locked(
+        self,
+        *,
+        motor_id: int,
+        arbitration_id: int,
+        timeout_s: float,
+        power_off: bool,
+    ) -> Dict[str, Any]:
+        steps = [
+            ("speed_zero", build_control_frame("speed", 0.0), CONTROL_COMMANDS["speed"]),
+            ("torque_zero", build_control_frame("torque", 0.0), CONTROL_COMMANDS["torque"]),
+            ("stop", build_zero_frame(CONTROL_COMMANDS["stop"]), CONTROL_COMMANDS["stop"]),
+        ]
+        if power_off:
+            steps.append(("off", build_zero_frame(CONTROL_COMMANDS["off"]), CONTROL_COMMANDS["off"]))
+
+        warnings = []
+        details = []
+        for label, payload, expected_cmd in steps:
+            result = self._motor_send_best_effort_locked(
+                motor_id=motor_id,
+                arbitration_id=arbitration_id,
+                payload=payload,
+                expected_cmd=expected_cmd,
+                timeout_s=timeout_s,
+                context=f"Motor safe stop {label} motor={motor_id}",
+            )
+            details.append({
+                "step": label,
+                "tx_hex": bytes_hex(payload),
+                "response": self._serialize_motor_frame(result["response"]) if result["response"] else None,
+                "timed_out": result["timed_out"],
+            })
+            if result["timed_out"]:
+                warnings.append(f"{label} echo timed out")
+            time.sleep(min(0.05, timeout_s))
+
+        return {
+            "safe_stop_steps": details,
+            "warning": "; ".join(warnings) if warnings else None,
+        }
+
+    def _decode_motor_response(self, data: bytes, *, output_ratio: float) -> Dict[str, Any]:
+        command = data[0]
+        if command in (CONTROL_COMMANDS["torque"], CONTROL_COMMANDS["speed"], READ_COMMANDS["state2"]):
+            return decode_feedback_frame(data, output_ratio=output_ratio)
+        if command == READ_COMMANDS["pid"]:
+            return decode_pid_frame(data)
+        if command == READ_COMMANDS["acceleration"]:
+            return decode_acceleration_frame(data)
+        if command == READ_COMMANDS["single"]:
+            return decode_single_frame(data, output_ratio=output_ratio)
+        if command == READ_COMMANDS["multi"]:
+            return decode_multi_frame(data, output_ratio=output_ratio)
+        return {
+            "motor_cmd_echo": command,
+            "raw_hex": bytes_hex(data),
+        }
+
+    def _motor_exchange_result(
+        self,
+        *,
+        action: str,
+        motor_id: int,
+        arbitration_id: int,
+        payload: bytes,
+        response: Dict[str, Any],
+        output_ratio: float,
+        target: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        result = {
+            "action": action,
+            "motor_id": motor_id,
+            "arbitration_id": f"0x{arbitration_id:03X}",
+            "tx_hex": bytes_hex(payload),
+            "response": self._serialize_motor_frame(response),
+            "decoded": self._decode_motor_response(response["data"], output_ratio=output_ratio),
+        }
+        if target is not None:
+            result["target"] = target
+        return result
+
+    def _serialize_motor_frame(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "motor_id": response.get("motor_id"),
+            "command": response.get("command"),
+            "arbitration_id": response.get("arbitration_id"),
+            "timestamp": response.get("timestamp"),
+            "data_hex": response.get("data_hex"),
+            "seq": response.get("seq"),
+        }
 
     def _decode_status_frame(self, arbitration_id: int, data: bytes, timestamp: float) -> None:
         # NEW: Status base changed from 0x200 to 0x400
@@ -1808,6 +2527,74 @@ class CanManager:
                 self.socketio.emit("pid_torque", data_point, namespace="/movement")
             except Exception:
                 pass
+
+    def _handle_joint_state(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode JOINT_STATE broadcast from CAN (0x4F0 + joint_id).
+
+        Frame format (8 bytes):
+        - Byte 0: uint8 dof index
+        - Bytes 1-2: int16 q_actual (x100, 0.01° resolution)
+        - Bytes 3-4: int16 dq_actual (x10, 0.1°/s resolution)
+        - Byte 5: int8 tau_A (torque A / 4)
+        - Byte 6: int8 tau_B (torque B / 4)
+        - Byte 7: uint8 status bits (bit0=valid, bit1=holding, bit2=watchdog_warning)
+        """
+        dof = data[0]
+        q_raw, dq_raw = struct.unpack_from("<hh", data, 1)
+        tau_a_div4 = struct.unpack_from("<b", data, 5)[0]
+        tau_b_div4 = struct.unpack_from("<b", data, 6)[0]
+        status = data[7]
+
+        q_deg = q_raw / 100.0
+        dq_deg_s = dq_raw / 10.0
+        tau_a = tau_a_div4 * 4
+        tau_b = tau_b_div4 * 4
+
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+
+        state_entry = {
+            "q_deg": q_deg,
+            "dq_deg_s": dq_deg_s,
+            "tau_a": tau_a,
+            "tau_b": tau_b,
+            "status": status,
+            "valid": bool(status & 0x01),
+            "holding": bool(status & 0x02),
+            "watchdog_warning": bool(status & 0x04),
+            "timestamp": timestamp,
+        }
+
+        with self._lock:
+            if joint_name not in self._joint_state:
+                self._joint_state[joint_name] = {}
+            self._joint_state[joint_name][dof] = state_entry
+
+        # Emit via SocketIO for real-time UI updates
+        data_point = {
+            "type": "joint_state",
+            "joint_id": joint_id,
+            "joint_name": joint_name,
+            "dof": dof,
+            **state_entry,
+        }
+        if self.socketio:
+            try:
+                self.socketio.emit("joint_state", data_point, namespace="/movement")
+            except Exception:
+                pass  # Don't let socket errors break streaming
+
+    def get_joint_state(self) -> Dict[str, Any]:
+        """Return current joint state data for all joints/DOFs in impedance mode."""
+        with self._lock:
+            # Deep copy to avoid race conditions
+            return {
+                joint_name: {
+                    str(dof): dict(state)
+                    for dof, state in dofs.items()
+                }
+                for joint_name, dofs in self._joint_state.items()
+            }
 
     def _handle_pid_inner_terms(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
         """

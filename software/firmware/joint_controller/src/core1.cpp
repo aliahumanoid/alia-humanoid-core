@@ -89,10 +89,13 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
 #define CAN_ID_WP_REANCHOR_INTERVAL 0x01B // Set waypoint re-anchor interval (Host → Controller)
 #define CAN_ID_WP_TELEMETRY_REQUEST 0x01C // Waypoint buffer telemetry request (Host → Controller)
+#define CAN_ID_SET_IMPEDANCE    0x01D     // Impedance target (Host → Controller, 2-frame accumulator)
+#define CAN_ID_IMPEDANCE_CTRL   0x01E     // Impedance control command (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 #define CAN_ID_WP_TELEMETRY_DATA 0x4D0   // Waypoint buffer telemetry (Controller → Host, + joint_id)
 #define CAN_ID_SAFE_LIMITS_DATA  0x4E0   // Safe limits per DOF (Controller → Host, + joint_id)
+#define CAN_ID_JOINT_STATE_BASE  0x4F0   // Joint state broadcast (Controller → Host, + joint_id)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -286,6 +289,13 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     int16_t raw_angles[3] = {multi_wp.dof0_angle, multi_wp.dof1_angle, multi_wp.dof2_angle};
     for (uint8_t d = 0; d < 3 && d < dc; d++) {
       if (raw_angles[d] == MULTI_DOF_UNUSED) continue;
+
+      // If DOF was in IMPEDANCE mode, switch back to WAYPOINT
+      if (dof_control_mode[d] == MODE_IMPEDANCE) {
+        dof_control_mode[d] = MODE_WAYPOINT;
+        LOG_C1_INFO("[CAN] DOF " + String(d) + " IMPEDANCE → WAYPOINT (waypoint arrival)");
+      }
+
       WaypointState st = waypoint_buffer_state(d);
       if (st == WaypointState::IDLE || st == WaypointState::HOLDING) {
         is_new_batch = true;
@@ -617,8 +627,93 @@ void sendPIDDiagStreamData() {
 }
 
 /**
+ * @brief Send JOINT_STATE broadcast for impedance feedback
+ *
+ * Sends one CAN frame per DOF that is in impedance mode. The frame provides
+ * the Jetson with real-time joint state for closed-loop impedance control.
+ *
+ * Frame format (CAN_ID_JOINT_STATE_BASE + ACTIVE_JOINT, one per DOF):
+ *   Byte 0:    dof_index
+ *   Byte 1-2:  q_actual (int16, °×100)
+ *   Byte 3-4:  dq_actual (int16, °/s×10)
+ *   Byte 5:    tau_A (int8, last agonist torque ÷4, clamped)
+ *   Byte 6:    tau_B (int8, last antagonist torque ÷4, clamped)
+ *   Byte 7:    status (bit0=valid, bit1=holding, bit2=watchdog_warning)
+ *
+ * Rate: reuses encoder stream interval (default 50 Hz).
+ * Only sent when at least one DOF is in MODE_IMPEDANCE.
+ */
+void sendJointStateData() {
+  // Skip if no DOF is in impedance mode
+  bool any_impedance = false;
+  uint8_t dof_count = active_joint_controller ? active_joint_controller->getConfig().dof_count : 0;
+  for (uint8_t d = 0; d < dof_count; d++) {
+    if (dof_control_mode[d] == MODE_IMPEDANCE) {
+      any_impedance = true;
+      break;
+    }
+  }
+  if (!any_impedance) return;
+
+  // Skip if Host CAN is suspended (SPI1 bus conflict avoidance)
+  if (suspend_host_can_polling) return;
+
+  // Rate limiting: reuse encoder stream interval
+  static uint32_t last_joint_state_send_us = 0;
+  uint32_t now_us = time_us_32();
+  if ((now_us - last_joint_state_send_us) < ENCODER_STREAM_INTERVAL_US) {
+    return;
+  }
+  last_joint_state_send_us = now_us;
+
+  extern MCP_CAN CAN_HOST;
+
+  for (uint8_t d = 0; d < dof_count; d++) {
+    if (dof_control_mode[d] != MODE_IMPEDANCE) continue;
+
+    struct __attribute__((packed)) {
+      uint8_t dof_index;
+      int16_t q_actual_x100;    // Degrees × 100
+      int16_t dq_actual_x10;    // Degrees/s × 10
+      int8_t tau_A_div4;         // Agonist torque ÷ 4
+      int8_t tau_B_div4;         // Antagonist torque ÷ 4
+      uint8_t status;
+    } frame;
+
+    frame.dof_index = d;
+
+    // Joint angle from shared encoder data
+    if (shared_dof_angles.valid[d]) {
+      frame.q_actual_x100 = (int16_t)(shared_dof_angles.angles[d] * 100.0f);
+      frame.dq_actual_x10 = (int16_t)(shared_dof_angles.velocities[d] * 10.0f);
+    } else {
+      frame.q_actual_x100 = 0;
+      frame.dq_actual_x10 = 0;
+    }
+
+    // Last torque commands from PID diagnostics (÷4 to fit int8)
+    frame.tau_A_div4 = (int8_t)constrain(pid_diagnostics.torque_A[d] / 4, -127, 127);
+    frame.tau_B_div4 = (int8_t)constrain(pid_diagnostics.torque_B[d] / 4, -127, 127);
+
+    // Status bits
+    frame.status = 0;
+    if (shared_dof_angles.valid[d]) frame.status |= 0x01;  // bit0: valid
+    if (!impedance_target[d].valid) frame.status |= 0x02;  // bit1: holding (no valid target)
+    // Watchdog warning: > 80% of timeout elapsed
+    if (impedance_target[d].valid) {
+      uint32_t elapsed = millis() - impedance_target[d].last_update_ms;
+      if (elapsed > impedance_watchdog_ms * 4 / 5) {
+        frame.status |= 0x04;  // bit2: watchdog warning
+      }
+    }
+
+    CAN_HOST.sendMsgBuf(CAN_ID_JOINT_STATE_BASE + ACTIVE_JOINT, 0, sizeof(frame), (uint8_t*)&frame);
+  }
+}
+
+/**
  * @brief Send movement metrics for a specific DOF via CAN
- * 
+ *
  * Called when metrics_ready[dof] is true (set when movement enters HOLDING).
  * Sends 2 CAN frames with complete movement performance data.
  * 
@@ -1184,6 +1279,121 @@ void pollHostCan() {
         memcpy(&frame[6], &buf_fill, 2);
         CAN_HOST.sendMsgBuf(CAN_ID_WP_TELEMETRY_DATA + ACTIVE_JOINT, 0, 8, frame);
       }
+    } else if (rx_id == CAN_ID_SET_IMPEDANCE) {
+      // SET_IMPEDANCE: 2-frame accumulator pattern (like SET_PID_OUTER)
+      // Frame 0 (seq=0): [joint_id, dof|seq<<4, q_hi, q_lo, dq_hi, dq_lo, stiff_hi, stiff_lo]
+      // Frame 1 (seq=1): [joint_id, dof|seq<<4, Kp_hi, Kp_lo, Kd_hi, Kd_lo, tau_ff_hi, tau_ff_lo]
+      // All int16 values use x100 scaling except tau_ff (raw motor units).
+      // seq=1 triggers application: writes to impedance_target[dof] and sets mode.
+      if (len >= 8 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        uint8_t dof = buf[1] & 0x0F;
+        uint8_t seq = (buf[1] >> 4) & 0x0F;
+
+        if (dof >= active_joint_controller->getConfig().dof_count) {
+          LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE invalid DOF=" + String(dof));
+        } else {
+          // Static accumulator for the 2-frame sequence
+          static uint8_t imp_dof = 0;
+          static int16_t imp_q = 0, imp_dq = 0, imp_stiff = 0;
+
+          if (seq == 0) {
+            imp_dof = dof;
+            memcpy(&imp_q, &buf[2], sizeof(int16_t));
+            memcpy(&imp_dq, &buf[4], sizeof(int16_t));
+            memcpy(&imp_stiff, &buf[6], sizeof(int16_t));
+          } else if (seq == 1) {
+            int16_t imp_kp_x100, imp_kd_x100, imp_tau_ff;
+            memcpy(&imp_kp_x100, &buf[2], sizeof(int16_t));
+            memcpy(&imp_kd_x100, &buf[4], sizeof(int16_t));
+            memcpy(&imp_tau_ff, &buf[6], sizeof(int16_t));
+
+            // Validate and clamp parameters
+            float q_deg = (float)imp_q / 100.0f;
+            float dq_deg_s = (float)imp_dq / 100.0f;
+            float stiff_deg = (float)imp_stiff / 100.0f;
+            float kp = (float)imp_kp_x100 / 100.0f;
+            float kd = (float)imp_kd_x100 / 100.0f;
+
+            // Clamp Kp, Kd to safe ranges
+            if (kp < 0.0f) kp = 0.0f;
+            if (kp > 50.0f) kp = 50.0f;
+            if (kd < 0.0f) kd = 0.0f;
+            if (kd > 20.0f) kd = 20.0f;
+            if (stiff_deg < 0.0f) stiff_deg = 0.0f;
+
+            // Validate q_target against angle limits
+            if (!active_joint_controller->isAngleInLimits(imp_dof, q_deg)) {
+              LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(imp_dof) +
+                          " q_target=" + String(q_deg, 2) + " outside limits, clamped");
+              // Clamp to safe range (let the existing safety system handle it)
+            }
+
+            // Apply to impedance target
+            impedance_target[imp_dof].q_target_deg = q_deg;
+            impedance_target[imp_dof].dq_target_deg_s = dq_deg_s;
+            impedance_target[imp_dof].stiffness_deg = stiff_deg;
+            impedance_target[imp_dof].kp = kp;
+            impedance_target[imp_dof].kd = kd;
+            impedance_target[imp_dof].tau_ff = imp_tau_ff;
+            impedance_target[imp_dof].last_update_ms = millis();
+            impedance_target[imp_dof].valid = true;
+
+            // Switch DOF to impedance mode
+            dof_control_mode[imp_dof] = MODE_IMPEDANCE;
+
+            // Throttled logging (every 50th command)
+            static uint16_t imp_log_counter = 0;
+            imp_log_counter++;
+            if (imp_log_counter >= 50) {
+              LOG_C1_INFO("[CAN_HOST] SET_IMPEDANCE DOF" + String(imp_dof) +
+                          " q=" + String(q_deg, 2) + " dq=" + String(dq_deg_s, 1) +
+                          " stiff=" + String(stiff_deg, 1) + " Kp=" + String(kp, 2) +
+                          " Kd=" + String(kd, 2) + " tau_ff=" + String(imp_tau_ff));
+              imp_log_counter = 0;
+            }
+          }
+        }
+      }
+    } else if (rx_id == CAN_ID_IMPEDANCE_CTRL) {
+      // IMPEDANCE_CTRL: control commands for impedance mode
+      // Frame: [joint_id, sub_cmd, param_lo, param_hi, 0, 0, 0, 0]
+      // sub_cmd: 0x00=disable (→ HOLDING), 0x01=enable, 0x02=set_watchdog_ms
+      if (len >= 2 && buf[0] == ACTIVE_JOINT) {
+        uint8_t sub_cmd = buf[1];
+        switch (sub_cmd) {
+          case 0x00: {
+            // Disable impedance mode on all DOFs → HOLDING
+            for (uint8_t d = 0; d < active_joint_controller->getConfig().dof_count; d++) {
+              if (dof_control_mode[d] == MODE_IMPEDANCE) {
+                dof_control_mode[d] = MODE_WAYPOINT;
+                waypoint_buffer_set_state(d, WaypointState::HOLDING);
+              }
+            }
+            LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: disabled all DOFs → HOLDING");
+            break;
+          }
+          case 0x01: {
+            // Enable impedance mode (informational, actual switch happens on SET_IMPEDANCE)
+            LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: enable acknowledged");
+            break;
+          }
+          case 0x02: {
+            // Set watchdog timeout
+            if (len >= 4) {
+              uint16_t timeout_ms;
+              memcpy(&timeout_ms, &buf[2], sizeof(uint16_t));
+              if (timeout_ms < 10) timeout_ms = 10;       // Minimum 10ms
+              if (timeout_ms > 5000) timeout_ms = 5000;    // Maximum 5s
+              impedance_watchdog_ms = timeout_ms;
+              LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: watchdog=" + String(timeout_ms) + "ms");
+            }
+            break;
+          }
+          default:
+            LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL: unknown sub_cmd=" + String(sub_cmd));
+            break;
+        }
+      }
     } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
       // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
       handleMultiDofWaypointFrame(rx_id, buf, len);
@@ -1253,12 +1463,14 @@ void core1_loop() {
         active_joint_controller->stopAllMotors();
         LOG_C1_INFO("Core1: All motors stopped");
         
-        // Clear all waypoint buffers to exit waypoint control loop
+        // Clear all waypoint buffers and reset impedance mode
         for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
           waypoint_buffer_clear(dof);
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
+          dof_control_mode[dof] = MODE_WAYPOINT;
+          impedance_target[dof].valid = false;
         }
-        LOG_C1_INFO("Core1: Waypoint buffers cleared");
+        LOG_C1_INFO("Core1: Waypoint buffers cleared, impedance mode reset");
       }
 
       // Reset flag
@@ -1284,6 +1496,10 @@ void core1_loop() {
     // === PID DIAGNOSTICS STREAMING VIA CAN ===
     // Send PID target/error/torque data at 20Hz for tuning
     sendPIDDiagStreamData();
+
+    // === JOINT STATE BROADCAST VIA CAN ===
+    // Send joint state feedback for impedance mode (50Hz, only when active)
+    sendJointStateData();
 
     // === ENCODER OFFSET NOTIFICATION VIA CAN ===
     // Core0 sets this flag after zero (saveOffsetsToFlash) or boot (loadOffsetsFromFlash)

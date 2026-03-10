@@ -204,6 +204,11 @@ volatile bool metrics_tracking_enabled = true;  // Enable by default
 // Global variable for auto‑mapping state
 AutoMappingState_t auto_mapping_state = {0};
 
+// Impedance control state (Scenario B — SET_IMPEDANCE CAN command)
+volatile DofControlMode dof_control_mode[MAX_DOFS] = {MODE_WAYPOINT, MODE_WAYPOINT, MODE_WAYPOINT};
+ImpedanceTarget impedance_target[MAX_DOFS] = {};
+volatile uint32_t impedance_watchdog_ms = 100;  // 100ms default watchdog
+
 // Control flag for sending mapping data
 bool auto_mapping_data_ready_to_send = false; // true = auto‑mapping data ready to send to host
 

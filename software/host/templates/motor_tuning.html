@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alia Motor CAN Tuning</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #08111f;
+            --panel: #101c2f;
+            --panel-alt: #16263d;
+            --line: #29415f;
+            --text: #edf4ff;
+            --muted: #8ea2bf;
+            --accent: #0ea5e9;
+            --accent-2: #22c55e;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background:
+                radial-gradient(circle at top right, rgba(14, 165, 233, 0.14), transparent 28%),
+                radial-gradient(circle at left bottom, rgba(34, 197, 94, 0.10), transparent 24%),
+                var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .panel {
+            background: linear-gradient(180deg, rgba(22, 38, 61, 0.96), rgba(16, 28, 47, 0.98));
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+        }
+
+        .pill {
+            border: 1px solid rgba(142, 162, 191, 0.22);
+            background: rgba(142, 162, 191, 0.08);
+            border-radius: 999px;
+            padding: 0.35rem 0.7rem;
+            font-size: 0.82rem;
+        }
+
+        .field {
+            background: rgba(8, 17, 31, 0.62);
+            border: 1px solid var(--line);
+            color: var(--text);
+            border-radius: 12px;
+            padding: 0.7rem 0.85rem;
+            width: 100%;
+        }
+
+        .btn {
+            border-radius: 12px;
+            padding: 0.72rem 0.95rem;
+            font-weight: 600;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #0284c7, #0ea5e9);
+        }
+
+        .btn-secondary {
+            background: rgba(14, 165, 233, 0.12);
+            border: 1px solid rgba(14, 165, 233, 0.28);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #15803d, #22c55e);
+        }
+
+        .btn-warn {
+            background: linear-gradient(135deg, #b45309, #f59e0b);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #b91c1c, #ef4444);
+        }
+
+        .status-dot {
+            width: 0.75rem;
+            height: 0.75rem;
+            border-radius: 999px;
+            display: inline-block;
+        }
+
+        .status-dot.connected {
+            background: var(--accent-2);
+            box-shadow: 0 0 14px rgba(34, 197, 94, 0.7);
+        }
+
+        .status-dot.disconnected {
+            background: var(--danger);
+            box-shadow: 0 0 14px rgba(239, 68, 68, 0.55);
+        }
+
+        pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+    </style>
+</head>
+
+<body data-motor-id="{{ motor_id }}" data-output-ratio="{{ output_ratio }}">
+    <div class="max-w-7xl mx-auto px-4 py-6">
+        <header class="panel px-6 py-5 mb-6">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <div class="flex items-center gap-3 mb-2">
+                        <a href="/" class="text-slate-300 hover:text-white transition-colors">
+                            <i class="fas fa-arrow-left"></i>
+                        </a>
+                        <h1 class="text-2xl font-bold">Motor CAN Tuning (Read Only)</h1>
+                    </div>
+                    <p class="text-slate-300">Public CAN subset for reading runtime state, PID gains, acceleration and encoder-related values from the spare motor.</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <span class="pill mono">Motor ID {{ motor_id }}</span>
+                    <span class="pill mono">Output Ratio {{ output_ratio }}</span>
+                    <span class="pill mono">READ ONLY</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid gap-6 lg:grid-cols-3">
+            <section class="panel p-5 lg:col-span-2">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Connection</h2>
+                    <button id="refreshStatusBtn" class="btn btn-secondary text-sm">
+                        <i class="fas fa-rotate mr-2"></i>Refresh
+                    </button>
+                </div>
+                <div class="grid gap-4 md:grid-cols-4">
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">CAN Status</div>
+                        <div class="flex items-center gap-2 font-semibold">
+                            <span id="statusDot" class="status-dot disconnected"></span>
+                            <span id="statusText">Disconnected</span>
+                        </div>
+                    </div>
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">Interface</div>
+                        <div id="statusInterface" class="mono text-sm">-</div>
+                    </div>
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">Channel</div>
+                        <div id="statusChannel" class="mono text-sm">-</div>
+                    </div>
+                    <div class="rounded-2xl bg-slate-950/25 border border-slate-700/70 p-4">
+                        <div class="text-sm text-slate-400 mb-2">Last RX</div>
+                        <div id="statusLastRx" class="mono text-sm">-</div>
+                    </div>
+                </div>
+
+                <div class="grid gap-4 mt-5 md:grid-cols-3">
+                    <button data-action="on" class="btn btn-success runtime-action">Motor On</button>
+                    <button data-action="stop" class="btn btn-warn runtime-action">Motor Stop</button>
+                    <button data-action="off" class="btn btn-danger runtime-action">Motor Off</button>
+                </div>
+            </section>
+
+            <section class="panel p-5">
+                <h2 class="text-xl font-semibold mb-4">Read Parameters</h2>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="timeoutValue">Reply Timeout (s)</label>
+                        <input id="timeoutValue" class="field mono" type="number" value="0.2" step="0.01" min="0.01">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="outputRatio">Output Ratio</label>
+                        <input id="outputRatio" class="field mono" type="number" value="{{ output_ratio }}" step="0.1" min="0.1">
+                    </div>
+                    <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                        This page does not expose RAM/ROM writes. It is limited to documented CAN reads so we can archive the factory defaults before any tuning.
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-3 mt-6">
+            <section class="panel p-5 lg:col-span-2">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Read Commands</h2>
+                    <span class="text-sm text-slate-400 mono">Public CAN subset only</span>
+                </div>
+                <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <button data-read="pid" class="btn btn-primary tuning-read">Read PID (0x30)</button>
+                    <button data-read="acceleration" class="btn btn-primary tuning-read">Read Acceleration (0x33)</button>
+                    <button data-read="state2" class="btn btn-secondary tuning-read">Read State2</button>
+                    <button data-read="single" class="btn btn-secondary tuning-read">Read Single</button>
+                    <button data-read="multi" class="btn btn-secondary tuning-read">Read Multi</button>
+                </div>
+                <div class="grid gap-4 mt-5 md:grid-cols-2">
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-semibold">PID Snapshot</h3>
+                            <span class="text-xs text-slate-400 mono">angle / speed / torque</span>
+                        </div>
+                        <div id="pidPanel" class="grid gap-3 md:grid-cols-3 text-sm">
+                            <div class="rounded-xl border border-slate-700/60 bg-slate-950/20 p-3">
+                                <div class="text-slate-400 mb-1">Position</div>
+                                <div id="pidPosition" class="mono">-</div>
+                            </div>
+                            <div class="rounded-xl border border-slate-700/60 bg-slate-950/20 p-3">
+                                <div class="text-slate-400 mb-1">Speed</div>
+                                <div id="pidSpeed" class="mono">-</div>
+                            </div>
+                            <div class="rounded-xl border border-slate-700/60 bg-slate-950/20 p-3">
+                                <div class="text-slate-400 mb-1">Torque</div>
+                                <div id="pidTorque" class="mono">-</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-semibold">Acceleration Snapshot</h3>
+                            <span class="text-xs text-slate-400 mono">0x33</span>
+                        </div>
+                        <div id="accelerationPanel" class="text-2xl font-semibold mono">-</div>
+                        <div class="text-sm text-slate-400 mt-2">Unit: dps/s</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel p-5">
+                <h2 class="text-xl font-semibold mb-4">Advanced Settings Coverage</h2>
+                <div class="space-y-3 text-sm">
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 px-4 py-3">
+                        <div class="font-semibold mb-1">Available now</div>
+                        <div class="text-slate-300">Read PID, read acceleration, runtime state, single/multi angle.</div>
+                    </div>
+                    <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+                        <div class="font-semibold mb-1">Still unresolved</div>
+                        <div class="text-amber-100">
+                            Max Torque Current, Current Ramp and Speed Ramp are known from the RS485 parameter map, but we do not yet have a confirmed public CAN read path for this firmware.
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-2 mt-6">
+            <section class="panel p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Recent Runtime Snapshot</h2>
+                    <span class="text-sm text-slate-400 mono">state2 / single / multi</span>
+                </div>
+                <div class="grid gap-4 md:grid-cols-3">
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="text-slate-400 text-sm mb-2">State2</div>
+                        <pre id="snapshotState2" class="mono text-xs">-</pre>
+                    </div>
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="text-slate-400 text-sm mb-2">Single</div>
+                        <pre id="snapshotSingle" class="mono text-xs">-</pre>
+                    </div>
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="text-slate-400 text-sm mb-2">Multi</div>
+                        <pre id="snapshotMulti" class="mono text-xs">-</pre>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Last Response</h2>
+                    <span class="text-sm text-slate-400 mono">tx / rx / decoded</span>
+                </div>
+                <pre id="resultPanel" class="mono text-xs rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4 min-h-[20rem]">No command sent yet.</pre>
+            </section>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/motor_tuning.js') }}"></script>
+</body>
+
+</html>

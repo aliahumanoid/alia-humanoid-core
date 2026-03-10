@@ -849,5 +849,51 @@ extern volatile uint16_t wp_reanchor_interval;
 // Reset re-anchor correction state for all DOFs (called on new batch)
 void wp_reanchor_reset_all();
 
+// ============================================================================
+// IMPEDANCE CONTROL (Scenario B — SET_IMPEDANCE CAN command)
+// ============================================================================
+
+/**
+ * @brief Per-DOF control mode selection
+ *
+ * Each DOF can independently be in WAYPOINT (trajectory following) or
+ * IMPEDANCE (Jetson-commanded impedance control) mode.
+ * Waypoint arrival on any DOF forces all DOFs back to MODE_WAYPOINT
+ * for backward compatibility and safety.
+ */
+enum DofControlMode : uint8_t {
+  MODE_WAYPOINT  = 0,  // Default: waypoint interpolation + PID holding
+  MODE_IMPEDANCE = 1   // Jetson sends {q, dq, stiffness, Kp, Kd, tau_ff}
+};
+
+/**
+ * @brief Impedance target from Jetson (received via SET_IMPEDANCE CAN command)
+ *
+ * Received as 2 CAN frames (accumulator pattern on 0x01D).
+ * Written by Core1 CAN handler, read by Core1 control loop.
+ * No cross-core access — volatile only on last_update_ms for watchdog.
+ */
+struct ImpedanceTarget {
+  float q_target_deg;      // Desired joint position (degrees)
+  float dq_target_deg_s;   // Desired velocity for feedforward (deg/s)
+  float stiffness_deg;     // Co-contraction stiffness (degrees)
+  float kp;                // Position gain (outer PID Kp)
+  float kd;                // Velocity gain (outer PID Kd)
+  int16_t tau_ff;          // Feedforward torque (raw motor units)
+  uint32_t last_update_ms; // Timestamp of last SET_IMPEDANCE (for watchdog)
+  bool valid;              // True after first complete SET_IMPEDANCE received
+};
+
+// Per-DOF control mode (default: all WAYPOINT)
+extern volatile DofControlMode dof_control_mode[MAX_DOFS];
+
+// Per-DOF impedance targets (written by CAN handler on Core1)
+extern ImpedanceTarget impedance_target[MAX_DOFS];
+
+// Impedance watchdog timeout (ms). If no SET_IMPEDANCE arrives within this
+// period, the DOF transitions to HOLDING at current position.
+// Configurable via IMPEDANCE_CTRL (0x01E) sub_cmd=0x02.
+extern volatile uint32_t impedance_watchdog_ms;
+
 #endif // MAIN_COMMON_H
 

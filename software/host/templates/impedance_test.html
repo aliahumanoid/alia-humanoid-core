@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alia Impedance Control Test</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap"
+          rel="stylesheet">
+    <style>
+        :root {
+            --bg: #08111f;
+            --panel: #101c2f;
+            --panel-alt: #16263d;
+            --line: #29415f;
+            --text: #edf4ff;
+            --muted: #8ea2bf;
+            --accent: #0ea5e9;
+            --accent-2: #22c55e;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --impedance: #a78bfa;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background:
+                radial-gradient(circle at top right, rgba(167, 139, 250, 0.14), transparent 28%),
+                radial-gradient(circle at left bottom, rgba(14, 165, 233, 0.10), transparent 24%),
+                var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .mono { font-family: 'JetBrains Mono', monospace; }
+
+        .panel {
+            background: linear-gradient(180deg, rgba(22, 38, 61, 0.96), rgba(16, 28, 47, 0.98));
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+        }
+
+        .pill {
+            border: 1px solid rgba(142, 162, 191, 0.22);
+            background: rgba(142, 162, 191, 0.08);
+            border-radius: 999px;
+            padding: 0.35rem 0.7rem;
+            font-size: 0.82rem;
+        }
+
+        .field {
+            background: rgba(8, 17, 31, 0.62);
+            border: 1px solid var(--line);
+            color: var(--text);
+            border-radius: 12px;
+            padding: 0.7rem 0.85rem;
+            width: 100%;
+        }
+
+        .field:focus {
+            outline: 2px solid rgba(167, 139, 250, 0.35);
+            border-color: var(--impedance);
+        }
+
+        .btn {
+            border-radius: 12px;
+            padding: 0.72rem 0.95rem;
+            font-weight: 600;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+            cursor: pointer;
+        }
+
+        .btn:hover { transform: translateY(-1px); }
+
+        .btn-primary { background: linear-gradient(135deg, #7c3aed, #a78bfa); }
+        .btn-secondary { background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.28); }
+        .btn-success { background: linear-gradient(135deg, #15803d, #22c55e); }
+        .btn-warn { background: linear-gradient(135deg, #b45309, #f59e0b); }
+        .btn-danger { background: linear-gradient(135deg, #b91c1c, #ef4444); }
+
+        .slider-container { position: relative; }
+        .slider-container input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: var(--line);
+            outline: none;
+        }
+        .slider-container input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--impedance);
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(167, 139, 250, 0.5);
+        }
+
+        .status-dot {
+            width: 0.75rem;
+            height: 0.75rem;
+            border-radius: 999px;
+            display: inline-block;
+        }
+        .status-dot.active {
+            background: var(--impedance);
+            box-shadow: 0 0 14px rgba(167, 139, 250, 0.7);
+        }
+        .status-dot.inactive {
+            background: var(--muted);
+        }
+        .status-dot.warning {
+            background: var(--warn);
+            box-shadow: 0 0 14px rgba(245, 158, 11, 0.7);
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .stat-card {
+            border-radius: 14px;
+            background: rgba(8, 17, 31, 0.5);
+            border: 1px solid rgba(41, 65, 95, 0.7);
+            padding: 1rem;
+        }
+
+        .log-area {
+            background: rgba(8, 17, 31, 0.62);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.78rem;
+            color: var(--muted);
+            height: 200px;
+            overflow-y: auto;
+            padding: 0.75rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Header -->
+        <header class="panel px-6 py-5 mb-6">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <div class="flex items-center gap-3 mb-2">
+                        <a href="/" class="text-slate-300 hover:text-white transition-colors">
+                            <i class="fas fa-arrow-left"></i>
+                        </a>
+                        <h1 class="text-2xl font-bold">Impedance Control Test</h1>
+                    </div>
+                    <p class="text-slate-300">Scenario B — SET_IMPEDANCE CAN command test bench (Jetson → RP2350 cascade PID)</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <span class="pill mono">CAN 0x01D / 0x01E</span>
+                    <span class="pill mono" id="modePill">Mode: —</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid gap-6 lg:grid-cols-3">
+
+            <!-- Left Column: Controls -->
+            <div class="lg:col-span-2 space-y-6">
+
+                <!-- Joint & DOF Selector -->
+                <section class="panel p-5">
+                    <h2 class="text-lg font-semibold mb-4"><i class="fas fa-cog mr-2 text-violet-400"></i>Joint Selection</h2>
+                    <div class="grid gap-4 md:grid-cols-3">
+                        <div>
+                            <label class="block text-sm text-slate-400 mb-1">Joint</label>
+                            <select id="jointSelect" class="field"></select>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-slate-400 mb-1">DOF Index</label>
+                            <select id="dofSelect" class="field">
+                                <option value="0">DOF 0</option>
+                                <option value="1">DOF 1</option>
+                            </select>
+                        </div>
+                        <div class="flex items-end gap-2">
+                            <button id="enableBtn" class="btn btn-success flex-1">
+                                <i class="fas fa-play mr-2"></i>Enable
+                            </button>
+                            <button id="disableBtn" class="btn btn-warn flex-1">
+                                <i class="fas fa-pause mr-2"></i>Disable
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Impedance Parameters -->
+                <section class="panel p-5">
+                    <h2 class="text-lg font-semibold mb-4"><i class="fas fa-sliders-h mr-2 text-violet-400"></i>Impedance Parameters</h2>
+                    <div class="grid gap-5 md:grid-cols-2">
+                        <!-- q_target -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="text-sm text-slate-400">q_target (deg)</label>
+                                <span id="qTargetVal" class="mono text-sm text-violet-300">0.00</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" id="qTarget" min="-180" max="180" step="0.5" value="0">
+                            </div>
+                            <div class="flex justify-between text-xs text-slate-500 mt-1">
+                                <span>-180</span><span>0</span><span>180</span>
+                            </div>
+                        </div>
+
+                        <!-- dq_target -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="text-sm text-slate-400">dq_target (deg/s)</label>
+                                <span id="dqTargetVal" class="mono text-sm text-violet-300">0.00</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" id="dqTarget" min="-100" max="100" step="1" value="0">
+                            </div>
+                            <div class="flex justify-between text-xs text-slate-500 mt-1">
+                                <span>-100</span><span>0</span><span>100</span>
+                            </div>
+                        </div>
+
+                        <!-- stiffness -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="text-sm text-slate-400">Stiffness (deg)</label>
+                                <span id="stiffnessVal" class="mono text-sm text-violet-300">0.00</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" id="stiffness" min="0" max="30" step="0.5" value="0">
+                            </div>
+                            <div class="flex justify-between text-xs text-slate-500 mt-1">
+                                <span>0</span><span>15</span><span>30</span>
+                            </div>
+                        </div>
+
+                        <!-- tau_ff -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="text-sm text-slate-400">tau_ff (raw motor units)</label>
+                                <span id="tauFfVal" class="mono text-sm text-violet-300">0</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" id="tauFf" min="-500" max="500" step="5" value="0">
+                            </div>
+                            <div class="flex justify-between text-xs text-slate-500 mt-1">
+                                <span>-500</span><span>0</span><span>500</span>
+                            </div>
+                        </div>
+
+                        <!-- Kp -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="text-sm text-slate-400">Kp (position gain)</label>
+                                <span id="kpVal" class="mono text-sm text-violet-300">5.00</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" id="kp" min="0" max="50" step="0.5" value="5">
+                            </div>
+                            <div class="flex justify-between text-xs text-slate-500 mt-1">
+                                <span>0</span><span>25</span><span>50</span>
+                            </div>
+                        </div>
+
+                        <!-- Kd -->
+                        <div>
+                            <div class="flex items-center justify-between mb-1">
+                                <label class="text-sm text-slate-400">Kd (velocity gain)</label>
+                                <span id="kdVal" class="mono text-sm text-violet-300">0.50</span>
+                            </div>
+                            <div class="slider-container">
+                                <input type="range" id="kd" min="0" max="20" step="0.1" value="0.5">
+                            </div>
+                            <div class="flex justify-between text-xs text-slate-500 mt-1">
+                                <span>0</span><span>10</span><span>20</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Send controls -->
+                    <div class="flex gap-3 mt-5">
+                        <button id="sendOnceBtn" class="btn btn-primary">
+                            <i class="fas fa-paper-plane mr-2"></i>Send Once
+                        </button>
+                        <button id="streamBtn" class="btn btn-secondary" data-streaming="false">
+                            <i class="fas fa-broadcast-tower mr-2"></i>Stream (10 Hz)
+                        </button>
+                        <div class="flex-1"></div>
+                        <button id="estopBtn" class="btn btn-danger">
+                            <i class="fas fa-exclamation-triangle mr-2"></i>E-STOP
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Presets -->
+                <section class="panel p-5">
+                    <h2 class="text-lg font-semibold mb-4"><i class="fas fa-bookmark mr-2 text-violet-400"></i>Gait Phase Presets</h2>
+                    <div class="grid gap-3 md:grid-cols-4">
+                        <button class="btn btn-secondary preset-btn"
+                                data-q="0" data-dq="0" data-stiff="5" data-kp="15" data-kd="2" data-tff="0">
+                            <div class="text-sm font-semibold">Stance</div>
+                            <div class="text-xs text-slate-400">Kp=15, Kd=2, S=5</div>
+                        </button>
+                        <button class="btn btn-secondary preset-btn"
+                                data-q="0" data-dq="0" data-stiff="2" data-kp="5" data-kd="1" data-tff="0">
+                            <div class="text-sm font-semibold">Swing</div>
+                            <div class="text-xs text-slate-400">Kp=5, Kd=1, S=2</div>
+                        </button>
+                        <button class="btn btn-secondary preset-btn"
+                                data-q="0" data-dq="0" data-stiff="10" data-kp="25" data-kd="5" data-tff="50">
+                            <div class="text-sm font-semibold">Heel Strike</div>
+                            <div class="text-xs text-slate-400">Kp=25, Kd=5, S=10, FF=50</div>
+                        </button>
+                        <button class="btn btn-secondary preset-btn"
+                                data-q="0" data-dq="0" data-stiff="0" data-kp="2" data-kd="0.5" data-tff="0">
+                            <div class="text-sm font-semibold">Compliant</div>
+                            <div class="text-xs text-slate-400">Kp=2, Kd=0.5, S=0</div>
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Watchdog Config -->
+                <section class="panel p-5">
+                    <h2 class="text-lg font-semibold mb-4"><i class="fas fa-shield-alt mr-2 text-violet-400"></i>Watchdog</h2>
+                    <div class="flex gap-4 items-end">
+                        <div class="flex-1">
+                            <label class="block text-sm text-slate-400 mb-1">Timeout (ms)</label>
+                            <input type="number" id="watchdogMs" class="field" value="100" min="10" max="5000" step="10">
+                        </div>
+                        <button id="setWatchdogBtn" class="btn btn-secondary">
+                            <i class="fas fa-save mr-2"></i>Set
+                        </button>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right Column: Feedback -->
+            <div class="space-y-6">
+
+                <!-- Joint State -->
+                <section class="panel p-5">
+                    <h2 class="text-lg font-semibold mb-4"><i class="fas fa-tachometer-alt mr-2 text-violet-400"></i>Joint State</h2>
+                    <div class="space-y-3">
+                        <div class="stat-card">
+                            <div class="text-xs text-slate-400">Position (q_act)</div>
+                            <div id="stateQAct" class="mono text-lg font-bold text-violet-300">—</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="text-xs text-slate-400">Velocity (dq_act)</div>
+                            <div id="stateDqAct" class="mono text-lg font-bold text-violet-300">—</div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="stat-card">
+                                <div class="text-xs text-slate-400">Torque A</div>
+                                <div id="stateTauA" class="mono text-base font-semibold">—</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="text-xs text-slate-400">Torque B</div>
+                                <div id="stateTauB" class="mono text-base font-semibold">—</div>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="text-xs text-slate-400 mb-2">Status</div>
+                            <div class="flex gap-3 items-center">
+                                <span id="statusValid" class="status-dot inactive" title="Valid"></span>
+                                <span class="text-xs text-slate-400">Valid</span>
+                                <span id="statusHolding" class="status-dot inactive" title="Holding"></span>
+                                <span class="text-xs text-slate-400">Holding</span>
+                                <span id="statusWatchdog" class="status-dot inactive" title="Watchdog Warning"></span>
+                                <span class="text-xs text-slate-400">WD</span>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="text-xs text-slate-400">Update Rate</div>
+                            <div id="stateRate" class="mono text-sm">— Hz</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- CAN Log -->
+                <section class="panel p-5">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-lg font-semibold"><i class="fas fa-terminal mr-2 text-violet-400"></i>Log</h2>
+                        <button id="clearLogBtn" class="text-sm text-slate-400 hover:text-white">Clear</button>
+                    </div>
+                    <div id="logArea" class="log-area"></div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        'use strict';
+
+        // --- Socket.IO ---
+        const socket = io.connect(
+            'http://' + document.domain + ':' + location.port + '/movement'
+        );
+
+        // --- DOM refs ---
+        const jointSelect = document.getElementById('jointSelect');
+        const dofSelect = document.getElementById('dofSelect');
+        const sliders = {
+            qTarget:   document.getElementById('qTarget'),
+            dqTarget:  document.getElementById('dqTarget'),
+            stiffness: document.getElementById('stiffness'),
+            kp:        document.getElementById('kp'),
+            kd:        document.getElementById('kd'),
+            tauFf:     document.getElementById('tauFf'),
+        };
+        const displays = {
+            qTarget:   document.getElementById('qTargetVal'),
+            dqTarget:  document.getElementById('dqTargetVal'),
+            stiffness: document.getElementById('stiffnessVal'),
+            kp:        document.getElementById('kpVal'),
+            kd:        document.getElementById('kdVal'),
+            tauFf:     document.getElementById('tauFfVal'),
+        };
+        const logArea = document.getElementById('logArea');
+
+        // --- State ---
+        let streamInterval = null;
+        let stateUpdateCount = 0;
+        let stateRateStart = Date.now();
+
+        // --- Logging ---
+        function log(msg, level) {
+            const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+            const color = level === 'error' ? '#ef4444'
+                        : level === 'warn' ? '#f59e0b'
+                        : level === 'ok' ? '#22c55e'
+                        : '#8ea2bf';
+            logArea.innerHTML += '<div style="color:' + color + '">[' + ts + '] ' + msg + '</div>';
+            logArea.scrollTop = logArea.scrollHeight;
+            // Keep last 200 lines
+            while (logArea.children.length > 200) {
+                logArea.removeChild(logArea.firstChild);
+            }
+        }
+
+        // --- Load joints from config API ---
+        fetch('/api/joints')
+            .then(r => r.json())
+            .then(data => {
+                if (data.joints) {
+                    Object.keys(data.joints).sort().forEach(name => {
+                        const opt = document.createElement('option');
+                        opt.value = name;
+                        opt.textContent = name + ' (id=' + data.joints[name].id + ')';
+                        jointSelect.appendChild(opt);
+                    });
+                }
+            })
+            .catch(() => {
+                // Fallback: populate with common joints
+                ['KNEE_LEFT', 'KNEE_RIGHT'].forEach(name => {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    jointSelect.appendChild(opt);
+                });
+                log('Could not load joints from API, using defaults', 'warn');
+            });
+
+        // --- Slider updates ---
+        Object.keys(sliders).forEach(key => {
+            sliders[key].addEventListener('input', () => {
+                const val = parseFloat(sliders[key].value);
+                displays[key].textContent = (key === 'tauFf') ? val.toFixed(0) : val.toFixed(2);
+            });
+        });
+
+        // --- Get current parameters ---
+        function getParams() {
+            return {
+                joint_name: jointSelect.value,
+                dof_index: parseInt(dofSelect.value),
+                q_target: parseFloat(sliders.qTarget.value),
+                dq_target: parseFloat(sliders.dqTarget.value),
+                stiffness: parseFloat(sliders.stiffness.value),
+                kp: parseFloat(sliders.kp.value),
+                kd: parseFloat(sliders.kd.value),
+                tau_ff: parseInt(sliders.tauFf.value),
+            };
+        }
+
+        // --- Send impedance target ---
+        function sendTarget() {
+            const params = getParams();
+            if (!params.joint_name) {
+                log('No joint selected', 'warn');
+                return;
+            }
+            fetch('/api/impedance/target', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    log('TX SET_IMPEDANCE q=' + params.q_target.toFixed(1) +
+                        ' Kp=' + params.kp.toFixed(1) +
+                        ' Kd=' + params.kd.toFixed(1) +
+                        ' S=' + params.stiffness.toFixed(1) +
+                        ' FF=' + params.tau_ff, 'ok');
+                } else {
+                    log('Error: ' + data.message, 'error');
+                }
+            })
+            .catch(err => log('Fetch error: ' + err, 'error'));
+        }
+
+        // --- Buttons ---
+        document.getElementById('sendOnceBtn').addEventListener('click', sendTarget);
+
+        document.getElementById('streamBtn').addEventListener('click', function() {
+            const btn = this;
+            if (btn.dataset.streaming === 'false') {
+                btn.dataset.streaming = 'true';
+                btn.innerHTML = '<i class="fas fa-stop mr-2"></i>Stop Stream';
+                btn.classList.remove('btn-secondary');
+                btn.classList.add('btn-primary');
+                streamInterval = setInterval(sendTarget, 100);  // 10 Hz
+                log('Streaming started (10 Hz)', 'ok');
+            } else {
+                btn.dataset.streaming = 'false';
+                btn.innerHTML = '<i class="fas fa-broadcast-tower mr-2"></i>Stream (10 Hz)';
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-secondary');
+                clearInterval(streamInterval);
+                streamInterval = null;
+                log('Streaming stopped');
+            }
+        });
+
+        document.getElementById('enableBtn').addEventListener('click', () => {
+            const jn = jointSelect.value;
+            if (!jn) return;
+            fetch('/api/impedance/ctrl', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ joint_name: jn, sub_cmd: 1 }),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    log('IMPEDANCE_CTRL enable sent to ' + jn, 'ok');
+                    document.getElementById('modePill').textContent = 'Mode: IMPEDANCE';
+                } else {
+                    log('Enable error: ' + data.message, 'error');
+                }
+            })
+            .catch(err => log('Fetch error: ' + err, 'error'));
+        });
+
+        document.getElementById('disableBtn').addEventListener('click', () => {
+            const jn = jointSelect.value;
+            if (!jn) return;
+            // Stop streaming if active
+            const streamBtn = document.getElementById('streamBtn');
+            if (streamBtn.dataset.streaming === 'true') {
+                streamBtn.click();
+            }
+            fetch('/api/impedance/ctrl', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ joint_name: jn, sub_cmd: 0 }),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    log('IMPEDANCE_CTRL disable sent to ' + jn, 'ok');
+                    document.getElementById('modePill').textContent = 'Mode: WAYPOINT';
+                } else {
+                    log('Disable error: ' + data.message, 'error');
+                }
+            })
+            .catch(err => log('Fetch error: ' + err, 'error'));
+        });
+
+        document.getElementById('estopBtn').addEventListener('click', () => {
+            // Stop streaming
+            const streamBtn = document.getElementById('streamBtn');
+            if (streamBtn.dataset.streaming === 'true') {
+                streamBtn.click();
+            }
+            // Disable impedance for selected joint
+            const jn = jointSelect.value;
+            if (jn) {
+                fetch('/api/impedance/ctrl', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ joint_name: jn, sub_cmd: 0 }),
+                }).catch(() => {});
+            }
+            log('E-STOP — impedance disabled, streaming stopped', 'error');
+            document.getElementById('modePill').textContent = 'Mode: STOPPED';
+        });
+
+        document.getElementById('setWatchdogBtn').addEventListener('click', () => {
+            const jn = jointSelect.value;
+            const ms = parseInt(document.getElementById('watchdogMs').value);
+            if (!jn) return;
+            fetch('/api/impedance/ctrl', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ joint_name: jn, sub_cmd: 2, param: ms }),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    log('Watchdog set to ' + ms + ' ms for ' + jn, 'ok');
+                } else {
+                    log('Watchdog error: ' + data.message, 'error');
+                }
+            })
+            .catch(err => log('Fetch error: ' + err, 'error'));
+        });
+
+        document.getElementById('clearLogBtn').addEventListener('click', () => {
+            logArea.innerHTML = '';
+        });
+
+        // --- Presets ---
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                sliders.qTarget.value   = btn.dataset.q;
+                sliders.dqTarget.value  = btn.dataset.dq;
+                sliders.stiffness.value = btn.dataset.stiff;
+                sliders.kp.value        = btn.dataset.kp;
+                sliders.kd.value        = btn.dataset.kd;
+                sliders.tauFf.value     = btn.dataset.tff;
+                // Update displays
+                Object.keys(sliders).forEach(key => {
+                    sliders[key].dispatchEvent(new Event('input'));
+                });
+                log('Preset loaded: ' + btn.querySelector('.text-sm').textContent);
+            });
+        });
+
+        // --- Socket.IO: Joint State ---
+        socket.on('connect', () => {
+            log('Socket.IO connected', 'ok');
+        });
+
+        socket.on('joint_state', (data) => {
+            // Only update if it matches our selected joint/DOF
+            if (data.joint_name !== jointSelect.value) return;
+            if (data.dof !== parseInt(dofSelect.value)) return;
+
+            document.getElementById('stateQAct').textContent = data.q_deg.toFixed(2) + '\u00B0';
+            document.getElementById('stateDqAct').textContent = data.dq_deg_s.toFixed(1) + '\u00B0/s';
+            document.getElementById('stateTauA').textContent = data.tau_a;
+            document.getElementById('stateTauB').textContent = data.tau_b;
+
+            // Status dots
+            const validDot = document.getElementById('statusValid');
+            const holdingDot = document.getElementById('statusHolding');
+            const watchdogDot = document.getElementById('statusWatchdog');
+
+            validDot.className = 'status-dot ' + (data.valid ? 'active' : 'inactive');
+            holdingDot.className = 'status-dot ' + (data.holding ? 'active' : 'inactive');
+            watchdogDot.className = 'status-dot ' + (data.watchdog_warning ? 'warning' : 'inactive');
+
+            // Update rate calculation
+            stateUpdateCount++;
+            const elapsed = (Date.now() - stateRateStart) / 1000;
+            if (elapsed >= 1.0) {
+                document.getElementById('stateRate').textContent =
+                    (stateUpdateCount / elapsed).toFixed(1) + ' Hz';
+                stateUpdateCount = 0;
+                stateRateStart = Date.now();
+            }
+        });
+
+        socket.on('disconnect', () => {
+            log('Socket.IO disconnected', 'warn');
+        });
+
+        // --- Init log ---
+        log('Impedance test page loaded. Select a joint and DOF to begin.');
+
+    })();
+    </script>
+</body>
+</html>
