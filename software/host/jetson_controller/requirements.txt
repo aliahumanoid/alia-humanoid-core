@@ -1,0 +1,5 @@
+# Jetson Controller dependencies
+# Install: pip install -r requirements.txt
+python-can>=4.4
+pyyaml>=6.0
+rich>=13.0

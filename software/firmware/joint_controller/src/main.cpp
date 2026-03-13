@@ -207,7 +207,11 @@ AutoMappingState_t auto_mapping_state = {0};
 // Impedance control state (Scenario B — SET_IMPEDANCE CAN command)
 volatile DofControlMode dof_control_mode[MAX_DOFS] = {MODE_WAYPOINT, MODE_WAYPOINT, MODE_WAYPOINT};
 ImpedanceTarget impedance_target[MAX_DOFS] = {};
+ImpedanceRollingSegment impedance_segment[MAX_DOFS] = {};
 volatile uint32_t impedance_watchdog_ms = 100;  // 100ms default watchdog
+InnerPidBackup inner_pid_backup[MAX_DOFS][2] = {};  // [dof][0=agonist, 1=antagonist]
+OuterLoopBackup outer_loop_backup[MAX_DOFS] = {};
+volatile bool inner_pid_reinit_after_impedance[MAX_DOFS] = {};
 
 // Control flag for sending mapping data
 bool auto_mapping_data_ready_to_send = false; // true = auto‑mapping data ready to send to host

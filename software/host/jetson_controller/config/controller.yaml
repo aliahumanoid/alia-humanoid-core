@@ -1,0 +1,39 @@
+# Jetson Controller Configuration
+#
+# Joint topology and limits are loaded from joint_config.json
+# (auto-generated from firmware config_presets.h).
+# This file defines controller-specific parameters only.
+
+can:
+  interface: slcan
+  channel: auto                            # "auto" = detect CANable USB device
+  bitrate: 1000000
+
+impedance:
+  send_rate_hz: 50
+  watchdog_ms: 2000       # Impedance watchdog timeout (firmware fallback to HOLDING)
+
+homing:
+  speed_deg_s: 5.0        # Slow and safe for first tests
+  tolerance_deg: 1.0      # Convergence threshold for homing complete
+
+# Per-joint control parameters.
+# Only joints listed here are controlled. Others are ignored.
+# Gains match firmware defaults from JointConfig.h as starting point.
+joints:
+  knee_right:
+    gains:
+      outer: { kp: 8.0, ki: 1.0, kd: 0.08 }
+      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+    stiffness_deg: 25.0
+    home_position_deg:
+      0: 0.0              # flexion-extension
+
+  ankle_right:
+    gains:
+      outer: { kp: 8.0, ki: 1.0, kd: 0.08 }
+      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+    stiffness_deg: 25.0
+    home_position_deg:
+      0: 0.0              # plantar-dorsal
+      1: 0.0              # inversion-eversion

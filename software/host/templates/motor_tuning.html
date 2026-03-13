@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Alia Motor CAN Tuning</title>
+    <title>Alia Motor Tuning</title>
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
@@ -117,7 +117,7 @@
     </style>
 </head>
 
-<body data-motor-id="{{ motor_id }}" data-output-ratio="{{ output_ratio }}">
+<body data-motor-id="{{ motor_id }}" data-output-ratio="{{ output_ratio }}" data-rs485-motor-id="{{ rs485_motor_id }}">
     <div class="max-w-7xl mx-auto px-4 py-6">
         <header class="panel px-6 py-5 mb-6">
             <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -126,14 +126,16 @@
                         <a href="/" class="text-slate-300 hover:text-white transition-colors">
                             <i class="fas fa-arrow-left"></i>
                         </a>
-                        <h1 class="text-2xl font-bold">Motor CAN Tuning (Read Only)</h1>
+                        <h1 class="text-2xl font-bold">Motor Tuning (CAN + Private RS485)</h1>
                     </div>
-                    <p class="text-slate-300">Public CAN subset for reading runtime state, PID gains, acceleration and encoder-related values from the spare motor.</p>
+                    <p class="text-slate-300">Public CAN reads plus the vendor-private RS485 setting path, exposed in a guarded workflow so we can archive the factory defaults and then test carefully scoped Current PID changes. On this firmware the private <span class="mono">0x15</span> write has already shown persistence across power-cycle.</p>
                 </div>
                 <div class="flex flex-wrap gap-2">
                     <span class="pill mono">Motor ID {{ motor_id }}</span>
                     <span class="pill mono">Output Ratio {{ output_ratio }}</span>
-                    <span class="pill mono">READ ONLY</span>
+                    <span class="pill mono">RS485 ID {{ rs485_motor_id }}</span>
+                    <span class="pill mono">RS485 {{ rs485_baud }}</span>
+                    <span class="pill mono">CURRENT PID WRITE MAY PERSIST</span>
                 </div>
             </div>
         </header>
@@ -187,7 +189,7 @@
                         <input id="outputRatio" class="field mono" type="number" value="{{ output_ratio }}" step="0.1" min="0.1">
                     </div>
                     <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                        This page does not expose RAM/ROM writes. It is limited to documented CAN reads so we can archive the factory defaults before any tuning.
+                        Public CAN remains read-only here. The only write path exposed below is the vendor-private RS485 Current PID write, guarded behind an explicit confirmation and immediate read-back verification. Treat it as persistence-capable on this firmware.
                     </div>
                 </div>
             </section>
@@ -248,8 +250,68 @@
                     <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
                         <div class="font-semibold mb-1">Still unresolved</div>
                         <div class="text-amber-100">
-                            Max Torque Current, Current Ramp and Speed Ramp are known from the RS485 parameter map, but we do not yet have a confirmed public CAN read path for this firmware.
+                            Max Torque Current, Current Ramp and Speed Ramp are not available on the public CAN path of this firmware, but we can now read them through the vendor-private RS485 setting command.
                         </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div class="grid gap-6 lg:grid-cols-3 mt-6">
+            <section class="panel p-5 lg:col-span-2">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Private RS485 Settings</h2>
+                    <span class="text-sm text-slate-400 mono">0x14 / 0x16 read, 0x15 guarded current PID write</span>
+                </div>
+                <div class="grid gap-4 md:grid-cols-4">
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="privatePort">Serial Port</label>
+                        <select id="privatePort" class="field mono"></select>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2" for="privateBaud">Baud</label>
+                        <input id="privateBaud" class="field mono" type="number" value="{{ rs485_baud }}" step="1" min="9600">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-slate-300 mb-2">Motor ID</label>
+                        <div class="field mono bg-slate-950/30">{{ rs485_motor_id }}</div>
+                    </div>
+                    <div class="flex items-end">
+                        <button id="refreshPrivatePortsBtn" class="btn btn-secondary w-full">
+                            <i class="fas fa-rotate mr-2"></i>Refresh Ports
+                        </button>
+                    </div>
+                </div>
+                <div class="grid gap-3 mt-5 md:grid-cols-2">
+                    <button data-private-read="setting" class="btn btn-primary private-read">Read Private Setting (0x14)</button>
+                    <button data-private-read="calib" class="btn btn-secondary private-read">Read Private Calib (0x16)</button>
+                </div>
+                <div class="grid gap-3 mt-3 md:grid-cols-2">
+                    <button id="readFullBaselineBtn" class="btn btn-secondary">Read Full Baseline</button>
+                    <button id="exportBaselineBtn" class="btn btn-success">Export Baseline JSON</button>
+                </div>
+                <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 mt-5">
+                    Use a serial port that is visible to the host and not already open in the vendor tool or another script. The only enabled write path is Current PID via the vendor-private RS485 command family. No separate ROM save is exposed here, but <span class="mono">0x15</span> has been observed to persist across power-cycle on this motor/firmware.
+                </div>
+            </section>
+
+            <section class="panel p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-semibold">Private Snapshot</h2>
+                    <span class="text-sm text-slate-400 mono">last successful 0x14 / 0x16</span>
+                </div>
+                <div class="space-y-3">
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="text-slate-400 text-sm mb-2">Current PID</div>
+                        <pre id="privateCurrentPid" class="mono text-xs">-</pre>
+                    </div>
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="text-slate-400 text-sm mb-2">Limits + Ramps</div>
+                        <pre id="privateLimits" class="mono text-xs">-</pre>
+                    </div>
+                    <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                        <div class="text-slate-400 text-sm mb-2">Calib Blob</div>
+                        <pre id="privateCalib" class="mono text-xs">-</pre>
                     </div>
                 </div>
             </section>
@@ -285,6 +347,83 @@
                 <pre id="resultPanel" class="mono text-xs rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4 min-h-[20rem]">No command sent yet.</pre>
             </section>
         </div>
+
+        <section class="panel p-5 mt-6">
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
+                <div>
+                    <h2 class="text-xl font-semibold">RAM Tuning Draft</h2>
+                    <p class="text-sm text-slate-300 mt-1">
+                        Editable fields prepared from the vendor-private baseline. Only the Current PID block can be applied from this page; every other field remains draft-only for now.
+                    </p>
+                </div>
+                <div class="flex gap-3">
+                    <button id="loadDraftFromLatestBtn" class="btn btn-secondary">Load Draft From Latest Setting</button>
+                    <button id="restoreCurrentPidBtn" class="btn btn-secondary">Restore Current PID From Baseline</button>
+                    <button id="exportDraftBtn" class="btn btn-success">Export Draft JSON</button>
+                </div>
+            </div>
+
+            <div class="grid gap-6 xl:grid-cols-4">
+                <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                    <div class="text-slate-400 text-sm mb-3">Angle PID</div>
+                    <div class="grid gap-3">
+                        <input id="draftAngleKp" class="field mono" type="number" step="1" placeholder="Kp">
+                        <input id="draftAngleKi" class="field mono" type="number" step="1" placeholder="Ki">
+                        <input id="draftAngleKd" class="field mono" type="number" step="1" placeholder="Kd">
+                    </div>
+                </div>
+                <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                    <div class="text-slate-400 text-sm mb-3">Speed PID</div>
+                    <div class="grid gap-3">
+                        <input id="draftSpeedKp" class="field mono" type="number" step="1" placeholder="Kp">
+                        <input id="draftSpeedKi" class="field mono" type="number" step="1" placeholder="Ki">
+                        <input id="draftSpeedKd" class="field mono" type="number" step="1" placeholder="Kd">
+                    </div>
+                </div>
+                <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                    <div class="text-slate-400 text-sm mb-3">Current PID</div>
+                    <div class="grid gap-3">
+                        <input id="draftCurrentKp" class="field mono" type="number" step="1" placeholder="Kp">
+                        <input id="draftCurrentKi" class="field mono" type="number" step="1" placeholder="Ki">
+                        <input id="draftCurrentKd" class="field mono" type="number" step="1" placeholder="Kd">
+                    </div>
+                </div>
+                <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4">
+                    <div class="text-slate-400 text-sm mb-3">Limits + Ramps</div>
+                    <div class="grid gap-3">
+                        <input id="draftMaxTorque" class="field mono" type="number" step="1" placeholder="Max torque current counts">
+                        <input id="draftCurrentRamp" class="field mono" type="number" step="1" placeholder="Current ramp">
+                        <input id="draftSpeedRamp" class="field mono" type="number" step="1" placeholder="Speed ramp">
+                        <input id="draftMaxSpeed" class="field mono" type="number" step="0.1" placeholder="Max speed dps">
+                        <input id="draftMaxAngle" class="field mono" type="number" step="0.1" placeholder="Max angle deg">
+                    </div>
+                </div>
+            </div>
+
+            <div class="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 mt-5">
+                Draft fields are still the safest way to compare values, but Current PID can now be applied through the private <span class="mono">0x15</span> path. On this firmware that write has already been observed to survive a power-cycle, so treat it as persistence-capable and verify against the saved baseline before and after every experiment.
+            </div>
+
+            <div class="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-4 mt-5">
+                <div class="font-semibold mb-3">Current PID Write (0x15)</div>
+                <p class="text-sm text-red-100 mb-3">
+                    This sends the vendor-private <span class="mono">0x15</span> write using the latest <span class="mono">0x14</span> setting blob as base, patching only <span class="mono">currentPidKp/Ki/Kd</span>. A read-back verification follows immediately.
+                </p>
+                <label class="flex items-start gap-3 text-sm text-red-50 mb-4">
+                    <input id="confirmCurrentPidWrite" type="checkbox" class="mt-1">
+                    <span>I understand this writes only the Current PID block via the vendor-private path, and that on this firmware the change has already been observed to persist across power-cycle. I will verify with read-back and restore from the saved baseline if needed.</span>
+                </label>
+                <button id="applyCurrentPidRamBtn" class="btn btn-warn" disabled>Apply Current PID (0x15)</button>
+            </div>
+
+            <div class="rounded-2xl border border-slate-700/70 bg-slate-950/25 p-4 mt-5">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="font-semibold">Draft Summary</h3>
+                    <span class="text-xs text-slate-400 mono">future write payload preview</span>
+                </div>
+                <pre id="draftSummary" class="mono text-xs">-</pre>
+            </div>
+        </section>
     </div>
 
     <script src="{{ url_for('static', filename='js/motor_tuning.js') }}"></script>

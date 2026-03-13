@@ -5,12 +5,12 @@
 
     const SWEEP_PRESETS = [
         {
-            id: "torque-step-plus20",
-            title: "Torque Step +20",
+            id: "torque-step-plus25",
+            title: "Torque Step +25",
             category: "Threshold",
-            summary: "Positive breakaway check near the observed threshold.",
-            note: "Use to confirm the first sustained motion region on CAN.",
-            suggestedLabel: "preset_torque_step_p20",
+            summary: "Positive breakaway check at the practical minimum motion threshold.",
+            note: "Use to confirm the first sustained motion region on CAN without stalling below threshold.",
+            suggestedLabel: "preset_torque_step_p25",
             values: {
                 sweepMode: "torque",
                 sweepProfile: "step",
@@ -18,7 +18,7 @@
                 sweepRate: 50,
                 timeoutValue: 0.1,
                 sweepBias: 0,
-                sweepAmplitude: 20,
+                sweepAmplitude: 25,
                 sweepPreload: 1,
                 sweepFrequency: 1,
                 sweepF0: 0.2,
@@ -31,12 +31,12 @@
             },
         },
         {
-            id: "torque-step-minus20",
-            title: "Torque Step -20",
+            id: "torque-step-minus25",
+            title: "Torque Step -25",
             category: "Threshold",
-            summary: "Negative breakaway check near the observed threshold.",
-            note: "Useful to verify the asymmetry seen during low-torque tests.",
-            suggestedLabel: "preset_torque_step_m20",
+            summary: "Negative breakaway check at the practical minimum motion threshold.",
+            note: "Useful to verify the low-torque asymmetry without using values that usually fail to move.",
+            suggestedLabel: "preset_torque_step_m25",
             values: {
                 sweepMode: "torque",
                 sweepProfile: "step",
@@ -44,7 +44,7 @@
                 sweepRate: 50,
                 timeoutValue: 0.1,
                 sweepBias: 0,
-                sweepAmplitude: -20,
+                sweepAmplitude: -25,
                 sweepPreload: 1,
                 sweepFrequency: 1,
                 sweepF0: 0.2,
@@ -609,7 +609,7 @@
             extraCommands.push("multi");
         }
 
-        const payload = await requestJson("/api/motor_test/sweep", {
+        const response = await fetch("/api/motor_test/sweep", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -632,11 +632,18 @@
                 power_off_at_end: document.getElementById("powerOffAtEnd").checked,
             }),
         });
+        const payload = await response.json();
         renderJson(resultPanel, payload);
         await loadStatus();
         if (payload.csv_name) {
             await loadAnalysis(payload.csv_name);
         }
+        if (!response.ok || payload.status === "error") {
+            const error = new Error(payload.message || `Request failed: ${response.status}`);
+            error.payload = payload;
+            throw error;
+        }
+        return payload;
     }
 
     function bindEvents() {

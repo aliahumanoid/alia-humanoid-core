@@ -12,6 +12,11 @@
   - Values above `WAYPOINT_BUFFER_DEPTH` are clamped (currently 2000)
   - Host UI/API aligned to range `0..2000`
 
+**Changelog v2.1:**
+- **CAN ID 0x01D**: Added SET_IMPEDANCE (variable-frame, 1-4 frames per command)
+- **CAN ID 0x01E**: Added IMPEDANCE_CTRL (disable/enable/watchdog)
+- **CAN ID Table**: Updated reserved range from 0x01D-0x13F to 0x01F-0x13F
+
 **Changelog v2.0:**
 - **Consolidated**: Merged `CAN_CONTROL_PROTOCOL.md` and `jetson-streaming-can.md` into this document
 - **Updated architecture**: Jetson direct CAN path with no Pico dispatcher in the production path
@@ -449,7 +454,86 @@ Byte 6-7:  uint16_t t_offset_ms (offset from batch anchor, 0-65535 ms)
 - For joints with fewer than 3 DOFs, set unused angles to `0x7FFF` (sentinel)
 - Controller skips DOFs with sentinel value
 
-#### 4.2.8 Motor Commands (ID: 0x140-0x1FF) — Motor CAN Bus
+#### 4.2.8 SET_IMPEDANCE (ID: 0x01D) — Variable-Frame Impedance Target
+
+**Purpose**: Send a rolling-waypoint command (`goal + cruise speed + gains`) with 1-4 CAN frames.
+
+See also: [SET_IMPEDANCE_ROLLING_WAYPOINT.md](./SET_IMPEDANCE_ROLLING_WAYPOINT.md)
+
+**Byte 1 encoding**: `[has_more:1][seq:3][dof:4]`
+- bit 7: `has_more` — 1 = more frames follow, 0 = last frame (triggers apply)
+- bits 6-4: sequence number (0, 1, 2, 3)
+- bits 3-0: DOF index
+
+```
+Frame 0 (seq=0, always sent):
+  Byte 0:    uint8_t   joint_id
+  Byte 1:    uint8_t   [has_more:1][0:3][dof:4]
+  Byte 2-3:  int16_t   q_target × 100      (0.01° resolution, ±327°)
+  Byte 4-5:  int16_t   dq_target × 10      (0.1°/s resolution, magnitude of requested cruise speed)
+  Byte 6-7:  int16_t   stiffness × 10      (0.1° resolution)
+
+Frame 1 (seq=1, optional — outer gains):
+  Byte 0:    uint8_t   joint_id
+  Byte 1:    uint8_t   [has_more:1][1:3][dof:4]
+  Byte 2-3:  int16_t   Kp × 100            (0-50)
+  Byte 4-5:  int16_t   Ki × 100            (0-20)
+  Byte 6-7:  int16_t   Kd × 100            (0-20)
+
+Frame 2 (seq=2, optional — inner gains):
+  Byte 0:    uint8_t   joint_id
+  Byte 1:    uint8_t   [has_more:1][2:3][dof:4]
+  Byte 2-3:  int16_t   kp_inner × 100      (0-50)
+  Byte 4-5:  int16_t   ki_inner × 100      (0-20)
+  Byte 6-7:  int16_t   kd_inner × 100      (0-20)
+
+Frame 3 (seq=3, optional — feedforward):
+  Byte 0:    uint8_t   joint_id
+  Byte 1:    uint8_t   [0:1][3:3][dof:4]   (has_more=0 when last)
+  Byte 2-3:  int16_t   tau_ff              (raw feedforward)
+  Byte 4-7:  padding
+```
+
+**Transaction model**:
+- seq=0 opens a new transaction; seq=1/2/3 are only accepted if seq=0 was seen
+- Gains not sent in a transaction retain their last-applied values (per-DOF accumulator)
+- `has_more=0` on the final frame triggers validation and apply
+- Orphan seq=1/2/3 frames (without prior seq=0) are dropped
+- Fast path (200 Hz): 1 frame (seq=0 with has_more=0) — ~0.1 ms
+- Full update: 4 frames with 3 ms inter-frame delay — ~9 ms
+
+**Runtime semantics**:
+- `q_target` = joint goal, not an instantaneous position sample
+- `dq_target` = requested cruise speed magnitude
+- Firmware generates a local linear segment `q_ref, dq_ref` at control-loop rate
+- A new command overwrites the previous segment from the current local reference
+- No waypoint queue is kept in this mode
+- Outer and inner loops both use the existing incremental PID controllers
+
+**Safety guards**: `isSystemReadyForMovement()`, `isAngleInLimits()`, `isAngleInMappingLimits()`
+
+#### 4.2.9 IMPEDANCE_CTRL (ID: 0x01E) — Impedance Mode Control
+
+**Purpose**: Enable/disable impedance mode and configure watchdog.
+
+```
+Byte 0:    uint8_t   joint_id
+Byte 1:    uint8_t   sub_cmd
+             0x00 = disable (all DOFs → MODE_WAYPOINT + HOLDING)
+             0x01 = enable (informational, actual switch on SET_IMPEDANCE)
+             0x02 = set watchdog timeout
+Byte 2-3:  uint16_t  param (e.g. watchdog timeout in ms for sub_cmd=0x02)
+Byte 4-7:  padding
+```
+
+**Disable (0x00)**: Restores the saved outer/inner PID parameters, clears the
+rolling segment, sets hold reference to current encoder position, and invalidates
+the active impedance target.
+
+**Watchdog (0x02)**: Range 10-5000 ms. On timeout, firmware auto-disables impedance,
+clears the rolling segment, and transitions to HOLDING at current position.
+
+#### 4.2.10 Motor Commands (ID: 0x140-0x1FF) — Motor CAN Bus
 
 **Bus**: Motor CAN (MCP2515, CS=GP9) — physically separate from Host CAN
 **Format**: LKM protocol (8 bytes)
@@ -457,7 +541,7 @@ Byte 6-7:  uint16_t t_offset_ms (offset from batch anchor, 0-65535 ms)
 **Direction**: Controller → Motors
 Handled by existing `LKM_Motor` library. Traffic never crosses to the Host CAN bus.
 
-#### 4.2.9 Status Feedback (ID: 0x400-0x4FF)
+#### 4.2.11 Status Feedback (ID: 0x400-0x4FF)
 
 ```cpp
 struct CanStatus_Joint {
@@ -477,6 +561,33 @@ struct CanStatus_Joint {
 #define STATUS_BUFFER_FULL  (1 << 3)
 #define STATUS_SYNCED       (1 << 4)
 ```
+
+`STATUS_HOLDING` means there is no active local motion segment for the selected DOF.
+In `SET_IMPEDANCE` mode this refers to the rolling segment state, not to `valid=false`.
+
+#### 4.2.12 JOINT_STATE Broadcast (ID: 0x4F0+joint)
+
+**Purpose**: Real-time impedance feedback broadcast for the currently active joint.
+
+The controller sends one frame per DOF currently in `MODE_IMPEDANCE`.
+Default rate is 50 Hz, reusing the encoder-stream interval.
+
+```
+Byte 0:    uint8_t   dof_index
+Byte 1-2:  int16_t   q_actual × 100      (0.01° resolution)
+Byte 3-4:  int16_t   dq_actual × 10      (0.1°/s resolution)
+Byte 5:    int8_t    tau_A_div4          (agonist torque command ÷ 4)
+Byte 6:    int8_t    tau_B_div4          (antagonist torque command ÷ 4)
+Byte 7:    uint8_t   status bits
+```
+
+**Status bits**:
+- bit 0: encoder/joint state valid
+- bit 1: holding (`1` = no active local rolling segment for this DOF)
+- bit 2: watchdog warning (`1` once elapsed time exceeds 80% of timeout)
+
+This frame is intended for host-side monitoring and UI feedback. It is not required
+for the local rolling-waypoint controller to function.
 
 ### 4.3 CAN ID Allocation
 
@@ -1333,7 +1444,9 @@ Each joint controller has two physically separate CAN buses:
 | 0x01A | Set Auto-Start on Boot | Host → Ctrl | High |
 | **0x01B** | **Re-anchor Interval** | Host → Ctrl | High |
 | **0x01C** | **WP Telemetry Request** | Host → Ctrl | High |
-| 0x01D-0x13F | Reserved (Future High Priority) | - | - |
+| **0x01D** | **SET_IMPEDANCE (1-4 frames)** | Host → Ctrl | High |
+| **0x01E** | **IMPEDANCE_CTRL (disable/enable/watchdog)** | Host → Ctrl | High |
+| 0x01F-0x13F | Reserved (Future High Priority) | - | - |
 | 0x380-0x393 | Multi-DOF Waypoint Joint 0-19 | Host → Ctrl | Level 3 |
 | 0x400-0x40F | Status/Feedback | Ctrl → Host | Level 4 |
 | 0x410 | Encoder Stream Data | Ctrl → Host | Level 4 |
@@ -1348,6 +1461,7 @@ Each joint controller has two physically separate CAN buses:
 | 0x4B0+joint | Encoder Offsets Response | Ctrl → Host | Level 4 |
 | 0x4C0+joint | Zero Complete Notification | Ctrl → Host | Level 4 |
 | **0x4D0+joint** | **WP Buffer Telemetry** | Ctrl → Host | Level 4 |
+| **0x4F0+joint** | **JOINT_STATE Broadcast** | Ctrl → Host | Level 4 |
 
 ### Motor CAN IDs
 

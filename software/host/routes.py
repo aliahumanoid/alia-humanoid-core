@@ -12,6 +12,11 @@ from typing import Dict, Any, List, Optional
 from serial_manager import SerialManager
 from config import JOINTS, MIN_ANGLES, MAX_ANGLES, COMMANDS
 from motor_can_bench import DEFAULT_MOTOR_ID, DEFAULT_OUTPUT_RATIO, analyze_csv_log
+from motor_rs485_private import (
+    MotorRs485PrivateReader,
+    DEFAULT_RS485_PRIVATE_BAUD,
+    DEFAULT_RS485_PRIVATE_MOTOR_ID,
+)
 from waypoint_types import (
     WaypointBatch, ValidationResult,
     build_batch, validate_batch, deduplicate_batch, batch_to_dicts,
@@ -33,7 +38,30 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-def register_routes(app, serial_manager: SerialManager, can_manager=None, stream_test_service=None):
+# Keep these UI defaults aligned with the safe waypoint controller defaults in
+# firmware `software/firmware/joint_controller/include/JointConfig.h`.
+# They seed the impedance test page with the same Kp/Ki/Kd and stiffness family
+# already validated on the waypoint path.
+IMPEDANCE_UI_DEFAULTS = {
+    "outer_kp": 8.0,
+    "outer_ki": 1.0,
+    "outer_kd": 0.08,
+    "outer_cascade": 1.0,
+    "inner_kp": 10.0,
+    "inner_ki": 1.0,
+    "inner_kd": 0.25,
+    "stiffness": 25.0,
+    "tau_ff": 0,
+    "dq_cruise": 20.0,
+}
+
+def register_routes(
+    app,
+    serial_manager: SerialManager,
+    can_manager=None,
+    stream_test_service=None,
+    motor_private_reader: Optional[MotorRs485PrivateReader] = None,
+):
     """
     Register all Flask routes for the joint controller application.
     
@@ -41,6 +69,9 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
         app: Flask application instance
         serial_manager: SerialManager instance for hardware communication
     """
+
+    if motor_private_reader is None:
+        motor_private_reader = MotorRs485PrivateReader(serial_manager)
 
     def handler_or_error(joint: str):
         handler = serial_manager.get_handler_for_joint(joint)
@@ -63,6 +94,8 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
                 "message": "CAN features not available on this host (python-can missing or disabled)."
             }), 503
         return None
+
+    IMPEDANCE_HOLD_EPS_DEG = 0.10
 
     # Maximum time sync age before waypoints are rejected (ms)
     MAX_SYNC_AGE_MS = 2000.0
@@ -183,6 +216,8 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
             'motor_tuning.html',
             motor_id=DEFAULT_MOTOR_ID,
             output_ratio=DEFAULT_OUTPUT_RATIO,
+            rs485_motor_id=DEFAULT_RS485_PRIVATE_MOTOR_ID,
+            rs485_baud=DEFAULT_RS485_PRIVATE_BAUD,
         )
 
     @app.route('/api/motor_test/status', methods=['GET'])
@@ -248,6 +283,90 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
             return jsonify({"status": "error", "message": str(exc)}), 504
         except Exception as exc:
             current_app.logger.exception("Motor tuning read failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_tuning/private_status', methods=['GET'])
+    def motor_tuning_private_status():
+        try:
+            result = motor_private_reader.get_status()
+        except Exception as exc:
+            current_app.logger.exception("Motor tuning private status failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_tuning/private_read', methods=['POST'])
+    def motor_tuning_private_read():
+        data = request.json or {}
+        action = (data.get("action") or "").strip().lower()
+        port = (data.get("port") or "").strip()
+        timeout_s = float(data.get("timeout_s", 0.5))
+        baud = int(data.get("baud", DEFAULT_RS485_PRIVATE_BAUD))
+
+        if not action:
+            return jsonify({"status": "error", "message": "action is required"}), 400
+        if not port:
+            return jsonify({"status": "error", "message": "port is required"}), 400
+
+        try:
+            result = motor_private_reader.read(
+                action,
+                port=port,
+                motor_id=DEFAULT_RS485_PRIVATE_MOTOR_ID,
+                baud=baud,
+                timeout_s=timeout_s,
+            )
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except TimeoutError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 504
+        except Exception as exc:
+            current_app.logger.exception("Motor tuning private read failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/motor_tuning/private_write_ram', methods=['POST'])
+    def motor_tuning_private_write_ram():
+        data = request.json or {}
+        action = (data.get("action") or "").strip().lower()
+        port = (data.get("port") or "").strip()
+        timeout_s = float(data.get("timeout_s", 0.5))
+        baud = int(data.get("baud", DEFAULT_RS485_PRIVATE_BAUD))
+        confirm_token = (data.get("confirm_token") or "").strip()
+        current_pid = data.get("current_pid") or {}
+        base_raw_hex = data.get("base_raw_hex") or ""
+
+        if action != "current_pid_ram":
+            return jsonify({"status": "error", "message": "unsupported private write action"}), 400
+        if not port:
+            return jsonify({"status": "error", "message": "port is required"}), 400
+        if confirm_token != "WRITE_CURRENT_PID_RAM":
+            return jsonify({"status": "error", "message": "confirmation token missing or invalid"}), 400
+        if not isinstance(current_pid, dict):
+            return jsonify({"status": "error", "message": "current_pid must be an object"}), 400
+        if not base_raw_hex:
+            return jsonify({"status": "error", "message": "base_raw_hex is required"}), 400
+
+        try:
+            result = motor_private_reader.write_current_pid_ram(
+                port=port,
+                motor_id=DEFAULT_RS485_PRIVATE_MOTOR_ID,
+                baud=baud,
+                timeout_s=timeout_s,
+                kp=int(current_pid.get("kp", 0)),
+                ki=int(current_pid.get("ki", 0)),
+                kd=int(current_pid.get("kd", 0)),
+                base_raw_hex=base_raw_hex,
+            )
+        except ValueError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
+        except TimeoutError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 504
+        except Exception as exc:
+            current_app.logger.exception("Motor tuning private RAM write failed")
             return jsonify({"status": "error", "message": str(exc)}), 500
 
         return jsonify({"status": "success", **result})
@@ -2264,38 +2383,117 @@ def register_routes(app, serial_manager: SerialManager, can_manager=None, stream
     @app.route('/api/joints', methods=['GET'])
     def api_joints():
         """Return available joints and their config (for dynamic UI population)."""
-        return jsonify({"status": "success", "joints": JOINTS})
+        joints = {}
+        for joint_name, joint_info in JOINTS.items():
+            enriched = dict(joint_info)
+            dofs = []
+            for dof in joint_info.get("dofs", []):
+                dof_index = int(dof["index"])
+                min_raw = MIN_ANGLES.get(joint_name)
+                max_raw = MAX_ANGLES.get(joint_name)
+                if isinstance(min_raw, dict):
+                    min_angle = min_raw.get(dof_index)
+                else:
+                    min_angle = min_raw
+                if isinstance(max_raw, dict):
+                    max_angle = max_raw.get(dof_index)
+                else:
+                    max_angle = max_raw
+
+                dofs.append({
+                    **dof,
+                    "min_angle": min_angle,
+                    "max_angle": max_angle,
+                })
+            enriched["dofs"] = dofs
+            joints[joint_name] = enriched
+
+        return jsonify({"status": "success", "joints": joints})
 
     @app.route('/impedance_test')
     def impedance_test_page():
         """Serves the impedance control test page."""
-        return render_template('impedance_test.html')
+        return render_template('impedance_test.html', impedance_defaults=IMPEDANCE_UI_DEFAULTS)
 
     @app.route('/api/impedance/target', methods=['POST'])
     def impedance_target():
-        """Send SET_IMPEDANCE command to firmware."""
+        """Send SET_IMPEDANCE rolling-waypoint command to firmware.
+
+        Required: joint_name, dof_index, q_target
+        Optional: dq_target, stiffness, kp, ki, kd, tau_ff, kp_inner, ki_inner, kd_inner
+        Omitted optional params are not sent -> firmware keeps previous values.
+        Semantics:
+        - q_target: local joint goal
+        - dq_target: cruise speed magnitude for the local rolling segment
+        """
         unavailable = can_unavailable_response()
         if unavailable:
             return unavailable
 
         data = request.json or {}
-        required = ["joint_name", "dof_index", "q_target", "kp", "kd"]
+        required = ["joint_name", "dof_index", "q_target"]
         missing = [k for k in required if k not in data]
         if missing:
             return jsonify({"status": "error",
                             "message": f"Missing fields: {', '.join(missing)}"}), 400
 
         try:
-            result = can_manager.send_impedance_target(
-                joint_name=data["joint_name"],
-                dof_index=int(data["dof_index"]),
-                q_target=float(data["q_target"]),
-                dq_target=float(data.get("dq_target", 0.0)),
-                stiffness=float(data.get("stiffness", 0.0)),
-                kp=float(data["kp"]),
-                kd=float(data["kd"]),
-                tau_ff=int(data.get("tau_ff", 0)),
+            joint_name = data["joint_name"]
+            dof_index = int(data["dof_index"])
+            q_target = float(data["q_target"])
+            dq_target = abs(float(data.get("dq_target", 0.0)))
+            stiffness = float(data.get("stiffness", 0.0))
+
+            if dq_target == 0.0:
+                encoder_data = can_manager.get_last_encoder_angles(joint_name)
+                angles = encoder_data.get("angles_deg") if isinstance(encoder_data, dict) else None
+                if not isinstance(encoder_data, dict) or not encoder_data.get("valid") or not isinstance(angles, list):
+                    return jsonify({
+                        "status": "error",
+                        "message": "dq_target=0 requires a valid encoder reading to confirm hold vs move."
+                    }), 409
+                if dof_index < 0 or dof_index >= len(angles) or angles[dof_index] is None:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"No encoder angle available for DOF {dof_index}."
+                    }), 409
+
+                q_current = float(angles[dof_index])
+                distance_deg = abs(q_target - q_current)
+                if distance_deg > IMPEDANCE_HOLD_EPS_DEG:
+                    return jsonify({
+                        "status": "error",
+                        "message": (
+                            f"dq_target=0 only permits hold commands within {IMPEDANCE_HOLD_EPS_DEG:.2f}°. "
+                            f"Current distance is {distance_deg:.2f}°."
+                        ),
+                    }), 400
+
+            # Build kwargs — only include params that are present in the request
+            kwargs = dict(
+                joint_name=joint_name,
+                dof_index=dof_index,
+                q_target=q_target,
+                dq_target=dq_target,
+                stiffness=stiffness,
             )
+            # Optional gain params — pass None if not in request (firmware keeps current)
+            if "kp" in data:
+                kwargs["kp"] = float(data["kp"])
+            if "ki" in data:
+                kwargs["ki"] = float(data["ki"])
+            if "kd" in data:
+                kwargs["kd"] = float(data["kd"])
+            if "tau_ff" in data:
+                kwargs["tau_ff"] = int(data["tau_ff"])
+            if "kp_inner" in data:
+                kwargs["kp_inner"] = float(data["kp_inner"])
+            if "ki_inner" in data:
+                kwargs["ki_inner"] = float(data["ki_inner"])
+            if "kd_inner" in data:
+                kwargs["kd_inner"] = float(data["kd_inner"])
+
+            result = can_manager.send_impedance_target(**kwargs)
         except KeyError as exc:
             return jsonify({"status": "error",
                             "message": f"Unknown joint: {exc}"}), 400

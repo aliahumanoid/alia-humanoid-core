@@ -863,26 +863,89 @@ void wp_reanchor_reset_all();
  */
 enum DofControlMode : uint8_t {
   MODE_WAYPOINT  = 0,  // Default: waypoint interpolation + PID holding
-  MODE_IMPEDANCE = 1   // Jetson sends {q, dq, stiffness, Kp, Kd, tau_ff}
+  MODE_IMPEDANCE = 1   // Jetson sends {q, dq, stiffness, outer/inner Kp/Ki/Kd, tau_ff}
 };
 
 /**
  * @brief Impedance target from Jetson (received via SET_IMPEDANCE CAN command)
  *
- * Received as 2 CAN frames (accumulator pattern on 0x01D).
+ * Received as 1 to 4 CAN frames (accumulator pattern on 0x01D).
  * Written by Core1 CAN handler, read by Core1 control loop.
  * No cross-core access — volatile only on last_update_ms for watchdog.
  */
 struct ImpedanceTarget {
   float q_target_deg;      // Desired joint position (degrees)
-  float dq_target_deg_s;   // Desired velocity for feedforward (deg/s)
+  float dq_target_deg_s;   // Requested cruise speed magnitude (deg/s)
   float stiffness_deg;     // Co-contraction stiffness (degrees)
   float kp;                // Position gain (outer PID Kp)
+  float ki;                // Position integral gain (outer PID Ki)
   float kd;                // Velocity gain (outer PID Kd)
+  float kp_inner;          // Inner PID Kp override (applied to both motors)
+  float ki_inner;          // Inner PID Ki override (applied to both motors)
+  float kd_inner;          // Inner PID Kd override (applied to both motors)
   int16_t tau_ff;          // Feedforward torque (raw motor units)
   uint32_t last_update_ms; // Timestamp of last SET_IMPEDANCE (for watchdog)
   bool valid;              // True after first complete SET_IMPEDANCE received
 };
+
+/**
+ * @brief Rolling local segment generated from the latest SET_IMPEDANCE goal.
+ *
+ * Instead of tracking the raw q_target as an immediate step, the firmware
+ * generates a single overwrite-only local segment. Each new command starts a
+ * new segment from the current q_ref and reaches q_goal at the requested
+ * cruise speed. This mirrors the waypoint interpolator without maintaining a
+ * queue.
+ */
+struct ImpedanceRollingSegment {
+  float q_goal_deg;        // Latest commanded goal
+  float q_start_deg;       // Segment start used for interpolation
+  float q_ref_deg;         // Last evaluated local reference
+  float dq_ref_deg_s;      // Last evaluated local reference speed
+  float speed_abs_deg_s;   // Cruise speed magnitude for this segment
+  uint32_t t_start_ms;     // Segment start time
+  uint32_t t_arrival_ms;   // Segment end time
+  bool active;             // True while q_ref is still moving towards q_goal
+  bool initialized;        // True after first valid segment/hold has been created
+};
+
+/**
+ * @brief Backup of original inner PID gains for restore on impedance mode exit.
+ *
+ * When a DOF enters impedance mode, the original inner PID Kp/Ki/Kd are saved
+ * so they can be restored when the DOF returns to waypoint mode (via disable,
+ * watchdog timeout, waypoint arrival, or E-Stop).
+ */
+struct InnerPidBackup {
+  float kp;
+  float ki;
+  float kd;
+  bool saved;
+};
+
+extern InnerPidBackup inner_pid_backup[MAX_DOFS][2];  // [dof][0=agonist, 1=antagonist]
+
+/**
+ * @brief Backup of outer loop parameters before entering impedance mode.
+ *
+ * SET_IMPEDANCE overrides outer Kp/Ki/Kd/stiffness on the existing waypoint PID.
+ * The original values must be restored when leaving impedance mode so waypoint
+ * tracking retains its tuned behavior.
+ */
+struct OuterLoopBackup {
+  float kp;
+  float ki;
+  float kd;
+  float stiffness_deg;
+  float cascade_influence;
+  bool saved;
+};
+
+extern OuterLoopBackup outer_loop_backup[MAX_DOFS];
+
+// Flag: inner PID needs bumpless reinitialization after impedance parameter override.
+// Set by core1 (restoreInnerPidGains), consumed by waypoint loop.
+extern volatile bool inner_pid_reinit_after_impedance[MAX_DOFS];
 
 // Per-DOF control mode (default: all WAYPOINT)
 extern volatile DofControlMode dof_control_mode[MAX_DOFS];
@@ -890,10 +953,19 @@ extern volatile DofControlMode dof_control_mode[MAX_DOFS];
 // Per-DOF impedance targets (written by CAN handler on Core1)
 extern ImpedanceTarget impedance_target[MAX_DOFS];
 
+// Per-DOF rolling impedance segments (written by CAN handler, evaluated in control loop)
+extern ImpedanceRollingSegment impedance_segment[MAX_DOFS];
+
 // Impedance watchdog timeout (ms). If no SET_IMPEDANCE arrives within this
 // period, the DOF transitions to HOLDING at current position.
 // Configurable via IMPEDANCE_CTRL (0x01E) sub_cmd=0x02.
 extern volatile uint32_t impedance_watchdog_ms;
 
-#endif // MAIN_COMMON_H
+// Rolling-waypoint helper API shared by CAN handling and the control loop.
+void resetImpedanceSegment(uint8_t dof);
+bool evaluateImpedanceSegment(uint8_t dof, uint32_t now_ms, float &q_ref_deg, float &dq_ref_deg_s);
+float getImpedanceHoldReference(uint8_t dof);
+void restoreInnerPidGains(uint8_t dof, JointController *jc);
+void restoreOuterLoopParameters(uint8_t dof, JointController *jc);
 
+#endif // MAIN_COMMON_H

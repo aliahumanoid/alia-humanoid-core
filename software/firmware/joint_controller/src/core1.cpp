@@ -89,7 +89,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
 #define CAN_ID_WP_REANCHOR_INTERVAL 0x01B // Set waypoint re-anchor interval (Host → Controller)
 #define CAN_ID_WP_TELEMETRY_REQUEST 0x01C // Waypoint buffer telemetry request (Host → Controller)
-#define CAN_ID_SET_IMPEDANCE    0x01D     // Impedance target (Host → Controller, 2-frame accumulator)
+#define CAN_ID_SET_IMPEDANCE    0x01D     // Impedance target (Host → Controller, 1-4 frame accumulator)
 #define CAN_ID_IMPEDANCE_CTRL   0x01E     // Impedance control command (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
@@ -125,6 +125,11 @@ static volatile uint32_t sync_local_ms = 0;  // Local millis() at sync
 // Startup safety: require minimum uptime before accepting waypoints
 // This prevents stale messages from executing after reset
 static const uint32_t MIN_UPTIME_FOR_WAYPOINTS_MS = 2000;  // 2 seconds
+static constexpr float IMPEDANCE_HOLD_EPS_DEG = 0.10f;
+static constexpr float IMPEDANCE_MIN_CRUISE_SPEED_DEG_S = 0.10f;
+static constexpr float IMPEDANCE_ABSOLUTE_MAX_JOINT_SPEED_DEG_S = 150.0f;
+static constexpr float IMPEDANCE_MAX_MOTOR_SPEED_DEG_S = 7200.0f;
+static constexpr float IMPEDANCE_MIN_SLOPE_ABS = 1e-3f;
 
 /**
  * @brief Convert host timestamp to local time
@@ -203,6 +208,137 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
  * 
  * @see CAN_SYSTEM_ARCHITECTURE.md section 4.2.4
  */
+/**
+ * @brief Restore inner PID gains from backup when leaving impedance mode.
+ *
+ * Called from: IMPEDANCE_CTRL disable, E-Stop, waypoint arrival, watchdog timeout,
+ * and control-loop safety cleanup in JointController_Waypoint.cpp.
+ * Uses setPid() which calls setTunings() (bumpless — no derivative kick).
+ */
+void restoreInnerPidGains(uint8_t dof, JointController *jc) {
+  if (!jc || !inner_pid_backup[dof][0].saved) return;
+
+  float unused_kp, unused_ki, unused_kd, tau_a, tau_b;
+  // Get current Tau; gains come from the impedance backup.
+  jc->getPid(dof, 1, unused_kp, unused_ki, unused_kd, tau_a);  // agonist
+  jc->getPid(dof, 2, unused_kp, unused_ki, unused_kd, tau_b);  // antagonist
+
+  jc->setPid(dof, 1, inner_pid_backup[dof][0].kp, inner_pid_backup[dof][0].ki,
+             inner_pid_backup[dof][0].kd, tau_a);  // agonist
+  jc->setPid(dof, 2, inner_pid_backup[dof][1].kp, inner_pid_backup[dof][1].ki,
+             inner_pid_backup[dof][1].kd, tau_b);  // antagonist
+
+  inner_pid_backup[dof][0].saved = false;
+  inner_pid_backup[dof][1].saved = false;
+
+  // PID state is stale after direct inner loop — flag for bumpless reinit
+  inner_pid_reinit_after_impedance[dof] = true;
+
+  LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " inner PID restored:"
+              " Kp=" + String(inner_pid_backup[dof][0].kp, 3) +
+              " Ki=" + String(inner_pid_backup[dof][0].ki, 3) +
+              " Kd=" + String(inner_pid_backup[dof][0].kd, 3));
+}
+
+void restoreOuterLoopParameters(uint8_t dof, JointController *jc) {
+  if (!jc || !outer_loop_backup[dof].saved) return;
+
+  const OuterLoopBackup backup = outer_loop_backup[dof];
+  jc->setOuterLoopParameters(dof, backup.kp, backup.ki, backup.kd,
+                             backup.stiffness_deg, backup.cascade_influence);
+  outer_loop_backup[dof].saved = false;
+
+  LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " outer loop restored:"
+              " Kp=" + String(backup.kp, 3) +
+              " Ki=" + String(backup.ki, 3) +
+              " Kd=" + String(backup.kd, 3));
+}
+
+void resetImpedanceSegment(uint8_t dof) {
+  if (dof >= MAX_DOFS) return;
+  impedance_segment[dof] = {};
+}
+
+static float sampleImpedanceReferenceInternal(const ImpedanceRollingSegment &seg, uint32_t now_ms,
+                                              float &dq_ref_deg_s, bool &segment_active) {
+  if (!seg.initialized) {
+    dq_ref_deg_s = 0.0f;
+    segment_active = false;
+    return seg.q_goal_deg;
+  }
+
+  if (!seg.active || seg.t_arrival_ms <= seg.t_start_ms) {
+    dq_ref_deg_s = 0.0f;
+    segment_active = false;
+    return seg.q_goal_deg;
+  }
+
+  if (now_ms >= seg.t_arrival_ms) {
+    dq_ref_deg_s = 0.0f;
+    segment_active = false;
+    return seg.q_goal_deg;
+  }
+
+  const float total_ms = (float)(seg.t_arrival_ms - seg.t_start_ms);
+  float progress = 0.0f;
+  if (total_ms > 0.0f) {
+    progress = (float)(now_ms - seg.t_start_ms) / total_ms;
+    progress = constrain(progress, 0.0f, 1.0f);
+  }
+
+  const float q_ref = seg.q_start_deg + (seg.q_goal_deg - seg.q_start_deg) * progress;
+  const float direction = (seg.q_goal_deg >= seg.q_start_deg) ? 1.0f : -1.0f;
+  dq_ref_deg_s = direction * seg.speed_abs_deg_s;
+  segment_active = true;
+  return q_ref;
+}
+
+bool evaluateImpedanceSegment(uint8_t dof, uint32_t now_ms, float &q_ref_deg, float &dq_ref_deg_s) {
+  if (dof >= MAX_DOFS) {
+    q_ref_deg = 0.0f;
+    dq_ref_deg_s = 0.0f;
+    return false;
+  }
+
+  ImpedanceRollingSegment &seg = impedance_segment[dof];
+  bool segment_active = false;
+  q_ref_deg = sampleImpedanceReferenceInternal(seg, now_ms, dq_ref_deg_s, segment_active);
+  seg.q_ref_deg = q_ref_deg;
+  seg.dq_ref_deg_s = dq_ref_deg_s;
+  seg.active = segment_active;
+  return seg.initialized;
+}
+
+float getImpedanceHoldReference(uint8_t dof) {
+  if (dof >= MAX_DOFS) return 0.0f;
+  const ImpedanceRollingSegment &seg = impedance_segment[dof];
+  if (seg.initialized) {
+    return seg.q_ref_deg;
+  }
+  return impedance_target[dof].q_target_deg;
+}
+
+static float getImpedanceMaxJointSpeedDegS(uint8_t dof, JointController *jc) {
+  if (!jc || dof >= jc->getConfig().dof_count) {
+    return IMPEDANCE_MIN_CRUISE_SPEED_DEG_S;
+  }
+
+  float safe_speed_deg_s = jc->getConfig().dofs[dof].motion.max_speed * RAD_TO_DEG;
+  safe_speed_deg_s = constrain(safe_speed_deg_s, IMPEDANCE_MIN_CRUISE_SPEED_DEG_S,
+                               IMPEDANCE_ABSOLUTE_MAX_JOINT_SPEED_DEG_S);
+
+  DofLinearEquations *eq = jc->getLinearEquations(dof);
+  if (eq && eq->calculated) {
+    const float max_abs_slope = max(fabsf(eq->agonist.slope), fabsf(eq->antagonist.slope));
+    if (max_abs_slope >= IMPEDANCE_MIN_SLOPE_ABS) {
+      const float motor_limited_joint_speed = IMPEDANCE_MAX_MOTOR_SPEED_DEG_S / max_abs_slope;
+      safe_speed_deg_s = min(safe_speed_deg_s, motor_limited_joint_speed);
+    }
+  }
+
+  return max(safe_speed_deg_s, IMPEDANCE_MIN_CRUISE_SPEED_DEG_S);
+}
+
 void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
   // Extract joint_id from CAN ID (0x380 + joint_id)
   uint8_t waypoint_joint_id = id - CAN_ID_MULTI_DOF_WAYPOINT_BASE;
@@ -290,9 +426,13 @@ void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) 
     for (uint8_t d = 0; d < 3 && d < dc; d++) {
       if (raw_angles[d] == MULTI_DOF_UNUSED) continue;
 
-      // If DOF was in IMPEDANCE mode, switch back to WAYPOINT
+      // If DOF was in IMPEDANCE mode, switch back to WAYPOINT and restore inner gains
       if (dof_control_mode[d] == MODE_IMPEDANCE) {
+        restoreInnerPidGains(d, active_joint_controller);
+        restoreOuterLoopParameters(d, active_joint_controller);
         dof_control_mode[d] = MODE_WAYPOINT;
+        impedance_target[d].valid = false;
+        resetImpedanceSegment(d);
         LOG_C1_INFO("[CAN] DOF " + String(d) + " IMPEDANCE → WAYPOINT (waypoint arrival)");
       }
 
@@ -698,7 +838,7 @@ void sendJointStateData() {
     // Status bits
     frame.status = 0;
     if (shared_dof_angles.valid[d]) frame.status |= 0x01;  // bit0: valid
-    if (!impedance_target[d].valid) frame.status |= 0x02;  // bit1: holding (no valid target)
+    if (!impedance_segment[d].active) frame.status |= 0x02;  // bit1: holding (local segment inactive)
     // Watchdog warning: > 80% of timeout elapsed
     if (impedance_target[d].valid) {
       uint32_t elapsed = millis() - impedance_target[d].last_update_ms;
@@ -1280,75 +1420,244 @@ void pollHostCan() {
         CAN_HOST.sendMsgBuf(CAN_ID_WP_TELEMETRY_DATA + ACTIVE_JOINT, 0, 8, frame);
       }
     } else if (rx_id == CAN_ID_SET_IMPEDANCE) {
-      // SET_IMPEDANCE: 2-frame accumulator pattern (like SET_PID_OUTER)
-      // Frame 0 (seq=0): [joint_id, dof|seq<<4, q_hi, q_lo, dq_hi, dq_lo, stiff_hi, stiff_lo]
-      // Frame 1 (seq=1): [joint_id, dof|seq<<4, Kp_hi, Kp_lo, Kd_hi, Kd_lo, tau_ff_hi, tau_ff_lo]
-      // All int16 values use x100 scaling except tau_ff (raw motor units).
-      // seq=1 triggers application: writes to impedance_target[dof] and sets mode.
+      // SET_IMPEDANCE: variable-frame accumulator (1 to 4 frames)
+      //
+      // Byte 1 encoding: [has_more:1][seq:3][dof:4]
+      //   bit 7:   has_more — 1 = more frames follow, 0 = this is the last (trigger)
+      //   bits 6-4: seq number (0, 1, 2, 3)
+      //   bits 3-0: DOF index
+      //
+      // Frame 0 (seq=0): [joint_id, flags, q×100, dq×10, stiff×10]          (always sent)
+      // Frame 1 (seq=1): [joint_id, flags, Kp×100, Ki×100, Kd×100]          (optional)
+      // Frame 2 (seq=2): [joint_id, flags, kp_inner×100, ki_inner×100,
+      //                  kd_inner×100]                                        (optional)
+      // Frame 3 (seq=3): [joint_id, flags, tau_ff, reserved, reserved]      (optional)
+      //
+      // When has_more=0, all accumulated data is validated and applied.
+      // Parameters not sent in this command retain their previous values.
+      // This preserves the 200 Hz fast path (1 frame) with occasional full gain updates.
       if (len >= 8 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
-        uint8_t dof = buf[1] & 0x0F;
-        uint8_t seq = (buf[1] >> 4) & 0x0F;
+        // SAFETY: Reject impedance commands if system not ready (same guard as waypoint path)
+        if (!active_joint_controller->isSystemReadyForMovement()) {
+          LOG_C1_ERROR("[CAN_HOST] SET_IMPEDANCE REJECTED: System not ready");
+          break;
+        }
+
+        uint8_t raw_flags = buf[1];
+        uint8_t dof = raw_flags & 0x0F;
+        uint8_t seq = (raw_flags >> 4) & 0x07;
+        bool has_more = (raw_flags >> 7) & 0x01;
 
         if (dof >= active_joint_controller->getConfig().dof_count) {
           LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE invalid DOF=" + String(dof));
         } else {
-          // Static accumulator for the 2-frame sequence
-          static uint8_t imp_dof = 0;
-          static int16_t imp_q = 0, imp_dq = 0, imp_stiff = 0;
+          // Per-DOF accumulator with staging buffer.
+          // Committed gains persist across commands (gains not re-sent keep values).
+          // Staging buffer isolates in-flight transactions: seq=1/2/3 only modify
+          // staging, and only a successful commit copies staging → committed.
+          // This prevents interrupted transactions from leaving latent gains.
+          struct ImpAccum {
+            // Committed state — last successfully applied gains
+            int16_t kp_x100 = 800, ki_x100 = 100, kd_x100 = 8, tau_ff = 0;
+            int16_t kp_inner_x100 = 1000, ki_inner_x100 = 100, kd_inner_x100 = 25;
+            // Staging — current transaction (discarded if not committed)
+            int16_t stg_q = 0, stg_dq = 0, stg_stiff = 0;
+            int16_t stg_kp_x100 = 800, stg_ki_x100 = 100, stg_kd_x100 = 8, stg_tau_ff = 0;
+            int16_t stg_kp_inner_x100 = 1000, stg_ki_inner_x100 = 100, stg_kd_inner_x100 = 25;
+            bool committed_initialized = false;
+            bool seen_seq0 = false;
+          };
+          static ImpAccum imp_acc[MAX_DOFS];
 
-          if (seq == 0) {
-            imp_dof = dof;
-            memcpy(&imp_q, &buf[2], sizeof(int16_t));
-            memcpy(&imp_dq, &buf[4], sizeof(int16_t));
-            memcpy(&imp_stiff, &buf[6], sizeof(int16_t));
-          } else if (seq == 1) {
-            int16_t imp_kp_x100, imp_kd_x100, imp_tau_ff;
-            memcpy(&imp_kp_x100, &buf[2], sizeof(int16_t));
-            memcpy(&imp_kd_x100, &buf[4], sizeof(int16_t));
-            memcpy(&imp_tau_ff, &buf[6], sizeof(int16_t));
+          ImpAccum &acc = imp_acc[dof];
+          auto seedCommittedGainsFromController = [&]() {
+            if (acc.committed_initialized) return;
 
-            // Validate and clamp parameters
-            float q_deg = (float)imp_q / 100.0f;
-            float dq_deg_s = (float)imp_dq / 100.0f;
-            float stiff_deg = (float)imp_stiff / 100.0f;
-            float kp = (float)imp_kp_x100 / 100.0f;
-            float kd = (float)imp_kd_x100 / 100.0f;
-
-            // Clamp Kp, Kd to safe ranges
-            if (kp < 0.0f) kp = 0.0f;
-            if (kp > 50.0f) kp = 50.0f;
-            if (kd < 0.0f) kd = 0.0f;
-            if (kd > 20.0f) kd = 20.0f;
-            if (stiff_deg < 0.0f) stiff_deg = 0.0f;
-
-            // Validate q_target against angle limits
-            if (!active_joint_controller->isAngleInLimits(imp_dof, q_deg)) {
-              LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(imp_dof) +
-                          " q_target=" + String(q_deg, 2) + " outside limits, clamped");
-              // Clamp to safe range (let the existing safety system handle it)
+            float outer_kp, outer_ki, outer_kd, outer_stiff, outer_influence;
+            if (active_joint_controller->getOuterLoopParameters(dof, outer_kp, outer_ki, outer_kd,
+                                                                outer_stiff, outer_influence)) {
+              acc.kp_x100 = (int16_t)lroundf(outer_kp * 100.0f);
+              acc.ki_x100 = (int16_t)lroundf(outer_ki * 100.0f);
+              acc.kd_x100 = (int16_t)lroundf(outer_kd * 100.0f);
             }
 
+            float inner_kp, inner_ki, inner_kd, inner_tau;
+            if (active_joint_controller->getPid(dof, 1, inner_kp, inner_ki, inner_kd, inner_tau)) {
+              acc.kp_inner_x100 = (int16_t)lroundf(inner_kp * 100.0f);
+              acc.ki_inner_x100 = (int16_t)lroundf(inner_ki * 100.0f);
+              acc.kd_inner_x100 = (int16_t)lroundf(inner_kd * 100.0f);
+            }
+
+            acc.committed_initialized = true;
+          };
+
+          if (seq == 0) {
+            seedCommittedGainsFromController();
+            // seq=0 opens a new transaction.
+            // Initialize staging from committed gains so gains not re-sent
+            // in this transaction use the last-applied values.
+            acc.seen_seq0 = true;
+            acc.stg_kp_x100 = acc.kp_x100;
+            acc.stg_ki_x100 = acc.ki_x100;
+            acc.stg_kd_x100 = acc.kd_x100;
+            acc.stg_tau_ff = acc.tau_ff;
+            acc.stg_kp_inner_x100 = acc.kp_inner_x100;
+            acc.stg_ki_inner_x100 = acc.ki_inner_x100;
+            acc.stg_kd_inner_x100 = acc.kd_inner_x100;
+            // Store position/velocity data in staging
+            memcpy(&acc.stg_q, &buf[2], sizeof(int16_t));
+            memcpy(&acc.stg_dq, &buf[4], sizeof(int16_t));
+            memcpy(&acc.stg_stiff, &buf[6], sizeof(int16_t));
+          } else if (seq == 1 && acc.seen_seq0) {
+            // seq=1 updates staging outer gains (only within an open transaction)
+            memcpy(&acc.stg_kp_x100, &buf[2], sizeof(int16_t));
+            memcpy(&acc.stg_ki_x100, &buf[4], sizeof(int16_t));
+            memcpy(&acc.stg_kd_x100, &buf[6], sizeof(int16_t));
+          } else if (seq == 2 && acc.seen_seq0) {
+            // seq=2 updates staging inner gains (only within an open transaction)
+            memcpy(&acc.stg_kp_inner_x100, &buf[2], sizeof(int16_t));
+            memcpy(&acc.stg_ki_inner_x100, &buf[4], sizeof(int16_t));
+            memcpy(&acc.stg_kd_inner_x100, &buf[6], sizeof(int16_t));
+          } else if (seq == 3 && acc.seen_seq0) {
+            // seq=3 updates staging feedforward term (only within an open transaction)
+            memcpy(&acc.stg_tau_ff, &buf[2], sizeof(int16_t));
+          } else if (seq > 0) {
+            // Orphan seq=1/2/3 without prior seq=0 — drop
+            LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                        " orphan seq=" + String(seq) + " dropped (no seq=0)");
+            break;
+          }
+
+          // Apply when this is the last frame (has_more == false)
+          if (!has_more && !acc.seen_seq0) {
+            LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                        " dropped: no seq=0 in this transaction");
+          } else if (!has_more) {
+            // Convert and validate staged parameters before committing.
+            float q_deg = (float)acc.stg_q / 100.0f;
+            float dq_abs_cmd_deg_s = fabsf((float)acc.stg_dq / 10.0f);
+            float stiff_deg = constrain((float)acc.stg_stiff / 10.0f, 0.0f, 3276.0f);
+            float kp = constrain((float)acc.stg_kp_x100 / 100.0f, 0.0f, 50.0f);
+            float ki = constrain((float)acc.stg_ki_x100 / 100.0f, 0.0f, 20.0f);
+            float kd = constrain((float)acc.stg_kd_x100 / 100.0f, 0.0f, 20.0f);
+            float kp_inner = constrain((float)acc.stg_kp_inner_x100 / 100.0f, 0.0f, 50.0f);
+            float ki_inner = constrain((float)acc.stg_ki_inner_x100 / 100.0f, 0.0f, 20.0f);
+            float kd_inner = constrain((float)acc.stg_kd_inner_x100 / 100.0f, 0.0f, 20.0f);
+
+            // Validate and clamp q_target against mapping-safe range
+            // (same check as waypoint path — physical + mapping limits)
+            if (!active_joint_controller->isAngleInLimits(dof, q_deg) ||
+                !active_joint_controller->isAngleInMappingLimits(dof, q_deg)) {
+              DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
+              if (eq && eq->limits_valid) {
+                float old_q = q_deg;
+                q_deg = constrain(q_deg, eq->joint_safe_min, eq->joint_safe_max);
+                LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                            " q=" + String(old_q, 2) + "° clamped to safe [" +
+                            String(eq->joint_safe_min, 1) + "," +
+                            String(eq->joint_safe_max, 1) + "] → " + String(q_deg, 2) + "°");
+              } else {
+                LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                            " q=" + String(q_deg, 2) + "° outside limits (no eq for clamp)");
+              }
+            }
+
+            const uint32_t now_ms = millis();
+            float q_ref_now = q_deg;
+            float dq_ref_now = 0.0f;
+            if (impedance_segment[dof].initialized) {
+              evaluateImpedanceSegment(dof, now_ms, q_ref_now, dq_ref_now);
+            } else {
+              bool enc_valid = false;
+              float q_now = active_joint_controller->getCurrentAngle(dof, enc_valid);
+              if (enc_valid) {
+                q_ref_now = q_now;
+              } else if (impedance_target[dof].valid) {
+                q_ref_now = getImpedanceHoldReference(dof);
+              }
+            }
+
+            const float distance_deg = fabsf(q_deg - q_ref_now);
+            if (distance_deg > IMPEDANCE_HOLD_EPS_DEG &&
+                dq_abs_cmd_deg_s < IMPEDANCE_MIN_CRUISE_SPEED_DEG_S) {
+              acc.seen_seq0 = false;
+              LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                          " rejected: dq=0 with distant goal (" +
+                          String(distance_deg, 2) + "° > " +
+                          String(IMPEDANCE_HOLD_EPS_DEG, 2) + "°)");
+              break;
+            }
+
+            const float dq_max_safe_deg_s = getImpedanceMaxJointSpeedDegS(dof, active_joint_controller);
+            const float v_eff_deg_s = (distance_deg > IMPEDANCE_HOLD_EPS_DEG)
+                ? constrain(dq_abs_cmd_deg_s, IMPEDANCE_MIN_CRUISE_SPEED_DEG_S, dq_max_safe_deg_s)
+                : 0.0f;
+
+            // Commit staged gains only after the command has been accepted.
+            acc.kp_x100 = acc.stg_kp_x100;
+            acc.ki_x100 = acc.stg_ki_x100;
+            acc.kd_x100 = acc.stg_kd_x100;
+            acc.tau_ff = acc.stg_tau_ff;
+            acc.kp_inner_x100 = acc.stg_kp_inner_x100;
+            acc.ki_inner_x100 = acc.stg_ki_inner_x100;
+            acc.kd_inner_x100 = acc.stg_kd_inner_x100;
+            acc.seen_seq0 = false;  // Close transaction
+
             // Apply to impedance target
-            impedance_target[imp_dof].q_target_deg = q_deg;
-            impedance_target[imp_dof].dq_target_deg_s = dq_deg_s;
-            impedance_target[imp_dof].stiffness_deg = stiff_deg;
-            impedance_target[imp_dof].kp = kp;
-            impedance_target[imp_dof].kd = kd;
-            impedance_target[imp_dof].tau_ff = imp_tau_ff;
-            impedance_target[imp_dof].last_update_ms = millis();
-            impedance_target[imp_dof].valid = true;
+            impedance_target[dof].q_target_deg = q_deg;
+            impedance_target[dof].dq_target_deg_s = v_eff_deg_s;
+            impedance_target[dof].stiffness_deg = stiff_deg;
+            impedance_target[dof].kp = kp;
+            impedance_target[dof].ki = ki;
+            impedance_target[dof].kd = kd;
+            impedance_target[dof].kp_inner = kp_inner;
+            impedance_target[dof].ki_inner = ki_inner;
+            impedance_target[dof].kd_inner = kd_inner;
+            impedance_target[dof].tau_ff = acc.tau_ff;
+            impedance_target[dof].last_update_ms = now_ms;
+            impedance_target[dof].valid = true;
+
+            // Overwrite-only local segment: start from the current q_ref and
+            // let the existing waypoint PID chase a linearly moving reference.
+            ImpedanceRollingSegment &seg = impedance_segment[dof];
+            seg.q_goal_deg = q_deg;
+            seg.q_start_deg = q_ref_now;
+            seg.q_ref_deg = (distance_deg > IMPEDANCE_HOLD_EPS_DEG) ? q_ref_now : q_deg;
+            seg.dq_ref_deg_s = 0.0f;
+            seg.speed_abs_deg_s = v_eff_deg_s;
+            seg.t_start_ms = now_ms;
+            seg.t_arrival_ms = now_ms;
+            seg.active = false;
+            seg.initialized = true;
+
+            if (distance_deg > IMPEDANCE_HOLD_EPS_DEG) {
+              const uint32_t duration_ms = max<uint32_t>(
+                  1u, (uint32_t)lroundf((distance_deg / v_eff_deg_s) * 1000.0f));
+              seg.t_arrival_ms = now_ms + duration_ms;
+              seg.active = true;
+              seg.dq_ref_deg_s = ((q_deg >= q_ref_now) ? 1.0f : -1.0f) * v_eff_deg_s;
+            }
+
+            // Drop any queued waypoint intent when impedance takes ownership.
+            waypoint_buffer_clear(dof);
+            waypoint_buffer_set_state(dof, seg.active ? WaypointState::MOVING : WaypointState::HOLDING);
 
             // Switch DOF to impedance mode
-            dof_control_mode[imp_dof] = MODE_IMPEDANCE;
+            dof_control_mode[dof] = MODE_IMPEDANCE;
 
             // Throttled logging (every 50th command)
             static uint16_t imp_log_counter = 0;
-            imp_log_counter++;
-            if (imp_log_counter >= 50) {
-              LOG_C1_INFO("[CAN_HOST] SET_IMPEDANCE DOF" + String(imp_dof) +
-                          " q=" + String(q_deg, 2) + " dq=" + String(dq_deg_s, 1) +
-                          " stiff=" + String(stiff_deg, 1) + " Kp=" + String(kp, 2) +
-                          " Kd=" + String(kd, 2) + " tau_ff=" + String(imp_tau_ff));
+            if (++imp_log_counter >= 50) {
+              LOG_C1_INFO("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                          " start=" + String(q_ref_now, 2) +
+                          " goal=" + String(q_deg, 2) +
+                          " v=" + String(v_eff_deg_s, 1) +
+                          " Kp=" + String(kp, 2) + " Ki=" + String(ki, 2) +
+                          " Kd=" + String(kd, 2) +
+                          " Kpi=" + String(kp_inner, 2) + " Kii=" + String(ki_inner, 2) +
+                          " Kdi=" + String(kd_inner, 2) +
+                          " ff=" + String(acc.tau_ff) +
+                          (seg.active ? " [segment]" : " [hold]"));
               imp_log_counter = 0;
             }
           }
@@ -1362,10 +1671,23 @@ void pollHostCan() {
         uint8_t sub_cmd = buf[1];
         switch (sub_cmd) {
           case 0x00: {
-            // Disable impedance mode on all DOFs → HOLDING
+            // Disable impedance mode on all DOFs → HOLDING, restore inner PID
             for (uint8_t d = 0; d < active_joint_controller->getConfig().dof_count; d++) {
               if (dof_control_mode[d] == MODE_IMPEDANCE) {
+                restoreInnerPidGains(d, active_joint_controller);
+                restoreOuterLoopParameters(d, active_joint_controller);
                 dof_control_mode[d] = MODE_WAYPOINT;
+                impedance_target[d].valid = false;
+
+                // Clear pending waypoints and set hold reference to current position.
+                // Fallback to last impedance target if encoder is momentarily invalid
+                // (avoids collapsing hold reference to 0°).
+                waypoint_buffer_clear(d);
+                bool enc_valid = false;
+                float q_now = active_joint_controller->getCurrentAngle(d, enc_valid);
+                float q_hold = enc_valid ? q_now : getImpedanceHoldReference(d);
+                resetImpedanceSegment(d);
+                waypoint_buffer_set_prev(d, q_hold, millis());
                 waypoint_buffer_set_state(d, WaypointState::HOLDING);
               }
             }
@@ -1463,12 +1785,15 @@ void core1_loop() {
         active_joint_controller->stopAllMotors();
         LOG_C1_INFO("Core1: All motors stopped");
         
-        // Clear all waypoint buffers and reset impedance mode
+        // Clear all waypoint buffers, reset impedance mode, restore inner PID
         for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
           waypoint_buffer_clear(dof);
           waypoint_buffer_set_state(dof, WaypointState::IDLE);
+          restoreInnerPidGains(dof, active_joint_controller);
+          restoreOuterLoopParameters(dof, active_joint_controller);
           dof_control_mode[dof] = MODE_WAYPOINT;
           impedance_target[dof].valid = false;
+          resetImpedanceSegment(dof);
         }
         LOG_C1_INFO("Core1: Waypoint buffers cleared, impedance mode reset");
       }

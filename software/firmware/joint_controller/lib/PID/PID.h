@@ -180,6 +180,22 @@ public:
   }
 
   /**
+   * @brief Get upper output saturation limit
+   * @return Current umax value
+   */
+  float getUmax() const {
+    return umax;
+  }
+
+  /**
+   * @brief Get lower output saturation limit
+   * @return Current umin value
+   */
+  float getUmin() const {
+    return umin;
+  }
+
+  /**
    * @brief Update derivative filter time constant (bumpless)
    *
    * Changes tau without resetting internal state, allowing smooth

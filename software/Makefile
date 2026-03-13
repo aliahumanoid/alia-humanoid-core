@@ -22,6 +22,7 @@ help:
 	@echo "Targets:"
 	@echo "  make run MODE=host                 # run Python host app"
 	@echo "  make host-venv|host-install|host-run|host-sanity"
+	@echo "  make jetson-install|jetson-run      # Jetson real-time controller"
 	@echo "  make run MODE=firmware-controller  ENV=pico2|pico2_debug"
 	@echo "  make fw-build-controller"
 	@echo "  make fw-monitor-controller [PORT=/dev/tty*]"
@@ -49,6 +50,14 @@ joint-config:
 $(JOINT_CONFIG_JSON): $(CONFIG_PRESETS_H)
 	@echo "Config file out of date, regenerating..."
 	@$(MAKE) joint-config
+
+# ---------------- Jetson Controller ----------------
+.PHONY: jetson-install
+jetson-install: host-install
+
+.PHONY: jetson-run
+jetson-run: jetson-install
+	cd "$(HOST_DIR)" && "$(HOST_PY)" -m jetson_controller -v
 
 # ---------------- Host (Python) ----------------
 HOST_PY := $(HOST_DIR)/.venv/bin/python

@@ -7,7 +7,7 @@ import routes
 from motor_can_bench import DEFAULT_MOTOR_ID, DEFAULT_OUTPUT_RATIO
 
 
-def build_client(mock_can_manager=None, mock_serial_manager=None):
+def build_client(mock_can_manager=None, mock_serial_manager=None, mock_private_reader=None):
     app = Flask(
         __name__,
         template_folder=str(Path(__file__).resolve().parent.parent / "templates"),
@@ -18,12 +18,20 @@ def build_client(mock_can_manager=None, mock_serial_manager=None):
         mock_can_manager = MagicMock()
     if mock_serial_manager is None:
         mock_serial_manager = MagicMock()
-    routes.register_routes(app, mock_serial_manager, mock_can_manager)
-    return app.test_client(), mock_can_manager
+    if mock_private_reader is None:
+        mock_private_reader = MagicMock()
+        mock_private_reader.get_status.return_value = {
+            "available_ports": ["/dev/tty.usbserial-test"],
+            "motor_id": 1,
+            "baud": 115200,
+            "recent": {"setting": None, "calib": None},
+        }
+    routes.register_routes(app, mock_serial_manager, mock_can_manager, motor_private_reader=mock_private_reader)
+    return app.test_client(), mock_can_manager, mock_private_reader
 
 
 def test_motor_test_page_renders():
-    client, _ = build_client()
+    client, _, _ = build_client()
 
     response = client.get("/motor_test")
 
@@ -34,18 +42,68 @@ def test_motor_test_page_renders():
 
 
 def test_motor_tuning_page_renders():
-    client, _ = build_client()
+    client, _, _ = build_client()
 
     response = client.get("/motor_tuning")
 
     assert response.status_code == 200
-    assert b"Motor CAN Tuning" in response.data
-    assert b"READ ONLY" in response.data
+    assert b"Motor Tuning" in response.data
+    assert b"CURRENT PID WRITE MAY PERSIST" in response.data
     assert b"Read PID (0x30)" in response.data
+    assert b"Read Private Setting (0x14)" in response.data
+    assert b"Read Full Baseline" in response.data
+    assert b"Export Baseline JSON" in response.data
+    assert b"RAM Tuning Draft" in response.data
+    assert b"Load Draft From Latest Setting" in response.data
+    assert b"Restore Current PID From Baseline" in response.data
+    assert b"Export Draft JSON" in response.data
+    assert b"Apply Current PID (0x15)" in response.data
+
+
+def test_impedance_test_page_renders():
+    client, _, _ = build_client()
+
+    response = client.get("/impedance_test")
+
+    assert response.status_code == 200
+    assert b"rolling waypoint test bench" in response.data
+    assert b"Stream (50 Hz)" in response.data
+    assert b"goal + cruise speed" in response.data
+    assert b"Suggested sequence" in response.data
+    assert b"Init Gains + Hold" in response.data
+    assert b"Waypoint Defaults" in response.data
+    assert b"waypoint-safe defaults" in response.data
+    assert b"Current Safe Range" in response.data
+    assert b"Current q_act" in response.data
+    assert b"Read Current PID" in response.data
+    assert b"Load PID from Flash" in response.data
+    assert b"Save PID &amp; Cascade to Flash" in response.data or b"Save PID & Cascade to Flash" in response.data
+    assert b"Cascade influence (0-1)" in response.data
+    assert b"Ki inner (motor integral)" in response.data
+    assert b"Inner Agonist" in response.data
+    assert b"Inner Antagonist" in response.data
+    assert b"Inner Firmware Readback Preview" in response.data
+    assert b"SLIDERS" in response.data
+    assert b"Tau=" in response.data
+    assert b"MATCH" in response.data
+
+
+def test_api_joints_includes_dof_limits():
+    client, _, _ = build_client()
+
+    response = client.get("/api/joints")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "success"
+    knee_right = payload["joints"]["KNEE_RIGHT"]
+    dof0 = knee_right["dofs"][0]
+    assert dof0["min_angle"] == -2.0
+    assert dof0["max_angle"] == 112.0
 
 
 def test_motor_test_status_returns_payload():
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     mock_can_manager.get_motor_test_status.return_value = {
         "connected": True,
         "config": {"interface": "serial", "channel": "/dev/tty"},
@@ -64,8 +122,101 @@ def test_motor_test_status_returns_payload():
     )
 
 
+def test_impedance_target_rejects_zero_speed_for_distant_goal():
+    client, mock_can_manager, _ = build_client()
+    mock_can_manager.get_last_encoder_angles.return_value = {
+        "valid": True,
+        "angles_deg": [0.0, None, None],
+    }
+
+    response = client.post(
+        "/api/impedance/target",
+        json={
+            "joint_name": "KNEE_RIGHT",
+            "dof_index": 0,
+            "q_target": 5.0,
+            "dq_target": 0.0,
+            "stiffness": 2.0,
+        },
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["status"] == "error"
+    assert "dq_target=0" in payload["message"]
+    mock_can_manager.send_impedance_target.assert_not_called()
+
+
+def test_impedance_target_rejects_zero_speed_without_encoder_data():
+    client, mock_can_manager, _ = build_client()
+    mock_can_manager.get_last_encoder_angles.return_value = {
+        "valid": False,
+        "message": "No encoder data",
+    }
+
+    response = client.post(
+        "/api/impedance/target",
+        json={
+            "joint_name": "KNEE_RIGHT",
+            "dof_index": 0,
+            "q_target": 0.0,
+            "dq_target": 0.0,
+            "stiffness": 0.0,
+        },
+    )
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload["status"] == "error"
+    assert "valid encoder reading" in payload["message"]
+    mock_can_manager.send_impedance_target.assert_not_called()
+
+
+def test_impedance_target_accepts_hold_and_normalizes_speed_magnitude():
+    client, mock_can_manager, _ = build_client()
+    mock_can_manager.get_last_encoder_angles.return_value = {
+        "valid": True,
+        "angles_deg": [5.04, None, None],
+    }
+    mock_can_manager.send_impedance_target.return_value = {"success": True}
+
+    response = client.post(
+        "/api/impedance/target",
+        json={
+            "joint_name": "KNEE_RIGHT",
+            "dof_index": 0,
+            "q_target": 5.0,
+            "dq_target": -12.5,
+            "stiffness": 3.0,
+            "kp": 8.0,
+            "ki": 1.0,
+            "kd": 0.08,
+            "kp_inner": 10.0,
+            "ki_inner": 1.0,
+            "kd_inner": 0.25,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "success"
+    mock_can_manager.send_impedance_target.assert_called_once_with(
+        joint_name="KNEE_RIGHT",
+        dof_index=0,
+        q_target=5.0,
+        dq_target=12.5,
+        stiffness=3.0,
+        kp=8.0,
+        ki=1.0,
+        kd=0.08,
+        kp_inner=10.0,
+        ki_inner=1.0,
+        kd_inner=0.25,
+    )
+
+
 def test_motor_tuning_status_returns_payload():
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     mock_can_manager.get_motor_tuning_status.return_value = {
         "connected": True,
         "config": {"interface": "serial", "channel": "/dev/tty"},
@@ -85,7 +236,7 @@ def test_motor_tuning_status_returns_payload():
 
 
 def test_motor_tuning_read_uses_fixed_motor_id():
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     mock_can_manager.motor_tuning_read.return_value = {
         "action": "pid",
         "motor_id": DEFAULT_MOTOR_ID,
@@ -108,8 +259,39 @@ def test_motor_tuning_read_uses_fixed_motor_id():
     )
 
 
+def test_motor_test_sweep_preserves_error_payload_and_csv_name():
+    client, mock_can_manager, _ = build_client()
+    mock_can_manager.motor_test_run_sweep.return_value = {
+        "status": "error",
+        "message": "Timeout waiting for motor_id=1 cmd=0xA1",
+        "csv_name": "partial_abort.csv",
+        "csv_path": "/tmp/partial_abort.csv",
+        "samples": 17,
+        "aborted_reason": "Timeout waiting for motor_id=1 cmd=0xA1",
+        "safe_stop": {"warning": "Cleanup fallback used after exception"},
+    }
+
+    response = client.post(
+        "/api/motor_test/sweep",
+        json={
+            "mode": "torque",
+            "profile": "chirp",
+            "duration_s": 12.0,
+            "rate_hz": 100.0,
+            "timeout_s": 0.05,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "error"
+    assert payload["csv_name"] == "partial_abort.csv"
+    assert payload["aborted_reason"] == "Timeout waiting for motor_id=1 cmd=0xA1"
+    assert payload["safe_stop"]["warning"] == "Cleanup fallback used after exception"
+
+
 def test_motor_test_action_uses_fixed_motor_id():
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     mock_can_manager.motor_test_command.return_value = {
         "action": "torque",
         "motor_id": DEFAULT_MOTOR_ID,
@@ -134,7 +316,7 @@ def test_motor_test_action_uses_fixed_motor_id():
 
 
 def test_motor_test_sweep_forwards_json_parameters():
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     mock_can_manager.motor_test_run_sweep.return_value = {
         "status": "success",
         "samples": 150,
@@ -190,7 +372,7 @@ def test_motor_test_sweep_forwards_json_parameters():
 
 
 def test_motor_test_logs_returns_entries():
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     mock_can_manager.list_motor_test_logs.return_value = [
         {"name": "bench.csv", "size_bytes": 1024, "modified_ts": 123.0}
     ]
@@ -205,7 +387,7 @@ def test_motor_test_logs_returns_entries():
 
 
 def test_motor_test_log_analysis_returns_payload(tmp_path):
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     log_file = log_dir / "bench.csv"
@@ -228,7 +410,7 @@ def test_motor_test_log_analysis_returns_payload(tmp_path):
 
 
 def test_motor_test_log_delete_removes_file(tmp_path):
-    client, mock_can_manager = build_client()
+    client, mock_can_manager, _ = build_client()
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     log_file = log_dir / "delete_me.csv"
@@ -241,3 +423,84 @@ def test_motor_test_log_delete_removes_file(tmp_path):
     payload = response.get_json()
     assert payload["status"] == "success"
     assert not log_file.exists()
+
+
+def test_motor_tuning_private_status_returns_payload():
+    client, _, mock_private_reader = build_client()
+    mock_private_reader.get_status.return_value = {
+        "available_ports": ["/dev/tty.usbserial-42"],
+        "motor_id": 1,
+        "baud": 115200,
+        "recent": {"setting": {"decoded": {"_summary": {"current_ramp": 0}}}, "calib": None},
+    }
+
+    response = client.get("/api/motor_tuning/private_status")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "success"
+    assert payload["available_ports"] == ["/dev/tty.usbserial-42"]
+    mock_private_reader.get_status.assert_called_once_with()
+
+
+def test_motor_tuning_private_read_uses_fixed_motor_id():
+    client, _, mock_private_reader = build_client()
+    mock_private_reader.read.return_value = {
+        "action": "read_setting_private",
+        "motor_id": DEFAULT_MOTOR_ID,
+        "port": "/dev/tty.usbserial-42",
+        "decoded": {"_summary": {"max_torque_current_counts": 1000}},
+    }
+
+    response = client.post(
+        "/api/motor_tuning/private_read",
+        json={"action": "setting", "port": "/dev/tty.usbserial-42", "timeout_s": 0.75, "baud": 115200},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "success"
+    mock_private_reader.read.assert_called_once_with(
+        "setting",
+        port="/dev/tty.usbserial-42",
+        motor_id=DEFAULT_MOTOR_ID,
+        baud=115200,
+        timeout_s=0.75,
+    )
+
+
+def test_motor_tuning_private_write_ram_uses_fixed_motor_id():
+    client, _, mock_private_reader = build_client()
+    mock_private_reader.write_current_pid_ram.return_value = {
+        "action": "write_setting_private_current_pid_ram",
+        "motor_id": DEFAULT_MOTOR_ID,
+        "requested_current_pid": {"kp": 60, "ki": 60, "kd": 0},
+        "applied": True,
+    }
+
+    response = client.post(
+        "/api/motor_tuning/private_write_ram",
+        json={
+            "action": "current_pid_ram",
+            "port": "/dev/tty.usbserial-42",
+            "timeout_s": 0.75,
+            "baud": 115200,
+            "confirm_token": "WRITE_CURRENT_PID_RAM",
+            "base_raw_hex": "00 01 02 03",
+            "current_pid": {"kp": 60, "ki": 60, "kd": 0},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "success"
+    mock_private_reader.write_current_pid_ram.assert_called_once_with(
+        port="/dev/tty.usbserial-42",
+        motor_id=DEFAULT_MOTOR_ID,
+        baud=115200,
+        timeout_s=0.75,
+        kp=60,
+        ki=60,
+        kd=0,
+        base_raw_hex="00 01 02 03",
+    )

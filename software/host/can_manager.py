@@ -146,6 +146,10 @@ class CanManager:
         # CAN set-zero completion event
         self._zero_complete_event = threading.Event()
 
+        # Impedance gain cache per (joint_name, dof_index)
+        # Avoids sending hardcoded defaults when gains are omitted (None)
+        self._impedance_gain_cache: Dict[tuple, Dict[str, float]] = {}
+
         # Waypoint buffer telemetry (on-demand request/response)
         self._wp_telemetry: Dict[str, Dict[str, Any]] = {}
         self._wp_telemetry_event = threading.Event()
@@ -156,8 +160,12 @@ class CanManager:
         # Per-joint batch locks (prevents concurrent batch sends to same joint)
         self._batch_locks: Dict[str, threading.Lock] = {}
 
+        # Impedance TX lock — serializes multi-frame SET_IMPEDANCE sends
+        self._impedance_tx_lock = threading.Lock()
+
         # Single-motor direct CAN bench state
         self._motor_test_lock = threading.Lock()
+        self._motor_test_abort_requested = threading.Event()
         self._motor_response_condition = threading.Condition()
         self._motor_recent_frames: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._motor_frame_history: deque = deque(maxlen=256)
@@ -698,6 +706,15 @@ class CanManager:
     # can overflow the RX FIFO before the firmware polls.  A short pause
     # between frames gives the 500 Hz control loop time to drain the buffer.
     _MULTI_FRAME_DELAY_S = 0.003  # 3 ms — ~1.5 control-loop iterations
+    _IMPEDANCE_DEFAULTS = {
+        "kp": 8.0,
+        "ki": 1.0,
+        "kd": 0.08,
+        "tau_ff": 0,
+        "kp_inner": 10.0,
+        "ki_inner": 1.0,
+        "kd_inner": 0.25,
+    }
 
     def set_pid_via_can(self, joint_name: str, dof_index: int, motor_type: int,
                         kp: float, ki: float, kd: float, tau: float) -> Dict[str, Any]:
@@ -789,50 +806,137 @@ class CanManager:
 
     def send_impedance_target(self, joint_name: str, dof_index: int,
                                q_target: float, dq_target: float,
-                               stiffness: float, kp: float, kd: float,
-                               tau_ff: int) -> Dict[str, Any]:
-        """Send SET_IMPEDANCE via CAN (0x01D) — 2 sequential frames.
+                               stiffness: float,
+                               kp: float = None, ki: float = None, kd: float = None,
+                               tau_ff: int = None,
+                               kp_inner: float = None, ki_inner: float = None,
+                               kd_inner: float = None) -> Dict[str, Any]:
+        """Send SET_IMPEDANCE via CAN (0x01D) — 1 to 4 frames.
 
-        Frame 0 (seq=0): [joint_id, dof|seq<<4, q_hi, q_lo, dq_hi, dq_lo, stiff_hi, stiff_lo]
-        Frame 1 (seq=1): [joint_id, dof|seq<<4, Kp_hi, Kp_lo, Kd_hi, Kd_lo, tau_ff_hi, tau_ff_lo]
+        Variable-frame protocol with has_more flag (bit 7 of byte 1):
+          Byte 1 = [has_more:1][seq:3][dof:4]
 
-        All int16 values use x100 scaling except tau_ff (raw motor units).
+        Frame 0 (seq=0): [joint_id, flags, q×100, dq×10, stiff×10]                   — always sent
+        Frame 1 (seq=1): [joint_id, flags, Kp×100, Ki×100, Kd×100]                   — optional
+        Frame 2 (seq=2): [joint_id, flags, kp_inner×100, ki_inner×100, kd_inner×100] — optional
+        Frame 3 (seq=3): [joint_id, flags, tau_ff, 0, 0]                             — optional
+
+        The last frame has has_more=0, which triggers application on firmware.
+        Parameters not sent retain their previous values on the firmware side.
+
+        Semantics:
+        - q_target = joint goal
+        - dq_target = cruise speed magnitude for the controller-side rolling segment
+        - the RP2350 interpolates q_ref/dq_ref locally at control-loop rate
+
+        Fast path (50-200 Hz host updates): call with only q/dq/stiffness → 1 frame, ~0.1 ms.
+        Full update: call with all params → 4 frames, ~9 ms.
 
         Args:
             joint_name: Joint name (e.g. "KNEE_RIGHT")
             dof_index: DOF index (0-2)
-            q_target: Target joint position (degrees)
-            dq_target: Target velocity for feedforward (deg/s)
+            q_target: Target joint goal (degrees)
+            dq_target: Cruise speed magnitude for the local rolling segment (deg/s)
             stiffness: Co-contraction stiffness (degrees)
-            kp: Position gain for outer PID
-            kd: Velocity gain for outer PID
-            tau_ff: Feedforward torque (raw motor units, int16)
+            kp: Outer position gain (None = keep firmware's current value)
+            ki: Outer integral gain (None = keep current)
+            kd: Outer velocity gain (None = keep firmware's current value)
+            tau_ff: Feedforward torque, raw motor units (None = keep current)
+            kp_inner: Inner PID Kp (None = keep current)
+            ki_inner: Inner PID Ki (None = keep current)
+            kd_inner: Inner PID Kd (None = keep current)
         """
         self._ensure_connection()
         joint_id = JOINTS[joint_name]["id"]
+        dq_target = abs(dq_target)
 
-        # Frame 0: q, dq, stiffness (all int16 x100)
-        q_int = int(round(q_target * 100))
-        dq_int = int(round(dq_target * 100))
-        stiff_int = int(round(stiffness * 100))
-        seq0_byte = (0 << 4) | (dof_index & 0x0F)
-        payload0 = struct.pack("<BBhhh", joint_id, seq0_byte,
-                                q_int, dq_int, stiff_int)
-        # Pad to 8 bytes if needed
-        payload0 = payload0.ljust(8, b'\x00')
+        # Serialize entire impedance transaction (cache + frames + ctrl).
+        # Prevents: cache contamination between concurrent requests,
+        # and a disable slipping between seq=0 and later optional frames.
+        with self._impedance_tx_lock:
+            # Read cache snapshot — resolve None gains from last-sent values.
+            # Cache is NOT mutated until all frames are sent successfully.
+            cache_key = (joint_name, dof_index)
+            cached = self._impedance_gain_cache.get(cache_key, {})
 
-        # Frame 1: Kp, Kd, tau_ff
-        kp_int = int(round(kp * 100))
-        kd_int = int(round(kd * 100))
-        tau_ff_int = int(round(tau_ff))
-        seq1_byte = (1 << 4) | (dof_index & 0x0F)
-        payload1 = struct.pack("<BBhhh", joint_id, seq1_byte,
-                                kp_int, kd_int, tau_ff_int)
-        payload1 = payload1.ljust(8, b'\x00')
+            # Determine which frames are needed
+            need_frame1 = (kp is not None or ki is not None or kd is not None)
+            need_frame2 = (kp_inner is not None or ki_inner is not None or kd_inner is not None)
+            need_frame3 = (tau_ff is not None)
 
-        self._send_frame(0x01D, payload0, context="SET_IMPEDANCE seq=0")
-        time.sleep(self._MULTI_FRAME_DELAY_S)
-        self._send_frame(0x01D, payload1, context="SET_IMPEDANCE seq=1")
+            # Resolve effective gain values for frame packing (cached or default)
+            defaults = self._IMPEDANCE_DEFAULTS
+            kp_val = kp if kp is not None else cached.get("kp", defaults["kp"])
+            ki_val = ki if ki is not None else cached.get("ki", defaults["ki"])
+            kd_val = kd if kd is not None else cached.get("kd", defaults["kd"])
+            tau_ff_val = tau_ff if tau_ff is not None else cached.get("tau_ff", defaults["tau_ff"])
+            kpi_val = kp_inner if kp_inner is not None else cached.get("kp_inner", defaults["kp_inner"])
+            kii_val = ki_inner if ki_inner is not None else cached.get("ki_inner", defaults["ki_inner"])
+            kdi_val = kd_inner if kd_inner is not None else cached.get("kd_inner", defaults["kd_inner"])
+
+            # --- Frame 0: q (×100), dq (×10), stiffness (×10) — always sent ---
+            q_int = int(round(q_target * 100))      # 0.01° resolution, ±327°
+            dq_int = int(round(dq_target * 10))      # 0.1°/s resolution, ±3276°/s
+            stiff_int = int(round(stiffness * 10))    # 0.1° resolution, ±3276°
+            has_more_0 = need_frame1 or need_frame2 or need_frame3
+            flags0 = (int(has_more_0) << 7) | (0 << 4) | (dof_index & 0x0F)
+            payload0 = struct.pack("<BBhhh", joint_id, flags0,
+                                    q_int, dq_int, stiff_int)
+            payload0 = payload0.ljust(8, b'\x00')
+
+            self._send_frame(0x01D, payload0, context="SET_IMPEDANCE seq=0")
+
+            if need_frame1:
+                time.sleep(self._MULTI_FRAME_DELAY_S)
+                # --- Frame 1: Kp, Ki, Kd ---
+                kp_int = int(round(kp_val * 100))
+                ki_int = int(round(ki_val * 100))
+                kd_int = int(round(kd_val * 100))
+                has_more_1 = need_frame2 or need_frame3
+                flags1 = (int(has_more_1) << 7) | (1 << 4) | (dof_index & 0x0F)
+                payload1 = struct.pack("<BBhhh", joint_id, flags1,
+                                        kp_int, ki_int, kd_int)
+                payload1 = payload1.ljust(8, b'\x00')
+                self._send_frame(0x01D, payload1, context="SET_IMPEDANCE seq=1")
+
+            if need_frame2:
+                time.sleep(self._MULTI_FRAME_DELAY_S)
+                # --- Frame 2: kp_inner, ki_inner, kd_inner ---
+                kpi_int = int(round(kpi_val * 100))
+                kii_int = int(round(kii_val * 100))
+                kdi_int = int(round(kdi_val * 100))
+                flags2 = (int(need_frame3) << 7) | (2 << 4) | (dof_index & 0x0F)
+                payload2 = struct.pack("<BBhhh", joint_id, flags2,
+                                        kpi_int, kii_int, kdi_int)
+                payload2 = payload2.ljust(8, b'\x00')
+                self._send_frame(0x01D, payload2, context="SET_IMPEDANCE seq=2")
+
+            if need_frame3:
+                time.sleep(self._MULTI_FRAME_DELAY_S)
+                tau_ff_int = int(round(tau_ff_val))
+                flags3 = (0 << 7) | (3 << 4) | (dof_index & 0x0F)
+                payload3 = struct.pack("<BBh", joint_id, flags3, tau_ff_int)
+                payload3 = payload3.ljust(8, b'\x00')
+                self._send_frame(0x01D, payload3, context="SET_IMPEDANCE seq=3")
+
+            # Commit to cache ONLY after all frames sent successfully.
+            # If _send_frame raised an exception above, cache stays unchanged.
+            if kp is not None:
+                cached["kp"] = kp
+            if ki is not None:
+                cached["ki"] = ki
+            if kd is not None:
+                cached["kd"] = kd
+            if tau_ff is not None:
+                cached["tau_ff"] = tau_ff
+            if kp_inner is not None:
+                cached["kp_inner"] = kp_inner
+            if ki_inner is not None:
+                cached["ki_inner"] = ki_inner
+            if kd_inner is not None:
+                cached["kd_inner"] = kd_inner
+            self._impedance_gain_cache[cache_key] = cached
+
         return {"success": True}
 
     def send_impedance_ctrl(self, joint_name: str, sub_cmd: int,
@@ -848,10 +952,13 @@ class CanManager:
         """
         self._ensure_connection()
         joint_id = JOINTS[joint_name]["id"]
-        payload = struct.pack("<BBH", joint_id, sub_cmd, param)
-        payload = payload.ljust(8, b'\x00')
-        self._send_frame(0x01E, payload,
-                         context=f"IMPEDANCE_CTRL cmd=0x{sub_cmd:02X} param={param}")
+        # Share impedance TX lock — prevents disable from slipping between
+        # seq=0 and later optional frames of a concurrent SET_IMPEDANCE transaction.
+        with self._impedance_tx_lock:
+            payload = struct.pack("<BBH", joint_id, sub_cmd, param)
+            payload = payload.ljust(8, b'\x00')
+            self._send_frame(0x01E, payload,
+                             context=f"IMPEDANCE_CTRL cmd=0x{sub_cmd:02X} param={param}")
         return {"success": True}
 
     def start_auto_mapping_via_can(self, joint_name: str,
@@ -1593,7 +1700,31 @@ class CanManager:
     ) -> Dict[str, Any]:
         self._ensure_connection()
         arbitration_id = self.MOTOR_ID_BASE + int(motor_id)
-        with self._motor_test_lock:
+        if action in ("stop", "off"):
+            self._motor_test_abort_requested.set()
+            acquired = self._motor_test_lock.acquire(timeout=0.1)
+            if not acquired:
+                blind_stop_steps = self._motor_force_stop_blind(
+                    motor_id=motor_id,
+                    arbitration_id=arbitration_id,
+                    timeout_s=timeout_s,
+                    power_off=(action == "off"),
+                )
+                return {
+                    "action": action,
+                    "motor_id": motor_id,
+                    "arbitration_id": f"0x{arbitration_id:03X}",
+                    "warning": "Emergency blind stop sent while sweep lock was busy",
+                    "blind_stop_steps": blind_stop_steps,
+                    "abort_requested": True,
+                }
+        else:
+            acquired = False
+
+        if not acquired:
+            self._motor_test_lock.acquire()
+
+        try:
             if action in READ_COMMANDS:
                 payload = build_read_frame(action)
                 response = self._motor_exchange_locked(
@@ -1672,7 +1803,12 @@ class CanManager:
                     "motor_id": motor_id,
                     "arbitration_id": f"0x{arbitration_id:03X}",
                     **safe_stop,
+                    "abort_requested": True,
                 }
+        finally:
+            self._motor_test_lock.release()
+            if action in ("stop", "off"):
+                self._motor_test_abort_requested.clear()
 
         raise ValueError(f"Unsupported motor action: {action}")
 
@@ -1725,7 +1861,13 @@ class CanManager:
         )
 
         with self._motor_test_lock:
+            self._motor_test_abort_requested.clear()
             motor_on_warning = None
+            neutral_warning = None
+            stop_warning = None
+            aborted_reason = None
+            safe_stop = None
+            cleanup_error = None
             if motor_on_before:
                 on_payload = build_zero_frame(CONTROL_COMMANDS["on"])
                 on_result = self._motor_send_best_effort_locked(
@@ -1740,93 +1882,134 @@ class CanManager:
                     motor_on_warning = "motor on echo timed out"
                 time.sleep(min(0.05, timeout_s))
 
-            for index in range(total_samples):
-                loop_start = time.perf_counter()
-                t_s = loop_start - start
-                target = generate_target(
-                    profile=profile,
-                    t_s=t_s,
-                    duration_s=duration_s,
-                    bias=bias,
-                    amplitude=amplitude,
-                    preload_s=preload_s,
-                    frequency_hz=frequency_hz,
-                    f0_hz=f0_hz,
-                    f1_hz=f1_hz,
-                )
-                payload = build_control_frame(mode, target)
-                response = self._motor_exchange_locked(
-                    motor_id=motor_id,
-                    arbitration_id=arbitration_id,
-                    payload=payload,
-                    expected_cmd=control_cmd,
-                    timeout_s=timeout_s,
-                    context=f"MotorSweep {mode}={target:.3f}",
-                )
-                decoded = self._decode_motor_response(response["data"], output_ratio=output_ratio)
-                row: Dict[str, Any] = {
-                    "motor_id": motor_id,
-                    "output_ratio": output_ratio,
-                    "duration_s": duration_s,
-                    "rate_hz": rate_hz,
-                    "timeout_s": timeout_s,
-                    "bias": bias,
-                    "amplitude": amplitude,
-                    "preload_s": preload_s,
-                    "frequency_hz": frequency_hz,
-                    "f0_hz": f0_hz,
-                    "f1_hz": f1_hz,
-                    "label": resolved_label,
-                    "t_s": t_s,
-                    "mode": mode,
-                    "profile": profile,
-                    "target": target,
-                    **decoded,
-                }
-
-                for extra_name in extras:
-                    extra_payload = build_read_frame(extra_name)
-                    extra_response = self._motor_exchange_locked(
-                        motor_id=motor_id,
-                        arbitration_id=arbitration_id,
-                        payload=extra_payload,
-                        expected_cmd=READ_COMMANDS[extra_name],
-                        timeout_s=timeout_s,
-                        context=f"MotorSweep extra {extra_name}",
+            try:
+                for index in range(total_samples):
+                    if self._motor_test_abort_requested.is_set():
+                        aborted_reason = "abort requested by manual stop/off"
+                        break
+                    loop_start = time.perf_counter()
+                    t_s = loop_start - start
+                    target = generate_target(
+                        profile=profile,
+                        t_s=t_s,
+                        duration_s=duration_s,
+                        bias=bias,
+                        amplitude=amplitude,
+                        preload_s=preload_s,
+                        frequency_hz=frequency_hz,
+                        f0_hz=f0_hz,
+                        f1_hz=f1_hz,
                     )
-                    row.update(self._decode_motor_response(extra_response["data"], output_ratio=output_ratio))
+                    payload = build_control_frame(mode, target)
+                    try:
+                        response = self._motor_exchange_locked(
+                            motor_id=motor_id,
+                            arbitration_id=arbitration_id,
+                            payload=payload,
+                            expected_cmd=control_cmd,
+                            timeout_s=timeout_s,
+                            context=f"MotorSweep {mode}={target:.3f}",
+                        )
+                    except TimeoutError:
+                        try:
+                            response = self._motor_exchange_locked(
+                                motor_id=motor_id,
+                                arbitration_id=arbitration_id,
+                                payload=payload,
+                                expected_cmd=control_cmd,
+                                timeout_s=timeout_s,
+                                context=f"MotorSweep retry {mode}={target:.3f}",
+                            )
+                        except TimeoutError as exc:
+                            aborted_reason = str(exc)
+                            break
 
-                rows.append(row)
+                    decoded = self._decode_motor_response(response["data"], output_ratio=output_ratio)
+                    row: Dict[str, Any] = {
+                        "motor_id": motor_id,
+                        "output_ratio": output_ratio,
+                        "duration_s": duration_s,
+                        "rate_hz": rate_hz,
+                        "timeout_s": timeout_s,
+                        "bias": bias,
+                        "amplitude": amplitude,
+                        "preload_s": preload_s,
+                        "frequency_hz": frequency_hz,
+                        "f0_hz": f0_hz,
+                        "f1_hz": f1_hz,
+                        "label": resolved_label,
+                        "t_s": t_s,
+                        "mode": mode,
+                        "profile": profile,
+                        "target": target,
+                        **decoded,
+                    }
 
-                next_deadline = start + ((index + 1) / rate_hz)
-                remaining = next_deadline - time.perf_counter()
-                if remaining > 0:
-                    time.sleep(remaining)
+                    extra_failed = False
+                    for extra_name in extras:
+                        extra_payload = build_read_frame(extra_name)
+                        try:
+                            extra_response = self._motor_exchange_locked(
+                                motor_id=motor_id,
+                                arbitration_id=arbitration_id,
+                                payload=extra_payload,
+                                expected_cmd=READ_COMMANDS[extra_name],
+                                timeout_s=timeout_s,
+                                context=f"MotorSweep extra {extra_name}",
+                            )
+                        except TimeoutError as exc:
+                            aborted_reason = str(exc)
+                            extra_failed = True
+                            break
+                        row.update(self._decode_motor_response(extra_response["data"], output_ratio=output_ratio))
 
-            stop_warning = None
-            neutral_warning = None
-            if stop_at_end:
-                neutral_payload = build_control_frame(mode, 0.0)
-                neutral_result = self._motor_send_best_effort_locked(
-                    motor_id=motor_id,
-                    arbitration_id=arbitration_id,
-                    payload=neutral_payload,
-                    expected_cmd=control_cmd,
-                    timeout_s=timeout_s,
-                    context=f"MotorSweep neutral {mode}=0 motor={motor_id}",
-                )
-                if neutral_result["timed_out"]:
-                    neutral_warning = f"{mode}=0 echo timed out"
+                    rows.append(row)
+                    if extra_failed:
+                        break
 
-                time.sleep(min(0.05, timeout_s))
+                    next_deadline = start + ((index + 1) / rate_hz)
+                    remaining = next_deadline - time.perf_counter()
+                    if remaining > 0:
+                        time.sleep(remaining)
+            finally:
+                if stop_at_end:
+                    try:
+                        neutral_payload = build_control_frame(mode, 0.0)
+                        neutral_result = self._motor_send_best_effort_locked(
+                            motor_id=motor_id,
+                            arbitration_id=arbitration_id,
+                            payload=neutral_payload,
+                            expected_cmd=control_cmd,
+                            timeout_s=timeout_s,
+                            context=f"MotorSweep neutral {mode}=0 motor={motor_id}",
+                        )
+                        if neutral_result["timed_out"]:
+                            neutral_warning = f"{mode}=0 echo timed out"
 
-                safe_stop = self._motor_safe_stop_locked(
-                    motor_id=motor_id,
-                    arbitration_id=arbitration_id,
-                    timeout_s=timeout_s,
-                    power_off=power_off_at_end,
-                )
-                stop_warning = safe_stop["warning"]
+                        time.sleep(min(0.05, timeout_s))
+
+                        safe_stop = self._motor_safe_stop_locked(
+                            motor_id=motor_id,
+                            arbitration_id=arbitration_id,
+                            timeout_s=timeout_s,
+                            power_off=power_off_at_end,
+                        )
+                        stop_warning = safe_stop["warning"]
+                    except Exception as exc:
+                        cleanup_error = str(exc)
+                        safe_stop = {
+                            "safe_stop_steps": [],
+                            "blind_stop_steps": self._motor_force_stop_blind(
+                                motor_id=motor_id,
+                                arbitration_id=arbitration_id,
+                                timeout_s=timeout_s,
+                                power_off=power_off_at_end,
+                            ),
+                            "warning": "Cleanup fallback used after exception",
+                        }
+                        if not stop_warning:
+                            stop_warning = safe_stop["warning"]
+                self._motor_test_abort_requested.clear()
 
         csv_path = default_csv_path(
             self.motor_test_log_dir(),
@@ -1836,7 +2019,8 @@ class CanManager:
         )
         write_csv_rows(csv_path, rows, fieldnames)
         return {
-            "status": "success",
+            "status": "error" if aborted_reason else "success",
+            "message": aborted_reason or cleanup_error or stop_warning or neutral_warning,
             "motor_id": motor_id,
             "mode": mode,
             "profile": profile,
@@ -1849,6 +2033,9 @@ class CanManager:
             "motor_on_warning": motor_on_warning,
             "neutral_warning": neutral_warning,
             "stop_warning": stop_warning,
+            "safe_stop": safe_stop,
+            "aborted_reason": aborted_reason,
+            "cleanup_error": cleanup_error,
         }
 
     def clear_status_messages(self) -> None:
@@ -2264,6 +2451,68 @@ class CanManager:
         except TimeoutError:
             return {"timed_out": True, "response": None}
 
+    def _motor_send_blind_locked(
+        self,
+        *,
+        arbitration_id: int,
+        payload: bytes,
+        context: str,
+    ) -> Dict[str, Any]:
+        self._send_frame(arbitration_id, payload, context=context)
+        return {"tx_hex": bytes_hex(payload)}
+
+    def _motor_force_stop_blind(
+        self,
+        *,
+        motor_id: int,
+        arbitration_id: int,
+        timeout_s: float,
+        power_off: bool,
+        repeats: int = 3,
+    ) -> list[Dict[str, Any]]:
+        details: list[Dict[str, Any]] = []
+        steps = [
+            ("torque_zero", build_control_frame("torque", 0.0)),
+            ("speed_zero", build_control_frame("speed", 0.0)),
+            ("stop", build_zero_frame(CONTROL_COMMANDS["stop"])),
+        ]
+        if power_off:
+            steps.append(("off", build_zero_frame(CONTROL_COMMANDS["off"])))
+
+        for repeat_index in range(repeats):
+            for label, payload in steps:
+                self._send_frame(
+                    arbitration_id=arbitration_id,
+                    data=payload,
+                    context=f"Motor blind stop {label} motor={motor_id} repeat={repeat_index + 1}",
+                )
+                details.append(
+                    {
+                        "repeat": repeat_index + 1,
+                        "step": label,
+                        "tx_hex": bytes_hex(payload),
+                    }
+                )
+                time.sleep(min(0.03, timeout_s))
+        return details
+
+    def _motor_force_stop_blind_locked(
+        self,
+        *,
+        motor_id: int,
+        arbitration_id: int,
+        timeout_s: float,
+        power_off: bool,
+        repeats: int = 3,
+    ) -> list[Dict[str, Any]]:
+        return self._motor_force_stop_blind(
+            motor_id=motor_id,
+            arbitration_id=arbitration_id,
+            timeout_s=timeout_s,
+            power_off=power_off,
+            repeats=repeats,
+        )
+
     def _motor_safe_stop_locked(
         self,
         *,
@@ -2301,8 +2550,16 @@ class CanManager:
                 warnings.append(f"{label} echo timed out")
             time.sleep(min(0.05, timeout_s))
 
+        blind_stop_steps = self._motor_force_stop_blind_locked(
+            motor_id=motor_id,
+            arbitration_id=arbitration_id,
+            timeout_s=timeout_s,
+            power_off=power_off,
+        )
+
         return {
             "safe_stop_steps": details,
+            "blind_stop_steps": blind_stop_steps,
             "warning": "; ".join(warnings) if warnings else None,
         }
 

@@ -58,6 +58,76 @@ static bool inner_tau_default_captured[MAX_DOFS] = {false};
 static float joint_ema_value[MAX_DOFS] = {0};          // EMA-filtered joint angle
 static bool joint_ema_initialized[MAX_DOFS] = {false}; // Joint EMA initialization flag
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
+
+static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
+  // Contract: caller must also set the waypoint hold reference/state it wants
+  // after the impedance-specific state has been torn down.
+  restoreInnerPidGains(dof, jc);
+  restoreOuterLoopParameters(dof, jc);
+  resetImpedanceSegment(dof);
+  dof_control_mode[dof] = MODE_WAYPOINT;
+  impedance_target[dof].valid = false;
+  inner_pid_reinit_after_impedance[dof] = true;
+}
+
+static void applyImpedanceOuterOverrides(uint8_t dof, JointController *jc) {
+  if (!jc || !impedance_target[dof].valid) {
+    return;
+  }
+
+  float cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence;
+  if (!jc->getOuterLoopParameters(dof, cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence)) {
+    return;
+  }
+
+  OuterLoopBackup &backup = outer_loop_backup[dof];
+  if (!backup.saved) {
+    backup = {cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence, true};
+  }
+
+  const float desired_influence = backup.cascade_influence;
+  if (fabsf(cur_kp - impedance_target[dof].kp) > 0.001f ||
+      fabsf(cur_ki - impedance_target[dof].ki) > 0.001f ||
+      fabsf(cur_kd - impedance_target[dof].kd) > 0.001f ||
+      fabsf(cur_stiff - impedance_target[dof].stiffness_deg) > 0.001f ||
+      fabsf(cur_influence - desired_influence) > 0.001f) {
+    jc->setOuterLoopParameters(dof,
+                               impedance_target[dof].kp,
+                               impedance_target[dof].ki,
+                               impedance_target[dof].kd,
+                               impedance_target[dof].stiffness_deg,
+                               desired_influence);
+  }
+}
+
+static void applyImpedanceInnerOverrides(uint8_t dof, PID *pid_agonist, PID *pid_antagonist) {
+  if (!pid_agonist || !pid_antagonist || !impedance_target[dof].valid) {
+    return;
+  }
+
+  if (!inner_pid_backup[dof][0].saved) {
+    inner_pid_backup[dof][0] = {pid_agonist->getKp(), pid_agonist->getKi(), pid_agonist->getKd(), true};
+    inner_pid_backup[dof][1] = {pid_antagonist->getKp(), pid_antagonist->getKi(), pid_antagonist->getKd(), true};
+    LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " inner PID backed up:"
+                " Kp=" + String(inner_pid_backup[dof][0].kp, 3) +
+                " Ki=" + String(inner_pid_backup[dof][0].ki, 3) +
+                " Kd=" + String(inner_pid_backup[dof][0].kd, 3));
+  }
+
+  const float kp_inner = impedance_target[dof].kp_inner;
+  const float ki_inner = impedance_target[dof].ki_inner;
+  const float kd_inner = impedance_target[dof].kd_inner;
+  if (fabsf(pid_agonist->getKp() - kp_inner) > 0.001f ||
+      fabsf(pid_agonist->getKi() - ki_inner) > 0.001f ||
+      fabsf(pid_agonist->getKd() - kd_inner) > 0.001f) {
+    pid_agonist->setTunings(kp_inner, ki_inner, kd_inner, pid_agonist->getTau());
+  }
+  if (fabsf(pid_antagonist->getKp() - kp_inner) > 0.001f ||
+      fabsf(pid_antagonist->getKi() - ki_inner) > 0.001f ||
+      fabsf(pid_antagonist->getKd() - kd_inner) > 0.001f) {
+    pid_antagonist->setTunings(kp_inner, ki_inner, kd_inner, pid_antagonist->getTau());
+  }
+}
 // When outer_loop_divisor > 1, delta_theta changes every N cycles creating "steps".
 // To smooth this, we interpolate between delta_theta_prev and delta_theta based on
 // where we are in the current outer loop period. This eliminates vibrations caused
@@ -398,12 +468,12 @@ bool JointController::executeWaypointMovement() {
       if (impedance_target[dof].valid) {
         uint32_t elapsed = t_now - impedance_target[dof].last_update_ms;
         if (elapsed > impedance_watchdog_ms) {
-          // Watchdog timeout → hold at current position
-          dof_control_mode[dof] = MODE_WAYPOINT;
-          float q_curr_wd = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
+          // Watchdog timeout -> hold at current local reference and return to waypoint control.
+          float q_curr_wd = dof_data.valid[dof] ? dof_data.angles[dof]
+                                                : getImpedanceHoldReference(dof);
+          clearImpedanceControlState(dof, this);
           waypoint_buffer_set_prev(dof, q_curr_wd, t_now);
           waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-          impedance_target[dof].valid = false;
           LOG_C1_WARN("[IMPEDANCE] DOF" + String(dof) + " watchdog timeout (" +
                       String(elapsed) + "ms > " + String((uint32_t)impedance_watchdog_ms) +
                       "ms) → HOLDING at " + String(q_curr_wd, 2) + "°");
@@ -451,25 +521,13 @@ bool JointController::executeWaypointMovement() {
       float prev_angle = waypoint_buffer_prev_angle(dof);
       uint32_t prev_time = waypoint_buffer_prev_time(dof);
       if (impedance_active_this_dof) {
-        q_des = impedance_target[dof].q_target_deg;
-        expected_velocity_deg_s = impedance_target[dof].dq_target_deg_s;
-        is_moving = true;
-        any_movement = true;
-
-        // Apply Kp/Kd from Jetson (bumpless via setTunings inside setOuterLoopParameters)
-        float cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence;
-        getOuterLoopParameters(dof, cur_kp, cur_ki, cur_kd, cur_stiff, cur_influence);
-        // Only update if values changed (avoid unnecessary setTunings calls)
-        if (fabsf(cur_kp - impedance_target[dof].kp) > 0.001f ||
-            fabsf(cur_kd - impedance_target[dof].kd) > 0.001f ||
-            fabsf(cur_stiff - impedance_target[dof].stiffness_deg) > 0.001f) {
-          setOuterLoopParameters(dof,
-              impedance_target[dof].kp,
-              cur_ki,  // Keep Ki from config
-              impedance_target[dof].kd,
-              impedance_target[dof].stiffness_deg,
-              cur_influence);
+        q_des = getImpedanceHoldReference(dof);
+        evaluateImpedanceSegment(dof, t_now, q_des, expected_velocity_deg_s);
+        is_moving = impedance_segment[dof].active;
+        if (is_moving) {
+          any_movement = true;
         }
+        applyImpedanceOuterOverrides(dof, this);
       }
 
       // Check if we have waypoints to process
@@ -634,12 +692,28 @@ bool JointController::executeWaypointMovement() {
               metrics_tracker[dof].aborted_by_stall = true;
               metrics_tracker[dof].abort_target_deg = cs.original_target_deg;
             }
+            if (impedance_active_this_dof) {
+              ImpedanceRollingSegment &seg = impedance_segment[dof];
+              seg.q_goal_deg = q_curr;
+              seg.q_start_deg = q_curr;
+              seg.q_ref_deg = q_curr;
+              seg.dq_ref_deg_s = 0.0f;
+              seg.speed_abs_deg_s = 0.0f;
+              seg.t_start_ms = t_now;
+              seg.t_arrival_ms = t_now;
+              seg.active = false;
+              seg.initialized = true;
+              impedance_target[dof].q_target_deg = q_curr;
+              impedance_target[dof].dq_target_deg_s = 0.0f;
+            }
             waypoint_buffer_clear(dof);
             waypoint_buffer_set_prev(dof, q_curr, t_now);
             waypoint_buffer_set_state(dof, WaypointState::HOLDING);
             dof_state = WaypointState::HOLDING;
             has_waypoints = false;
+            is_moving = false;
             q_des = q_curr;
+            expected_velocity_deg_s = 0.0f;
             error = 0.0f;
             abs_error = 0.0f;
 
@@ -701,6 +775,20 @@ bool JointController::executeWaypointMovement() {
 
           // Teach mode: keep the current position as new target
           if (recovery_policy == RECOVERY_STAY_AT_CURRENT) {
+            if (impedance_active_this_dof) {
+              ImpedanceRollingSegment &seg = impedance_segment[dof];
+              seg.q_goal_deg = q_curr;
+              seg.q_start_deg = q_curr;
+              seg.q_ref_deg = q_curr;
+              seg.dq_ref_deg_s = 0.0f;
+              seg.speed_abs_deg_s = 0.0f;
+              seg.t_start_ms = t_now;
+              seg.t_arrival_ms = t_now;
+              seg.active = false;
+              seg.initialized = true;
+              impedance_target[dof].q_target_deg = q_curr;
+              impedance_target[dof].dq_target_deg_s = 0.0f;
+            }
             waypoint_buffer_clear(dof);
             waypoint_buffer_set_prev(dof, q_curr, t_now);
             waypoint_buffer_set_state(dof, WaypointState::HOLDING);
@@ -767,15 +855,20 @@ bool JointController::executeWaypointMovement() {
           // Trigger emergency stop
           od.oscillation_detected = true;
           stopAllMotors();
-          
-          // Reset waypoint state
-          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+
+          float hold_ref = dof_data.valid[dof] ? dof_data.angles[dof] : getImpedanceHoldReference(dof);
+          if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+            clearImpedanceControlState(dof, this);
+          }
+
           waypoint_buffer_clear(dof);
-          prev_dof_state[dof] = WaypointState::IDLE;
+          waypoint_buffer_set_prev(dof, hold_ref, t_now);
+          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
+          prev_dof_state[dof] = WaypointState::HOLDING;
           pid_reset_needed[dof] = true;
-          
+
           // Notify host via serial
-          SERIAL_C1_COM_LN("⚠️ OSCILLATION_STOP:DOF=" + String(dof) + 
+          SERIAL_C1_COM_LN("⚠️ OSCILLATION_STOP:DOF=" + String(dof) +
                         ":AMPLITUDE=" + String(osc_amplitude, 1) +
                         ":SIGN_CHANGES=" + String(od.sign_change_count));
           
@@ -797,7 +890,7 @@ bool JointController::executeWaypointMovement() {
       // - HOLDING mode: check immediately on transition, then every 10 cycles (period depends on outer loop rate)
       
       // Determine current state based on waypoint buffer
-      bool is_holding = !has_waypoints; // If no waypoints, we're holding position
+      bool is_holding = !is_moving;
       
       // Detect MOVING → HOLDING transition by comparing with previous cycle's state
       bool just_entered_holding = (prev_dof_state[dof] == WaypointState::MOVING) && is_holding;
@@ -805,6 +898,9 @@ bool JointController::executeWaypointMovement() {
       // Update buffer state to HOLDING if buffer is empty and we were MOVING
       // This ensures the state machine is consistent
       if (is_holding && (dof_state == WaypointState::MOVING || just_entered_holding)) {
+        if (impedance_active_this_dof) {
+          waypoint_buffer_set_prev(dof, getImpedanceHoldReference(dof), t_now);
+        }
         waypoint_buffer_set_state(dof, WaypointState::HOLDING);
         dof_state = WaypointState::HOLDING; // Update local variable for this cycle
         
@@ -883,7 +979,7 @@ bool JointController::executeWaypointMovement() {
       // - Check periodically in HOLDING mode (every 10 cycles = ~100ms at 100Hz)
       // NOTE: We do NOT check immediately when entering HOLDING because motors may still be settling
       // Reduced from 20 cycles (200ms) to 10 cycles (100ms) for faster detection during manual push
-      bool should_check_safety = has_waypoints || (is_holding && safety_check_counter >= 10);
+      bool should_check_safety = is_moving || (is_holding && safety_check_counter >= 10);
       
       if (should_check_safety) {
 #if CONTROLLER_DEBUG
@@ -913,15 +1009,18 @@ bool JointController::executeWaypointMovement() {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
           LOG_C1_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
-          
-          // Reset waypoint state to IDLE for this DOF
-          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+
+          float hold_ref = dof_data.valid[dof] ? q_curr : getImpedanceHoldReference(dof);
+          if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+            clearImpedanceControlState(dof, this);
+          }
+
           waypoint_buffer_clear(dof);
-          prev_dof_state[dof] = WaypointState::IDLE;
-          
-          // Mark PID reset needed for next sequence
+          waypoint_buffer_set_prev(dof, hold_ref, t_now);
+          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
+          prev_dof_state[dof] = WaypointState::HOLDING;
           pid_reset_needed[dof] = true;
-          
+
           // Continue checking other DOFs (don't return, just skip this one)
           continue;
         }
@@ -940,11 +1039,7 @@ bool JointController::executeWaypointMovement() {
         last_outer_loop_dt = outer_loop_dt;
       }
 
-      // Compute delta_theta using outer loop PID controller
-      // The PID class handles:
-      // - Filtered derivative (reduces noise sensitivity from encoder readings)
-      // - Anti-windup (prevents integral saturation during large errors)
-      // - Output saturation (limits delta_theta to ±MAX_DELTA_THETA)
+      // Compute delta_theta using outer loop controller
       PID *outer_pid = getOuterPID(dof);
       if (outer_pid) {
         // Save previous value for interpolation (smooth transitions when divisor > 1)
@@ -953,7 +1048,6 @@ bool JointController::executeWaypointMovement() {
         // Cache expected velocity for inner loop stiffness scaling
         expected_velocity_cache[dof] = expected_velocity_deg_s;
 
-        // Normal PID control - compute delta_theta
         delta_theta[dof] = outer_pid->control(q_des, q_curr);
 
         // Store outer PID term breakdown for diagnostics (DOF 0 only)
@@ -1093,8 +1187,9 @@ bool JointController::executeWaypointMovement() {
     float theta_0_joint; // Joint angle for theta_0 calculation
 
     if (impedance_active_this_dof) {
-      // IMPEDANCE: use target from Jetson directly
-      theta_0_joint = impedance_target[dof].q_target_deg;
+      theta_0_joint = getImpedanceHoldReference(dof);
+      float dq_ref_unused = 0.0f;
+      evaluateImpedanceSegment(dof, t_now, theta_0_joint, dq_ref_unused);
     } else if (waypoint_buffer_peek(dof, current_target)) {
       // MOVING: use interpolated position
       float prev_angle = waypoint_buffer_prev_angle(dof);
@@ -1305,10 +1400,17 @@ bool JointController::executeWaypointMovement() {
           LOG_C1_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
                     " CAN errors in " + String(can_error_window_ms) + "ms, EMERGENCY STOP!");
           stopAllMotors();
+          float hold_ref = dof_data.valid[dof] ? dof_data.angles[dof] : getImpedanceHoldReference(dof);
+          if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+            clearImpedanceControlState(dof, this);
+          }
           waypoint_buffer_clear(dof);
-          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+          waypoint_buffer_set_prev(dof, hold_ref, t_now);
+          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
           wp_canErrorTracker.clearErrors(dof);
           wp_first_read[dof] = true;
+          prev_dof_state[dof] = WaypointState::HOLDING;
+          pid_reset_needed[dof] = true;
           continue;
         }
 
@@ -1372,14 +1474,18 @@ bool JointController::executeWaypointMovement() {
     // This is deferred from the IDLE→MOVING detection above because motor references
     // (theta_A_ref, theta_B_ref) and CAN readings (theta_A_pid, theta_B_pid) are only
     // available at this point in the loop.
-    if (inner_pid_init_needed[dof]) {
+    if (inner_pid_init_needed[dof] || inner_pid_reinit_after_impedance[dof]) {
       pid_agonist->initializeState(theta_A_pid, theta_A_ref, 0.0f);
       pid_antagonist->initializeState(theta_B_pid, theta_B_ref, 0.0f);
+      if (inner_pid_reinit_after_impedance[dof]) {
+        LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " inner PID reinit after impedance");
+      } else {
+        LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " inner PID bumpless init:"
+                     " Aref=" + String(theta_A_ref, 1) + " Acurr=" + String(theta_A_pid, 1) +
+                     " Bref=" + String(theta_B_ref, 1) + " Bcurr=" + String(theta_B_pid, 1));
+      }
       inner_pid_init_needed[dof] = false;
-
-      LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " inner PID bumpless init:"
-                   " Aref=" + String(theta_A_ref, 1) + " Acurr=" + String(theta_A_pid, 1) +
-                   " Bref=" + String(theta_B_ref, 1) + " Bcurr=" + String(theta_B_pid, 1));
+      inner_pid_reinit_after_impedance[dof] = false;
     }
 
     // === FRICTION FEEDFORWARD ===
@@ -1424,15 +1530,20 @@ bool JointController::executeWaypointMovement() {
       uff_B -= tau_ff;
     }
 
-    // Inner PID for motors (compute torque commands)
+    // === INNER LOOP: incremental PID in both waypoint and impedance modes ===
 #if CONTROLLER_DEBUG
     uint32_t pid_start_us = time_us_32();
 #endif
-    float command_A = pid_agonist->control(theta_A_ref, theta_A_pid, uff_A);
-    float command_B = pid_antagonist->control(theta_B_ref, theta_B_pid, uff_B);
+    float command_A, command_B;
 
-    // Store inner PID term breakdown for diagnostics (DOF 0, agonist only)
-    // Values scaled ×100 for int16 transmission (incremental terms are small floats)
+    if (impedance_active_this_dof) {
+      applyImpedanceInnerOverrides(dof, pid_agonist, pid_antagonist);
+    }
+
+    command_A = pid_agonist->control(theta_A_ref, theta_A_pid, uff_A);
+    command_B = pid_antagonist->control(theta_B_ref, theta_B_pid, uff_B);
+
+    // Diagnostics (DOF 0)
     if (dof == 0 && pid_diag_terms_enabled) {
       pid_diagnostics.inner_p_term = (int16_t)constrain(pid_agonist->last_up * 100.0f, -32767, 32767);
       pid_diagnostics.inner_i_term = (int16_t)constrain(pid_agonist->last_ui * 100.0f, -32767, 32767);
