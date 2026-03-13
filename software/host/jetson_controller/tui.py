@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import sys
 import termios
 import time
@@ -24,6 +25,7 @@ from .can_bus import CanBus
 from .config import ControllerConfig
 from .fsm import FSMState
 from .impedance_loop import ImpedanceLoop
+from .session_log import get_log_path
 from .telemetry import TelemetryManager
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,16 @@ class TUI:
         """Main TUI loop with live display and key handling."""
         key_task = asyncio.create_task(self._key_reader())
 
+        # Suppress console logging while TUI is active — the TUI panel
+        # already shows FSM state, CAN stats, etc.  Logs still go to file.
+        console_handlers = [
+            h for h in logging.getLogger().handlers
+            if isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.FileHandler)
+        ]
+        for h in console_handlers:
+            h.setLevel(logging.WARNING)
+
         try:
             with Live(self._render(), console=self._console,
                       refresh_per_second=10, screen=False) as live:
@@ -101,6 +113,9 @@ class TUI:
                     live.update(self._render())
                     await asyncio.sleep(0.1)
         finally:
+            # Restore console logging
+            for h in console_handlers:
+                h.setLevel(logging.INFO)
             key_task.cancel()
             try:
                 await key_task
@@ -181,7 +196,7 @@ class TUI:
 
         if self._impedance.cycle_count > 0:
             can_info.append(f"  Loop: {self._impedance.avg_cycle_time_ms:.1f}ms", style="dim")
-            effective_hz = 1000.0 / max(self._impedance.avg_cycle_time_ms, 0.1)
+            effective_hz = 1000.0 / max(self._impedance.avg_period_ms, 0.1)
             can_info.append(f" ({effective_hz:.0f}Hz)", style="dim")
 
         # Status line (transient messages from key commands)
@@ -205,6 +220,8 @@ class TUI:
         keys.append("/", style="dim")
         keys.append("[-]", style="bold green")
         keys.append(f" {self.STEP_DEG}\u00b0  ", style="dim")
+        keys.append("[L]", style="bold magenta")
+        keys.append("og  ", style="dim")
         keys.append("[Space]", style="bold")
         keys.append(" Pause  ", style="dim")
         keys.append("[Q]", style="bold")
@@ -317,6 +334,18 @@ class TUI:
             self._status_line = f"Nudge -{self.STEP_DEG}\u00b0"
             if self._cb_nudge:
                 await self._cb_nudge(-self.STEP_DEG)
+
+        elif k == 'l':
+            log_path = get_log_path()
+            if log_path.exists():
+                self._status_line = f"Opening log: {log_path.name}"
+                # Open in system viewer (non-blocking)
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", str(log_path)])
+                else:
+                    subprocess.Popen(["xdg-open", str(log_path)])
+            else:
+                self._status_line = "No log file yet"
 
         elif key == ' ':
             self._loop_paused = not self._loop_paused

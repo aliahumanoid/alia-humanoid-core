@@ -10,7 +10,6 @@ DOF indices match.
 """
 from __future__ import annotations
 
-import glob
 import json
 import logging
 import sys
@@ -18,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import serial.tools.list_ports
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -69,35 +69,54 @@ class ControllerConfig:
 
 
 def _autodetect_can_channel() -> str:
-    """Auto-detect CANable USB device.
+    """Auto-detect CANable USB adapter by VID:PID.
 
-    Search order:
-      macOS:  /dev/cu.usbmodem*
-      Linux:  /dev/ttyACM*  then  /dev/ttyUSB*
+    Known adapters:
+      CANable 2:  VID=16D0  PID=117E
 
-    Returns the device path, or raises FileNotFoundError.
+    Falls back to description matching ('canable', 'can') if VID:PID
+    is unknown.  Returns the device path, or raises FileNotFoundError.
     """
-    if sys.platform == "darwin":
-        patterns = ["/dev/cu.usbmodem*"]
-    else:
-        # Linux (Jetson, RPi, etc.)
-        patterns = ["/dev/ttyACM*", "/dev/ttyUSB*"]
+    # Known CAN adapter VID:PID pairs
+    CAN_VID_PIDS = {
+        (0x16D0, 0x117E),  # CANable 2
+    }
+    CAN_DESC_HINTS = ("canable", "canbus", "can adapter")
 
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            if len(matches) > 1:
-                logger.warning(
-                    f"Multiple CAN devices found: {matches} — using {matches[0]}"
-                )
-            logger.info(f"Auto-detected CAN device: {matches[0]}")
-            return matches[0]
+    ports = serial.tools.list_ports.comports()
+    candidates: list[str] = []
 
-    raise FileNotFoundError(
-        "No CAN device found. Connect a CANable adapter or set "
-        "'can.channel' in controller.yaml.\n"
-        f"  Searched: {patterns}"
-    )
+    for info in sorted(ports, key=lambda p: p.device):
+        vid_pid = (info.vid, info.pid) if info.vid and info.pid else None
+
+        # Match by VID:PID
+        if vid_pid in CAN_VID_PIDS:
+            candidates.append(info.device)
+            continue
+
+        # Match by description
+        desc = (info.description or "").lower()
+        if any(hint in desc for hint in CAN_DESC_HINTS):
+            candidates.append(info.device)
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No CAN adapter found. Connect a CANable adapter or set "
+            "'can.channel' in controller.yaml.\n"
+            "  Detected USB devices:\n"
+            + "\n".join(
+                f"    {p.device}  ({p.description})"
+                for p in sorted(ports, key=lambda p: p.device)
+            )
+        )
+
+    if len(candidates) > 1:
+        logger.warning(
+            f"Multiple CAN adapters found: {candidates} — using {candidates[0]}"
+        )
+
+    logger.info(f"Auto-detected CAN device: {candidates[0]}")
+    return candidates[0]
 
 
 def load_config(yaml_path: Optional[str] = None) -> ControllerConfig:

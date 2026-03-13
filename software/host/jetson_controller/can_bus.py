@@ -8,15 +8,154 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import threading
 import time
 from typing import Callable, Optional
 
 import can
 
-from .protocol import MULTI_FRAME_DELAY_S
+from .protocol import (
+    MULTI_FRAME_DELAY_S,
+    CAN_ID_EMERGENCY_STOP, CAN_ID_TIME_SYNC, CAN_ID_ENCODER_STREAM_CTRL,
+    CAN_ID_IDENTIFY_REQUEST, CAN_ID_STARTUP_SEQUENCE,
+    CAN_ID_SET_IMPEDANCE, CAN_ID_IMPEDANCE_CTRL,
+    CAN_ID_ENCODER_STREAM_DATA, CAN_ID_STARTUP_STATUS, CAN_ID_JOINT_ANNOUNCE,
+    UNUSED_DOF,
+)
 
 logger = logging.getLogger(__name__)
+
+# How often to log a periodic summary for high-frequency streams (seconds)
+_SUMMARY_INTERVAL_S = 5.0
+
+
+# ---------------------------------------------------------------------------
+# Frame decoders for human-readable logging
+# ---------------------------------------------------------------------------
+
+def _decode_tx(arb_id: int, data: bytes) -> str:
+    """Decode a TX CAN frame into a human-readable string."""
+    if arb_id == CAN_ID_EMERGENCY_STOP:
+        reason = data[0] if data else 0
+        return f"EMERGENCY_STOP reason={reason}"
+
+    if arb_id == CAN_ID_TIME_SYNC:
+        ts_ms = struct.unpack_from("<I", data, 0)[0] if len(data) >= 4 else 0
+        return f"TIME_SYNC ts={ts_ms}ms"
+
+    if arb_id == CAN_ID_IDENTIFY_REQUEST:
+        return "IDENTIFY_REQUEST"
+
+    if arb_id == CAN_ID_ENCODER_STREAM_CTRL:
+        start = bool(data[0]) if data else False
+        return f"ENCODER_STREAM {'START' if start else 'STOP'}"
+
+    if arb_id == CAN_ID_STARTUP_SEQUENCE:
+        joint_id = data[0] if data else 0
+        return f"STARTUP_SEQUENCE joint={joint_id}"
+
+    if arb_id == CAN_ID_SET_IMPEDANCE and len(data) >= 6:
+        return _decode_set_impedance(data)
+
+    if arb_id == CAN_ID_IMPEDANCE_CTRL and len(data) >= 4:
+        joint_id = data[0]
+        sub_cmd = data[1]
+        param = struct.unpack_from("<H", data, 2)[0]
+        sub_names = {0x00: "DISABLE", 0x01: "ENABLE", 0x02: "WATCHDOG"}
+        sub = sub_names.get(sub_cmd, f"sub=0x{sub_cmd:02X}")
+        return f"IMPEDANCE_CTRL joint={joint_id} {sub} param={param}"
+
+    return f"0x{arb_id:03X} [{data.hex(' ')}]"
+
+
+def _decode_set_impedance(data: bytes) -> str:
+    """Decode SET_IMPEDANCE frame into readable format."""
+    joint_id = data[0]
+    flags = data[1]
+    seq = (flags >> 4) & 0x07
+    dof = flags & 0x0F
+    has_more = bool(flags & 0x80)
+
+    vals = struct.unpack_from("<hhh", data, 2)
+
+    if seq == 0:
+        q_deg = vals[0] / 100.0
+        dq = vals[1] / 10.0
+        stiff = vals[2] / 10.0
+        more = "+" if has_more else ""
+        return (f"SET_IMP{more} j={joint_id} d={dof} "
+                f"q={q_deg:+.2f}° dq={dq:.1f}°/s stiff={stiff:.1f}°")
+    elif seq == 1:
+        kp = vals[0] / 100.0
+        ki = vals[1] / 100.0
+        kd = vals[2] / 100.0
+        more = "+" if has_more else ""
+        return (f"SET_IMP_OUTER{more} j={joint_id} d={dof} "
+                f"Kp={kp:.2f} Ki={ki:.2f} Kd={kd:.2f}")
+    elif seq == 2:
+        kp = vals[0] / 100.0
+        ki = vals[1] / 100.0
+        kd = vals[2] / 100.0
+        more = "+" if has_more else ""
+        return (f"SET_IMP_INNER{more} j={joint_id} d={dof} "
+                f"KpI={kp:.2f} KiI={ki:.2f} KdI={kd:.2f}")
+    elif seq == 3:
+        tau = vals[0]
+        return f"SET_IMP_FF j={joint_id} d={dof} tau={tau}"
+
+    return f"SET_IMPEDANCE seq={seq} [{data.hex(' ')}]"
+
+
+def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
+    """Decode an RX CAN frame. Returns (readable_string, is_high_freq)."""
+    # Encoder stream data (50 Hz — high frequency)
+    if CAN_ID_ENCODER_STREAM_DATA <= arb_id < CAN_ID_ENCODER_STREAM_DATA + 16:
+        joint_id = arb_id - CAN_ID_ENCODER_STREAM_DATA
+        if len(data) >= 8:
+            d0, d1, d2, t_ms = struct.unpack("<hhhH", data)
+            angles = []
+            for raw in (d0, d1, d2):
+                if raw == UNUSED_DOF:
+                    angles.append("--")
+                else:
+                    angles.append(f"{raw / 100.0:+.2f}°")
+            return (f"ENCODER j={joint_id} [{', '.join(angles)}] t={t_ms}ms",
+                    True)
+        return f"ENCODER j={joint_id} [{data.hex(' ')}]", True
+
+    # Startup status
+    if CAN_ID_STARTUP_STATUS <= arb_id < CAN_ID_STARTUP_STATUS + 16:
+        joint_id = arb_id - CAN_ID_STARTUP_STATUS
+        if len(data) >= 5:
+            evt = data[0]
+            dof_idx = data[1]
+            reason = data[2]
+            elapsed = struct.unpack_from("<H", data, 3)[0]
+            evt_names = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAIL",
+                         3: "COMPLETE", 4: "FAILED"}
+            return (f"STARTUP_STATUS j={joint_id} "
+                    f"{evt_names.get(evt, f'evt={evt}')} "
+                    f"dof={dof_idx} reason={reason} {elapsed}ms",
+                    False)
+        return f"STARTUP_STATUS j={joint_id} [{data.hex(' ')}]", False
+
+    # Joint announce
+    if CAN_ID_JOINT_ANNOUNCE <= arb_id < CAN_ID_JOINT_ANNOUNCE + 16:
+        joint_id = arb_id - CAN_ID_JOINT_ANNOUNCE
+        if len(data) >= 8:
+            dofs = data[1]
+            motors = data[2]
+            ready = bool(data[3])
+            fw = f"{data[4]}.{data[5]}.{data[6]}"
+            return (f"JOINT_ANNOUNCE j={joint_id} dofs={dofs} motors={motors} "
+                    f"ready={ready} fw={fw}",
+                    False)
+        return f"JOINT_ANNOUNCE j={joint_id} [{data.hex(' ')}]", False
+
+    # Unknown
+    hex_data = data.hex(" ") if data else ""
+    return f"RX 0x{arb_id:03X} [{hex_data}]", False
 
 
 class CanBus:
@@ -34,6 +173,12 @@ class CanBus:
         self.tx_count = 0
         self.rx_count = 0
         self.errors = 0
+
+        # Throttled logging state
+        self._last_imp_log: dict[tuple[int, int], bytes] = {}  # (joint, dof) → last data
+        self._last_enc_log: dict[int, float] = {}  # joint_id → last log time
+        self._imp_summary_time = 0.0
+        self._imp_summary_count = 0
 
     @property
     def connected(self) -> bool:
@@ -73,10 +218,27 @@ class CanBus:
                 # Thread-safe put into asyncio queue
                 if self._loop is not None and self._rx_queue is not None:
                     self._loop.call_soon_threadsafe(self._enqueue, msg)
+                # Log RX frame
+                self._log_rx(msg)
             except can.CanError as exc:
                 self.errors += 1
                 logger.warning(f"CAN RX error: {exc}")
                 time.sleep(0.1)
+
+    def _log_rx(self, msg: can.Message) -> None:
+        """Log received CAN frame — decoded and throttled."""
+        decoded, is_high_freq = _decode_rx(msg.arbitration_id, msg.data)
+
+        if is_high_freq:
+            # Encoder data: log once per joint per summary interval
+            joint_id = msg.arbitration_id - CAN_ID_ENCODER_STREAM_DATA
+            now = time.monotonic()
+            last = self._last_enc_log.get(joint_id, 0.0)
+            if now - last >= _SUMMARY_INTERVAL_S:
+                self._last_enc_log[joint_id] = now
+                logger.debug(f"CAN RX {decoded}")
+        else:
+            logger.info(f"CAN RX {decoded}")
 
     def _enqueue(self, msg: can.Message) -> None:
         """Called from event loop thread to put message in queue."""
@@ -106,6 +268,39 @@ class CanBus:
             None, self._send_blocking, msg
         )
         self.tx_count += 1
+
+        # Log TX frame — decoded and throttled
+        self._log_tx(arb_id, data)
+
+    def _log_tx(self, arb_id: int, data: bytes) -> None:
+        """Log TX frame with human-readable decode and smart throttling."""
+        decoded = _decode_tx(arb_id, data)
+
+        if arb_id == CAN_ID_SET_IMPEDANCE:
+            # Throttle: only log when payload changes or every N seconds
+            joint_id = data[0] if data else 0
+            flags = data[1] if len(data) > 1 else 0
+            dof = flags & 0x0F
+            key = (joint_id, dof)
+
+            prev = self._last_imp_log.get(key)
+            self._imp_summary_count += 1
+            now = time.monotonic()
+
+            if prev != data:
+                # Data changed — log it
+                self._last_imp_log[key] = data
+                logger.info(f"CAN TX {decoded}")
+            elif now - self._imp_summary_time >= _SUMMARY_INTERVAL_S:
+                # Periodic summary
+                self._imp_summary_time = now
+                logger.info(f"CAN TX [impedance stream: "
+                            f"{self._imp_summary_count} frames in "
+                            f"{_SUMMARY_INTERVAL_S:.0f}s]")
+                self._imp_summary_count = 0
+            # else: skip (same data, within interval)
+        else:
+            logger.info(f"CAN TX {decoded}")
 
     def _send_blocking(self, msg: can.Message) -> None:
         with self._tx_lock:

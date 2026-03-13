@@ -69,8 +69,9 @@ class ImpedanceLoop:
 
         # Stats
         self.cycle_count = 0
-        self.last_cycle_time_ms = 0.0
-        self.avg_cycle_time_ms = 0.0
+        self.last_cycle_time_ms = 0.0    # Send time only (how long _send_cycle took)
+        self.avg_cycle_time_ms = 0.0     # EMA of send time
+        self.avg_period_ms = 0.0         # EMA of full cycle period (send + sleep)
 
     @property
     def running(self) -> bool:
@@ -107,9 +108,22 @@ class ImpedanceLoop:
     async def _run(self, can_bus: CanBus) -> None:
         """Internal loop: send SET_IMPEDANCE at configured rate."""
         logger.info(f"Impedance loop started @ {self._config.send_rate_hz} Hz")
+        last_cycle_start = time.monotonic()
         try:
             while True:
                 t0 = time.monotonic()
+
+                # Track full period (time since last cycle start)
+                if self.cycle_count > 0:
+                    period_ms = (t0 - last_cycle_start) * 1000.0
+                    alpha_p = 0.05
+                    self.avg_period_ms = (
+                        alpha_p * period_ms +
+                        (1 - alpha_p) * self.avg_period_ms
+                    )
+                else:
+                    self.avg_period_ms = self._period * 1000.0
+                last_cycle_start = t0
 
                 await self._send_cycle(can_bus)
 
@@ -117,7 +131,7 @@ class ImpedanceLoop:
                 elapsed = time.monotonic() - t0
                 self.last_cycle_time_ms = elapsed * 1000.0
 
-                # Exponential moving average
+                # Exponential moving average of send time
                 alpha = 0.05
                 self.avg_cycle_time_ms = (
                     alpha * self.last_cycle_time_ms +

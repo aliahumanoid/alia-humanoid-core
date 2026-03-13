@@ -17,6 +17,7 @@ from .config import load_config
 from .fsm import StartupFSM
 from .impedance_loop import ImpedanceLoop
 from .safety import SafetyManager
+from .session_log import setup_session_logging, get_log_path
 from .telemetry import TelemetryManager
 from .tui import TUI
 
@@ -24,14 +25,26 @@ logger = logging.getLogger("jetson_controller")
 
 
 def setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s.%(msecs)03d %(levelname)-7s [%(name)s] %(message)s",
+    # Root logger accepts everything; handlers decide what to show
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # Console handler: INFO always (verbose flag does NOT dump DEBUG to terminal)
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(levelname)-7s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
-    )
+    ))
+    root.addHandler(console)
+
     # Quiet noisy libraries
     logging.getLogger("can").setLevel(logging.WARNING)
+
+    # Unified session log file: captures DEBUG (50 Hz frames etc.)
+    # Console stays at INFO — no flooding.
+    setup_session_logging(verbose, clear=True)
+    logger.info(f"Session log: {get_log_path()}")
 
 
 async def main(config_path: str = None, verbose: bool = False) -> int:
