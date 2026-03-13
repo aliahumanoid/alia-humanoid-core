@@ -52,6 +52,13 @@ CAN_ADAPTER_VID_PIDS = {
 }
 
 
+def _format_vid_pid(vid: Optional[int], pid: Optional[int]) -> str:
+    """Format a USB VID:PID pair, tolerating missing metadata."""
+    if vid is None or pid is None:
+        return "n/a"
+    return f"{vid:04X}:{pid:04X}"
+
+
 def _colour_line(line: str) -> str:
     """Apply ANSI colour based on prefix."""
     stripped = line.strip()
@@ -103,7 +110,8 @@ def discover() -> list[str]:
 
         # Show other devices for debugging
         if "usbmodem" in info.device or "ttyACM" in info.device:
-            print(f"  {_DIM}skip {label}  [unknown VID:PID={info.vid:04X}:{info.pid:04X}]{_RESET}")
+            vid_pid_text = _format_vid_pid(info.vid, info.pid)
+            print(f"  {_DIM}skip {label}  [unknown VID:PID={vid_pid_text}]{_RESET}")
 
     return results
 

@@ -1,6 +1,9 @@
 import asyncio
 import gc
 import importlib
+import json
+import os
+import subprocess
 import sys
 import types
 import warnings
@@ -101,6 +104,7 @@ class _DummyImpedance:
     targets = {}
     cycle_count = 0
     avg_cycle_time_ms = 0.0
+    avg_period_ms = 0.0
 
 
 class _DummyBus:
@@ -157,10 +161,114 @@ def test_tui_rejected_long_op_does_not_warn():
     asyncio.run(scenario())
 
 
-def test_run_sh_uses_project_venv_binaries():
-    script = (HOST_DIR / "jetson_controller" / "run.sh").read_text()
+def test_run_sh_forwards_single_mode_args_and_rejects_ambiguous_dual_mode(
+    tmp_path,
+):
+    host_dir = tmp_path / "host"
+    jetson_dir = host_dir / "jetson_controller"
+    jetson_dir.mkdir(parents=True)
 
-    assert 'PYTHON_BIN="$VENV_DIR/bin/python"' in script
-    assert '"$PYTHON_BIN" -m pip install -q -r "$HOST_DIR/requirements.txt"' in script
-    assert 'exec "$PYTHON_BIN" -m jetson_controller -v "$@"' in script
-    assert 'source "$VENV_DIR/bin/activate"' not in script
+    script = (HOST_DIR / "jetson_controller" / "run.sh").read_text()
+    run_sh = jetson_dir / "run.sh"
+    run_sh.write_text(script)
+    os.chmod(run_sh, 0o755)
+
+    (host_dir / "requirements.txt").write_text("")
+    python_bin = host_dir / ".venv" / "bin" / "python"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json",
+                "import sys",
+                "",
+                "args = sys.argv[1:]",
+                "if args[:3] == ['-m', 'pip', 'install']:",
+                "    raise SystemExit(0)",
+                "print(json.dumps(args))",
+            ]
+        )
+        + "\n"
+    )
+    os.chmod(python_bin, 0o755)
+
+    proc = subprocess.run(
+        [str(run_sh), "--no-serial", "--config", "/tmp/controller.yaml"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout.strip()) == [
+        "-m",
+        "jetson_controller",
+        "-v",
+        "--config",
+        "/tmp/controller.yaml",
+    ]
+
+    proc = subprocess.run(
+        [str(run_sh), "--serial", "--port", "/dev/ttyACM0"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout.strip()) == [
+        "-m",
+        "jetson_controller.serial_monitor",
+        "-v",
+        "--port",
+        "/dev/ttyACM0",
+    ]
+
+    proc = subprocess.run(
+        [str(run_sh), "--config", "/tmp/controller.yaml"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "--no-serial or --serial" in proc.stderr
+
+
+def test_session_log_clear_preserves_existing_appenders(tmp_path, monkeypatch):
+    from jetson_controller import session_log
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_file = log_dir / "session.log"
+
+    monkeypatch.setattr(session_log, "LOG_DIR", log_dir)
+    monkeypatch.setattr(session_log, "LOG_FILE", log_file)
+
+    with open(log_file, "a", encoding="utf-8") as handle:
+        handle.write("before\n")
+        handle.flush()
+        session_log._clear_previous_log()
+        handle.write("after\n")
+        handle.flush()
+
+    assert log_file.read_text(encoding="utf-8") == "after\n"
+
+
+def test_serial_monitor_discover_tolerates_missing_vid_pid(monkeypatch, capsys):
+    from jetson_controller import serial_monitor
+
+    ports = [
+        types.SimpleNamespace(
+            device="/dev/ttyACM0",
+            description="Generic USB CDC",
+            vid=None,
+            pid=None,
+        )
+    ]
+    monkeypatch.setattr(
+        serial_monitor.serial.tools.list_ports,
+        "comports",
+        lambda: ports,
+    )
+
+    assert serial_monitor.discover() == []
+    assert "VID:PID=n/a" in capsys.readouterr().out

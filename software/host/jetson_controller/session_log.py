@@ -5,8 +5,9 @@ Creates a single timestamped log file per session under logs/.
 Both the CAN controller and the serial monitor write to the same file
 via the standard logging module, each with a distinct source prefix.
 
-On startup the previous log is **deleted** (only the latest session
-is kept) to avoid stale data accumulation.
+On startup the previous log is cleared in place (only the latest
+session is kept) to avoid stale data accumulation without breaking
+other processes already writing to the same file.
 
 Log location:
     jetson_controller/logs/session.log
@@ -25,8 +26,6 @@ Usage — serial monitor side:
 from __future__ import annotations
 
 import logging
-import os
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -37,7 +36,6 @@ LOG_FILE = LOG_DIR / "session.log"
 
 # Module-level state
 _file_handler: logging.FileHandler | None = None
-_session_start: float = 0.0
 
 
 def _ensure_log_dir() -> None:
@@ -50,9 +48,14 @@ def _ensure_log_dir() -> None:
 
 
 def _clear_previous_log() -> None:
-    """Delete the previous session log."""
-    if LOG_FILE.exists():
-        LOG_FILE.unlink()
+    """Clear the previous session log without changing its inode.
+
+    This preserves any already-open file handles held by a sibling process
+    such as the serial monitor started in parallel via tmux.
+    """
+    LOG_FILE.parent.mkdir(exist_ok=True)
+    with open(LOG_FILE, "w", encoding="utf-8"):
+        pass
 
 
 def setup_session_logging(verbose: bool = False, clear: bool = True) -> None:
@@ -66,7 +69,7 @@ def setup_session_logging(verbose: bool = False, clear: bool = True) -> None:
                The CAN controller (main process) should clear=True.
                The serial monitor (secondary) should clear=False to append.
     """
-    global _file_handler, _session_start
+    global _file_handler
 
     if _file_handler is not None:
         return  # Already set up in this process
@@ -75,8 +78,6 @@ def setup_session_logging(verbose: bool = False, clear: bool = True) -> None:
 
     if clear:
         _clear_previous_log()
-
-    _session_start = time.monotonic()
 
     # Write a section header (append-safe)
     source = "CAN Controller" if clear else "Serial Monitor"
