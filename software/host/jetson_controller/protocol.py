@@ -17,6 +17,7 @@ Feedback (controller → host):
   0x410+joint  Encoder Stream Data (50 Hz)
   0x490+joint  Startup Status
   0x4A0+joint  Joint Announce
+  0x4F0+joint  Joint State (impedance feedback, 50 Hz)
 """
 from __future__ import annotations
 
@@ -33,12 +34,15 @@ CAN_ID_TIME_SYNC = 0x002
 CAN_ID_ENCODER_STREAM_CTRL = 0x003
 CAN_ID_IDENTIFY_REQUEST = 0x008
 CAN_ID_STARTUP_SEQUENCE = 0x009
+CAN_ID_PRETENSION = 0x00C
+CAN_ID_PRETENSION_ALL = 0x00D
 CAN_ID_SET_IMPEDANCE = 0x01D
 CAN_ID_IMPEDANCE_CTRL = 0x01E
 
 CAN_ID_ENCODER_STREAM_DATA = 0x410
 CAN_ID_STARTUP_STATUS = 0x490
 CAN_ID_JOINT_ANNOUNCE = 0x4A0
+CAN_ID_JOINT_STATE = 0x4F0
 
 # Sentinel for unused DOF slots
 UNUSED_DOF = 0x7FFF
@@ -92,6 +96,20 @@ class StartupStatus:
 
 
 @dataclass
+class JointState:
+    """Impedance feedback broadcast (0x4F0+joint)."""
+    joint_id: int
+    dof_index: int
+    q_actual_deg: float      # actual joint angle
+    dq_actual_deg_s: float   # actual joint velocity
+    tau_agonist: int          # agonist torque command (raw, ×4)
+    tau_antagonist: int       # antagonist torque command (raw, ×4)
+    valid: bool               # encoder/joint state valid
+    holding: bool             # no active rolling segment
+    watchdog_warning: bool    # >80% watchdog timeout elapsed
+
+
+@dataclass
 class EncoderData:
     joint_id: int
     angles_deg: list[Optional[float]]   # up to 3 DOFs, None = unused
@@ -127,6 +145,15 @@ def encode_startup_sequence(joint_id: int, torque: int = 0,
     """Encode startup sequence command (0x009)."""
     payload = struct.pack("<BBhh", joint_id, 0, torque, duration) + bytes(2)
     return CAN_ID_STARTUP_SEQUENCE, payload
+
+
+def encode_pretension_all(joint_id: int) -> tuple[int, bytes]:
+    """Encode pretension-all command (0x00D).
+
+    Re-enables motor power after an emergency stop and pretensions all DOFs.
+    """
+    payload = bytes([joint_id]) + bytes(7)
+    return CAN_ID_PRETENSION_ALL, payload
 
 
 def encode_encoder_stream_ctrl(start: bool) -> tuple[int, bytes]:
@@ -249,3 +276,32 @@ def decode_encoder_stream(data: bytes, joint_id: int) -> EncoderData:
     for raw in (dof0_raw, dof1_raw, dof2_raw):
         angles.append(None if raw == UNUSED_DOF else raw / 100.0)
     return EncoderData(joint_id=joint_id, angles_deg=angles, t_offset_ms=t_ms)
+
+
+def decode_joint_state(data: bytes, joint_id: int) -> JointState:
+    """Decode joint state broadcast (0x4F0+joint).
+
+    Format (8 bytes):
+      byte 0:   uint8   dof_index
+      byte 1-2: int16   q_actual × 100
+      byte 3-4: int16   dq_actual × 10
+      byte 5:   int8    tau_agonist ÷ 4
+      byte 6:   int8    tau_antagonist ÷ 4
+      byte 7:   uint8   status bits (bit0=valid, bit1=holding, bit2=watchdog)
+    """
+    dof = data[0]
+    q_raw, dq_raw = struct.unpack_from("<hh", data, 1)
+    tau_a = struct.unpack_from("<b", data, 5)[0]
+    tau_b = struct.unpack_from("<b", data, 6)[0]
+    status = data[7]
+    return JointState(
+        joint_id=joint_id,
+        dof_index=dof,
+        q_actual_deg=q_raw / 100.0,
+        dq_actual_deg_s=dq_raw / 10.0,
+        tau_agonist=tau_a * 4,
+        tau_antagonist=tau_b * 4,
+        valid=bool(status & 0x01),
+        holding=bool(status & 0x02),
+        watchdog_warning=bool(status & 0x04),
+    )

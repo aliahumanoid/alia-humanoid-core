@@ -132,6 +132,7 @@ class TUI:
             FSMState.READY: "green",
             FSMState.ERROR: "red",
             FSMState.HOME: "yellow",
+            FSMState.DISCOVERED: "yellow",
         }.get(self._fsm_state, "cyan")
 
         header = Text()

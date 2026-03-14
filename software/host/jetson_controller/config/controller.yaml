@@ -14,8 +14,11 @@ impedance:
   watchdog_ms: 2000       # Impedance watchdog timeout (firmware fallback to HOLDING)
 
 homing:
-  speed_deg_s: 5.0        # Slow and safe for first tests
+  speed_deg_s: 5.0        # Slow and safe for homing
   tolerance_deg: 1.0      # Convergence threshold for homing complete
+
+nudge:
+  speed_deg_s: 15.0       # Degrees/second for +/- nudge commands
 
 # Per-joint control parameters.
 # Only joints listed here are controlled. Others are ignored.
@@ -29,11 +32,11 @@ joints:
     home_position_deg:
       0: 0.0              # flexion-extension
 
-  ankle_right:
-    gains:
-      outer: { kp: 8.0, ki: 1.0, kd: 0.08 }
-      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
-    stiffness_deg: 25.0
-    home_position_deg:
-      0: 0.0              # plantar-dorsal
-      1: 0.0              # inversion-eversion
+  # ankle_right:                # uncomment when ready to test
+  #   gains:
+  #     outer: { kp: 8.0, ki: 1.0, kd: 0.08 }
+  #     inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+  #   stiffness_deg: 25.0
+  #   home_position_deg:
+  #     0: 0.0              # plantar-dorsal
+  #     1: 0.0              # inversion-eversion

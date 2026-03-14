@@ -87,9 +87,12 @@ async def main(config_path: str = None, verbose: bool = False) -> int:
                 impedance.set_target(key, dof, target, config.homing_speed_deg_s)
 
     async def on_startup():
-        """Re-run full startup FSM (discover → startup → stream → gains → home)."""
+        """Run startup sequence (pretension → startup → stream → gains → home).
+
+        Re-discovers joints first, then runs motor startup.
+        """
         if not can_bus.connected:
-            logger.warning("Cannot re-startup: CAN not connected")
+            logger.warning("Cannot startup: CAN not connected")
             return
         # Stop impedance loop first — quiet the bus before re-init
         await impedance.stop()
@@ -103,7 +106,10 @@ async def main(config_path: str = None, verbose: bool = False) -> int:
                 evt.clear()
         new_fsm = StartupFSM()
         new_fsm.on_state_change(tui.set_fsm_state)
-        ready = await new_fsm.run(can_bus, config, telemetry, safety)
+        # Re-discover then startup
+        if not await new_fsm.run_discover(can_bus, config, telemetry):
+            return
+        ready = await new_fsm.run_startup(can_bus, config, telemetry, safety)
         if ready:
             impedance.start(can_bus)
 
@@ -130,7 +136,7 @@ async def main(config_path: str = None, verbose: bool = False) -> int:
                 min_a = jcfg.min_angles.get(dof, -180.0)
                 max_a = jcfg.max_angles.get(dof, 180.0)
                 new_q = max(min_a, min(max_a, new_q))
-                impedance.set_target(key, dof, new_q, config.homing_speed_deg_s)
+                impedance.set_target(key, dof, new_q, config.nudge_speed_deg_s)
         logger.info(f"Nudge {delta_deg:+.1f}° all DOFs")
 
     async def on_toggle_loop():
@@ -159,22 +165,21 @@ async def main(config_path: str = None, verbose: bool = False) -> int:
 
     exit_code = 0
     try:
-        # Run startup FSM
-        ready = await fsm.run(can_bus, config, telemetry, safety)
+        # Phase 1: Connect CAN + discover joints (safe, no motor movement)
+        discovered = await fsm.run_discover(can_bus, config, telemetry)
 
-        if ready:
-            # Start 50 Hz impedance loop (managed task)
-            impedance.start(can_bus)
-
-            # Wait for quit
-            await tui.wait_for_quit()
-
-            # Graceful shutdown
-            await impedance.stop()
+        if discovered:
+            # Wait for user to press [S] to start motors
+            logger.info("Joints discovered — press [S] to start motors")
         else:
-            logger.error("Startup failed — press Q to exit")
+            logger.error("Discovery failed — press Q to exit")
             exit_code = 1
-            await tui.wait_for_quit()
+
+        # Wait for quit (user presses [S] for startup or [Q] to exit)
+        await tui.wait_for_quit()
+
+        # Graceful shutdown
+        await impedance.stop()
 
     except KeyboardInterrupt:
         logger.info("Interrupted")

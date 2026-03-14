@@ -17,11 +17,13 @@ from .config import ControllerConfig
 from .protocol import (
     CAN_ID_ENCODER_STREAM_DATA,
     CAN_ID_JOINT_ANNOUNCE,
+    CAN_ID_JOINT_STATE,
     CAN_ID_STARTUP_STATUS,
     JointAnnounce,
     StartupStatus,
     decode_encoder_stream,
     decode_joint_announce,
+    decode_joint_state,
     decode_startup_status,
 )
 
@@ -30,8 +32,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class JointState:
-    """Live state for a single joint, updated from encoder stream."""
+    """Live state for a single joint, updated from CAN feedback."""
     angles_deg: dict[int, float] = field(default_factory=dict)
+    velocities_deg_s: dict[int, float] = field(default_factory=dict)
+    torques_agonist: dict[int, int] = field(default_factory=dict)
+    torques_antagonist: dict[int, int] = field(default_factory=dict)
+    holding: dict[int, bool] = field(default_factory=dict)
     last_update: float = 0.0           # time.monotonic()
     is_online: bool = False
     announce: Optional[JointAnnounce] = None
@@ -106,6 +112,32 @@ class TelemetryManager:
             joint_id = arb_id - CAN_ID_JOINT_ANNOUNCE
             self._handle_announce(data, joint_id)
             return
+
+        # Joint state / impedance feedback (0x4F0-0x4FF)
+        if 0x4F0 <= arb_id <= 0x4FF and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_JOINT_STATE
+            self._handle_joint_state(data, joint_id)
+            return
+
+    def _handle_joint_state(self, data: bytes, joint_id: int) -> None:
+        js = decode_joint_state(data, joint_id)
+        key = self._config._id_to_key.get(joint_id)
+        if key is None:
+            return
+
+        state = self.states.get(key)
+        if state is None:
+            return
+
+        dof = js.dof_index
+        state.angles_deg[dof] = js.q_actual_deg
+        state.velocities_deg_s[dof] = js.dq_actual_deg_s
+        state.torques_agonist[dof] = js.tau_agonist
+        state.torques_antagonist[dof] = js.tau_antagonist
+        state.holding[dof] = js.holding
+        state.last_update = time.monotonic()
+        state.is_online = True
+        state.rx_count += 1
 
     def _handle_encoder(self, data: bytes, joint_id: int) -> None:
         enc = decode_encoder_stream(data, joint_id)

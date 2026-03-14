@@ -55,6 +55,7 @@ class ControllerConfig:
     watchdog_ms: int
     homing_speed_deg_s: float
     homing_tolerance_deg: float
+    nudge_speed_deg_s: float
     joints: dict[str, JointControlConfig]  # keyed by UPPER name (e.g. "KNEE_RIGHT")
 
     # Reverse lookup: joint_id → joint key
@@ -225,5 +226,6 @@ def load_config(yaml_path: Optional[str] = None) -> ControllerConfig:
         watchdog_ms=imp_cfg.get("watchdog_ms", 2000),
         homing_speed_deg_s=homing_cfg.get("speed_deg_s", 5.0),
         homing_tolerance_deg=homing_cfg.get("tolerance_deg", 1.0),
+        nudge_speed_deg_s=cfg.get("nudge", {}).get("speed_deg_s", 15.0),
         joints=joints,
     )

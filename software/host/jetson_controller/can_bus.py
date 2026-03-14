@@ -19,8 +19,10 @@ from .protocol import (
     MULTI_FRAME_DELAY_S,
     CAN_ID_EMERGENCY_STOP, CAN_ID_TIME_SYNC, CAN_ID_ENCODER_STREAM_CTRL,
     CAN_ID_IDENTIFY_REQUEST, CAN_ID_STARTUP_SEQUENCE,
+    CAN_ID_PRETENSION_ALL,
     CAN_ID_SET_IMPEDANCE, CAN_ID_IMPEDANCE_CTRL,
     CAN_ID_ENCODER_STREAM_DATA, CAN_ID_STARTUP_STATUS, CAN_ID_JOINT_ANNOUNCE,
+    CAN_ID_JOINT_STATE,
     UNUSED_DOF,
 )
 
@@ -54,6 +56,10 @@ def _decode_tx(arb_id: int, data: bytes) -> str:
     if arb_id == CAN_ID_STARTUP_SEQUENCE:
         joint_id = data[0] if data else 0
         return f"STARTUP_SEQUENCE joint={joint_id}"
+
+    if arb_id == CAN_ID_PRETENSION_ALL:
+        joint_id = data[0] if data else 0
+        return f"PRETENSION_ALL joint={joint_id}"
 
     if arb_id == CAN_ID_SET_IMPEDANCE and len(data) >= 6:
         return _decode_set_impedance(data)
@@ -153,6 +159,27 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
                     False)
         return f"JOINT_ANNOUNCE j={joint_id} [{data.hex(' ')}]", False
 
+    # Joint state (impedance feedback, 50 Hz — high frequency)
+    if CAN_ID_JOINT_STATE <= arb_id < CAN_ID_JOINT_STATE + 16:
+        joint_id = arb_id - CAN_ID_JOINT_STATE
+        if len(data) >= 8:
+            dof = data[0]
+            q_raw, dq_raw = struct.unpack_from("<hh", data, 1)
+            tau_a = struct.unpack_from("<b", data, 5)[0]
+            tau_b = struct.unpack_from("<b", data, 6)[0]
+            status = data[7]
+            flags = []
+            if status & 0x02:
+                flags.append("HOLD")
+            if status & 0x04:
+                flags.append("WDG!")
+            flag_str = f" [{','.join(flags)}]" if flags else ""
+            return (f"JOINT_STATE j={joint_id} d={dof} "
+                    f"q={q_raw / 100.0:+.2f}° dq={dq_raw / 10.0:.1f}°/s "
+                    f"τA={tau_a * 4} τB={tau_b * 4}{flag_str}",
+                    True)
+        return f"JOINT_STATE j={joint_id} [{data.hex(' ')}]", True
+
     # Unknown
     hex_data = data.hex(" ") if data else ""
     return f"RX 0x{arb_id:03X} [{hex_data}]", False
@@ -200,6 +227,17 @@ class CanBus:
         )
         logger.info("CAN bus connected")
 
+        # Drain stale frames from previous sessions (max 100ms window)
+        drained = 0
+        deadline = time.monotonic() + 0.1
+        while time.monotonic() < deadline:
+            stale = self._bus.recv(timeout=0.01)
+            if stale is None:
+                break
+            drained += 1
+        if drained:
+            logger.info(f"Drained {drained} stale CAN frame(s) from buffer")
+
         # Start background listener
         self._listener_stop.clear()
         self._listener_thread = threading.Thread(
@@ -230,12 +268,11 @@ class CanBus:
         decoded, is_high_freq = _decode_rx(msg.arbitration_id, msg.data)
 
         if is_high_freq:
-            # Encoder data: log once per joint per summary interval
-            joint_id = msg.arbitration_id - CAN_ID_ENCODER_STREAM_DATA
+            # High-freq streams (encoder, joint_state): sample once per interval
             now = time.monotonic()
-            last = self._last_enc_log.get(joint_id, 0.0)
+            last = self._last_enc_log.get(msg.arbitration_id, 0.0)
             if now - last >= _SUMMARY_INTERVAL_S:
-                self._last_enc_log[joint_id] = now
+                self._last_enc_log[msg.arbitration_id] = now
                 logger.debug(f"CAN RX {decoded}")
         else:
             logger.info(f"CAN RX {decoded}")

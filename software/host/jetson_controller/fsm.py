@@ -18,6 +18,7 @@ from .config import ControllerConfig
 from .protocol import (
     encode_encoder_stream_ctrl,
     encode_identify_request,
+    encode_pretension_all,
     encode_set_impedance_frame0,
     encode_set_impedance_frame1,
     encode_set_impedance_frame2,
@@ -34,6 +35,7 @@ class FSMState(enum.Enum):
     INIT = "INIT"
     CAN_CONNECT = "CAN_CONNECT"
     DISCOVER = "DISCOVER"
+    DISCOVERED = "DISCOVERED"
     STARTUP = "STARTUP"
     STREAM = "STREAM"
     INIT_GAINS = "INIT_GAINS"
@@ -67,9 +69,36 @@ class StartupFSM:
     async def run(self, can_bus: CanBus, config: ControllerConfig,
                   telemetry: TelemetryManager, safety: SafetyManager) -> bool:
         """Execute full startup sequence. Returns True if READY reached."""
+        if not await self.run_discover(can_bus, config, telemetry):
+            return False
+        return await self.run_startup(can_bus, config, telemetry, safety)
+
+    async def run_discover(self, can_bus: CanBus, config: ControllerConfig,
+                           telemetry: TelemetryManager) -> bool:
+        """Connect and discover joints. Returns True on success.
+
+        After success the FSM is in DISCOVERED state, waiting for the
+        user to press [S] before motors are enabled.
+        """
         try:
             await self._connect(can_bus, config)
             await self._discover(can_bus, config, telemetry)
+            self._set_state(FSMState.DISCOVERED,
+                            "Press [S] to start motors")
+            return True
+        except StartupError as e:
+            self._set_state(FSMState.ERROR, str(e))
+            logger.error(f"Discover failed: {e}")
+            return False
+
+    async def run_startup(self, can_bus: CanBus, config: ControllerConfig,
+                          telemetry: TelemetryManager,
+                          safety: SafetyManager) -> bool:
+        """Run startup sequence (pretension → startup → stream → gains → home).
+
+        Expects joints to be already discovered.
+        """
+        try:
             await self._startup(can_bus, config, telemetry)
             await self._stream(can_bus, config, telemetry)
             await self._init_gains(can_bus, config, telemetry, safety)
@@ -142,6 +171,11 @@ class StartupFSM:
 
         for key, jcfg in config.joints.items():
             logger.info(f"Starting up {key} (id={jcfg.joint_id})")
+
+            # Re-enable motor power (clears post-e-stop lockout)
+            arb_id, data = encode_pretension_all(jcfg.joint_id)
+            await can_bus.send(arb_id, data)
+            await asyncio.sleep(0.1)  # Let firmware process pretension
 
             # Reset event for this joint
             evt = telemetry.startup_events.get(jcfg.joint_id)
