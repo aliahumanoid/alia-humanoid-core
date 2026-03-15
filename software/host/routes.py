@@ -38,22 +38,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Keep these UI defaults aligned with the safe waypoint controller defaults in
-# firmware `software/firmware/joint_controller/include/JointConfig.h`.
-# They seed the impedance test page with the same Kp/Ki/Kd and stiffness family
-# already validated on the waypoint path.
-IMPEDANCE_UI_DEFAULTS = {
-    "outer_kp": 8.0,
-    "outer_ki": 1.0,
-    "outer_kd": 0.08,
-    "outer_cascade": 1.0,
-    "inner_kp": 10.0,
-    "inner_ki": 1.0,
-    "inner_kd": 0.25,
-    "stiffness": 25.0,
-    "tau_ff": 0,
-    "dq_cruise": 20.0,
-}
 
 def register_routes(
     app,
@@ -94,8 +78,6 @@ def register_routes(
                 "message": "CAN features not available on this host (python-can missing or disabled)."
             }), 503
         return None
-
-    IMPEDANCE_HOLD_EPS_DEG = 0.10
 
     # Maximum time sync age before waypoints are rejected (ms)
     MAX_SYNC_AGE_MS = 2000.0
@@ -2409,141 +2391,6 @@ def register_routes(
             joints[joint_name] = enriched
 
         return jsonify({"status": "success", "joints": joints})
-
-    @app.route('/impedance_test')
-    def impedance_test_page():
-        """Serves the impedance control test page."""
-        return render_template('impedance_test.html', impedance_defaults=IMPEDANCE_UI_DEFAULTS)
-
-    @app.route('/api/impedance/target', methods=['POST'])
-    def impedance_target():
-        """Send SET_IMPEDANCE rolling-waypoint command to firmware.
-
-        Required: joint_name, dof_index, q_target
-        Optional: dq_target, stiffness, kp, ki, kd, tau_ff, kp_inner, ki_inner, kd_inner
-        Omitted optional params are not sent -> firmware keeps previous values.
-        Semantics:
-        - q_target: local joint goal
-        - dq_target: cruise speed magnitude for the local rolling segment
-        """
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        data = request.json or {}
-        required = ["joint_name", "dof_index", "q_target"]
-        missing = [k for k in required if k not in data]
-        if missing:
-            return jsonify({"status": "error",
-                            "message": f"Missing fields: {', '.join(missing)}"}), 400
-
-        try:
-            joint_name = data["joint_name"]
-            dof_index = int(data["dof_index"])
-            q_target = float(data["q_target"])
-            dq_target = abs(float(data.get("dq_target", 0.0)))
-            stiffness = float(data.get("stiffness", 0.0))
-
-            if dq_target == 0.0:
-                encoder_data = can_manager.get_last_encoder_angles(joint_name)
-                angles = encoder_data.get("angles_deg") if isinstance(encoder_data, dict) else None
-                if not isinstance(encoder_data, dict) or not encoder_data.get("valid") or not isinstance(angles, list):
-                    return jsonify({
-                        "status": "error",
-                        "message": "dq_target=0 requires a valid encoder reading to confirm hold vs move."
-                    }), 409
-                if dof_index < 0 or dof_index >= len(angles) or angles[dof_index] is None:
-                    return jsonify({
-                        "status": "error",
-                        "message": f"No encoder angle available for DOF {dof_index}."
-                    }), 409
-
-                q_current = float(angles[dof_index])
-                distance_deg = abs(q_target - q_current)
-                if distance_deg > IMPEDANCE_HOLD_EPS_DEG:
-                    return jsonify({
-                        "status": "error",
-                        "message": (
-                            f"dq_target=0 only permits hold commands within {IMPEDANCE_HOLD_EPS_DEG:.2f}°. "
-                            f"Current distance is {distance_deg:.2f}°."
-                        ),
-                    }), 400
-
-            # Build kwargs — only include params that are present in the request
-            kwargs = dict(
-                joint_name=joint_name,
-                dof_index=dof_index,
-                q_target=q_target,
-                dq_target=dq_target,
-                stiffness=stiffness,
-            )
-            # Optional gain params — pass None if not in request (firmware keeps current)
-            if "kp" in data:
-                kwargs["kp"] = float(data["kp"])
-            if "ki" in data:
-                kwargs["ki"] = float(data["ki"])
-            if "kd" in data:
-                kwargs["kd"] = float(data["kd"])
-            if "tau_ff" in data:
-                kwargs["tau_ff"] = int(data["tau_ff"])
-            if "kp_inner" in data:
-                kwargs["kp_inner"] = float(data["kp_inner"])
-            if "ki_inner" in data:
-                kwargs["ki_inner"] = float(data["ki_inner"])
-            if "kd_inner" in data:
-                kwargs["kd_inner"] = float(data["kd_inner"])
-
-            result = can_manager.send_impedance_target(**kwargs)
-        except KeyError as exc:
-            return jsonify({"status": "error",
-                            "message": f"Unknown joint: {exc}"}), 400
-        except Exception as exc:
-            current_app.logger.exception("Impedance target failed")
-            return jsonify({"status": "error", "message": str(exc)}), 500
-
-        return jsonify({"status": "success", **result})
-
-    @app.route('/api/impedance/ctrl', methods=['POST'])
-    def impedance_ctrl():
-        """Send IMPEDANCE_CTRL command to firmware."""
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        data = request.json or {}
-        if "joint_name" not in data or "sub_cmd" not in data:
-            return jsonify({"status": "error",
-                            "message": "joint_name and sub_cmd required"}), 400
-
-        try:
-            result = can_manager.send_impedance_ctrl(
-                joint_name=data["joint_name"],
-                sub_cmd=int(data["sub_cmd"]),
-                param=int(data.get("param", 0)),
-            )
-        except KeyError as exc:
-            return jsonify({"status": "error",
-                            "message": f"Unknown joint: {exc}"}), 400
-        except Exception as exc:
-            current_app.logger.exception("Impedance ctrl failed")
-            return jsonify({"status": "error", "message": str(exc)}), 500
-
-        return jsonify({"status": "success", **result})
-
-    @app.route('/api/impedance/state', methods=['GET'])
-    def impedance_state():
-        """Get current joint state from JOINT_STATE broadcast."""
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        try:
-            state = can_manager.get_joint_state()
-        except Exception as exc:
-            current_app.logger.exception("Joint state query failed")
-            return jsonify({"status": "error", "message": str(exc)}), 500
-
-        return jsonify({"status": "success", "joint_state": state})
 
     @app.route('/')
     def index():

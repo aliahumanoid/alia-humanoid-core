@@ -60,34 +60,6 @@ def test_motor_tuning_page_renders():
     assert b"Apply Current PID (0x15)" in response.data
 
 
-def test_impedance_test_page_renders():
-    client, _, _ = build_client()
-
-    response = client.get("/impedance_test")
-
-    assert response.status_code == 200
-    assert b"rolling waypoint test bench" in response.data
-    assert b"Stream (50 Hz)" in response.data
-    assert b"goal + cruise speed" in response.data
-    assert b"Suggested sequence" in response.data
-    assert b"Init Gains + Hold" in response.data
-    assert b"Waypoint Defaults" in response.data
-    assert b"waypoint-safe defaults" in response.data
-    assert b"Current Safe Range" in response.data
-    assert b"Current q_act" in response.data
-    assert b"Read Current PID" in response.data
-    assert b"Load PID from Flash" in response.data
-    assert b"Save PID &amp; Cascade to Flash" in response.data or b"Save PID & Cascade to Flash" in response.data
-    assert b"Cascade influence (0-1)" in response.data
-    assert b"Ki inner (motor integral)" in response.data
-    assert b"Inner Agonist" in response.data
-    assert b"Inner Antagonist" in response.data
-    assert b"Inner Firmware Readback Preview" in response.data
-    assert b"SLIDERS" in response.data
-    assert b"Tau=" in response.data
-    assert b"MATCH" in response.data
-
-
 def test_api_joints_includes_dof_limits():
     client, _, _ = build_client()
 
@@ -119,99 +91,6 @@ def test_motor_test_status_returns_payload():
     mock_can_manager.get_motor_test_status.assert_called_once_with(
         motor_id=DEFAULT_MOTOR_ID,
         output_ratio=DEFAULT_OUTPUT_RATIO,
-    )
-
-
-def test_impedance_target_rejects_zero_speed_for_distant_goal():
-    client, mock_can_manager, _ = build_client()
-    mock_can_manager.get_last_encoder_angles.return_value = {
-        "valid": True,
-        "angles_deg": [0.0, None, None],
-    }
-
-    response = client.post(
-        "/api/impedance/target",
-        json={
-            "joint_name": "KNEE_RIGHT",
-            "dof_index": 0,
-            "q_target": 5.0,
-            "dq_target": 0.0,
-            "stiffness": 2.0,
-        },
-    )
-
-    assert response.status_code == 400
-    payload = response.get_json()
-    assert payload["status"] == "error"
-    assert "dq_target=0" in payload["message"]
-    mock_can_manager.send_impedance_target.assert_not_called()
-
-
-def test_impedance_target_rejects_zero_speed_without_encoder_data():
-    client, mock_can_manager, _ = build_client()
-    mock_can_manager.get_last_encoder_angles.return_value = {
-        "valid": False,
-        "message": "No encoder data",
-    }
-
-    response = client.post(
-        "/api/impedance/target",
-        json={
-            "joint_name": "KNEE_RIGHT",
-            "dof_index": 0,
-            "q_target": 0.0,
-            "dq_target": 0.0,
-            "stiffness": 0.0,
-        },
-    )
-
-    assert response.status_code == 409
-    payload = response.get_json()
-    assert payload["status"] == "error"
-    assert "valid encoder reading" in payload["message"]
-    mock_can_manager.send_impedance_target.assert_not_called()
-
-
-def test_impedance_target_accepts_hold_and_normalizes_speed_magnitude():
-    client, mock_can_manager, _ = build_client()
-    mock_can_manager.get_last_encoder_angles.return_value = {
-        "valid": True,
-        "angles_deg": [5.04, None, None],
-    }
-    mock_can_manager.send_impedance_target.return_value = {"success": True}
-
-    response = client.post(
-        "/api/impedance/target",
-        json={
-            "joint_name": "KNEE_RIGHT",
-            "dof_index": 0,
-            "q_target": 5.0,
-            "dq_target": -12.5,
-            "stiffness": 3.0,
-            "kp": 8.0,
-            "ki": 1.0,
-            "kd": 0.08,
-            "kp_inner": 10.0,
-            "ki_inner": 1.0,
-            "kd_inner": 0.25,
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["status"] == "success"
-    mock_can_manager.send_impedance_target.assert_called_once_with(
-        joint_name="KNEE_RIGHT",
-        dof_index=0,
-        q_target=5.0,
-        dq_target=12.5,
-        stiffness=3.0,
-        kp=8.0,
-        ki=1.0,
-        kd=0.08,
-        kp_inner=10.0,
-        ki_inner=1.0,
-        kd_inner=0.25,
     )
 
 
