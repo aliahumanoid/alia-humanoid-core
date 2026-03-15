@@ -18,8 +18,8 @@ Authoritative mapping is in code; this document mirrors those defaults for wirin
 **J5 CAN_Controller (Host CAN):**
 - `GP08` → `CAN_HOST_CS_PIN` (chip select for Host MCP2515)
 - `GP14` → `CAN_HOST_INT_PIN` (interrupt from Host MCP2515)
-- **Purpose:** Host/Jetson commands (TimeSync, Waypoints)
-- **CAN IDs:** 0x000 (Emergency), 0x002 (TimeSync), 0x380-0x39F (Multi-DOF Waypoints)
+- **Purpose:** Host/Jetson commands (TimeSync, Impedance)
+- **CAN IDs:** 0x000 (Emergency), 0x002 (TimeSync), 0x01D-0x01E (Impedance)
 
 **Architecture:**
 - **Dual CAN Bus** separates Host commands from Motor commands

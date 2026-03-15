@@ -87,7 +87,7 @@ break-free event.
 
 ### Implementation
 
-**Location:** Inner PID feedforward parameter (`uff`) in `JointController_Waypoint.cpp`
+**Location:** Inner PID feedforward parameter (`uff`) in `JointController_ControlLoop.cpp`
 
 **Logic (trapezoidal profile with soft fade-out):**
 1. If velocity is exactly zero (holding): no feedforward (dead zone at 0.01 deg/s)
@@ -185,7 +185,7 @@ The feedforward value is visible in the PID diagnostics:
 |------|--------|
 | `main_common.h` | Declare friction_ff_* parameters |
 | `main.cpp` | Define friction_ff_* with defaults |
-| `JointController_Waypoint.cpp` | Compute and inject feedforward into inner PIDs |
+| `JointController_ControlLoop.cpp` | Compute and inject feedforward into inner PIDs |
 | `core0.cpp` | Serial command parsing for FRIC_EN/FRIC_TORQUE/FRIC_SPEED |
 
 ---

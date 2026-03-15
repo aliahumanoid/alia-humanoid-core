@@ -102,7 +102,6 @@ class CanManager:
     """High-level helper that manages python-can Bus lifecycle and protocol helpers."""
 
     DEFAULT_BITRATE = 1_000_000  # 1 Mbps (maximum speed test)
-    REANCHOR_INTERVAL_MAX = 2000  # Must match firmware WAYPOINT_BUFFER_DEPTH
     MOTOR_ID_BASE = 0x140
     MOTOR_TEST_LOG_DIR = Path(__file__).resolve().parent / "logs" / "motor_can_bench"
 
@@ -149,16 +148,6 @@ class CanManager:
         # Impedance gain cache per (joint_name, dof_index)
         # Avoids sending hardcoded defaults when gains are omitted (None)
         self._impedance_gain_cache: Dict[tuple, Dict[str, float]] = {}
-
-        # Waypoint buffer telemetry (on-demand request/response)
-        self._wp_telemetry: Dict[str, Dict[str, Any]] = {}
-        self._wp_telemetry_event = threading.Event()
-
-        # Time sync tracking (for preflight gating)
-        self._last_time_sync_ts: Optional[float] = None
-
-        # Per-joint batch locks (prevents concurrent batch sends to same joint)
-        self._batch_locks: Dict[str, threading.Lock] = {}
 
         # Impedance TX lock — serializes multi-frame SET_IMPEDANCE sends
         self._impedance_tx_lock = threading.Lock()
@@ -332,23 +321,6 @@ class CanManager:
     # ------------------------------------------------------------------
     # Protocol helpers
     # ------------------------------------------------------------------
-    def send_time_sync(self, timestamp_ms: Optional[int] = None) -> Dict[str, Any]:
-        """Broadcast absolute time reference to all controllers."""
-        self._ensure_connection()
-        if timestamp_ms is None:
-            timestamp_ms = int(time.time() * 1000)
-        # Ensure timestamp fits in uint32_t (0 to 4,294,967,295)
-        timestamp_ms = timestamp_ms & 0xFFFFFFFF
-        payload = struct.pack("<II", timestamp_ms, 0)
-        self._send_frame(0x002, payload, context=f"TimeSync ts={timestamp_ms}")
-        self._last_time_sync_ts = time.monotonic()
-        return {"timestamp_ms": timestamp_ms}
-
-    def last_time_sync_age_ms(self) -> Optional[float]:
-        """Return ms since last time sync, or None if never synced."""
-        if self._last_time_sync_ts is None:
-            return None
-        return (time.monotonic() - self._last_time_sync_ts) * 1000.0
 
     def send_emergency_stop(self, reason_code: int = 0) -> Dict[str, Any]:
         """Broadcast emergency stop frame."""
@@ -482,44 +454,6 @@ class CanManager:
             )
 
         return result
-
-    def request_wp_telemetry(
-        self, joint_name: str, timeout: float = 0.5
-    ) -> Optional[Dict[str, Any]]:
-        """Request waypoint buffer telemetry from a joint controller.
-
-        Sends a request frame (0x01C) and waits for the response (0x4D0+joint).
-
-        Args:
-            joint_name: Joint name (e.g. "KNEE_RIGHT")
-            timeout: Seconds to wait for the response
-
-        Returns:
-            Dict with wp_accepted, wp_dropped_full, wp_dropped_guard, buffer_fill,
-            or None if no response.
-        """
-        self._ensure_connection()
-        joint_id = JOINTS[joint_name]["id"]
-
-        with self._lock:
-            self._wp_telemetry_event.clear()
-
-        request_ts = time.time()
-        payload = bytes([joint_id]) + bytes(7)
-        self._send_frame(0x01C, payload, context=f"WP telemetry request joint={joint_name}")
-
-        arrived = self._wp_telemetry_event.wait(timeout=timeout)
-        if not arrived:
-            return None  # Timeout: don't return stale cache
-
-        with self._lock:
-            entry = self._wp_telemetry.get(joint_name)
-            if entry is None:
-                return None
-            # Guard: only return if response arrived after our request
-            if entry.get("timestamp", 0) < request_ts:
-                return None
-            return entry
 
     def validate_encoder_offsets(self, joint_name: str) -> Dict[str, Any]:
         """Query firmware encoder offsets and validate against saved host copy.
@@ -1071,22 +1005,6 @@ class CanManager:
         self._log_can_info("PID diagnostics streaming stopped")
         return {"streaming": False}
 
-    def set_interpolation_mode(self, mode: str) -> Dict[str, Any]:
-        """
-        Set waypoint interpolation mode.
-        
-        Args:
-            mode: "linear" for step response (PID tuning) or "cosine" for smooth motion
-        
-        Sends control command (0x005) to set interpolation mode.
-        """
-        self._ensure_connection()
-        mode_value = 0 if mode == "linear" else 1
-        payload = bytes([mode_value]) + bytes(7)
-        self._send_frame(0x005, payload, context=f"Interpolation mode={mode}")
-        self._log_can_info(f"Interpolation mode set to: {mode}")
-        return {"mode": mode}
-
     def set_loop_frequencies(self, inner_period_us: int, outer_divisor: int) -> Dict[str, Any]:
         """
         Set control loop frequencies.
@@ -1148,29 +1066,6 @@ class CanManager:
             "interval_ms": interval_ms
         }
 
-    def set_reanchor_interval(self, interval: int) -> Dict[str, Any]:
-        """
-        Set waypoint re-anchor interval.
-
-        Args:
-            interval: Number of consumed WPs between re-anchors (0 = disabled)
-
-        Sends control command (0x01B) to set re-anchor interval.
-        """
-        self._ensure_connection()
-        requested_interval = int(interval)
-        applied_interval = max(0, min(self.REANCHOR_INTERVAL_MAX, requested_interval))
-        payload = struct.pack('<H', applied_interval) + bytes(6)
-        self._send_frame(0x01B, payload, context=f"WP re-anchor interval={applied_interval}")
-        self._log_can_info(f"WP re-anchor interval set to: {applied_interval}" +
-                           (" (disabled)" if applied_interval == 0 else " WPs"))
-        return {
-            "interval": applied_interval,
-            "requested_interval": requested_interval,
-            "clamped": applied_interval != requested_interval,
-            "max_interval": self.REANCHOR_INTERVAL_MAX,
-        }
-
     def is_encoder_streaming(self) -> bool:
         """Check if encoder streaming is currently active."""
         return self._encoder_stream_active
@@ -1230,280 +1125,6 @@ class CanManager:
                     result[joint_name]["age_ms"] = (current_time - data["timestamp"]) * 1000
                     result[joint_name]["valid"] = True
                 return result
-
-    def send_multi_dof_waypoint(
-        self,
-        joint_name: str,
-        angles_deg: list,
-        t_offset_ms: int,
-    ) -> Dict[str, Any]:
-        """
-        Send Multi-DOF waypoint command to a joint (optimized format).
-        
-        This is the recommended format for production use, as it sends all DOFs
-        of a joint in a single CAN frame, reducing bus traffic by 66%.
-        
-        Format (8 bytes):
-            Byte 0-1: int16_t dof0_angle (0.01° resolution, 0x7FFF = unused)
-            Byte 2-3: int16_t dof1_angle (0.01° resolution, 0x7FFF = unused)
-            Byte 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF = unused)
-            Byte 6-7: uint16_t t_offset_ms (offset from batch start, firmware-anchored)
-
-        Args:
-            joint_name: Host joint key (e.g., 'KNEE_LEFT')
-            angles_deg: List of target angles [dof0, dof1, dof2] in degrees.
-                        Use None for unused DOFs.
-            t_offset_ms: Time offset from batch start in milliseconds (0-65535).
-                        Firmware anchors to the local clock at the first WP
-                        arrival and computes arrival = anchor + t_offset_ms.
-        
-        Returns:
-            Dict with frame details for debugging.
-        
-        Example:
-            # 3-DOF joint (ankle): all DOFs used, arrive in 1 second
-            send_multi_dof_waypoint('ANKLE_RIGHT', [45.0, 10.0, -5.0], 1000)
-            
-            # 1-DOF joint (knee): only DOF0 used, arrive in 500ms
-            send_multi_dof_waypoint('KNEE_RIGHT', [90.0, None, None], 500)
-        """
-        self._ensure_connection()
-
-        joint_key = joint_name.upper()
-        if joint_key not in JOINTS:
-            raise ValueError(f"Unknown joint '{joint_name}'.")
-
-        joint_info = JOINTS[joint_key]
-        joint_id = joint_info["id"]
-        
-        # Multi-DOF waypoint uses 0x380 base
-        arbitration_id = 0x380 + joint_id
-        
-        # Sentinel value for unused DOF
-        UNUSED_DOF = 0x7FFF
-        
-        # Convert angles to 0.01° resolution, use sentinel for None/unused
-        angle_counts = []
-        for i in range(3):
-            if i < len(angles_deg) and angles_deg[i] is not None:
-                counts = int(round(angles_deg[i] * 100))
-                counts = max(min(counts, 32767), -32768)
-                angle_counts.append(counts)
-            else:
-                angle_counts.append(UNUSED_DOF)
-        
-        # Clamp t_offset to uint16 range
-        t_offset_ms = max(0, min(t_offset_ms, 65535))
-        
-        # Pack payload: 3x int16 angles + 1x uint16 offset
-        payload = struct.pack("<hhhH", 
-                              angle_counts[0], 
-                              angle_counts[1], 
-                              angle_counts[2], 
-                              t_offset_ms)
-        
-        # Build context string for logging
-        angles_str = ", ".join(
-            f"DOF{i}={angles_deg[i]:.2f}°" if i < len(angles_deg) and angles_deg[i] is not None else f"DOF{i}=unused"
-            for i in range(3)
-        )
-        context = f"MultiDOF joint={joint_key} id={joint_id} {angles_str} t_offset={t_offset_ms}ms"
-        
-        self._send_frame(arbitration_id, payload, context=context)
-
-        return {
-            "joint": joint_key,
-            "joint_id": joint_id,
-            "angles_deg": angles_deg,
-            "angle_counts": angle_counts,
-            "t_offset_ms": t_offset_ms,
-            "arbitration_id": f"0x{arbitration_id:03X}",
-            "format": "multi_dof",
-        }
-
-    def send_waypoint_batch(
-        self,
-        joint_name: str,
-        waypoints: list,
-        inter_waypoint_delay_ms: float = 2.0,
-        batch_id: str = "",
-        min_lead_ms: float = 15.0,
-    ) -> Dict[str, Any]:
-        """
-        Send a batch of waypoints sequentially (deterministic order).
-
-        This ensures all waypoints arrive in order and none are lost.
-        A small delay between waypoints prevents CAN buffer overflow.
-        A per-joint lock prevents concurrent batches to the same joint.
-
-        TIMING MODEL (batch-anchor):
-        The t_offset_ms from JS represents "desired arrival time from batch
-        start".  These offsets are sent to the firmware **unchanged**.
-        The firmware anchors them: when the first waypoint of a batch
-        arrives, the controller saves ``anchor_local_ms = millis()`` and
-        computes every arrival time as ``anchor_local_ms + t_offset_ms``.
-        This eliminates per-frame jitter caused by sampling millis() on
-        each CAN receive — all inter-waypoint deltas are exact.
-
-        LATE WAYPOINT POLICY:
-        A waypoint is considered "late" when the time remaining before
-        its intended arrival (``t_offset - elapsed``) drops below
-        *min_lead_ms*.  Late waypoints are skipped (the firmware
-        interpolates from the previous to the next waypoint).  If
-        MAX_CONSECUTIVE_LATE consecutive waypoints are late, the batch
-        is aborted — the system cannot keep up.
-
-        Args:
-            joint_name: Joint name (e.g., 'ANKLE_RIGHT')
-            waypoints: List of dicts with 'angles_deg' and 't_offset_ms'
-            inter_waypoint_delay_ms: Delay between waypoints (default 2ms)
-            batch_id: Optional batch identifier for traceability
-            min_lead_ms: Minimum remaining lead to consider on-time (default 15)
-
-        Returns:
-            Dict with batch statistics
-
-        Raises:
-            ValueError: If a batch is already in progress for this joint
-        """
-        import time
-        from waypoint_types import MAX_CONSECUTIVE_LATE
-
-        self._ensure_connection()
-
-        # Per-joint concurrency lock — prevents interleaved batches
-        joint_key = joint_name.upper()
-        lock = self._batch_locks.setdefault(joint_key, threading.Lock())
-        if not lock.acquire(timeout=0):
-            raise ValueError(f"Waypoint batch already in progress for {joint_key}")
-
-        try:
-            success_count = 0
-            failed_indices = []
-            skipped_indices = []
-            consecutive_late = 0
-            total_late = 0
-            aborted = False
-            delay_sec = inter_waypoint_delay_ms / 1000.0
-            max_timing_drift_ms = 0.0
-            tag = f"[{batch_id}]" if batch_id else ""
-
-            # Socket.IO progress throttle
-            PROGRESS_INTERVAL = 50
-
-            # Track elapsed time for late-waypoint detection
-            batch_start_time = time.perf_counter()
-
-            for i, wp in enumerate(waypoints):
-                try:
-                    angles = wp.get('angles_deg', [None, None, None])
-                    original_t_offset = wp.get('t_offset_ms', 0)
-
-                    # Elapsed time since batch start (ms)
-                    elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
-
-                    # Remaining lead: how far in the future is this waypoint?
-                    # The firmware anchors all offsets to the first-WP arrival
-                    # time, so the effective lead shrinks as transmission
-                    # progresses.
-                    remaining_lead_ms = original_t_offset - elapsed_ms
-
-                    # Track timing drift (informational)
-                    offset_loss = max(0.0, -remaining_lead_ms)
-                    if offset_loss > max_timing_drift_ms:
-                        max_timing_drift_ms = offset_loss
-
-                    # --- Late waypoint policy ---
-                    # First waypoint (i==0) is always sent regardless of lead
-                    if remaining_lead_ms < min_lead_ms and i > 0:
-                        consecutive_late += 1
-                        total_late += 1
-                        if consecutive_late >= MAX_CONSECUTIVE_LATE:
-                            self.logger.error(
-                                f"Batch {tag} aborted: {consecutive_late} consecutive "
-                                f"late waypoints, system cannot maintain timing"
-                            )
-                            aborted = True
-                            break
-                        self.logger.warning(
-                            f"Waypoint {i} {tag} late: remaining_lead="
-                            f"{remaining_lead_ms:.0f}ms < min_lead={min_lead_ms}ms, skipping"
-                        )
-                        skipped_indices.append(i)
-                        continue  # Skip — firmware interpolates from prev to next
-
-                    consecutive_late = 0  # Reset on successful send
-
-                    # Send original t_offset — firmware uses batch-anchor
-                    self.send_multi_dof_waypoint(
-                        joint_name, angles, original_t_offset
-                    )
-                    success_count += 1
-
-                    if batch_id:
-                        self.logger.debug(
-                            f"{tag}:{i} sent t_off={original_t_offset}ms "
-                            f"(remaining_lead={remaining_lead_ms:.0f}ms)"
-                        )
-
-                    # Small delay to prevent CAN buffer overflow
-                    if i < len(waypoints) - 1:
-                        time.sleep(delay_sec)
-
-                except Exception as exc:
-                    self.logger.warning(f"Waypoint {i} {tag} failed: {exc}")
-                    failed_indices.append(i)
-
-                # --- Socket.IO progress (throttled) ---
-                if (self.socketio and batch_id
-                        and (i + 1) % PROGRESS_INTERVAL == 0):
-                    try:
-                        self.socketio.emit("batch_progress", {
-                            "batch_id": batch_id,
-                            "joint": joint_key,
-                            "sent": success_count,
-                            "total": len(waypoints),
-                            "elapsed_ms": round(elapsed_ms, 1),
-                        }, namespace="/movement")
-                    except Exception:
-                        pass  # Non-critical
-
-            total_elapsed_ms = (time.perf_counter() - batch_start_time) * 1000.0
-            status_str = "aborted" if aborted else "complete"
-            self.logger.info(
-                f"Waypoint batch {tag} {status_str}: {success_count}/{len(waypoints)} "
-                f"sent in {total_elapsed_ms:.1f}ms "
-                f"(late={total_late}, skipped={len(skipped_indices)})"
-            )
-
-            # --- Socket.IO batch complete event ---
-            if self.socketio and batch_id:
-                try:
-                    self.socketio.emit("batch_complete", {
-                        "batch_id": batch_id,
-                        "joint": joint_key,
-                        "sent": success_count,
-                        "total": len(waypoints),
-                        "elapsed_ms": round(total_elapsed_ms, 1),
-                        "status": "success" if not aborted else "aborted",
-                    }, namespace="/movement")
-                except Exception:
-                    pass
-
-            return {
-                "total": len(waypoints),
-                "sent": success_count,
-                "failed_indices": failed_indices,
-                "skipped_indices": skipped_indices,
-                "elapsed_ms": round(total_elapsed_ms, 1),
-                "timing_drift_ms": round(max_timing_drift_ms, 1),
-                "late_count": total_late,
-                "aborted": aborted,
-                "joint": joint_key,
-                "batch_id": batch_id,
-            }
-        finally:
-            lock.release()
 
     # ------------------------------------------------------------------
     # Telemetry accessors
@@ -2317,24 +1938,6 @@ class CanManager:
             self._zero_complete_event.set()
             return
 
-        # Waypoint buffer telemetry (0x4D0-0x4DF) - on-demand response
-        if 0x4D0 <= arb_id <= 0x4DF and len(data) >= 8:
-            joint_id = arb_id - 0x4D0
-            accepted, dropped_full, dropped_guard, buf_fill = struct.unpack_from(
-                "<HHHH", data
-            )
-            joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
-            with self._lock:
-                self._wp_telemetry[joint_name] = {
-                    "wp_accepted": accepted,
-                    "wp_dropped_full": dropped_full,
-                    "wp_dropped_guard": dropped_guard,
-                    "buffer_fill": buf_fill,
-                    "timestamp": time.time(),
-                }
-            self._wp_telemetry_event.set()
-            return
-
         # Safe limits per DOF (0x4E0-0x4EF) - emitted on encoder stream start
         if 0x4E0 <= arb_id <= 0x4EF and len(data) >= 6:
             joint_id = arb_id - 0x4E0
@@ -3094,7 +2697,8 @@ class CanManager:
 
         event_names = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAILED", 3: "COMPLETE", 4: "FAILED"}
         reason_names = {0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
-                        4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT"}
+                        4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT",
+                        7: "PARTIAL_HOLD"}
 
         joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id}")
         evt_name = event_names.get(event_type, f"UNKNOWN_{event_type}")

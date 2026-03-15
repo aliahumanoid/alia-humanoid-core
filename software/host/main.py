@@ -8,8 +8,7 @@ with the joint controller firmware.
 Boot sequence (after server starts):
 1. Load saved CAN configuration (if exists)
 2. Auto-connect to CAN bus
-3. Send time sync
-4. Discover joints on serial ports
+3. Discover joints on serial ports
 """
 import signal
 import sys
@@ -22,7 +21,6 @@ from flask_socketio import SocketIO
 from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
 from serial_manager import SerialManager
 from can_manager import CanManager
-from stream_test_service import StreamTestService
 from routes import register_routes
 
 # Configure logging
@@ -86,12 +84,7 @@ def init_app():
         logger.warning("CAN features unavailable: %s", exc)
         can_manager_instance = None
 
-    stream_test_service_instance = StreamTestService(
-        socketio=socketio,
-        base_url=f"http://127.0.0.1:{FLASK_PORT}",
-    )
-    register_routes(app, serial_manager_instance, can_manager_instance,
-                    stream_test_service_instance)
+    register_routes(app, serial_manager_instance, can_manager_instance)
 
 
 def auto_boot_sequence():
@@ -100,8 +93,7 @@ def auto_boot_sequence():
     
     1. Load saved CAN configuration
     2. Connect to CAN bus
-    3. Send time sync
-    4. Discover joints on serial ports
+    3. Discover joints on serial ports
     """
     global can_manager_instance, serial_manager_instance
     
@@ -147,19 +139,9 @@ def auto_boot_sequence():
             }, namespace='/movement')
         return
     
-    # Step 3: Send time sync
-    try:
-        time.sleep(0.3)  # Brief pause after connection
-        can_manager_instance.send_time_sync()
-        logger.info("Boot sequence: Time sync sent")
-        if socketio:
-            socketio.emit('boot_status', {
-                'step': 'time_sync',
-                'message': 'Time sync sent to all controllers'
-            }, namespace='/movement')
-    except Exception as e:
-        logger.warning(f"Boot sequence: Time sync failed: {e}")
-    
+    # [Removed] Step 3: Time sync (no longer needed — waypoints removed)
+    time.sleep(0.3)  # Brief pause after CAN connection
+
     # Step 4: Discover joints via serial
     try:
         time.sleep(0.2)

@@ -1,8 +1,12 @@
-# Waypoint System Testing Guide
+# ⚠️ ARCHIVED (D033, 2026-03-15) — Waypoint System Testing Guide
 
-**Version**: 1.0  
-**Date**: 18 November 2025  
-**Status**: Ready for Testing
+> **This document is historical reference only.** The waypoint streaming pipeline has been
+> removed from the firmware (D033). Movement is now handled exclusively via SET_IMPEDANCE
+> (0x01D/0x01E). See `CAN_SYSTEM_ARCHITECTURE.md` §4.2.8/4.2.9 for the current protocol.
+
+**Version**: 1.0
+**Date**: 18 November 2025
+**Status**: ~~Ready for Testing~~ **ARCHIVED** — Waypoint path removed (D033)
 
 ---
 

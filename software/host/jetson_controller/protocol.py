@@ -76,6 +76,7 @@ class StartupStatus:
     REASON_NAMES = {
         0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
         4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT",
+        7: "PARTIAL_HOLD",
     }
 
     @property
@@ -93,6 +94,11 @@ class StartupStatus:
     @property
     def is_failed(self) -> bool:
         return self.event_type in (2, 4)
+
+    @property
+    def is_partial(self) -> bool:
+        """COMPLETE but some DOFs stayed IDLE (encoder invalid at startup)."""
+        return self.event_type == 3 and self.reason_code == 7
 
 
 @dataclass

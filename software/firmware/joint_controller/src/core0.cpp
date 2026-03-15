@@ -218,6 +218,7 @@ static void pushStartupEvent(uint8_t event_type, uint8_t dof_index,
 #define STARTUP_REASON_POSITION_RANGE    4
 #define STARTUP_REASON_RECALC_ERROR      5
 #define STARTUP_REASON_GLOBAL_TIMEOUT    6
+#define STARTUP_REASON_PARTIAL_HOLD     7  // COMPLETE but some DOFs stayed IDLE (encoder invalid)
 
 /**
  * @brief Execute startup sequence (recalc_offset for all DOFs, then HOLDING)
@@ -461,41 +462,79 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     LOG_INFO("Motor offsets saved to flash after startup");
   }
 
-  // === Inject HOLDING waypoints for all DOFs ===
-  // After recalc, motors are stopped (torque 0). Injecting a waypoint at the
-  // current angle transitions each DOF from IDLE → MOVING → HOLDING, so the PID
-  // takes over and holds position under closed-loop control.
-  // Guard: signal Core1 to drop any incoming CAN waypoints while we write to buffer.
-  __atomic_store_n(&startup_injecting_waypoints, true, __ATOMIC_RELEASE);
-  updateSharedDofAngles();  // Refresh angles right before injection
+  // === Clear stale impedance ownership and set HOLDING ===
+  // After recalc, motors are stopped (torque 0). Any previous impedance session
+  // must be invalidated so stale targets cannot resume after recalibration.
+  //
+  // Cross-core safety: Core0 must NOT call restoreInnerPidGains() or
+  // restoreOuterLoopParameters() — those mutate PID objects owned by Core1.
+  // Instead, Core0 invalidates the impedance data (safe while DOF is IDLE)
+  // and a lazy-restore in the Core1 control loop detects stale backups
+  // (inner_pid_backup[dof].saved == true with impedance_target.valid == false)
+  // and restores the PID gains on the next active cycle.
+  // Retry encoder reads to handle transient SPI failures on loaded joints.
+  // A single updateSharedDofAngles() may mark a DOF invalid due to one bad read.
+  const uint8_t MAX_ENCODER_RETRIES = 3;
+  const uint8_t RETRY_DELAY_MS = 2;
+  for (uint8_t attempt = 0; attempt < MAX_ENCODER_RETRIES; attempt++) {
+    updateSharedDofAngles();
+    bool all_valid = true;
+    for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+      if (!shared_dof_angles.valid[dof]) { all_valid = false; break; }
+    }
+    if (all_valid) break;
+    if (attempt < MAX_ENCODER_RETRIES - 1) delay(RETRY_DELAY_MS);
+  }
+
   uint32_t t_now_hold = millis();
   uint8_t dof_count_hold = active_joint_controller->getConfig().dof_count;
 
   for (uint8_t dof = 0; dof < dof_count_hold; dof++) {
+    // Step 1: Force DOF to IDLE so Core1 skips it entirely
+    dof_state[dof] = DofState::IDLE;
+  }
+  // Brief pause to ensure Core1 has completed any in-flight cycle for these DOFs.
+  // At 500 Hz (2ms per cycle), 5ms guarantees at least 2 full cycles have passed.
+  delay(5);
+
+  bool all_dofs_holding = true;
+  for (uint8_t dof = 0; dof < dof_count_hold; dof++) {
+    // Step 2: Invalidate impedance data (safe — Core1 is skipping IDLE DOFs)
+    if (impedance_target[dof].valid) {
+      impedance_target[dof].valid = false;
+      LOG_INFO("DOF " + String(dof) + " impedance invalidated on startup");
+    }
+    resetImpedanceSegment(dof);
+
+    // Step 3: Set HOLDING if encoder is valid, otherwise leave IDLE and warn
     if (shared_dof_angles.valid[dof]) {
       float current_angle = shared_dof_angles.angles[dof];
 
-      waypoint_buffer_set_prev(dof, current_angle, t_now_hold);
-
-      WaypointEntry hold_wp{};
-      hold_wp.dof_index = dof;
-      hold_wp.target_angle_deg = current_angle;
-      hold_wp.t_arrival_ms = t_now_hold + 100;  // 100ms — PID ramps up gently
-      hold_wp.mode = 0;
-
-      waypoint_buffer_push(dof, hold_wp);
-      waypoint_buffer_set_state(dof, WaypointState::MOVING);
+      dof_hold_angle[dof] = current_angle;
+      dof_hold_time[dof] = t_now_hold;
+      dof_state[dof] = DofState::HOLDING;
 
       LOG_INFO("DOF " + String(dof) + " entering HOLDING at " +
                String(current_angle, 1) + "\xC2\xB0");
+    } else {
+      // DOF stays IDLE — no hold position available
+      all_dofs_holding = false;
+      LOG_WARN("DOF " + String(dof) + " encoder invalid after " +
+               String(MAX_ENCODER_RETRIES) + " retries — staying IDLE (no hold)");
+      SERIAL_COM_LN("EVT:STARTUP_DOF_NO_HOLD(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
     }
   }
-  __atomic_store_n(&startup_injecting_waypoints, false, __ATOMIC_RELEASE);  // Core1 can accept CAN waypoints
 
   uint32_t total_time_ms = millis() - startup_start_time;
-  SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
-  LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — holding position");
-  pushStartupEvent(STARTUP_EVT_COMPLETE, 0, STARTUP_REASON_OK, (uint16_t)total_time_ms);
+  if (all_dofs_holding) {
+    SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms));
+    LOG_INFO("Startup sequence complete in " + String(total_time_ms) + "ms — all DOFs holding");
+  } else {
+    SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" + String(total_time_ms) + ":PARTIAL=1");
+    LOG_WARN("Startup sequence complete in " + String(total_time_ms) + "ms — PARTIAL: some DOFs not holding");
+  }
+  uint8_t complete_reason = all_dofs_holding ? STARTUP_REASON_OK : STARTUP_REASON_PARTIAL_HOLD;
+  pushStartupEvent(STARTUP_EVT_COMPLETE, 0, complete_reason, (uint16_t)total_time_ms);
   return true;
 }
 
@@ -674,7 +713,7 @@ void core0_main_loop() {
 #pragma region Init Core1 and SharedData
   // Start the second core if it is not already running
   // Using 8KB stack (default is 4KB) to prevent stack overflow in
-  // executeWaypointMovement() which has large stack frame from cascade control,
+  // executeControlLoop() which has large stack frame from cascade control,
   // metrics tracking, compliance detection, and String-based LOG_INFO calls.
   static uint32_t core1_stack[2048];  // 8KB (2048 × 4 bytes)
   if (init_prg) {
@@ -714,11 +753,6 @@ void core0_main_loop() {
         }
       }
     }
-  }
-
-  // Print waypoint trajectory dump if Core1 signaled one is ready
-  if (wp_dump_pending_dof >= 0) {
-    wp_dump_print_from_core0();
   }
 
   // NOTE: CAN polling has been moved to Core1 to avoid SPI1 conflicts

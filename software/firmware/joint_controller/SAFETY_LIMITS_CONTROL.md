@@ -2,13 +2,13 @@
 
 ## Overview
 
-The firmware enforces angle limit checks during movement execution to guarantee joint safety. Safety checks run at the outer control loop frequency within `executeWaypointMovement`, validating joint and motor angles at each control cycle before computing new control outputs. The outer loop rate is configurable via `outer_loop_divisor` (default: 500 Hz).
+The firmware enforces angle limit checks during movement execution to guarantee joint safety. Safety checks run at the outer control loop frequency within `executeControlLoop`, validating joint and motor angles at each control cycle before computing new control outputs. Movement is controlled exclusively via SET_IMPEDANCE (0x01D/0x01E). The outer loop rate is configurable via `outer_loop_divisor` (default: 500 Hz).
 
 ## Operation
 
 ### Execution Context
 
-Safety checks are performed within `executeWaypointMovement` during waypoint-based movement:
+Safety checks are performed within `executeControlLoop` during impedance-based movement:
 - At each outer control loop iteration (configurable via `outer_loop_divisor`)
 - After reading current joint angles
 - Before computing new PID outputs and motor torques
@@ -76,7 +76,7 @@ These messages trigger immediate movement termination and motor stop.
 
 ## Integration & Safety Notes
 
-- Safety checks are integrated into the waypoint control loop (`executeWaypointMovement` in `JointController_Waypoint.cpp`)
+- Safety checks are integrated into the control loop (`executeControlLoop` in `JointController_ControlLoop.cpp`)
 - Checks execute only during active movements when controller is initialized and encoders provide valid readings
 - Movement termination on violation prevents continued operation in unsafe conditions
 - Emergency stop (handled in `core1_loop`) provides independent safety mechanism with higher priority

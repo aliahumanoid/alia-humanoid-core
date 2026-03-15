@@ -523,7 +523,7 @@ JointController::OffsetValidationResult JointController::checkOffsetDriftFromCac
   // Need valid equations to calculate expected angles
   if (!hasValidEquations(dof_index)) return result;
 
-  // Need valid cached motor angles (updated every control cycle by executeWaypointMovement)
+  // Need valid cached motor angles (updated every control cycle by executeControlLoop)
   if (!cached_motor_angles.valid[dof_index]) return result;
 
   // Need valid joint encoder reading

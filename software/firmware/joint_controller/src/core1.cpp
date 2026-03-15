@@ -36,7 +36,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 // DUAL CAN BUS ARCHITECTURE
 // ============================================================================
 // J4 CAN_Servo (Motor CAN): GP9=CS, GP13=INT - Motor commands via LKM_Motor
-// J5 CAN_Controller (Host CAN): GP8=CS, GP14=INT - Host commands (TimeSync, Waypoints)
+// J5 CAN_Controller (Host CAN): GP8=CS, GP14=INT - Host commands (TimeSync, Impedance)
 // Both share SPI1 (GP10=SCK, GP11=MOSI, GP12=MISO) with different CS pins
 // ============================================================================
 
@@ -48,7 +48,6 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_TIME_SYNC 0x002
 #define CAN_ID_ENCODER_STREAM_CTRL 0x003  // Encoder streaming control (start/stop)
 #define CAN_ID_PID_DIAG_CTRL 0x004        // PID diagnostics streaming control
-#define CAN_ID_INTERPOLATION_MODE 0x005   // Waypoint interpolation mode (linear/smooth)
 #define CAN_ID_LOOP_FREQUENCY 0x006       // Control loop frequencies (inner/outer)
 #define CAN_ID_PID_DIAG_FREQ 0x007        // PID diagnostics stream frequency
 #define CAN_ID_IDENTIFY_REQUEST 0x008     // Joint identification request (broadcast)
@@ -57,7 +56,6 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 // Priority Level 2: Motor Control (0x140-0x280) - handled by LKM_Motor library
 
 // Priority Level 3: Trajectory Commands
-#define CAN_ID_MULTI_DOF_WAYPOINT_BASE 0x380  // 0x380-0x39F for multi-DOF waypoints
 
 // Priority Level 4: Status Feedback
 #define CAN_ID_STATUS_BASE 0x400    // 0x400-0x4FF for status (NEW: was 0x200)
@@ -87,13 +85,10 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SAVE_LINEAR_EQ 0x018       // Save linear equations to flash (Host → Controller)
 #define CAN_ID_LOAD_LINEAR_EQ 0x019       // Load linear equations from flash (Host → Controller)
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
-#define CAN_ID_WP_REANCHOR_INTERVAL 0x01B // Set waypoint re-anchor interval (Host → Controller)
-#define CAN_ID_WP_TELEMETRY_REQUEST 0x01C // Waypoint buffer telemetry request (Host → Controller)
 #define CAN_ID_SET_IMPEDANCE    0x01D     // Impedance target (Host → Controller, 1-4 frame accumulator)
 #define CAN_ID_IMPEDANCE_CTRL   0x01E     // Impedance control command (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
-#define CAN_ID_WP_TELEMETRY_DATA 0x4D0   // Waypoint buffer telemetry (Controller → Host, + joint_id)
 #define CAN_ID_SAFE_LIMITS_DATA  0x4E0   // Safe limits per DOF (Controller → Host, + joint_id)
 #define CAN_ID_JOINT_STATE_BASE  0x4F0   // Joint state broadcast (Controller → Host, + joint_id)
 
@@ -105,13 +100,6 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define PID_DIAG_DEFAULT_INTERVAL_US 50000    // 50ms = 20Hz (normal monitoring)
 volatile uint32_t pid_diag_interval_us = PID_DIAG_DEFAULT_INTERVAL_US;
 
-// Interpolation modes
-#define INTERPOLATION_LINEAR 0   // Linear interpolation (step response)
-#define INTERPOLATION_COSINE 1   // S-curve cosine (smooth motion)
-
-// Global interpolation mode (set via CAN command, used by waypoint execution)
-volatile uint8_t waypoint_interpolation_mode = INTERPOLATION_LINEAR;
-
 // Sentinel value for unused DOF in Multi-DOF waypoint
 #define MULTI_DOF_UNUSED 0x7FFF
 
@@ -122,14 +110,26 @@ static volatile bool clock_synced = false;
 static volatile uint32_t sync_host_ms = 0;   // Host timestamp at sync
 static volatile uint32_t sync_local_ms = 0;  // Local millis() at sync
 
-// Startup safety: require minimum uptime before accepting waypoints
-// This prevents stale messages from executing after reset
-static const uint32_t MIN_UPTIME_FOR_WAYPOINTS_MS = 2000;  // 2 seconds
 static constexpr float IMPEDANCE_HOLD_EPS_DEG = 0.10f;
 static constexpr float IMPEDANCE_MIN_CRUISE_SPEED_DEG_S = 0.10f;
 static constexpr float IMPEDANCE_ABSOLUTE_MAX_JOINT_SPEED_DEG_S = 150.0f;
 static constexpr float IMPEDANCE_MAX_MOTOR_SPEED_DEG_S = 7200.0f;
 static constexpr float IMPEDANCE_MIN_SLOPE_ABS = 1e-3f;
+
+// SET_IMPEDANCE accumulator: tracks committed gains across transactions.
+// File-scope so the disable/startup handlers can reset tau_ff.
+struct ImpAccum {
+  // Committed state — last successfully applied gains
+  int16_t kp_x100 = 800, ki_x100 = 100, kd_x100 = 8, tau_ff = 0;
+  int16_t kp_inner_x100 = 1000, ki_inner_x100 = 100, kd_inner_x100 = 25;
+  // Staging — current transaction (discarded if not committed)
+  int16_t stg_q = 0, stg_dq = 0, stg_stiff = 0;
+  int16_t stg_kp_x100 = 800, stg_ki_x100 = 100, stg_kd_x100 = 8, stg_tau_ff = 0;
+  int16_t stg_kp_inner_x100 = 1000, stg_ki_inner_x100 = 100, stg_kd_inner_x100 = 25;
+  bool committed_initialized = false;
+  bool seen_seq0 = false;
+};
+static ImpAccum imp_acc[MAX_DOFS];
 
 /**
  * @brief Convert host timestamp to local time
@@ -189,30 +189,10 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
 }
 
 /**
- * @brief Handle Multi-DOF Waypoint frame from host (optimized format)
- * 
- * This is the recommended format for production use, as it sends all DOFs
- * of a joint in a single CAN frame, reducing bus traffic by 66%.
- * 
- * Format (8 bytes):
- *   Byte 0-1: int16_t dof0_angle (0.01° resolution, 0x7FFF = unused)
- *   Byte 2-3: int16_t dof1_angle (0.01° resolution, 0x7FFF = unused)
- *   Byte 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF = unused)
- *   Byte 6-7: uint16_t t_offset_ms (offset from last time sync)
- * 
- * CAN ID: 0x380 + joint_id (this controller responds to its own joint_id)
- * 
- * @param id CAN ID (0x380 + joint_id)
- * @param data CAN frame data (8 bytes)
- * @param len Frame length
- * 
- * @see CAN_SYSTEM_ARCHITECTURE.md section 4.2.4
- */
-/**
  * @brief Restore inner PID gains from backup when leaving impedance mode.
  *
- * Called from: IMPEDANCE_CTRL disable, E-Stop, waypoint arrival, watchdog timeout,
- * and control-loop safety cleanup in JointController_Waypoint.cpp.
+ * Called from: IMPEDANCE_CTRL disable, E-Stop, watchdog timeout,
+ * and lazy-restore in JointController_ControlLoop.cpp.
  * Uses setPid() which calls setTunings() (bumpless — no derivative kick).
  */
 void restoreInnerPidGains(uint8_t dof, JointController *jc) {
@@ -337,263 +317,6 @@ static float getImpedanceMaxJointSpeedDegS(uint8_t dof, JointController *jc) {
   }
 
   return max(safe_speed_deg_s, IMPEDANCE_MIN_CRUISE_SPEED_DEG_S);
-}
-
-void handleMultiDofWaypointFrame(uint32_t id, const uint8_t *data, uint8_t len) {
-  // Extract joint_id from CAN ID (0x380 + joint_id)
-  uint8_t waypoint_joint_id = id - CAN_ID_MULTI_DOF_WAYPOINT_BASE;
-  
-  // CRITICAL: Only process waypoints for THIS joint
-  // Multiple controllers share the same CAN bus, each must filter by joint_id
-  if (waypoint_joint_id != ACTIVE_JOINT) {
-    // Not for this joint, ignore silently
-    return;
-  }
-  
-  if (len < 8) {
-    LOG_C1_WARN("[CAN] Multi-DOF Waypoint frame too short (" + String(len) + " bytes)");
-    return;
-  }
-
-  if (!clock_synced) {
-    LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: clock not synchronized");
-    wp_telemetry.wp_dropped_guard++;
-    return;
-  }
-  
-  // SAFETY: Require minimum uptime before accepting waypoints.
-  // Wrap-safe: latch after first pass (check only relevant at boot, avoids
-  // millis() wrap at ~49.71 days re-triggering the guard).
-  static bool uptime_check_passed = false;
-  if (!uptime_check_passed) {
-    if (millis() < MIN_UPTIME_FOR_WAYPOINTS_MS) {
-      LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: system startup");
-      wp_telemetry.wp_dropped_guard++;
-      return;
-    }
-    uptime_check_passed = true;
-  }
-
-  // SAFETY: Drop waypoints during startup injection (Core0 writing to buffer)
-  if (__atomic_load_n(&startup_injecting_waypoints, __ATOMIC_ACQUIRE)) {
-    LOG_C1_WARN("[CAN] Multi-DOF Waypoint dropped: startup injection in progress");
-    wp_telemetry.wp_dropped_guard++;
-    return;
-  }
-
-  // SAFETY: Verify system is ready for movement
-  if (active_joint_controller != nullptr && !active_joint_controller->isSystemReadyForMovement()) {
-    LOG_C1_ERROR("[CAN] Multi-DOF Waypoint REJECTED: System not ready - run recalcOffset first!");
-    wp_telemetry.wp_dropped_guard++;
-    return;
-  }
-
-  // Parse Multi-DOF waypoint
-  // Format: 3× int16 angles (0.01° resolution, 0x7FFF = unused) + uint16 t_offset_ms
-  // t_offset_ms is the desired arrival time relative to batch start (not compensated).
-  // The firmware anchors all offsets to a single local timestamp captured at the
-  // first waypoint of each batch, eliminating per-frame millis() jitter.
-  struct {
-    int16_t dof0_angle;    // 0.01° resolution, 0x7FFF = unused
-    int16_t dof1_angle;    // 0.01° resolution, 0x7FFF = unused
-    int16_t dof2_angle;    // 0.01° resolution, 0x7FFF = unused
-    uint16_t t_offset_ms;  // Offset from batch start (host sends original, uncompensated)
-  } __attribute__((packed)) multi_wp;
-
-  memcpy(&multi_wp, data, sizeof(multi_wp));
-
-  uint32_t t_now = getAbsoluteTimeMs();
-
-  // --- Batch anchor timing ---
-  // The host sends t_offset_ms as the desired arrival time relative to
-  // batch start (uncompensated).  The firmware anchors all offsets to a
-  // single local timestamp captured when the first waypoint of a batch
-  // arrives, giving exact inter-WP spacing regardless of per-frame
-  // millis() jitter.
-  //
-  // Anchor reset triggers:
-  //   1. Any DOF transitioning IDLE/HOLDING → MOVING (new movement)
-  //   2. Candidate arrival in the past (new streaming chunk whose
-  //      t_offsets restart from a small lead value)
-  static uint32_t batch_anchor_local_ms = 0;
-  static bool batch_anchor_valid = false;
-
-  // Check if any active DOF in this frame needs init (new batch)
-  bool is_new_batch = false;
-  {
-    uint8_t dc = waypoint_buffers_get_dof_count();
-    int16_t raw_angles[3] = {multi_wp.dof0_angle, multi_wp.dof1_angle, multi_wp.dof2_angle};
-    for (uint8_t d = 0; d < 3 && d < dc; d++) {
-      if (raw_angles[d] == MULTI_DOF_UNUSED) continue;
-
-      // If DOF was in IMPEDANCE mode, switch back to WAYPOINT and restore inner gains
-      if (dof_control_mode[d] == MODE_IMPEDANCE) {
-        restoreInnerPidGains(d, active_joint_controller);
-        restoreOuterLoopParameters(d, active_joint_controller);
-        dof_control_mode[d] = MODE_WAYPOINT;
-        impedance_target[d].valid = false;
-        resetImpedanceSegment(d);
-        LOG_C1_INFO("[CAN] DOF " + String(d) + " IMPEDANCE → WAYPOINT (waypoint arrival)");
-      }
-
-      WaypointState st = waypoint_buffer_state(d);
-      if (st == WaypointState::IDLE || st == WaypointState::HOLDING) {
-        is_new_batch = true;
-        break;
-      }
-    }
-  }
-
-  if (is_new_batch || !batch_anchor_valid) {
-    batch_anchor_local_ms = t_now;
-    batch_anchor_valid = true;
-    if (is_new_batch) {
-      wp_reanchor_reset_all();
-    }
-  }
-
-  // Candidate arrival based on current anchor
-  uint32_t t_arrival_local = batch_anchor_local_ms + multi_wp.t_offset_ms;
-
-  // If the candidate arrival is already in the past, this is a new
-  // streaming chunk whose t_offsets are relative to "now" — re-anchor.
-  if ((int32_t)(t_now - t_arrival_local) > 0) {
-    batch_anchor_local_ms = t_now;
-    t_arrival_local = t_now + multi_wp.t_offset_ms;
-    // Reset re-anchor corrections: old corrections were relative to
-    // the previous batch_anchor, no longer valid with the new anchor.
-    wp_reanchor_reset_all();
-  }
-
-  // Get DOF count for this joint
-  uint8_t dof_count = waypoint_buffers_get_dof_count();
-  
-  // Array of angle values for easy iteration
-  int16_t angles[3] = {multi_wp.dof0_angle, multi_wp.dof1_angle, multi_wp.dof2_angle};
-  
-  // Process each DOF
-  uint8_t queued_count = 0;
-  for (uint8_t dof = 0; dof < 3 && dof < dof_count; dof++) {
-    // Skip unused DOFs (sentinel value 0x7FFF)
-    if (angles[dof] == MULTI_DOF_UNUSED) {
-      continue;
-    }
-    
-    // Create waypoint entry
-    WaypointEntry entry{};
-    entry.dof_index = dof;
-    entry.target_angle_deg = static_cast<float>(angles[dof]) / 100.0f;
-    // Monotonicity enforcement: ensure arrival times strictly increase per DOF.
-    // Uses last_pushed_time (tail of queue), not prev_time (consumed/interpolation ref),
-    // to catch out-of-order insertions relative to already-queued waypoints.
-    uint32_t last_push_t = waypoint_buffer_last_pushed_time(dof);
-    uint32_t arrival_ms = t_arrival_local;
-    // Wrap-safe: signed difference detects backwards timestamps across uint32_t overflow
-    if (last_push_t > 0 && (int32_t)(arrival_ms - last_push_t) <= 0) {
-      arrival_ms = last_push_t + 1;
-    }
-    entry.t_arrival_ms = arrival_ms;
-    entry.mode = 0;  // LINEAR interpolation
-    
-    // Check current state for this DOF
-    WaypointState current_state = waypoint_buffer_state(dof);
-    bool is_first_waypoint = (current_state == WaypointState::IDLE);
-    bool needs_init = is_first_waypoint || (current_state == WaypointState::HOLDING);
-    
-    // Initialize movement if needed
-    if (needs_init && active_joint_controller != nullptr) {
-      bool is_valid = shared_dof_angles.valid[dof];
-      float current_angle = shared_dof_angles.angles[dof];
-
-      if (is_valid) {
-        String safety_violation;
-        if (!active_joint_controller->checkWaypointSafety(dof, current_angle,
-                                                          entry.target_angle_deg, entry.t_arrival_ms,
-                                                          t_now, safety_violation)) {
-          LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) + ": " + safety_violation);
-          emergency_stop_requested = true;
-          return;
-        }
-
-        waypoint_buffer_set_prev(dof, current_angle, t_now);
-        waypoint_buffer_set_state(dof, WaypointState::MOVING);
-
-        if (is_first_waypoint) {
-          LOG_C1_DEBUG("[CAN] DOF " + String(dof) + " IDLE → MOVING (multi-DOF)");
-        }
-      } else {
-        // Encoder not valid during init — skip this DOF entirely
-        LOG_C1_WARN("[CAN] Multi-DOF DOF" + String(dof) + " waypoint dropped: encoder not valid");
-        continue;
-      }
-    } else if (active_joint_controller != nullptr) {
-      // In-stream waypoint (already MOVING) — lightweight angle validation
-      if (!active_joint_controller->isAngleInLimits(dof, entry.target_angle_deg)) {
-        LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +
-                     " in-stream waypoint outside physical limits: " +
-                     String(entry.target_angle_deg, 2) + " deg");
-        emergency_stop_requested = true;
-        return;
-      }
-      if (!active_joint_controller->isAngleInMappingLimits(dof, entry.target_angle_deg)) {
-        LOG_C1_WARN("[CAN] Multi-DOF DOF" + String(dof) +
-                    " in-stream waypoint outside mapping limits, skipped");
-        continue;
-      }
-
-      // In-stream velocity check: compare against last pushed waypoint
-      uint32_t last_t = waypoint_buffer_last_pushed_time(dof);
-      float last_angle = waypoint_buffer_last_pushed_angle(dof);
-      if (last_t > 0) {
-        float dt_s = (float)(arrival_ms - last_t) / 1000.0f;
-        if (dt_s > 0.001f) {
-          float vel_deg_s = fabsf(entry.target_angle_deg - last_angle) / dt_s;
-
-          // HARD CAP: 150 deg/s — matches host-side validation in
-          // waypoint_types.py.  Batch-anchor timing eliminates the
-          // per-frame millis() jitter that previously required a 20%
-          // margin (was 180).  All arrival times are now computed from
-          // a single reference point, so inter-WP dt is exact.
-          const float ABSOLUTE_MAX_VELOCITY_DEG_S = 150.0f;
-          if (vel_deg_s > ABSOLUTE_MAX_VELOCITY_DEG_S) {
-            LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +
-                         " in-stream velocity " + String(vel_deg_s, 1) +
-                         " deg/s exceeds hard limit");
-            emergency_stop_requested = true;
-            return;
-          }
-
-          // Per-DOF max_speed with 1.5x emergency margin
-          float max_speed_rad_s = active_joint_controller->getConfig().dofs[dof].motion.max_speed;
-          float max_speed_deg_s = max_speed_rad_s * RAD_TO_DEG;
-          if (vel_deg_s > max_speed_deg_s * 1.5f) {
-            LOG_C1_ERROR("[CAN SAFETY] Multi-DOF DOF" + String(dof) +
-                         " in-stream velocity " + String(vel_deg_s, 1) +
-                         " deg/s exceeds 1.5x max_speed " +
-                         String(max_speed_deg_s, 1) + " deg/s");
-            emergency_stop_requested = true;
-            return;
-          }
-        }
-      }
-    }
-
-    // Push to buffer
-    if (waypoint_buffer_push(dof, entry)) {
-      queued_count++;
-    } else {
-      LOG_C1_WARN("[CAN] Multi-DOF buffer full for DOF " + String(dof));
-    }
-  }
-  
-  // Log summary (throttled to avoid serial bottleneck)
-  static uint16_t multi_dof_log_counter = 0;
-  multi_dof_log_counter++;
-  if (multi_dof_log_counter >= 50) {
-    LOG_C1_INFO("[CAN] Multi-DOF: " + String(queued_count) + " DOFs queued, t_offset=" + 
-             String(multi_wp.t_offset_ms) + "ms, t_arrival=" + String(t_arrival_local));
-    multi_dof_log_counter = 0;
-  }
 }
 
 /**
@@ -781,14 +504,14 @@ void sendPIDDiagStreamData() {
  *   Byte 7:    status (bit0=valid, bit1=holding, bit2=watchdog_warning)
  *
  * Rate: reuses encoder stream interval (default 50 Hz).
- * Only sent when at least one DOF is in MODE_IMPEDANCE.
+ * Only sent when at least one DOF has active impedance.
  */
 void sendJointStateData() {
   // Skip if no DOF is in impedance mode
   bool any_impedance = false;
   uint8_t dof_count = active_joint_controller ? active_joint_controller->getConfig().dof_count : 0;
   for (uint8_t d = 0; d < dof_count; d++) {
-    if (dof_control_mode[d] == MODE_IMPEDANCE) {
+    if (impedance_target[d].valid) {
       any_impedance = true;
       break;
     }
@@ -809,7 +532,7 @@ void sendJointStateData() {
   extern MCP_CAN CAN_HOST;
 
   for (uint8_t d = 0; d < dof_count; d++) {
-    if (dof_control_mode[d] != MODE_IMPEDANCE) continue;
+    if (!impedance_target[d].valid) continue;
 
     struct __attribute__((packed)) {
       uint8_t dof_index;
@@ -1054,18 +777,6 @@ void pollHostCan() {
         } else {
           pid_diag_terms_enabled = false;  // Always disable terms when stopping
           LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
-        }
-      }
-    } else if (rx_id == CAN_ID_INTERPOLATION_MODE) {
-      // Interpolation mode control: byte 0 = mode (0=linear, 1=cosine)
-      if (len >= 1) {
-        uint8_t mode = buf[0];
-        if (mode <= INTERPOLATION_COSINE) {
-          waypoint_interpolation_mode = mode;
-          const char* mode_name = (mode == INTERPOLATION_LINEAR) ? "LINEAR (step)" : "COSINE (smooth)";
-          LOG_C1_INFO("[CAN_HOST] Interpolation mode set to: " + String(mode_name));
-        } else {
-          LOG_C1_WARN("[CAN_HOST] Invalid interpolation mode: " + String(mode));
         }
       }
     } else if (rx_id == CAN_ID_LOOP_FREQUENCY) {
@@ -1376,49 +1087,6 @@ void pollHostCan() {
         LOG_C1_INFO("[CAN_HOST] SET_AUTO_START en=" + String(can_auto_start_enabled));
         can_set_auto_start_requested = true;
       }
-    } else if (rx_id == CAN_ID_WP_REANCHOR_INTERVAL) {
-      // Re-anchor interval: byte 0-1 = uint16_t interval
-      // 0 = disabled, otherwise clamp to [1, WAYPOINT_BUFFER_DEPTH].
-      if (len >= 2) {
-        uint16_t requested_interval = buf[0] | (buf[1] << 8);
-        uint16_t applied_interval = requested_interval;
-
-        if (requested_interval > WAYPOINT_BUFFER_DEPTH) {
-          applied_interval = WAYPOINT_BUFFER_DEPTH;
-          LOG_C1_WARN("[CAN_HOST] WP re-anchor interval clamped: " +
-                      String(requested_interval) + " -> " +
-                      String((uint16_t)WAYPOINT_BUFFER_DEPTH));
-        }
-
-        wp_reanchor_interval = applied_interval;
-        LOG_C1_INFO("[CAN_HOST] WP re-anchor interval set to: " + String(applied_interval) +
-                    (applied_interval == 0 ? " (disabled)" : " WPs"));
-      }
-    } else if (rx_id == CAN_ID_WP_TELEMETRY_REQUEST) {
-      // Waypoint buffer telemetry: on-demand request/response
-      // Frame in: [joint_id, ...]
-      // Frame out on CAN_ID_WP_TELEMETRY_DATA + joint_id:
-      //   [accepted_lo, accepted_hi, dropped_full_lo, dropped_full_hi,
-      //    dropped_guard_lo, dropped_guard_hi, buf_fill_lo, buf_fill_hi]
-      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
-        uint8_t frame[8];
-        // Report maximum buffer fill across DOFs (active DOF's actual level)
-        uint16_t buf_fill = 0;
-        for (uint8_t d = 0; d < waypoint_buffers_get_dof_count(); d++) {
-          uint16_t c = waypoint_buffer_count(d);
-          if (c > buf_fill) buf_fill = c;
-        }
-        // Truncate uint32_t counters to low 16 bits for the 8-byte CAN frame.
-        // Host detects wraps via delta = (new - prev) & 0xFFFF.
-        uint16_t acc_lo = (uint16_t)(wp_telemetry.wp_accepted & 0xFFFF);
-        uint16_t df_lo  = (uint16_t)(wp_telemetry.wp_dropped_full & 0xFFFF);
-        uint16_t dg_lo  = (uint16_t)(wp_telemetry.wp_dropped_guard & 0xFFFF);
-        memcpy(&frame[0], &acc_lo, 2);
-        memcpy(&frame[2], &df_lo, 2);
-        memcpy(&frame[4], &dg_lo, 2);
-        memcpy(&frame[6], &buf_fill, 2);
-        CAN_HOST.sendMsgBuf(CAN_ID_WP_TELEMETRY_DATA + ACTIVE_JOINT, 0, 8, frame);
-      }
     } else if (rx_id == CAN_ID_SET_IMPEDANCE) {
       // SET_IMPEDANCE: variable-frame accumulator (1 to 4 frames)
       //
@@ -1451,24 +1119,11 @@ void pollHostCan() {
         if (dof >= active_joint_controller->getConfig().dof_count) {
           LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE invalid DOF=" + String(dof));
         } else {
-          // Per-DOF accumulator with staging buffer.
+          // Per-DOF accumulator (file-scope ImpAccum imp_acc[]) with staging buffer.
           // Committed gains persist across commands (gains not re-sent keep values).
           // Staging buffer isolates in-flight transactions: seq=1/2/3 only modify
           // staging, and only a successful commit copies staging → committed.
           // This prevents interrupted transactions from leaving latent gains.
-          struct ImpAccum {
-            // Committed state — last successfully applied gains
-            int16_t kp_x100 = 800, ki_x100 = 100, kd_x100 = 8, tau_ff = 0;
-            int16_t kp_inner_x100 = 1000, ki_inner_x100 = 100, kd_inner_x100 = 25;
-            // Staging — current transaction (discarded if not committed)
-            int16_t stg_q = 0, stg_dq = 0, stg_stiff = 0;
-            int16_t stg_kp_x100 = 800, stg_ki_x100 = 100, stg_kd_x100 = 8, stg_tau_ff = 0;
-            int16_t stg_kp_inner_x100 = 1000, stg_ki_inner_x100 = 100, stg_kd_inner_x100 = 25;
-            bool committed_initialized = false;
-            bool seen_seq0 = false;
-          };
-          static ImpAccum imp_acc[MAX_DOFS];
-
           ImpAccum &acc = imp_acc[dof];
           auto seedCommittedGainsFromController = [&]() {
             if (acc.committed_initialized) return;
@@ -1638,12 +1293,8 @@ void pollHostCan() {
               seg.dq_ref_deg_s = ((q_deg >= q_ref_now) ? 1.0f : -1.0f) * v_eff_deg_s;
             }
 
-            // Drop any queued waypoint intent when impedance takes ownership.
-            waypoint_buffer_clear(dof);
-            waypoint_buffer_set_state(dof, seg.active ? WaypointState::MOVING : WaypointState::HOLDING);
-
-            // Switch DOF to impedance mode
-            dof_control_mode[dof] = MODE_IMPEDANCE;
+            // Update DOF state based on whether a segment is active
+            dof_state[dof] = seg.active ? DofState::MOVING : DofState::HOLDING;
 
             // Throttled logging (every 50th command)
             static uint16_t imp_log_counter = 0;
@@ -1673,22 +1324,25 @@ void pollHostCan() {
           case 0x00: {
             // Disable impedance mode on all DOFs → HOLDING, restore inner PID
             for (uint8_t d = 0; d < active_joint_controller->getConfig().dof_count; d++) {
-              if (dof_control_mode[d] == MODE_IMPEDANCE) {
+              // Reset tau_ff accumulator so next session starts clean
+              imp_acc[d].tau_ff = 0;
+              imp_acc[d].stg_tau_ff = 0;
+
+              if (impedance_target[d].valid) {
                 restoreInnerPidGains(d, active_joint_controller);
                 restoreOuterLoopParameters(d, active_joint_controller);
-                dof_control_mode[d] = MODE_WAYPOINT;
                 impedance_target[d].valid = false;
 
-                // Clear pending waypoints and set hold reference to current position.
+                // Set hold reference to current position.
                 // Fallback to last impedance target if encoder is momentarily invalid
                 // (avoids collapsing hold reference to 0°).
-                waypoint_buffer_clear(d);
                 bool enc_valid = false;
                 float q_now = active_joint_controller->getCurrentAngle(d, enc_valid);
                 float q_hold = enc_valid ? q_now : getImpedanceHoldReference(d);
                 resetImpedanceSegment(d);
-                waypoint_buffer_set_prev(d, q_hold, millis());
-                waypoint_buffer_set_state(d, WaypointState::HOLDING);
+                dof_hold_angle[d] = q_hold;
+                dof_hold_time[d] = millis();
+                dof_state[d] = DofState::HOLDING;
               }
             }
             LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: disabled all DOFs → HOLDING");
@@ -1716,9 +1370,6 @@ void pollHostCan() {
             break;
         }
       }
-    } else if (rx_id >= CAN_ID_MULTI_DOF_WAYPOINT_BASE && rx_id < CAN_ID_STATUS_BASE) {
-      // Multi-DOF Waypoint (0x380-0x39F) - all DOFs in one frame
-      handleMultiDofWaypointFrame(rx_id, buf, len);
     }
     // Note: Motor responses (0x140+) are on the Motor CAN bus, not here
 
@@ -1744,7 +1395,7 @@ void pollHostCan() {
  * - CMD_PRETENSION / CMD_PRETENSION_ALL: Apply tensioning torque
  * - CMD_RELEASE / CMD_RELEASE_ALL: Release tensioning torque
  * - CMD_SET_ZERO_CURRENT_POS: Set current position as zero
- * - Movement: via CAN waypoints (executeWaypointMovement)
+ * - Movement: via SET_IMPEDANCE (executeControlLoop)
  * - CMD_RECALC_OFFSET: Recalculate motor offset calibration
  * - CMD_START_AUTO_MAPPING: Start automatic joint calibration
  * - CMD_STOP_AUTO_MAPPING: Stop automatic joint calibration
@@ -1785,17 +1436,18 @@ void core1_loop() {
         active_joint_controller->stopAllMotors();
         LOG_C1_INFO("Core1: All motors stopped");
         
-        // Clear all waypoint buffers, reset impedance mode, restore inner PID
+        // Reset all DOF states, impedance mode, restore inner PID
         for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
-          waypoint_buffer_clear(dof);
-          waypoint_buffer_set_state(dof, WaypointState::IDLE);
+          dof_state[dof] = DofState::IDLE;
           restoreInnerPidGains(dof, active_joint_controller);
           restoreOuterLoopParameters(dof, active_joint_controller);
-          dof_control_mode[dof] = MODE_WAYPOINT;
           impedance_target[dof].valid = false;
           resetImpedanceSegment(dof);
+          // Reset tau_ff accumulator so next session starts clean
+          imp_acc[dof].tau_ff = 0;
+          imp_acc[dof].stg_tau_ff = 0;
         }
-        LOG_C1_INFO("Core1: Waypoint buffers cleared, impedance mode reset");
+        LOG_C1_INFO("Core1: DOF states reset, impedance mode cleared");
       }
 
       // Reset flag
@@ -1899,25 +1551,25 @@ void core1_loop() {
     }
 
     // === WAYPOINT-BASED MOVEMENT ===
-    // Execute waypoint trajectory for all DOFs (if waypoints available)
+    // Execute cascade control loop for all DOFs (impedance + holding)
     // This runs @ 500 Hz with precise timing (outer loop every outer_loop_divisor cycles)
-    bool waypoint_active = false;
+    bool control_active = false;
     if (active_joint_controller != nullptr && safety_is_motor_power_enabled()) {
-      waypoint_active = active_joint_controller->executeWaypointMovement();
+      control_active = active_joint_controller->executeControlLoop();
     }
 
     // Signal Core0 to suspend Serial streaming during active MOVING only.
-    // HOLDING is safe for serial — Core1 doesn't log when buffer is empty.
-    movement_in_progress = waypoint_active;
+    // HOLDING is safe for serial — Core1 doesn't log when no movement active.
+    movement_in_progress = control_active;
 
     // === TIMING: Wait for next cycle (configurable frequency) ===
     // PID needs 500Hz both in MOVING and HOLDING (gains tuned for 2ms period).
-    // waypoint_active covers MOVING; check HOLDING (non-IDLE) separately.
-    bool pid_timing_needed = waypoint_active;
+    // control_active covers MOVING; check HOLDING (non-IDLE) separately.
+    bool pid_timing_needed = control_active;
     if (!pid_timing_needed && active_joint_controller != nullptr) {
       uint8_t dof_count = active_joint_controller->getConfig().dof_count;
       for (uint8_t d = 0; d < dof_count; d++) {
-        if (waypoint_buffer_state(d) != WaypointState::IDLE) {
+        if (dof_state[d] != DofState::IDLE) {
           pid_timing_needed = true;
           break;
         }

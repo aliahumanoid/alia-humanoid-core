@@ -17,11 +17,6 @@ from motor_rs485_private import (
     DEFAULT_RS485_PRIVATE_BAUD,
     DEFAULT_RS485_PRIVATE_MOTOR_ID,
 )
-from waypoint_types import (
-    WaypointBatch, ValidationResult,
-    build_batch, validate_batch, deduplicate_batch, batch_to_dicts,
-    get_dof_limits, MAX_BATCH_SIZE,
-)
 import json
 import os
 import time
@@ -43,7 +38,6 @@ def register_routes(
     app,
     serial_manager: SerialManager,
     can_manager=None,
-    stream_test_service=None,
     motor_private_reader: Optional[MotorRs485PrivateReader] = None,
 ):
     """
@@ -78,75 +72,6 @@ def register_routes(
                 "message": "CAN features not available on this host (python-can missing or disabled)."
             }), 503
         return None
-
-    # Maximum time sync age before waypoints are rejected (ms)
-    MAX_SYNC_AGE_MS = 2000.0
-
-    def _waypoint_preflight(joint_name: str, waypoints_raw: list):
-        """
-        Validate preconditions for sending a waypoint batch.
-
-        Returns:
-            (WaypointBatch, None)               on success
-            (None, (jsonify_response, status))   on failure
-        """
-        # 1. CAN connected
-        if not can_manager.is_connected():
-            return None, (jsonify({
-                "status": "error",
-                "message": "CAN bus not connected"
-            }), 503)
-
-        # 2. Time sync freshness
-        sync_age = can_manager.last_time_sync_age_ms()
-        if sync_age is None:
-            return None, (jsonify({
-                "status": "error",
-                "message": "No time sync sent yet — send time sync first"
-            }), 400)
-        if sync_age > MAX_SYNC_AGE_MS:
-            return None, (jsonify({
-                "status": "error",
-                "message": f"Time sync stale ({sync_age:.0f}ms ago, limit {MAX_SYNC_AGE_MS:.0f}ms)"
-            }), 400)
-
-        # 3. Build batch dataclass from raw dicts
-        try:
-            batch = build_batch(joint_name, waypoints_raw)
-        except Exception as exc:
-            return None, (jsonify({
-                "status": "error",
-                "message": f"Invalid waypoint data: {exc}"
-            }), 400)
-
-        # 4. Validate batch (angle limits, monotonicity, velocity)
-        result: ValidationResult = validate_batch(batch)
-        if not result.ok:
-            error_details = [
-                {"index": e.index, "field": e.field, "message": e.message}
-                for e in result.errors
-            ]
-            return None, (jsonify({
-                "status": "error",
-                "message": f"Waypoint validation failed ({len(result.errors)} error(s))",
-                "validation_errors": error_details,
-            }), 400)
-
-        # Log warnings (non-fatal)
-        for w in result.warnings:
-            logger.warning(f"[Waypoint] {w}")
-
-        # 5. Deduplicate (remove zero-step quantization duplicates)
-        original_count = len(batch.entries)
-        batch = deduplicate_batch(batch)
-        if len(batch.entries) < original_count:
-            logger.info(
-                f"[Waypoint] Deduplication removed "
-                f"{original_count - len(batch.entries)} zero-step waypoints "
-                f"({original_count} → {len(batch.entries)})"
-            )
-
-        return batch, None
 
     def load_mapping_from_file(joint_name: str):
         filename = f"mapping_data/{joint_name.lower()}_mapping.json"
@@ -533,11 +458,9 @@ def register_routes(
         1. Sends CAN identify request (if CAN connected)
         2. Scans all serial ports for EVT:JOINT messages
         3. Retries once if first scan finds nothing (CAN identify triggers 3s broadcast)
-        4. Sends time sync automatically after successful discovery
         """
         discovered = {}
         can_sent = False
-        time_synced = False
 
         # Try to send CAN identify request if connected
         if can_manager and can_manager.is_connected():
@@ -569,15 +492,6 @@ def register_routes(
             except Exception as e:
                 current_app.logger.warning(f"Discovery retry failed: {e}")
 
-        # Auto-send time sync after successful discovery
-        if discovered and can_manager and can_manager.is_connected():
-            try:
-                can_manager.send_time_sync()
-                time_synced = True
-                current_app.logger.info("Discovery: auto time sync sent")
-            except Exception as e:
-                current_app.logger.warning(f"Auto time sync after discovery failed: {e}")
-
         # Also include joints discovered via CAN announce (0x4A0)
         can_discovered = {}
         if can_manager and can_manager.is_connected():
@@ -589,7 +503,6 @@ def register_routes(
         return jsonify({
             "status": "success",
             "can_request_sent": can_sent,
-            "time_synced": time_synced,
             "discovered": discovered,
             "can_discovered": {str(k): v for k, v in can_discovered.items()},
             "mappings": serial_manager.get_joint_to_port_mapping(),
@@ -890,228 +803,8 @@ def register_routes(
                 "message": f"Unable to fetch status: {exc}"
             }), 500
 
-    @app.route('/can/time_sync', methods=['POST'])
-    def send_can_time_sync():
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        data = request.get_json() or {}
-        timestamp_ms = data.get('timestamp_ms')
-        if timestamp_ms is None:
-            timestamp_ms = int(time.time() * 1000)
-        else:
-            try:
-                timestamp_ms = int(timestamp_ms)
-            except ValueError:
-                return jsonify({
-                    "status": "error",
-                    "message": "timestamp_ms must be an integer"
-                }), 400
-
-        try:
-            result = can_manager.send_time_sync(timestamp_ms)
-            return jsonify({
-                "status": "success",
-                "message": f"Time sync broadcast at {result['timestamp_ms']} ms",
-                "result": result
-            })
-        except Exception as exc:
-            logger.exception("Failed to send CAN time sync")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to send time sync: {exc}"
-            }), 500
-
-    @app.route('/can/waypoint', methods=['POST'])
-    def send_can_waypoint():
-        """
-        Send waypoint command using Multi-DOF format.
-        
-        Sends all DOFs of a joint in a single CAN frame (8 bytes).
-        
-        Request JSON:
-            {
-                "joint": "ANKLE_RIGHT",
-                "angles_deg": [45.0, 10.0, -5.0],  // DOF0, DOF1, DOF2 (use null for unused)
-                "t_offset_ms": 1000                // Offset from current time
-            }
-        """
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        data = request.get_json() or {}
-        joint = data.get('joint')
-        angles_deg = data.get('angles_deg')
-        t_offset_ms = data.get('t_offset_ms')
-
-        if not joint:
-            return jsonify({
-                "status": "error",
-                "message": "Joint is required"
-            }), 400
-        if angles_deg is None or not isinstance(angles_deg, list):
-            return jsonify({
-                "status": "error",
-                "message": "angles_deg must be a list of up to 3 angles (use null for unused DOFs)"
-            }), 400
-        if t_offset_ms is None:
-            return jsonify({
-                "status": "error",
-                "message": "t_offset_ms is required (offset from last time sync)"
-            }), 400
-
-        try:
-            # Convert angles, keeping None for unused DOFs
-            processed_angles = []
-            for i, angle in enumerate(angles_deg[:3]):  # Max 3 DOFs
-                if angle is not None:
-                    processed_angles.append(float(angle))
-                else:
-                    processed_angles.append(None)
-
-            t_offset_ms = int(t_offset_ms)
-            if t_offset_ms < 0 or t_offset_ms > 65535:
-                return jsonify({
-                    "status": "error",
-                    "message": "t_offset_ms must be 0-65535"
-                }), 400
-
-            # Validate angles against physical limits
-            joint_key = joint.upper()
-            if joint_key in JOINTS:
-                dof_limits = get_dof_limits(joint_key)
-                for dof_idx, angle in enumerate(processed_angles):
-                    if angle is not None and dof_idx in dof_limits:
-                        lo, hi = dof_limits[dof_idx]
-                        if angle < lo or angle > hi:
-                            return jsonify({
-                                "status": "error",
-                                "message": f"DOF{dof_idx} angle {angle:.2f}° out of range [{lo:.1f}, {hi:.1f}]"
-                            }), 400
-
-        except ValueError as exc:
-            return jsonify({
-                "status": "error",
-                "message": f"Invalid parameter: {exc}"
-            }), 400
-
-        try:
-            details = can_manager.send_multi_dof_waypoint(joint, processed_angles, t_offset_ms)
-            return jsonify({
-                "status": "success",
-                "message": f"Multi-DOF waypoint queued for {joint}",
-                "details": details
-            })
-        except ValueError as exc:
-            return jsonify({
-                "status": "error",
-                "message": str(exc)
-            }), 400
-        except Exception as exc:
-            logger.exception("Failed to send multi-DOF waypoint")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to send multi-DOF waypoint: {exc}"
-            }), 500
-
-    @app.route('/can/waypoint_batch', methods=['POST'])
-    def send_can_waypoint_batch():
-        """
-        Send a batch of waypoints in deterministic order.
-
-        Request body:
-        {
-            "joint": "ANKLE_RIGHT",
-            "waypoints": [
-                {"angles_deg": [10.0, 5.0, null], "t_offset_ms": 500},
-                {"angles_deg": [15.0, 7.0, null], "t_offset_ms": 600},
-                ...
-            ]
-        }
-
-        Preflight checks: CAN connected, time sync fresh, angle/velocity/
-        monotonicity validation.  Per-joint concurrency lock prevents
-        interleaved batches.
-        """
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        data = request.get_json() or {}
-        joint = data.get('joint')
-        waypoints_raw = data.get('waypoints', [])
-
-        if not joint:
-            return jsonify({
-                "status": "error",
-                "message": "Missing 'joint' parameter"
-            }), 400
-
-        if not waypoints_raw or not isinstance(waypoints_raw, list):
-            return jsonify({
-                "status": "error",
-                "message": "Missing or invalid 'waypoints' array"
-            }), 400
-
-        # --- Preflight: CAN, time sync, build & validate batch ---
-        batch, preflight_error = _waypoint_preflight(joint, waypoints_raw)
-        if preflight_error:
-            return preflight_error
-
-        try:
-            # NOTE: Interpolation mode is NOT forced here anymore.
-            # The current mode (set by oscillation test or other commands) is used.
-            # - LINEAR: For dense trajectories (many waypoints, small delta-t)
-            # - COSINE: For sparse trajectories (few waypoints, large delta-t)
-            # User should set mode via oscillation test or a dedicated control.
-
-            # Use deduplicated batch (from preflight) instead of raw
-            result = can_manager.send_waypoint_batch(
-                joint, batch_to_dicts(batch),
-                batch_id=batch.batch_id,
-            )
-
-            sent = result["sent"]
-            total = result["total"]
-
-            # Determine status: success / partial / error
-            # HTTP codes: 200 = all sent, 207 = partial, 502 = none sent
-            if sent == total:
-                status = "success"
-                http_code = 200
-            elif sent > 0:
-                status = "partial"
-                http_code = 207  # Multi-Status — some waypoints sent
-            else:
-                status = "error"
-                http_code = 502  # Upstream failure — CAN layer sent nothing
-
-            return jsonify({
-                "status": status,
-                "message": f"Batch {batch.batch_id}: {sent}/{total} waypoints sent to {joint}",
-                "result": result,
-            }), http_code
-
-        except ValueError as exc:
-            msg = str(exc)
-            # Per-joint concurrency conflict → 409
-            if "already in progress" in msg:
-                return jsonify({
-                    "status": "error",
-                    "message": msg
-                }), 409
-            return jsonify({
-                "status": "error",
-                "message": msg
-            }), 400
-        except Exception as exc:
-            logger.exception("Failed to send waypoint batch")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to send waypoint batch: {exc}"
-            }), 500
+    # [Removed] Waypoint routes: /can/time_sync, /can/waypoint, /can/waypoint_batch
+    # Replaced by SET_IMPEDANCE via /api/impedance/target (Phase 7)
 
     @app.route('/can/emergency_stop', methods=['POST'])
     def send_can_emergency_stop():
@@ -1373,43 +1066,6 @@ def register_routes(
     # CAN INTERPOLATION MODE ROUTE
     # ===============================================================
 
-    @app.route('/can/interpolation_mode', methods=['POST'])
-    def set_interpolation_mode():
-        """
-        Set waypoint interpolation mode.
-        
-        POST body: { "mode": "linear" | "cosine" }
-        
-        - "linear": Step response for PID tuning (sharp transitions)
-        - "cosine": Smooth S-curve for operational movements (reduced vibrations)
-        """
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        try:
-            data = request.get_json() or {}
-            mode = data.get("mode", "linear")
-            
-            if mode not in ["linear", "cosine"]:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Invalid mode '{mode}'. Use 'linear' or 'cosine'."
-                }), 400
-            
-            result = can_manager.set_interpolation_mode(mode)
-            return jsonify({
-                "status": "success",
-                "message": f"Interpolation mode set to: {mode}",
-                "result": result
-            })
-        except Exception as exc:
-            logger.exception("Failed to set interpolation mode")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to set interpolation mode: {exc}"
-            }), 500
-
     # ===============================================================
     # CAN LOOP FREQUENCIES ROUTE
     # ===============================================================
@@ -1504,56 +1160,6 @@ def register_routes(
                 "status": "error",
                 "message": f"Unable to set PID diagnostics frequency: {exc}"
             }), 500
-
-    @app.route('/can/reanchor_interval', methods=['POST'])
-    def set_reanchor_interval():
-        """Set waypoint re-anchor interval via CAN."""
-        try:
-            data = request.get_json(silent=True)
-            if not data or 'interval' not in data:
-                return jsonify({
-                    "status": "error",
-                    "message": "Missing 'interval' field"
-                }), 400
-            requested_interval = int(data['interval'])
-            result = can_manager.set_reanchor_interval(requested_interval)
-            applied_interval = int(result.get("interval", requested_interval))
-            clamped = bool(result.get("clamped", False))
-            message = f"WP re-anchor interval set to: {applied_interval}" + \
-                      (" (disabled)" if applied_interval == 0 else " WPs")
-            if clamped:
-                message += f" [clamped from {requested_interval}]"
-            return jsonify({
-                "status": "success",
-                "message": message,
-                "result": result
-            })
-        except Exception as exc:
-            logger.exception("Failed to set re-anchor interval")
-            return jsonify({
-                "status": "error",
-                "message": f"Unable to set re-anchor interval: {exc}"
-            }), 500
-
-    @app.route('/can/wp_telemetry', methods=['GET'])
-    def get_wp_telemetry():
-        """Request waypoint buffer telemetry from firmware (on-demand 0x4D0)."""
-        unavailable = can_unavailable_response()
-        if unavailable:
-            return unavailable
-
-        joint = request.args.get('joint')
-        if not joint:
-            return jsonify({"status": "error", "message": "Missing 'joint' param"}), 400
-
-        try:
-            result = can_manager.request_wp_telemetry(joint)
-            if result is None:
-                return jsonify({"status": "error", "message": "No response from firmware"}), 504
-            return jsonify({"status": "success", "result": result})
-        except Exception as exc:
-            logger.exception("Failed to get WP telemetry")
-            return jsonify({"status": "error", "message": str(exc)}), 500
 
     @app.route('/status_message', methods=['GET'])
     def get_status_message():
@@ -1822,7 +1428,7 @@ def register_routes(
                 handler.get_outer_pid_for_joint_dof(joint, dof_index)
                 message = f"Outer PID request sent for {joint} DOF {dof_index}"
             elif cmd == "set-pid":
-                # Set PID is operational → CAN first, serial fallback
+                # CAN-only (serial fallback removed — Fase 6)
                 dof_index = data.get('dof', 0)
                 if dof_index == 'ALL':
                     dof_index = 0
@@ -1837,10 +1443,10 @@ def register_routes(
                     can_manager.set_pid_via_can(joint, dof_index, motor_type, kp, ki, kd, tau)
                     message = f"PID set via CAN for {joint} DOF {dof_index} motor {motor_type}"
                 else:
-                    handler.set_pid_for_joint_dof(joint, dof_index, motor_type, kp, ki, kd, tau)
-                    message = f"PID set via serial for {joint} DOF {dof_index} motor {motor_type}"
+                    message = "CAN not connected — cannot set PID"
+                    return jsonify({"status": "error", "message": message}), 503
             elif cmd == "set-pid-outer":
-                # Set PID outer is operational → CAN first, serial fallback
+                # CAN-only (serial fallback removed — Fase 6)
                 dof_index = data.get('dof', 0)
                 if dof_index == 'ALL':
                     dof_index = 0
@@ -1855,8 +1461,8 @@ def register_routes(
                     can_manager.set_pid_outer_via_can(joint, dof_index, kp, ki, kd, stiffness, cascade)
                     message = f"Outer PID set via CAN for {joint} DOF {dof_index}"
                 else:
-                    handler.set_outer_pid_for_joint_dof(joint, dof_index, kp, ki, kd, stiffness, cascade)
-                    message = f"Outer PID set via serial for {joint} DOF {dof_index}"
+                    message = "CAN not connected — cannot set outer PID"
+                    return jsonify({"status": "error", "message": message}), 503
             elif cmd == "load-pid-all":
                 # Load PID from flash and refresh UI
                 if can_manager and can_manager.is_connected():
@@ -2207,160 +1813,136 @@ def register_routes(
                 "message": f"Error saving enriched data: {str(e)}"
             })
 
-    @app.route('/sequence/start', methods=['POST'])
-    def start_sequence():
-        """
-        Starts sequence data collection
-        """
-        try:
-            data = request.get_json()
-            joint = data.get('joint')
-            
-            if not joint:
-                return jsonify({
-                    "status": "error",
-                    "message": "Joint name is required"
-                }), 400
-            
-            handler, error, code = handler_or_error(joint)
-            if error:
-                return error, code
-            
-            handler.start_sequence_data_collection()
-            return jsonify({
-                "status": "success",
-                "message": "Sequence data collection started"
-            })
-        except Exception as e:
-            return jsonify({
-                "status": "error",
-                "message": f"Error starting sequence: {str(e)}"
-            }), 500
+    # [Removed] Sequence routes: /sequence/start, /sequence/stop, /sequence/data
+    # [Removed] Stream test routes: /stream_test/start, /stop, /status, /metrics, /events
 
-    @app.route('/sequence/stop', methods=['POST'])
-    def stop_sequence():
-        """
-        Stops sequence data collection
-        """
-        try:
-            data = request.get_json()
-            joint = data.get('joint')
-            
-            if not joint:
-                return jsonify({
-                    "status": "error",
-                    "message": "Joint name is required"
-                }), 400
-            
-            handler, error, code = handler_or_error(joint)
-            if error:
-                return error, code
-            
-            handler.stop_sequence_data_collection()
-            return jsonify({
-                "status": "success",
-                "message": "Sequence data collection stopped",
-                "steps_collected": len(handler.get_sequence_movement_data())
-            })
-        except Exception as e:
-            return jsonify({
-                "status": "error",
-                "message": f"Error stopping sequence: {str(e)}"
-            }), 500
+    # ── Impedance API ─────────────────────────────────────────────────
 
-    @app.route('/sequence/data', methods=['GET'])
-    def get_sequence_data():
-        """
-        Returns accumulated sequence movement data
-        """
-        try:
-            joint = request.args.get('joint')
-            
-            if not joint:
-                return jsonify({
-                    "status": "error",
-                    "message": "Joint name is required"
-                }), 400
-            
-            handler, error, code = handler_or_error(joint)
-            if error:
-                return error, code
-            
-            data = handler.get_sequence_movement_data()
-            return jsonify({
-                "status": "success",
-                "steps": len(data),
-                "data": data
-            })
-        except Exception as e:
-            return jsonify({
-                "status": "error",
-                "message": f"Error getting sequence data: {str(e)}"
-            }), 500
+    @app.route('/api/impedance/target', methods=['POST'])
+    def impedance_target():
+        """Send SET_IMPEDANCE rolling-waypoint command to firmware.
 
-    # ------------------------------------------------------------------
-    # Stream Test endpoints
-    # ------------------------------------------------------------------
+        Required: joint_name, dof_index, q_target, dq_target, stiffness
+        Optional: kp, ki, kd, tau_ff, kp_inner, ki_inner, kd_inner
+        Omitted optional params → firmware keeps previous values.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
 
-    @app.route('/stream_test/start', methods=['POST'])
-    def stream_test_start():
-        if stream_test_service is None:
-            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
+        data = request.json or {}
+        required = ["joint_name", "dof_index", "q_target", "dq_target", "stiffness"]
+        missing = [k for k in required if k not in data]
+        if missing:
+            return jsonify({"status": "error",
+                            "message": f"Missing fields: {', '.join(missing)}"}), 400
+
         try:
-            data = request.get_json() or {}
-            result = stream_test_service.start(data)
-            return jsonify({"status": "success", **result})
-        except ValueError as exc:
-            return jsonify({"status": "error", "message": str(exc)}), 400
-        except RuntimeError as exc:
-            return jsonify({"status": "error", "message": str(exc)}), 409
+            kwargs = dict(
+                joint_name=data["joint_name"],
+                dof_index=int(data["dof_index"]),
+                q_target=float(data["q_target"]),
+                dq_target=abs(float(data["dq_target"])),
+                stiffness=float(data["stiffness"]),
+            )
+            if "kp" in data:
+                kwargs["kp"] = float(data["kp"])
+            if "ki" in data:
+                kwargs["ki"] = float(data["ki"])
+            if "kd" in data:
+                kwargs["kd"] = float(data["kd"])
+            if "tau_ff" in data:
+                kwargs["tau_ff"] = int(data["tau_ff"])
+            if "kp_inner" in data:
+                kwargs["kp_inner"] = float(data["kp_inner"])
+            if "ki_inner" in data:
+                kwargs["ki_inner"] = float(data["ki_inner"])
+            if "kd_inner" in data:
+                kwargs["kd_inner"] = float(data["kd_inner"])
+
+            result = can_manager.send_impedance_target(**kwargs)
+        except KeyError as exc:
+            return jsonify({"status": "error",
+                            "message": f"Unknown joint: {exc}"}), 400
         except Exception as exc:
-            logger.exception("Stream test start error")
+            current_app.logger.exception("Impedance target failed")
             return jsonify({"status": "error", "message": str(exc)}), 500
 
-    @app.route('/stream_test/stop', methods=['POST'])
-    def stream_test_stop():
-        if stream_test_service is None:
-            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
-        try:
-            data = request.get_json() or {}
-            session_id = data.get("session_id", "")
-            reason = data.get("reason", "operator_stop")
-            result = stream_test_service.stop(session_id, reason=reason)
-            return jsonify(result)
-        except ValueError as exc:
-            return jsonify({"status": "error", "message": str(exc)}), 400
-        except Exception as exc:
-            logger.exception("Stream test stop error")
-            return jsonify({"status": "error", "message": str(exc)}), 500
-
-    @app.route('/stream_test/status', methods=['GET'])
-    def stream_test_status():
-        if stream_test_service is None:
-            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
-        session_id = request.args.get("session_id")
-        result = stream_test_service.get_status(session_id)
         return jsonify({"status": "success", **result})
 
-    @app.route('/stream_test/metrics', methods=['GET'])
-    def stream_test_metrics():
-        if stream_test_service is None:
-            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
-        metrics = stream_test_service.get_metrics()
-        return jsonify({"status": "success", "metrics": metrics})
+    @app.route('/api/impedance/ctrl', methods=['POST'])
+    def impedance_ctrl():
+        """Send IMPEDANCE_CTRL command to firmware."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
 
-    @app.route('/stream_test/events', methods=['GET'])
-    def stream_test_events():
-        if stream_test_service is None:
-            return jsonify({"status": "error", "message": "Stream test service not available"}), 503
-        session_id = request.args.get("session_id")
-        after_seq = request.args.get("after_seq", 0, type=int)
-        events = stream_test_service.get_events(session_id, after_seq)
-        return jsonify({"status": "success", "events": events})
+        data = request.json or {}
+        if "joint_name" not in data or "sub_cmd" not in data:
+            return jsonify({"status": "error",
+                            "message": "Missing joint_name or sub_cmd"}), 400
 
-    # ------------------------------------------------------------------
-    # Impedance control (Scenario B)
-    # ------------------------------------------------------------------
+        try:
+            result = can_manager.send_impedance_ctrl(
+                joint_name=data["joint_name"],
+                sub_cmd=int(data["sub_cmd"]),
+                param=int(data.get("param", 0)),
+            )
+        except KeyError as exc:
+            return jsonify({"status": "error",
+                            "message": f"Unknown joint: {exc}"}), 400
+        except Exception as exc:
+            current_app.logger.exception("Impedance ctrl failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        return jsonify({"status": "success", **result})
+
+    @app.route('/api/impedance/state', methods=['GET'])
+    def impedance_state():
+        """Return latest JOINT_STATE data collected from CAN broadcasts."""
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+        return jsonify({"status": "success",
+                        "joint_state": can_manager.get_joint_state()})
+
+    @app.route('/api/impedance/sync_outer', methods=['POST'])
+    def impedance_sync_outer():
+        """Send SET_PID_OUTER via CAN only (no serial fallback).
+
+        Used by the Impedance Move panel to sync cascade/gains before
+        SET_IMPEDANCE, bypassing the /command route which requires a
+        serial port assignment.
+        """
+        unavailable = can_unavailable_response()
+        if unavailable:
+            return unavailable
+        data = request.json or {}
+        required = ["joint_name", "dof_index", "kp", "ki", "kd",
+                     "stiffness", "cascade"]
+        missing = [k for k in required if k not in data]
+        if missing:
+            return jsonify({"status": "error",
+                            "message": f"Missing fields: {', '.join(missing)}"}), 400
+        try:
+            result = can_manager.set_pid_outer_via_can(
+                joint_name=data["joint_name"],
+                dof_index=int(data["dof_index"]),
+                kp=float(data["kp"]),
+                ki=float(data["ki"]),
+                kd=float(data["kd"]),
+                stiffness=float(data["stiffness"]),
+                influence=float(data["cascade"]),
+            )
+        except KeyError as exc:
+            return jsonify({"status": "error",
+                            "message": f"Unknown joint: {exc}"}), 400
+        except Exception as exc:
+            current_app.logger.exception("Impedance sync_outer failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+        return jsonify({"status": "success", **result})
+
+    # ── Joint Configuration ───────────────────────────────────────────
 
     @app.route('/api/joints', methods=['GET'])
     def api_joints():

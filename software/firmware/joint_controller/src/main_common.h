@@ -40,8 +40,6 @@
 #include <config_presets.h>
 #include <shared_data.h>
 #include <safety_system.h>
-#include <waypoint_buffer.h>
-
 // Legacy support includes
 #include <PID.h>
 #include <debug.h>
@@ -157,11 +155,6 @@ extern volatile uint8_t can_startup_joint_id;
 extern volatile int16_t can_startup_torque;    // 0 = use config default
 extern volatile int16_t can_startup_duration;  // 0 = use config default
 
-// Startup waypoint injection guard (Core0 sets, Core1 checks)
-// Prevents race condition if host sends waypoints during Core0 startup injection.
-// Uses __atomic_store_n / __atomic_load_n for cross-core memory ordering.
-extern volatile bool startup_injecting_waypoints;
-
 // CAN-triggered set-zero (Core1 sets flags, Core0 executes)
 extern volatile bool can_set_zero_requested;
 extern volatile uint8_t can_set_zero_dof_index;
@@ -244,7 +237,7 @@ enum ComplianceRecoveryPolicy : uint8_t {
   RECOVERY_RAMP_BACK = 2          // Slowly return to target
 };
 
-// Expected velocity from current waypoint segment (deg/s)
+// Expected velocity from current movement segment (deg/s)
 extern volatile float expected_velocity_deadband_deg_s;  // <= this => treat as holding
 
 // HOLDING deflection detection (expected velocity ~ 0)
@@ -351,7 +344,7 @@ struct ComplianceState {
 extern ComplianceState compliance_state[MAX_DOFS];
 
 // ============================================================================
-// CAN ERROR TRACKER (shared utility for Movement and Waypoint loops)
+// CAN ERROR TRACKER (shared utility for control loop)
 // ============================================================================
 
 /**
@@ -426,7 +419,7 @@ private:
 /**
  * @brief Diagnostic data from PID control loop
  * 
- * Written AND read exclusively on Core1 (waypoint execution + CAN streaming).
+ * Written AND read exclusively on Core1 (control loop + CAN streaming).
  * No cross-core access — volatile not needed on members.
  * All angles in degrees * 100 (int16_t for CAN efficiency).
  */
@@ -481,7 +474,7 @@ extern CachedMotorAngles cached_motor_angles;
 /**
  * @brief Performance metrics calculated during movement execution
  * 
- * These metrics are computed per-DOF during waypoint execution and
+ * These metrics are computed per-DOF during movement execution and
  * sent via CAN when the DOF enters HOLDING state.
  * Used for PID tuning evaluation and optimization.
  */
@@ -838,33 +831,40 @@ void setup_common();
 void core0_main_loop();  // Core0 loop - serial communication (implemented in core0.cpp)
 void core1_loop();       // Core1 loop - hardware operations (implemented in core1.cpp)
 
-// Waypoint trajectory dump (Core1 records, Core0 prints)
-extern volatile int8_t wp_dump_pending_dof;
-void wp_dump_print_from_core0();
+// ============================================================================
+// DOF CONTROL STATE (replaces waypoint_buffer state machine)
+// ============================================================================
 
-// Waypoint re-anchor interval (configurable via CAN 0x01B)
-// 0 = disabled, N = re-anchor every N consumed waypoints
-extern volatile uint16_t wp_reanchor_interval;
+/**
+ * @brief Per-DOF control state
+ *
+ * Tracks whether each DOF is idle, actively moving (impedance segment),
+ * or holding position. Previously part of waypoint_buffer; now standalone
+ * since waypoint infrastructure has been removed.
+ *
+ * Cross-core contract: Core0 writes during startup sequence (motors stopped,
+ * control loop not active for this DOF). Core1 writes during normal operation
+ * (watchdog timeout, IMPEDANCE_CTRL disable, safety transitions). Reads by
+ * Core1 control loop every cycle. Volatile ensures compiler does not cache
+ * stale values across loop iterations.
+ *
+ * On RP2350 (ARM Cortex-M33), aligned ≤32-bit reads/writes are naturally
+ * atomic. The startup sequence writes happen while Core1 sees dof_state==IDLE
+ * (control loop skips IDLE DOFs), so no torn-read risk in practice.
+ */
+enum class DofState : uint8_t {
+  IDLE = 0,
+  MOVING,
+  HOLDING
+};
 
-// Reset re-anchor correction state for all DOFs (called on new batch)
-void wp_reanchor_reset_all();
+extern volatile DofState dof_state[MAX_DOFS];
+extern volatile float dof_hold_angle[MAX_DOFS];     // Hold reference angle (degrees)
+extern volatile uint32_t dof_hold_time[MAX_DOFS];   // Timestamp of last state update
 
 // ============================================================================
 // IMPEDANCE CONTROL (Scenario B — SET_IMPEDANCE CAN command)
 // ============================================================================
-
-/**
- * @brief Per-DOF control mode selection
- *
- * Each DOF can independently be in WAYPOINT (trajectory following) or
- * IMPEDANCE (Jetson-commanded impedance control) mode.
- * Waypoint arrival on any DOF forces all DOFs back to MODE_WAYPOINT
- * for backward compatibility and safety.
- */
-enum DofControlMode : uint8_t {
-  MODE_WAYPOINT  = 0,  // Default: waypoint interpolation + PID holding
-  MODE_IMPEDANCE = 1   // Jetson sends {q, dq, stiffness, outer/inner Kp/Ki/Kd, tau_ff}
-};
 
 /**
  * @brief Impedance target from Jetson (received via SET_IMPEDANCE CAN command)
@@ -913,8 +913,8 @@ struct ImpedanceRollingSegment {
  * @brief Backup of original inner PID gains for restore on impedance mode exit.
  *
  * When a DOF enters impedance mode, the original inner PID Kp/Ki/Kd are saved
- * so they can be restored when the DOF returns to waypoint mode (via disable,
- * watchdog timeout, waypoint arrival, or E-Stop).
+ * so they can be restored when impedance mode ends (via disable,
+ * watchdog timeout, or E-Stop).
  */
 struct InnerPidBackup {
   float kp;
@@ -928,9 +928,9 @@ extern InnerPidBackup inner_pid_backup[MAX_DOFS][2];  // [dof][0=agonist, 1=anta
 /**
  * @brief Backup of outer loop parameters before entering impedance mode.
  *
- * SET_IMPEDANCE overrides outer Kp/Ki/Kd/stiffness on the existing waypoint PID.
- * The original values must be restored when leaving impedance mode so waypoint
- * tracking retains its tuned behavior.
+ * SET_IMPEDANCE overrides outer Kp/Ki/Kd/stiffness on the cascade PID.
+ * The original values must be restored when leaving impedance mode so
+ * holding behavior retains its tuned gains.
  */
 struct OuterLoopBackup {
   float kp;
@@ -944,11 +944,8 @@ struct OuterLoopBackup {
 extern OuterLoopBackup outer_loop_backup[MAX_DOFS];
 
 // Flag: inner PID needs bumpless reinitialization after impedance parameter override.
-// Set by core1 (restoreInnerPidGains), consumed by waypoint loop.
+// Set by core1 (restoreInnerPidGains), consumed by control loop.
 extern volatile bool inner_pid_reinit_after_impedance[MAX_DOFS];
-
-// Per-DOF control mode (default: all WAYPOINT)
-extern volatile DofControlMode dof_control_mode[MAX_DOFS];
 
 // Per-DOF impedance targets (written by CAN handler on Core1)
 extern ImpedanceTarget impedance_target[MAX_DOFS];

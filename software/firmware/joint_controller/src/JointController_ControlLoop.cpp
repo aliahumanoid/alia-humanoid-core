@@ -1,39 +1,30 @@
 /**
- * @file JointController_Waypoint.cpp
- * @brief Waypoint-based trajectory execution with cascade control
- * 
+ * @file JointController_ControlLoop.cpp
+ * @brief Impedance-based trajectory execution with cascade control
+ *
  * Implementation follows CAN_SYSTEM_ARCHITECTURE.md section 6.2 with cascade
- * control (outer joint PID + inner motor PID) and continuous waypoint consumption.
- * 
+ * control (outer joint PID + inner motor PID) driven by impedance commands.
+ *
  * Key features:
- * - Linear interpolation between waypoints (smoothness from waypoint density @ 50-100 Hz)
- * - Per-DOF waypoint buffers (independent control)
- * - State management: IDLE → MOVING → HOLDING
+ * - Impedance control via SET_IMPEDANCE CAN command
+ * - Per-DOF state management: IDLE → MOVING → HOLDING
  * - Cascade control architecture:
  *   * SAMPLING_PERIOD = 2000 µs (2 ms) → 500 Hz
  *   * Outer PID runs every outer_loop_divisor cycles (default 1 = 500 Hz)
  *   * Inner PID @ 500 Hz (motor-level, computes torque commands)
  *   * theta_ref = theta_0 + cascade_correction
- * 
- * @see waypoint_buffer.h for buffer management
- * @see CAN_SYSTEM_ARCHITECTURE.md section 6.2 for detailed specification
+ *
  * @see CAN_SYSTEM_ARCHITECTURE.md for protocol specification
  */
 
 #include "JointController.h"
-#include <waypoint_buffer.h>
 #include <Arduino.h>
 #include <debug.h>
-#include "main_common.h"  // For shared_dof_angles
+#include "main_common.h"  // For shared_dof_angles, DofState
 #include <math.h>  // For cosf, M_PI
 
 // External time sync function (defined in core1.cpp)
 extern uint32_t getAbsoluteTimeMs();
-
-// External interpolation mode (defined in core1.cpp, set via CAN command)
-extern volatile uint8_t waypoint_interpolation_mode;
-#define INTERPOLATION_LINEAR 0
-#define INTERPOLATION_COSINE 1
 
 // Cycle counter for outer/inner loop division (wraps at 1000 to prevent overflow)
 static uint16_t cycle_count = 0;
@@ -60,12 +51,9 @@ static bool joint_ema_initialized[MAX_DOFS] = {false}; // Joint EMA initializati
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
-  // Contract: caller must also set the waypoint hold reference/state it wants
-  // after the impedance-specific state has been torn down.
   restoreInnerPidGains(dof, jc);
   restoreOuterLoopParameters(dof, jc);
   resetImpedanceSegment(dof);
-  dof_control_mode[dof] = MODE_WAYPOINT;
   impedance_target[dof].valid = false;
   inner_pid_reinit_after_impedance[dof] = true;
 }
@@ -162,7 +150,7 @@ static const uint16_t WP_MICRO_MIN_SAMPLES = 50;
 static uint16_t safety_check_counter = 0;
 
 // Track previous state to detect MOVING → HOLDING transitions
-static WaypointState prev_dof_state[MAX_DOFS] = {WaypointState::IDLE};
+static DofState prev_dof_state[MAX_DOFS] = {DofState::IDLE};
 
 // Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
 static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
@@ -208,31 +196,6 @@ static int wp_prev_torque_B[MAX_DOFS] = {0};
 static uint32_t wp_shadow_log_timer = 0;     // Throttle shadow comparison logs
 static uint32_t wp_shadow_resync_timer = 0;  // Periodic resync watchdog
 
-// === WAYPOINT TRAJECTORY DUMP (debug diagnostic) ===
-// Records consumed waypoints for post-movement validation.
-// Stores angle + arrival_ms for each consumed waypoint per DOF.
-static const uint16_t WP_DUMP_MAX = 250;  // max waypoints to record per DOF
-struct WpDumpEntry {
-  float angle_deg;
-  uint32_t t_arrival_ms;
-};
-static WpDumpEntry wp_dump[MAX_DOFS][WP_DUMP_MAX];
-static uint16_t wp_dump_count[MAX_DOFS] = {0};
-volatile int8_t wp_dump_pending_dof = -1;  // -1 = no dump pending, 0..2 = DOF to dump
-
-// === RE-ANCHOR CORRECTION STATE (per-DOF, consume side only) ===
-// When wp_reanchor_interval > 0, every N consumed waypoints the firmware
-// computes a timing correction to re-synchronize arrival times with wall clock.
-static int32_t wp_reanchor_correction_ms[MAX_DOFS] = {0};
-static uint16_t wp_reanchor_consumed_count[MAX_DOFS] = {0};
-
-void wp_reanchor_reset_all() {
-  for (uint8_t i = 0; i < MAX_DOFS; i++) {
-    wp_reanchor_correction_ms[i] = 0;
-    wp_reanchor_consumed_count[i] = 0;
-  }
-}
-
 // === MOTOR POINTER CACHE ===
 // Cache motor pointers to avoid searching every cycle (saves ~10µs per DOF per cycle)
 static LKM_Motor* cached_agonist[MAX_DOFS] = {nullptr};
@@ -267,21 +230,21 @@ void getWaypointProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& ma
 }
 
 /**
- * @brief Execute waypoint-based movement for all DOFs
- * 
- * This is the main entry point called from core1_loop() at 500 Hz.
- * Implements the same cascade control as moveMultiDOF_cascade but with
- * continuous waypoint consumption instead of pre-generated trajectory arrays.
- * 
- * Following CAN_SYSTEM_ARCHITECTURE.md section 6.2:
- * - Outer loop @ 100 Hz (every 5 cycles)
- * - Inner loop @ 500 Hz (every cycle)
- * - Linear interpolation between waypoints
- * - Hold position when buffer empty
- * 
+ * @brief Execute impedance-based cascade control for all DOFs
+ *
+ * Main control loop entry point called from core1_loop() at 500 Hz.
+ * Implements cascade control (outer joint PID + inner motor PID) with
+ * impedance targets received via SET_IMPEDANCE CAN command (0x01D).
+ *
+ * Control architecture:
+ * - Outer loop: configurable via outer_loop_divisor (default 500 Hz)
+ * - Inner loop: 500 Hz (motor PID → torque command)
+ * - Impedance: rolling segment interpolation from current to goal
+ * - HOLDING: maintain position when no impedance target is active
+ *
  * @return true if any DOF is actively moving
  */
-bool JointController::executeWaypointMovement() {
+bool JointController::executeControlLoop() {
   // === PROFILING: Record cycle start time ===
   profiling_start_us = time_us_32();
   
@@ -306,14 +269,14 @@ bool JointController::executeWaypointMovement() {
   // Process each DOF independently
   for (uint8_t dof = 0; dof < config.dof_count; dof++) {
     
-    // === EARLY EXIT: Skip if DOF is IDLE and not in impedance mode ===
+    // === EARLY EXIT: Skip if DOF is IDLE ===
     // This saves CPU time when no control is active
-    WaypointState dof_state = waypoint_buffer_state(dof);
-    if (dof_state == WaypointState::IDLE && dof_control_mode[dof] != MODE_IMPEDANCE) {
+    DofState cur_dof_state = dof_state[dof];
+    if (cur_dof_state == DofState::IDLE) {
       // Mark PID reset needed for when this DOF becomes active
       pid_reset_needed[dof] = true;
       inner_pid_init_needed[dof] = false;  // Clear any stale flag
-      prev_dof_state[dof] = WaypointState::IDLE;
+      prev_dof_state[dof] = DofState::IDLE;
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
       expected_velocity_cache[dof] = 0.0f;
@@ -327,22 +290,35 @@ bool JointController::executeWaypointMovement() {
       continue; // Skip this DOF entirely
     }
 
+    // === LAZY PID RESTORE: Clean up stale impedance gain overrides ===
+    // When impedance mode ends (via disable, watchdog, startup, E-Stop), the
+    // impedance_target is invalidated but the PID gains may still be overridden.
+    // The backup structs (.saved == true) indicate gains that need restoring.
+    // This runs on Core1 where the PID objects live, avoiding cross-core mutation.
+    if (!impedance_target[dof].valid) {
+      if (inner_pid_backup[dof][0].saved) {
+        restoreInnerPidGains(dof, this);
+      }
+      if (outer_loop_backup[dof].saved) {
+        restoreOuterLoopParameters(dof, this);
+      }
+    }
+
 #if CONTROLLER_DEBUG
     uint32_t dof_start_us = time_us_32();
 #endif
-    
-    // === RESET PID STATE when transitioning to MOVING ===
-    // Reset ONLY on IDLE → MOVING (new sequence starting from stopped state)
+
+    // === RESET PID STATE when exiting IDLE ===
+    // Reset on IDLE → MOVING or IDLE → HOLDING (re-entering control from stopped state)
     // DO NOT reset on HOLDING → MOVING - preserve integral compensation for gravity/friction
-    // This prevents the "spike" movement when resuming from HOLDING
-    bool just_started_from_idle = (prev_dof_state[dof] == WaypointState::IDLE) &&
-                                   (dof_state == WaypointState::MOVING);
-    bool should_reset = pid_reset_needed[dof] && just_started_from_idle;
+    // This prevents torque bumps from stale PID state after recalibration/startup
+    bool just_exited_idle = (prev_dof_state[dof] == DofState::IDLE);
+    bool should_reset = pid_reset_needed[dof] && just_exited_idle;
     
     if (should_reset) {
       // Bumpless transfer for outer loop PID controller:
       // Initialize state at current joint angle so P and D terms start at zero.
-      // Since q_des ≈ q_curr for a HOLDING waypoint, error ≈ 0 and only the
+      // Since q_des ≈ q_curr at entry, error ≈ 0 and only the
       // integral term will contribute a tiny correction on the first cycle.
       float q_init = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
       PID *outer_pid_init = getOuterPID(dof);
@@ -365,124 +341,54 @@ bool JointController::executeWaypointMovement() {
       wp_prev_torque_A[dof] = 0;
       wp_prev_torque_B[dof] = 0;
 
-      LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " bumpless init (IDLE → MOVING) at " + String(q_init, 1) + "°");
+      LOG_C1_DEBUG("[Control] DOF " + String(dof) + " bumpless init (IDLE → " +
+                   String(cur_dof_state == DofState::MOVING ? "MOVING" : "HOLDING") +
+                   ") at " + String(q_init, 1) + "°");
     }
 
     // === TRAJECTORY DUMP: Reset on new movement ===
-    if (prev_dof_state[dof] != WaypointState::MOVING && dof_state == WaypointState::MOVING) {
-      wp_dump_count[dof] = 0;
-    }
+    // (trajectory dump removed)
 
     // === METRICS: Initialize tracker for NEW movement (from IDLE or HOLDING) ===
     // Detect when a new movement starts:
     // - IDLE → MOVING: first movement ever
     // - HOLDING → MOVING: new movement after previous one completed
     // Use !tracking_active as additional guard to prevent multiple initializations
-    bool new_movement_started = (prev_dof_state[dof] != WaypointState::MOVING) && 
-                                 (dof_state == WaypointState::MOVING);
+    bool new_movement_started = (prev_dof_state[dof] != DofState::MOVING) &&
+                                 (cur_dof_state == DofState::MOVING);
 
     if (new_movement_started) {
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
     }
     
-    if (metrics_tracking_enabled && new_movement_started && dof < 3 && 
+    if (metrics_tracking_enabled && new_movement_started && dof < 3 &&
         !metrics_tracker[dof].tracking_active) {
-      WaypointEntry first_wp;
-      if (waypoint_buffer_peek(dof, first_wp)) {
+      if (impedance_target[dof].valid) {
         float start_angle = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
-        // Pass the first waypoint's arrival time so duration is measured from actual movement start
-        metrics_tracker[dof].reset(start_angle, first_wp.target_angle_deg, first_wp.t_arrival_ms);
-        LOG_C1_DEBUG("[Metrics] DOF " + String(dof) + " tracking started: " + 
-                  String(start_angle, 2) + "° → " + String(first_wp.target_angle_deg, 2) + 
-                  "° (t_arrival=" + String(first_wp.t_arrival_ms) + ")");
-      }
-    }
-    
-    // === CHECK WAYPOINT TRANSITION ===
-    // Check if we've reached the current waypoint target
-    WaypointEntry next_waypoint;
-    if (waypoint_buffer_peek(dof, next_waypoint)) {
-      // Apply re-anchor correction to arrival time (consume-side drift compensation)
-      uint32_t effective_arrival = next_waypoint.t_arrival_ms;
-      if (wp_reanchor_correction_ms[dof] != 0) {
-        effective_arrival = (uint32_t)((int32_t)next_waypoint.t_arrival_ms + wp_reanchor_correction_ms[dof]);
-      }
-
-      // Wrap-safe: signed difference handles uint32_t overflow (valid for <24.8 days)
-      if ((int32_t)(t_now - effective_arrival) >= 0) {
-        // Waypoint reached - pop from buffer and update prev state
-        waypoint_buffer_pop(dof);
-        // Set prev to EFFECTIVE arrival so interpolation sees corrected timestamps
-        waypoint_buffer_set_prev(dof, next_waypoint.target_angle_deg, effective_arrival);
-
-        // Record consumed waypoint with effective arrival for diagnostic visibility
-        if (dof < MAX_DOFS && wp_dump_count[dof] < WP_DUMP_MAX) {
-          wp_dump[dof][wp_dump_count[dof]] = {next_waypoint.target_angle_deg, effective_arrival};
-          wp_dump_count[dof]++;
-        }
-
-        // Update metrics target to latest consumed WP so overshoot is
-        // measured against the current trajectory position, not the first WP.
-        if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
-          metrics_tracker[dof].target_angle_deg = next_waypoint.target_angle_deg;
-        }
-
-        // Re-anchor interval check: every N consumed WPs, recompute correction
-        wp_reanchor_consumed_count[dof]++;
-        uint16_t interval = wp_reanchor_interval;  // Read volatile once
-        if (interval > 0 && wp_reanchor_consumed_count[dof] >= interval) {
-          WaypointEntry peek_reanchor;
-          if (waypoint_buffer_peek(dof, peek_reanchor)) {
-            int32_t new_correction = (int32_t)(t_now - peek_reanchor.t_arrival_ms);
-            if (new_correction > 0) {
-              wp_reanchor_correction_ms[dof] = new_correction;
-              LOG_C1_INFO("[Reanchor] DOF " + String(dof) + " correction=" +
-                          String(new_correction) + "ms after " + String(interval) + " WPs");
-            } else {
-              // Drift gone or negative: clear any stale positive correction
-              wp_reanchor_correction_ms[dof] = 0;
-              LOG_C1_INFO("[Reanchor] DOF " + String(dof) + " no drift (delta=" +
-                          String(new_correction) + "ms) after " + String(interval) + " WPs");
-            }
-          }
-          wp_reanchor_consumed_count[dof] = 0;
-        }
-
-        // Check if more waypoints available
-        WaypointEntry peek_next;
-        if (!waypoint_buffer_peek(dof, peek_next)) {
-          // No more waypoints - this was the LAST waypoint
-          // prev_angle is now set to this waypoint's target
-          float final_target = waypoint_buffer_prev_angle(dof);
-          LOG_C1_INFO("[Waypoint] DOF " + String(dof) + " LAST waypoint consumed: " +
-                    String(next_waypoint.target_angle_deg, 2) + "° → prev_angle=" +
-                    String(final_target, 2) + "°");
-        }
+        metrics_tracker[dof].reset(start_angle, impedance_target[dof].q_target_deg);
       }
     }
     
     // === IMPEDANCE MODE: Watchdog and PID init ===
     // Check impedance watchdog BEFORE outer loop so timeout transitions happen promptly
-    if (dof_control_mode[dof] == MODE_IMPEDANCE) {
-      if (impedance_target[dof].valid) {
-        uint32_t elapsed = t_now - impedance_target[dof].last_update_ms;
-        if (elapsed > impedance_watchdog_ms) {
-          // Watchdog timeout -> hold at current local reference and return to waypoint control.
-          float q_curr_wd = dof_data.valid[dof] ? dof_data.angles[dof]
-                                                : getImpedanceHoldReference(dof);
-          clearImpedanceControlState(dof, this);
-          waypoint_buffer_set_prev(dof, q_curr_wd, t_now);
-          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-          LOG_C1_WARN("[IMPEDANCE] DOF" + String(dof) + " watchdog timeout (" +
-                      String(elapsed) + "ms > " + String((uint32_t)impedance_watchdog_ms) +
-                      "ms) → HOLDING at " + String(q_curr_wd, 2) + "°");
-          // Fall through to waypoint path for this cycle
-        }
+    if (impedance_target[dof].valid) {
+      uint32_t elapsed = t_now - impedance_target[dof].last_update_ms;
+      if (elapsed > impedance_watchdog_ms) {
+        // Watchdog timeout -> hold at current position.
+        float q_curr_wd = dof_data.valid[dof] ? dof_data.angles[dof]
+                                              : getImpedanceHoldReference(dof);
+        clearImpedanceControlState(dof, this);
+        dof_hold_angle[dof] = q_curr_wd;
+        dof_hold_time[dof] = t_now;
+        dof_state[dof] = DofState::HOLDING;
+        LOG_C1_WARN("[IMPEDANCE] DOF" + String(dof) + " watchdog timeout (" +
+                    String(elapsed) + "ms > " + String((uint32_t)impedance_watchdog_ms) +
+                    "ms) → HOLDING at " + String(q_curr_wd, 2) + "°");
       }
 
       // Bumpless init on first impedance entry (from IDLE)
-      if (impedance_target[dof].valid && pid_reset_needed[dof]) {
+      if (pid_reset_needed[dof]) {
         float q_init = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
         PID *outer_pid_init = getOuterPID(dof);
         if (outer_pid_init) {
@@ -502,8 +408,7 @@ bool JointController::executeWaypointMovement() {
     }
 
     // Track impedance mode status for this DOF (used by both outer and inner loop)
-    bool impedance_active_this_dof = (dof_control_mode[dof] == MODE_IMPEDANCE &&
-                                       impedance_target[dof].valid);
+    bool impedance_active = impedance_target[dof].valid;
 
     // === OUTER LOOP (Joint PID) ===
     // Execute outer loop every N inner cycles (configurable via outer_loop_divisor)
@@ -517,10 +422,7 @@ bool JointController::executeWaypointMovement() {
       float expected_velocity_deg_s = 0.0f;
       bool is_moving = false;
 
-      // Use last known waypoint as reference
-      float prev_angle = waypoint_buffer_prev_angle(dof);
-      uint32_t prev_time = waypoint_buffer_prev_time(dof);
-      if (impedance_active_this_dof) {
+      if (impedance_active) {
         q_des = getImpedanceHoldReference(dof);
         evaluateImpedanceSegment(dof, t_now, q_des, expected_velocity_deg_s);
         is_moving = impedance_segment[dof].active;
@@ -528,72 +430,14 @@ bool JointController::executeWaypointMovement() {
           any_movement = true;
         }
         applyImpedanceOuterOverrides(dof, this);
-      }
-
-      // Check if we have waypoints to process
-      WaypointEntry current_target;
-      bool has_waypoints = (!impedance_active_this_dof) && waypoint_buffer_peek(dof, current_target);
-      if (has_waypoints) {
-        // MOVING state - linear interpolation
-        is_moving = true;
-        any_movement = true;
-
-        float target_angle = current_target.target_angle_deg;
-        // Apply re-anchor correction to target arrival (consistent with prev_time which was set to effective_arrival)
-        uint32_t corrected_arrival = current_target.t_arrival_ms;
-        if (wp_reanchor_correction_ms[dof] != 0) {
-          corrected_arrival = (uint32_t)((int32_t)current_target.t_arrival_ms + wp_reanchor_correction_ms[dof]);
-        }
-        float time_total = corrected_arrival - prev_time;
-        float time_elapsed = t_now - prev_time;
-        
-        // Compute progress (0.0 to 1.0)
-        float progress = 0.0f;
-        if (time_total > 0) {
-          progress = time_elapsed / time_total;
-          progress = constrain(progress, 0.0f, 1.0f);
-          expected_velocity_deg_s = (target_angle - prev_angle) * 1000.0f / time_total;
-        }
-        
-        // NOTE: Trajectory diagnostic logging removed to reduce serial overhead
-        // Only errors > 5° are logged (see below)
-        
-        // === ERROR DETECTION: Log only significant tracking errors ===
-        if (dof_data.valid[dof]) {
-          float q_curr_now = dof_data.angles[dof];
-          float tracking_error = fabs(target_angle - q_curr_now);
-          if (tracking_error > 5.0f && dof == 0) {
-            static uint32_t last_error_log = 0;
-            if (millis() - last_error_log > 500) { // Max 1 log per 500ms
-              LOG_C1_WARN("[TRAJ] DOF" + String(dof) + " LARGE ERROR: " + 
-                       String(tracking_error, 1) + "° (tgt=" + String(target_angle, 1) + 
-                       " cur=" + String(q_curr_now, 1) + ")");
-              last_error_log = millis();
-            }
-          }
-        }
-        
-        // Apply interpolation based on mode
-        float smooth_progress = progress;
-        if (waypoint_interpolation_mode == INTERPOLATION_COSINE) {
-          // S-curve using cosine: smooth start and end (zero acceleration at boundaries)
-          // smooth_progress = 0.5 * (1 - cos(π * progress))
-          smooth_progress = 0.5f * (1.0f - cosf(progress * M_PI));
-        }
-        
-        // Interpolation: q_des = start + (end - start) × smooth_progress
-        q_des = prev_angle + (target_angle - prev_angle) * smooth_progress;
-        
-      } else if (!impedance_active_this_dof) {
-        // HOLDING mode - maintain TARGET position (last waypoint target)
-        // Use the last waypoint's target angle, NOT current encoder reading
-        // This ensures the PID keeps trying to reach and hold the target
-        q_des = prev_angle;
+      } else {
+        // HOLDING mode - maintain target position
+        q_des = dof_hold_angle[dof];
       }
       
       // Read current angle from shared state (updated by Core0)
       if (!dof_data.valid[dof]) {
-        LOG_C1_WARN("[Waypoint] Invalid encoder reading for DOF " + String(dof));
+        LOG_C1_WARN("[Control] Invalid encoder reading for DOF " + String(dof));
         continue;
       }
       float q_curr = dof_data.angles[dof];
@@ -692,7 +536,7 @@ bool JointController::executeWaypointMovement() {
               metrics_tracker[dof].aborted_by_stall = true;
               metrics_tracker[dof].abort_target_deg = cs.original_target_deg;
             }
-            if (impedance_active_this_dof) {
+            if (impedance_active) {
               ImpedanceRollingSegment &seg = impedance_segment[dof];
               seg.q_goal_deg = q_curr;
               seg.q_start_deg = q_curr;
@@ -706,11 +550,10 @@ bool JointController::executeWaypointMovement() {
               impedance_target[dof].q_target_deg = q_curr;
               impedance_target[dof].dq_target_deg_s = 0.0f;
             }
-            waypoint_buffer_clear(dof);
-            waypoint_buffer_set_prev(dof, q_curr, t_now);
-            waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-            dof_state = WaypointState::HOLDING;
-            has_waypoints = false;
+            dof_hold_angle[dof] = q_curr;
+            dof_hold_time[dof] = t_now;
+            dof_state[dof] = DofState::HOLDING;
+            cur_dof_state = DofState::HOLDING;
             is_moving = false;
             q_des = q_curr;
             expected_velocity_deg_s = 0.0f;
@@ -775,7 +618,7 @@ bool JointController::executeWaypointMovement() {
 
           // Teach mode: keep the current position as new target
           if (recovery_policy == RECOVERY_STAY_AT_CURRENT) {
-            if (impedance_active_this_dof) {
+            if (impedance_active) {
               ImpedanceRollingSegment &seg = impedance_segment[dof];
               seg.q_goal_deg = q_curr;
               seg.q_start_deg = q_curr;
@@ -789,11 +632,10 @@ bool JointController::executeWaypointMovement() {
               impedance_target[dof].q_target_deg = q_curr;
               impedance_target[dof].dq_target_deg_s = 0.0f;
             }
-            waypoint_buffer_clear(dof);
-            waypoint_buffer_set_prev(dof, q_curr, t_now);
-            waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-            dof_state = WaypointState::HOLDING;
-            has_waypoints = false;
+            dof_hold_angle[dof] = q_curr;
+            dof_hold_time[dof] = t_now;
+            dof_state[dof] = DofState::HOLDING;
+            cur_dof_state = DofState::HOLDING;
             q_des = q_curr;
             error = 0.0f;
             abs_error = 0.0f;
@@ -857,14 +699,14 @@ bool JointController::executeWaypointMovement() {
           stopAllMotors();
 
           float hold_ref = dof_data.valid[dof] ? dof_data.angles[dof] : getImpedanceHoldReference(dof);
-          if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+          if (impedance_active) {
             clearImpedanceControlState(dof, this);
           }
 
-          waypoint_buffer_clear(dof);
-          waypoint_buffer_set_prev(dof, hold_ref, t_now);
-          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-          prev_dof_state[dof] = WaypointState::HOLDING;
+          dof_hold_angle[dof] = hold_ref;
+          dof_hold_time[dof] = t_now;
+          dof_state[dof] = DofState::HOLDING;
+          prev_dof_state[dof] = DofState::HOLDING;
           pid_reset_needed[dof] = true;
 
           // Notify host via serial
@@ -893,40 +735,26 @@ bool JointController::executeWaypointMovement() {
       bool is_holding = !is_moving;
       
       // Detect MOVING → HOLDING transition by comparing with previous cycle's state
-      bool just_entered_holding = (prev_dof_state[dof] == WaypointState::MOVING) && is_holding;
+      bool just_entered_holding = (prev_dof_state[dof] == DofState::MOVING) && is_holding;
       
-      // Update buffer state to HOLDING if buffer is empty and we were MOVING
+      // Update state to HOLDING if movement ended and we were MOVING
       // This ensures the state machine is consistent
-      if (is_holding && (dof_state == WaypointState::MOVING || just_entered_holding)) {
-        if (impedance_active_this_dof) {
-          waypoint_buffer_set_prev(dof, getImpedanceHoldReference(dof), t_now);
+      if (is_holding && (cur_dof_state == DofState::MOVING || just_entered_holding)) {
+        if (impedance_active) {
+          dof_hold_angle[dof] = getImpedanceHoldReference(dof);
+          dof_hold_time[dof] = t_now;
         }
-        waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-        dof_state = WaypointState::HOLDING; // Update local variable for this cycle
-        
+        dof_state[dof] = DofState::HOLDING;
+        cur_dof_state = DofState::HOLDING;
+
         if (just_entered_holding) {
           // Get the holding target for this DOF
-          float holding_target = waypoint_buffer_prev_angle(dof);
-          LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " transitioned MOVING → HOLDING");
+          float holding_target = dof_hold_angle[dof];
+          LOG_C1_DEBUG("[Control] DOF " + String(dof) + " transitioned MOVING → HOLDING");
 
           // Send structured message for UI display
           SERIAL_C1_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
 
-          // === TRAJECTORY DUMP: Signal Core0 to print the detailed dump ===
-          // Core1 must NOT do heavy serial I/O — it blocks CAN polling.
-          // Set a flag so Core0 prints the dump at its own pace.
-          if (wp_dump_count[dof] > 0) {
-            // Quick 1-line summary is safe from Core1 (single print)
-            char sum[100];
-            uint32_t total_dt = wp_dump[dof][wp_dump_count[dof]-1].t_arrival_ms
-                              - wp_dump[dof][0].t_arrival_ms;
-            snprintf(sum, sizeof(sum), "[WP_DUMP] DOF %d: %d pts, total_dt=%lums — dump pending on Core0",
-                     dof, wp_dump_count[dof], (unsigned long)total_dt);
-            LOG_C1_INFO(sum);
-            // Signal Core0 to print the full dump
-            wp_dump_pending_dof = dof;
-          }
-          
           // DO NOT reset PID integral here - we need it to maintain position
           // against static loads (gravity, friction). The integral was compensating
           // for steady-state error, and resetting it would cause drift.
@@ -1011,14 +839,14 @@ bool JointController::executeWaypointMovement() {
           LOG_C1_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
 
           float hold_ref = dof_data.valid[dof] ? q_curr : getImpedanceHoldReference(dof);
-          if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+          if (impedance_active) {
             clearImpedanceControlState(dof, this);
           }
 
-          waypoint_buffer_clear(dof);
-          waypoint_buffer_set_prev(dof, hold_ref, t_now);
-          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
-          prev_dof_state[dof] = WaypointState::HOLDING;
+          dof_hold_angle[dof] = hold_ref;
+          dof_hold_time[dof] = t_now;
+          dof_state[dof] = DofState::HOLDING;
+          prev_dof_state[dof] = DofState::HOLDING;
           pid_reset_needed[dof] = true;
 
           // Continue checking other DOFs (don't return, just skip this one)
@@ -1027,7 +855,7 @@ bool JointController::executeWaypointMovement() {
       }
       
       // Update previous state for next cycle (use updated dof_state)
-      prev_dof_state[dof] = is_holding ? WaypointState::HOLDING : WaypointState::MOVING;
+      prev_dof_state[dof] = is_holding ? DofState::HOLDING : DofState::MOVING;
 
       // === UPDATE OUTER LOOP SAMPLING PERIOD ===
       // The PID controller needs the correct Ts for proper integral/derivative scaling
@@ -1182,38 +1010,16 @@ bool JointController::executeWaypointMovement() {
       continue;
     }
     
-    // Get current waypoint (or last position for HOLDING / impedance target)
-    WaypointEntry current_target;
-    float theta_0_joint; // Joint angle for theta_0 calculation
+    // Get current position reference for inner loop theta_0 calculation
+    float theta_0_joint;
 
-    if (impedance_active_this_dof) {
+    if (impedance_active) {
       theta_0_joint = getImpedanceHoldReference(dof);
       float dq_ref_unused = 0.0f;
       evaluateImpedanceSegment(dof, t_now, theta_0_joint, dq_ref_unused);
-    } else if (waypoint_buffer_peek(dof, current_target)) {
-      // MOVING: use interpolated position
-      float prev_angle = waypoint_buffer_prev_angle(dof);
-      uint32_t prev_time = waypoint_buffer_prev_time(dof);
-      float target_angle = current_target.target_angle_deg;
-      // Apply re-anchor correction (consistent with prev_time set to effective_arrival)
-      uint32_t corrected_arrival = current_target.t_arrival_ms;
-      if (wp_reanchor_correction_ms[dof] != 0) {
-        corrected_arrival = (uint32_t)((int32_t)current_target.t_arrival_ms + wp_reanchor_correction_ms[dof]);
-      }
-      float time_total = corrected_arrival - prev_time;
-      float time_elapsed = t_now - prev_time;
-      float progress = (time_total > 0) ? (time_elapsed / time_total) : 0.0f;
-      progress = constrain(progress, 0.0f, 1.0f);
-      
-      // Apply interpolation based on mode
-      float smooth_progress = progress;
-      if (waypoint_interpolation_mode == INTERPOLATION_COSINE) {
-        smooth_progress = 0.5f * (1.0f - cosf(progress * M_PI));
-      }
-      theta_0_joint = prev_angle + (target_angle - prev_angle) * smooth_progress;
     } else {
       // HOLDING: use last known position
-      theta_0_joint = waypoint_buffer_prev_angle(dof);
+      theta_0_joint = dof_hold_angle[dof];
     }
     
     // Compute theta_0 for motors using linear equations
@@ -1237,7 +1043,7 @@ bool JointController::executeWaypointMovement() {
       // No linear equations, cannot control this DOF
       static uint32_t last_warn_time = 0;
       if (millis() - last_warn_time > 5000) {
-        LOG_C1_WARN("[Waypoint] DOF " + String(dof) + " has no linear equations, cannot move");
+        LOG_C1_WARN("[Control] DOF " + String(dof) + " has no linear equations, cannot move");
         last_warn_time = millis();
       }
       continue;
@@ -1272,7 +1078,7 @@ bool JointController::executeWaypointMovement() {
     // delta_theta (tracking) stays at full cascade_influence for position accuracy.
     // NOTE: In impedance mode, stiffness is set directly by Jetson — skip auto-scaling.
     float stiffness_eff = stiffness_ref;
-    if (cascade_speed_scaling_enabled && !impedance_active_this_dof) {
+    if (cascade_speed_scaling_enabled) {
       float speed = fabs(expected_velocity_cache[dof]);
       float stiffness_factor;
       if (speed <= cascade_speed_low) {
@@ -1365,7 +1171,7 @@ bool JointController::executeWaypointMovement() {
     if (invalid_A || invalid_B) {
       static uint32_t last_invalid_log = 0;
       if (millis() - last_invalid_log > 100) { // Log max every 100ms
-        LOG_C1_ERROR("[Waypoint] DOF " + String(dof) + " INVALID CAN READ: A=" + 
+        LOG_C1_ERROR("[Control] DOF " + String(dof) + " INVALID CAN READ: A=" + 
                   String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
         last_invalid_log = millis();
       }
@@ -1397,19 +1203,19 @@ bool JointController::executeWaypointMovement() {
 
         // Trigger emergency stop if too many errors within time window
         if (wp_canErrorTracker.shouldStop(dof)) {
-          LOG_C1_ERROR("[Waypoint] DOF " + String(dof) + " - " + String(recent_errors) +
+          LOG_C1_ERROR("[Control] DOF " + String(dof) + " - " + String(recent_errors) +
                     " CAN errors in " + String(can_error_window_ms) + "ms, EMERGENCY STOP!");
           stopAllMotors();
           float hold_ref = dof_data.valid[dof] ? dof_data.angles[dof] : getImpedanceHoldReference(dof);
-          if (dof_control_mode[dof] == MODE_IMPEDANCE) {
+          if (impedance_active) {
             clearImpedanceControlState(dof, this);
           }
-          waypoint_buffer_clear(dof);
-          waypoint_buffer_set_prev(dof, hold_ref, t_now);
-          waypoint_buffer_set_state(dof, WaypointState::HOLDING);
+          dof_hold_angle[dof] = hold_ref;
+          dof_hold_time[dof] = t_now;
+          dof_state[dof] = DofState::HOLDING;
           wp_canErrorTracker.clearErrors(dof);
           wp_first_read[dof] = true;
-          prev_dof_state[dof] = WaypointState::HOLDING;
+          prev_dof_state[dof] = DofState::HOLDING;
           pid_reset_needed[dof] = true;
           continue;
         }
@@ -1478,9 +1284,9 @@ bool JointController::executeWaypointMovement() {
       pid_agonist->initializeState(theta_A_pid, theta_A_ref, 0.0f);
       pid_antagonist->initializeState(theta_B_pid, theta_B_ref, 0.0f);
       if (inner_pid_reinit_after_impedance[dof]) {
-        LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " inner PID reinit after impedance");
+        LOG_C1_DEBUG("[Control] DOF " + String(dof) + " inner PID reinit after impedance");
       } else {
-        LOG_C1_DEBUG("[Waypoint] DOF " + String(dof) + " inner PID bumpless init:"
+        LOG_C1_DEBUG("[Control] DOF " + String(dof) + " inner PID bumpless init:"
                      " Aref=" + String(theta_A_ref, 1) + " Acurr=" + String(theta_A_pid, 1) +
                      " Bref=" + String(theta_B_ref, 1) + " Bcurr=" + String(theta_B_pid, 1));
       }
@@ -1524,7 +1330,7 @@ bool JointController::executeWaypointMovement() {
     // === IMPEDANCE FEEDFORWARD TORQUE ===
     // In impedance mode, add tau_ff from Jetson to the friction feedforward.
     // tau_ff > 0 pushes agonist direction, distributed as agonist+, antagonist-.
-    if (impedance_active_this_dof && impedance_target[dof].tau_ff != 0) {
+    if (impedance_active && impedance_target[dof].tau_ff != 0) {
       float tau_ff = (float)impedance_target[dof].tau_ff;
       uff_A += tau_ff;
       uff_B -= tau_ff;
@@ -1536,7 +1342,7 @@ bool JointController::executeWaypointMovement() {
 #endif
     float command_A, command_B;
 
-    if (impedance_active_this_dof) {
+    if (impedance_active) {
       applyImpedanceInnerOverrides(dof, pid_agonist, pid_antagonist);
     }
 
@@ -1864,36 +1670,3 @@ bool JointController::executeWaypointMovement() {
   return any_movement;
 }
 
-// === Core0-safe trajectory dump ===
-// Called from Core0 main loop when wp_dump_pending_dof >= 0.
-// Prints the full waypoint table over serial at Core0's pace.
-void wp_dump_print_from_core0() {
-  int8_t dof = wp_dump_pending_dof;
-  if (dof < 0 || dof >= MAX_DOFS) return;
-  wp_dump_pending_dof = -1;  // clear immediately to avoid re-entry
-
-  uint16_t count = wp_dump_count[dof];
-  if (count == 0) return;
-
-  SERIAL_COM_LN("INFO: [WP_DUMP] DOF " + String(dof) + ": " + String(count) + " waypoints consumed");
-  SERIAL_COM_LN("INFO: [WP_DUMP] idx | angle_deg | t_arrival_ms | dt_ms | vel_deg_s");
-
-  for (uint16_t i = 0; i < count; i++) {
-    float angle = wp_dump[dof][i].angle_deg;
-    uint32_t t_arr = wp_dump[dof][i].t_arrival_ms;
-    char buf[90];
-    if (i == 0) {
-      snprintf(buf, sizeof(buf), "INFO: [WP_DUMP] %3d | %8.2f | %10lu |   --- |       ---",
-               i, angle, (unsigned long)t_arr);
-    } else {
-      float prev_angle = wp_dump[dof][i-1].angle_deg;
-      uint32_t prev_t = wp_dump[dof][i-1].t_arrival_ms;
-      uint32_t dt_ms = t_arr - prev_t;
-      float vel = (dt_ms > 0) ? fabsf(angle - prev_angle) / ((float)dt_ms / 1000.0f) : 0.0f;
-      snprintf(buf, sizeof(buf), "INFO: [WP_DUMP] %3d | %8.2f | %10lu | %5lu | %9.1f",
-               i, angle, (unsigned long)t_arr, (unsigned long)dt_ms, vel);
-    }
-    SERIAL_COM_LN(buf);
-  }
-  SERIAL_COM_LN("INFO: [WP_DUMP] END");
-}

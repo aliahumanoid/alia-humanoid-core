@@ -20,6 +20,7 @@ from .protocol import (
     encode_set_impedance_frame0,
     encode_set_impedance_frame1,
     encode_set_impedance_frame2,
+    encode_set_impedance_frame3,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,8 @@ class ImpedanceLoop:
 
     async def _send_with_gains(self, can_bus: CanBus, joint_id: int,
                                dof: int, target: ImpedanceTarget) -> None:
-        """Send frames 0+1+2 (gain change)."""
+        """Send frames 0+1+2+3 (gain change + tau_ff reset)."""
+        tau_ff = getattr(target, 'tau_ff', 0)
         frames = [
             encode_set_impedance_frame0(
                 joint_id, dof,
@@ -192,7 +194,11 @@ class ImpedanceLoop:
                 kp_inner=target.gains_inner.kp,
                 ki_inner=target.gains_inner.ki,
                 kd_inner=target.gains_inner.kd,
-                has_more=False,
+                has_more=True,
+            ),
+            encode_set_impedance_frame3(
+                joint_id, dof,
+                tau_ff=tau_ff,
             ),
         ]
         await can_bus.send_impedance_sequence(frames)

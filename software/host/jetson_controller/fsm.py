@@ -22,6 +22,7 @@ from .protocol import (
     encode_set_impedance_frame0,
     encode_set_impedance_frame1,
     encode_set_impedance_frame2,
+    encode_set_impedance_frame3,
     encode_startup_sequence,
     encode_time_sync,
 )
@@ -200,6 +201,11 @@ class StartupFSM:
                     f"Startup failed for {key}: {result.event_name} "
                     f"DOF={result.dof_index} reason={result.reason_name}"
                 )
+            if result and result.is_partial:
+                raise StartupError(
+                    f"Startup partial for {key}: some DOFs have no hold position "
+                    f"(encoder invalid) — joint not safe for movement"
+                )
 
             self._set_state(FSMState.STARTUP, f"{key} ready")
 
@@ -246,7 +252,9 @@ class StartupFSM:
                 if state and dof in state.angles_deg:
                     current_angle = state.angles_deg[dof]
 
-                # Build 3-frame sequence: position + outer gains + inner gains
+                # Build 4-frame sequence: position + outer gains + inner gains + tau_ff
+                # Frame 3 explicitly sets tau_ff=0 to clear any stale feedforward
+                # from a previous session (webapp or earlier Jetson run).
                 frames = [
                     encode_set_impedance_frame0(
                         jcfg.joint_id, dof,
@@ -266,7 +274,11 @@ class StartupFSM:
                         kp_inner=jcfg.gains_inner.kp,
                         ki_inner=jcfg.gains_inner.ki,
                         kd_inner=jcfg.gains_inner.kd,
-                        has_more=False,  # Last frame — triggers apply
+                        has_more=True,
+                    ),
+                    encode_set_impedance_frame3(
+                        jcfg.joint_id, dof,
+                        tau_ff=0,  # Last frame — triggers apply
                     ),
                 ]
                 await can_bus.send_impedance_sequence(frames)

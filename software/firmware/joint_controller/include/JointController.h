@@ -701,25 +701,24 @@ public:
   }
 
   // ==========================================================================
-  // WAYPOINT-BASED TRAJECTORY CONTROL
+  // IMPEDANCE-BASED CASCADE CONTROL LOOP
   // ==========================================================================
 
   /**
-   * @brief Execute waypoint-based movement for all DOFs
-   * 
-   * Main entry point for waypoint control. Call this from core1_loop() at 500 Hz.
-   * Implements cascade control (outer joint PID + inner motor PID) with continuous
-   * waypoint consumption for smooth trajectory execution.
-   * 
-   * Following CAN_SYSTEM_ARCHITECTURE.md section 6.2:
+   * @brief Execute cascade control loop for all DOFs (500 Hz)
+   *
+   * Main entry point for control execution. Call from core1_loop() at 500 Hz.
+   * Implements cascade control (outer joint PID + inner motor PID) with
+   * impedance rolling-segment generation for smooth movement.
+   *
    * - Outer loop runs every outer_loop_divisor cycles (default 1 = 500 Hz)
    * - Inner loop @ 500 Hz (every cycle)
-   * - Linear interpolation between waypoints
-   * - Hold position when buffer empty
-   * 
+   * - MOVING: impedance segment interpolation toward target
+   * - HOLDING: maintain position with cascade PID active
+   *
    * @return true if any DOF is actively moving
    */
-  bool executeWaypointMovement();
+  bool executeControlLoop();
 };
 
 #endif // JOINT_CONTROLLER_H

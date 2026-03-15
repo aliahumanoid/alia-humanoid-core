@@ -463,10 +463,7 @@
                                     class="px-3 py-1.5 rounded-md bg-gray-500 text-white text-sm hover:bg-gray-600">
                                     <i class="fas fa-unlink mr-1"></i>Disconnect
                                 </button>
-                                <button id="sendCanTimeSync" type="button"
-                                    class="px-3 py-1.5 rounded-md bg-blue-500 text-white text-sm hover:bg-blue-600">
-                                    <i class="fas fa-clock mr-1"></i>Time Sync
-                                </button>
+                                <!-- [Removed] Time Sync button (waypoint infrastructure removed) -->
                             </div>
                             
                             <!-- CAN Bus Diagnostic (collapsible) -->
@@ -1603,52 +1600,26 @@
                                     </div>
                                 </div>
                                 
-                                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                                    <!-- Move Duration -->
+                                <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
+                                    <!-- Move Duration (dq cruise) -->
                                     <div>
                                         <label class="block text-xs font-medium text-purple-700 mb-1">Move Time (ms)</label>
-                                        <input type="number" id="oscTestMoveTime" value="1000" step="100" min="200" 
+                                        <input type="number" id="oscTestMoveTime" value="1000" step="100" min="200"
                                             class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
                                     </div>
-                                    
+
                                     <!-- Repetitions -->
                                     <div>
                                         <label class="block text-xs font-medium text-purple-700 mb-1">Repetitions</label>
-                                        <input type="number" id="oscTestReps" value="5" step="1" min="1" max="100" 
+                                        <input type="number" id="oscTestReps" value="5" step="1" min="1" max="100"
                                             class="w-full p-2 border border-purple-300 rounded text-sm font-mono">
                                     </div>
-                                    
-                                    <!-- Interpolation Mode -->
-                                    <div>
-                                        <label class="block text-xs font-medium text-purple-700 mb-1">Interpolation</label>
-                                        <select id="oscTestInterpolation" class="w-full p-2 border border-purple-300 rounded text-sm"
-                                            onchange="onInterpolationModeChange()">
-                                            <option value="linear">Linear (Step)</option>
-                                            <option value="cosine" selected>Smooth (Cosine)</option>
-                                        </select>
-                                    </div>
-                                    
+
                                     <!-- Status -->
                                     <div>
                                         <label class="block text-xs font-medium text-purple-700 mb-1">Status</label>
                                         <div id="oscTestStatus" class="p-2 bg-white border border-purple-200 rounded text-sm font-mono">
                                             <span class="text-gray-400">Ready</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <!-- Warning for Smooth interpolation (shown by default since cosine is now default) -->
-                                <div id="oscTestSmoothWarning" class="mb-3 p-3 bg-amber-50 border border-amber-300 rounded text-xs">
-                                    <div class="flex items-start">
-                                        <i class="fas fa-exclamation-triangle text-amber-500 mr-2 mt-0.5"></i>
-                                        <div>
-                                            <span class="font-semibold text-amber-700">Warning:</span>
-                                            <span class="text-amber-600">
-                                                Smooth interpolation masks the real PID response. 
-                                                For PID tuning, use <strong>Linear (Step)</strong> to clearly see 
-                                                overshoot, oscillations and settling time.
-                                                Use Smooth only for final operational movements.
-                                            </span>
                                         </div>
                                     </div>
                                 </div>
@@ -2065,15 +2036,15 @@
                 <!-- Right column: Motion Control, Movement, Charts, Measurements -->
                 <div class="resizable-column pt-4 px-4 pb-0" style="width: 40%; flex-basis: 40%;">
 
-                <!-- CAN Motion Control (Waypoints) -->
+                <!-- Impedance Move Control -->
                 <div class="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-lg shadow-md p-6 mb-8 border border-indigo-200">
-                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('canMotionContent')">
-                        <span><i class="fas fa-route mr-2 text-indigo-600"></i>Trajectory Control <span class="text-xs font-normal text-gray-400 ml-1">(CAN Bus)</span></span>
+                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('impedanceMoveContent')">
+                        <span><i class="fas fa-bullseye mr-2 text-indigo-600"></i>Impedance Move <span class="text-xs font-normal text-gray-400 ml-1">(CAN Bus)</span></span>
                         <i class="fas fa-chevron-up chevron-icon"></i>
                     </h2>
 
-                    <div id="canMotionContent" class="section-content space-y-4">
-                        <!-- Emergency Stop - Always visible and prominent -->
+                    <div id="impedanceMoveContent" class="section-content space-y-4">
+                        <!-- Emergency Stop -->
                         <div class="flex justify-end">
                             <button id="sendCanEmergency" type="button"
                                 class="px-4 py-2 rounded-md bg-red-500 text-white hover:bg-red-600 font-semibold shadow-md">
@@ -2081,559 +2052,113 @@
                             </button>
                         </div>
 
-                        <!-- Selected Joint Display + Waypoint Controls -->
-                        <div class="flex items-center gap-2 mb-2">
+                        <!-- Joint Info + Status -->
+                        <div class="flex items-center gap-2 mb-2 flex-wrap">
                             <span class="text-xs font-medium text-gray-500">Target:</span>
-                            <span id="canMotionJointLabel" class="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-sm font-semibold">KNEE_LEFT</span>
+                            <span id="impedanceJointLabel" class="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-sm font-semibold">KNEE_LEFT</span>
+                            <span class="text-xs text-gray-400">|</span>
+                            <span class="text-xs text-gray-500">Current:</span>
+                            <span id="impedanceCurrentPos" class="text-sm font-mono font-semibold text-indigo-700">—</span>
+                            <span class="text-xs text-gray-400">|</span>
+                            <span id="impedanceDotValid" class="inline-block w-2.5 h-2.5 rounded-full bg-gray-300" title="Valid"></span>
+                            <span class="text-xs text-gray-500">Valid</span>
+                            <span id="impedanceDotHolding" class="inline-block w-2.5 h-2.5 rounded-full bg-gray-300" title="Holding"></span>
+                            <span class="text-xs text-gray-500">Hold</span>
+                            <span id="impedanceDotWatchdog" class="inline-block w-2.5 h-2.5 rounded-full bg-gray-300" title="Watchdog"></span>
+                            <span class="text-xs text-gray-500">WD</span>
+                            <span class="text-xs text-gray-400 ml-1"><span id="impedanceStateRate">—</span></span>
                         </div>
 
-                        <!-- Movement Limits Panel (populated dynamically) -->
-                        <div id="trajectoryLimitsPanel" class="bg-white rounded-md p-2 border border-gray-200 text-xs mb-3 hidden">
-                            <!-- Content generated by updateTrajectoryLimitsPanel() in scripts.js -->
-                        </div>
-
-                        <!-- Layout for 1 DOF joints (KNEE) -->
-                        <div id="waypointInput1DOF" class="grid grid-cols-2 gap-3">
-                            <!-- DOF selector hidden (kept for JS compatibility, always value=0) -->
-                            <select id="canWaypointDof" class="hidden">
-                                <option value="0">DOF 0</option>
-                            </select>
-                            <div>
-                                <label for="canWaypointAngle" class="block text-xs font-medium text-gray-600">Angle (°)</label>
-                                <input type="number" id="canWaypointAngle" value="45"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
-                            </div>
-                            <div>
-                                <label for="canWaypointArrival" class="block text-xs font-medium text-gray-600">Offset (ms)</label>
-                                <input type="number" id="canWaypointArrival" value="1000"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
-                            </div>
-                        </div>
-                        <!-- Layout for 2 DOF joints (ANKLE, HIP) -->
-                        <div id="waypointInput2DOF" class="grid grid-cols-3 gap-3" style="display: none;">
-                            <div>
-                                <label for="canWaypointAngleDof0" class="block text-xs font-medium text-gray-600">DOF0 (°)</label>
-                                <input type="number" id="canWaypointAngleDof0" value="0"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
-                            </div>
-                            <div>
-                                <label for="canWaypointAngleDof1" class="block text-xs font-medium text-gray-600">DOF1 (°)</label>
-                                <input type="number" id="canWaypointAngleDof1" value="0"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
-                            </div>
-                            <div>
-                                <label for="canWaypointArrival2DOF" class="block text-xs font-medium text-gray-600">Offset (ms)</label>
-                                <input type="number" id="canWaypointArrival2DOF" value="1000"
-                                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
-                            </div>
-                        </div>
-
-                        <!-- Send Single Waypoint -->
-                        <div class="flex gap-2 items-end mb-2">
-                            <div class="flex-shrink-0">
-                                <label class="block text-xs font-medium text-gray-600 mb-1">Interpolation</label>
-                                <select id="singleWaypointInterpolation" class="px-2 py-2 text-sm border rounded-md focus:ring-2 focus:ring-indigo-300">
-                                    <option value="linear">Linear</option>
-                                    <option value="cosine">Smooth</option>
-                                </select>
-                            </div>
-                            <button id="sendCanWaypointBtn" type="button"
-                                class="flex-1 px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600 font-medium">
-                                <i class="fas fa-crosshairs mr-1"></i>Single Waypoint
-                            </button>
-                        </div>
-
-                        <!-- Multi-Waypoint Smooth Curve (Rate slider + chunk size + button) -->
-                        <div class="bg-amber-50 p-2 rounded border border-amber-200 mb-2">
-                            <div class="flex gap-2 items-end">
-                                <div class="flex-shrink-0">
-                                    <label class="block text-xs font-medium text-amber-700 mb-1">
-                                        Rate: <span id="multiWpPointsValue">100</span> pts/s
-                                    </label>
-                                    <input type="range" id="multiWpPoints" min="10" max="250" value="100" step="10"
-                                        class="w-24 h-2 bg-amber-200 rounded-lg cursor-pointer"
-                                        oninput="$('#multiWpPointsValue').text(this.value)" />
+                        <!-- Motion Parameters -->
+                        <div class="bg-white rounded-md p-3 border border-gray-200">
+                            <div class="grid gap-3" style="grid-template-columns: 1fr auto auto;">
+                                <div>
+                                    <label for="impedanceDqCruise" class="block text-xs font-medium text-gray-600">dq cruise (°/s)</label>
+                                    <div class="flex items-center gap-2 mt-1">
+                                        <input type="range" id="impedanceDqCruise" min="1" max="200" value="20" step="1"
+                                            class="flex-1 h-2 bg-indigo-200 rounded-lg cursor-pointer" style="min-width: 100px;">
+                                        <span id="impedanceDqCruiseVal" class="text-sm font-mono w-8 text-right shrink-0">20</span>
+                                    </div>
                                 </div>
-                                <div class="flex-shrink-0">
-                                    <label for="multiWpReanchor" class="block text-xs font-medium text-amber-700 mb-1">
-                                        Re-anchor: <span id="multiWpReanchorValue">50</span>
-                                    </label>
-                                    <input type="number" id="multiWpReanchor" value="50" min="0" max="2000" step="1"
-                                        class="w-16 px-1 py-1 text-xs border border-amber-300 rounded text-center"
-                                        oninput="$('#multiWpReanchorValue').text(this.value || '0')" />
+                                <div style="min-width: 80px;">
+                                    <label class="block text-xs font-medium text-gray-600">Stiffness (°)</label>
+                                    <div id="impedanceStiffnessDisplay" class="mt-1 px-2 py-1.5 text-sm font-mono bg-gray-50 border border-gray-200 rounded-md text-gray-700 text-center">—</div>
+                                    <p class="text-[10px] text-gray-400 mt-0.5 text-center">from PID section</p>
                                 </div>
-                                <button id="sendMultiWaypointSmoothBtn" type="button"
-                                    class="flex-1 px-3 py-2 rounded-md bg-amber-500 text-white hover:bg-amber-600 font-medium text-sm">
-                                    <i class="fas fa-wave-square mr-1"></i>Multi-WP (Smooth Curve)
-                                </button>
+                                <div style="min-width: 90px;">
+                                    <label for="impedanceTauFf" class="block text-xs font-medium text-gray-600">tau_ff (raw)</label>
+                                    <input type="number" id="impedanceTauFf" value="0" step="1"
+                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm" />
+                                </div>
                             </div>
-                            <p class="text-xs text-amber-600 mt-1">
-                                COSINE S-curve + LINEAR interp (Δt = 1000/rate) — Default 50, 0 = disabled
-                            </p>
                         </div>
-
-                        <!-- Smart Waypoints (mapping-based) -->
+                        <!-- Smart Impedance Buttons (mapping-based) -->
                         <div class="bg-white p-3 rounded border border-indigo-200 mb-2">
                             <div class="flex items-center justify-between mb-2">
                                 <h4 class="text-sm font-medium text-gray-700">
-                                    <i class="fas fa-brain mr-1"></i>Smart Waypoints
+                                    <i class="fas fa-brain mr-1"></i>Smart Impedance
                                 </h4>
                                 <div class="flex items-center gap-2">
-                                    <button type="button" id="waypointViewBtn" onclick="previewWaypointBatch()"
-                                            class="px-2 py-1 text-xs bg-blue-100 hover:bg-blue-200 text-blue-600 rounded border border-blue-300"
-                                            title="Preview waypoints or view last sent batch">
-                                        <i class="fas fa-eye mr-1"></i><span id="waypointViewBtnLabel">Preview</span>
-                                    </button>
                                     <label class="inline-flex items-center cursor-pointer">
-                                        <input type="checkbox" id="autoWaypointSendToggle" class="sr-only peer">
-                                        <div
-                                            class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600">
-                                        </div>
-                                        <span class="ml-2 text-xs font-medium text-gray-600">Auto-send</span>
+                                        <input type="checkbox" id="autoImpedanceSendToggle" class="sr-only peer">
+                                        <div class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                                        <span class="ml-2 text-xs font-medium text-gray-600">Auto-execute</span>
                                     </label>
                                 </div>
                             </div>
-                            <div id="smartWaypointButtons">
-                                <!-- Buttons will be generated dynamically by JavaScript -->
+                            <div id="smartImpedanceButtons">
+                                <!-- Buttons generated dynamically by generateSmartImpedanceButtons() -->
                             </div>
-                        </div>
-
-                        <!-- Waypoint Sequence Builder (Collapsible) -->
-                        <div class="bg-purple-50 rounded-md border border-purple-200 mb-2">
-                            <button type="button" 
-                                    onclick="$('#wpSequenceContent').slideToggle(200); $(this).find('.fa-chevron-down, .fa-chevron-right').toggleClass('fa-chevron-down fa-chevron-right');"
-                                    class="w-full p-3 text-left flex items-center justify-between hover:bg-purple-100 rounded-t-md transition-colors">
-                                <h3 class="text-sm font-semibold text-purple-700">
-                                    <i class="fas fa-film mr-1"></i>Waypoint Sequence Builder
-                                </h3>
-                                <i class="fas fa-chevron-right text-purple-400 text-xs"></i>
-                            </button>
-                            <div id="wpSequenceContent" class="p-4 pt-0 hidden">
-                                <!-- Toggle for sequence mode -->
-                                <div class="mt-2 mb-3 flex items-center gap-3">
-                                    <label for="wpSequenceModeToggle" class="text-sm font-medium text-gray-700 flex items-center">
-                                        <i class="fas fa-list-ol mr-2 text-purple-500"></i>Sequence Mode:
-                                    </label>
-                                    <label class="inline-flex items-center cursor-pointer">
-                                        <input type="checkbox" id="wpSequenceModeToggle" class="sr-only peer">
-                                        <div class="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
-                                        <span class="ml-2 text-sm font-medium text-gray-700">Off/On</span>
-                                    </label>
-                                </div>
-                                
-                                <!-- Sequence Builder -->
-                                <div id="wpSequenceBuilderContainer" style="display: none;">
-                                    <!-- Sequence list -->
-                                    <div id="wpSequenceList" class="sequence-list mb-3">
-                                        <div class="sequence-empty-state">
-                                            Click Smart Waypoint buttons to add steps
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- Sequence controls -->
-                                    <div class="flex flex-wrap gap-2 items-center">
-                                        <!-- Add Pause Button -->
-                                        <button onclick="addWpPauseToSequence()"
-                                            class="bg-yellow-500 hover:bg-yellow-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
-                                            <i class="fas fa-pause mr-1"></i>Add Pause
-                                        </button>
-                                        
-                                        <!-- Pause Duration -->
-                                        <div class="flex items-center gap-1">
-                                            <i class="fas fa-clock text-gray-500 text-xs"></i>
-                                            <span class="text-xs text-gray-600">Pause:</span>
-                                            <select id="wpPauseDuration" class="text-sm rounded border-gray-300 py-1 px-2">
-                                                <option value="0.5">0.5s</option>
-                                                <option value="1" selected>1s</option>
-                                                <option value="2">2s</option>
-                                                <option value="3">3s</option>
-                                                <option value="5">5s</option>
-                                            </select>
-                                        </div>
-                                        
-                                        <!-- Loop toggle -->
-                                        <div class="flex items-center gap-1">
-                                            <i class="fas fa-redo text-gray-500 text-xs"></i>
-                                            <span class="text-xs text-gray-600">Loop:</span>
-                                            <label class="inline-flex items-center cursor-pointer">
-                                                <input type="checkbox" id="wpSequenceLoopToggle" class="sr-only peer">
-                                                <div class="relative w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
-                                            </label>
-                                        </div>
-                                        
-                                        <!-- Action buttons -->
-                                        <button onclick="playWpSequence()" id="playWpSequenceBtn"
-                                            class="bg-green-500 hover:bg-green-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
-                                            <i class="fas fa-play mr-1"></i>Play
-                                        </button>
-                                        
-                                        <button onclick="stopWpSequence()" id="stopWpSequenceBtn" disabled
-                                            class="bg-red-400 hover:bg-red-500 text-white text-sm py-1.5 px-3 rounded transition-colors disabled:opacity-50">
-                                            <i class="fas fa-stop mr-1"></i>Stop
-                                        </button>
-                                        
-                                        <button onclick="removeLastWpStep()"
-                                            class="bg-orange-500 hover:bg-orange-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
-                                            <i class="fas fa-arrow-left mr-1"></i>Remove Last
-                                        </button>
-                                        
-                                        <button onclick="clearWpSequence()"
-                                            class="bg-gray-500 hover:bg-gray-600 text-white text-sm py-1.5 px-3 rounded transition-colors">
-                                            <i class="fas fa-trash mr-1"></i>Clear All
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Sinusoid Test Section (Collapsible) -->
-                        <div class="bg-purple-50 rounded-md border border-purple-200">
-                            <button type="button" 
-                                    onclick="$('#sinusoidContent').slideToggle(200); $(this).find('.fa-chevron-down, .fa-chevron-right').toggleClass('fa-chevron-down fa-chevron-right');"
-                                    class="w-full p-3 text-left flex items-center justify-between hover:bg-purple-100 rounded-t-md transition-colors">
-                                <h3 class="text-sm font-semibold text-purple-700">
-                                    <i class="fas fa-wave-square mr-1"></i>Sinusoidal Trajectory Test
-                                </h3>
-                                <i class="fas fa-chevron-right text-purple-400 text-xs"></i>
-                            </button>
-                            <div id="sinusoidContent" class="p-4 pt-0 hidden">
-                            
-                            <!-- DOF Oscillation Parameters -->
-                            <div id="sinusoidDofParams" class="mb-3 space-y-2 mt-2">
-                                <!-- DOF 0 -->
-                                <div class="bg-white p-2 rounded border border-purple-100">
-                                    <div class="flex items-center justify-between mb-1">
-                                        <label class="text-xs font-semibold text-purple-700">
-                                            <input type="checkbox" id="sinusoidDof0Active" checked class="mr-1">
-                                            DOF 0
-                                        </label>
-                                        <span id="sinusoidDof0Name" class="text-xs text-purple-500">-</span>
-                                    </div>
-                                    <div class="grid grid-cols-2 gap-2">
-                                        <div>
-                                            <label class="text-xs text-gray-500">Min (°)</label>
-                                            <input type="number" id="sinusoidDof0Min" value="20" step="1"
-                                                class="w-full px-2 py-1 text-sm border rounded">
-                                        </div>
-                                        <div>
-                                            <label class="text-xs text-gray-500">Max (°)</label>
-                                            <input type="number" id="sinusoidDof0Max" value="80" step="1"
-                                                class="w-full px-2 py-1 text-sm border rounded">
-                                        </div>
-                                    </div>
-                                </div>
-                                <!-- DOF 1 -->
-                                <div id="sinusoidDof1Container" class="bg-white p-2 rounded border border-purple-100">
-                                    <div class="flex items-center justify-between mb-1">
-                                        <label class="text-xs font-semibold text-purple-700">
-                                            <input type="checkbox" id="sinusoidDof1Active" class="mr-1">
-                                            DOF 1
-                                        </label>
-                                        <span id="sinusoidDof1Name" class="text-xs text-purple-500">-</span>
-                                    </div>
-                                    <div class="grid grid-cols-2 gap-2">
-                                        <div>
-                                            <label class="text-xs text-gray-500">Min (°)</label>
-                                            <input type="number" id="sinusoidDof1Min" value="-10" step="1"
-                                                class="w-full px-2 py-1 text-sm border rounded">
-                                        </div>
-                                        <div>
-                                            <label class="text-xs text-gray-500">Max (°)</label>
-                                            <input type="number" id="sinusoidDof1Max" value="10" step="1"
-                                                class="w-full px-2 py-1 text-sm border rounded">
-                                        </div>
-                                    </div>
-                                </div>
-                                <!-- DOF 2 (for HIP) -->
-                                <div id="sinusoidDof2Container" class="bg-white p-2 rounded border border-purple-100 hidden">
-                                    <div class="flex items-center justify-between mb-1">
-                                        <label class="text-xs font-semibold text-purple-700">
-                                            <input type="checkbox" id="sinusoidDof2Active" class="mr-1">
-                                            DOF 2
-                                        </label>
-                                        <span id="sinusoidDof2Name" class="text-xs text-purple-500">-</span>
-                                    </div>
-                                    <div class="grid grid-cols-2 gap-2">
-                                        <div>
-                                            <label class="text-xs text-gray-500">Min (°)</label>
-                                            <input type="number" id="sinusoidDof2Min" value="-10" step="1"
-                                                class="w-full px-2 py-1 text-sm border rounded">
-                                        </div>
-                                        <div>
-                                            <label class="text-xs text-gray-500">Max (°)</label>
-                                            <input type="number" id="sinusoidDof2Max" value="10" step="1"
-                                                class="w-full px-2 py-1 text-sm border rounded">
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- Timing Parameters -->
-                            <div class="grid grid-cols-2 gap-2 mb-2">
-                                <div>
-                                    <label class="text-xs text-purple-600">Cycle Duration (s)</label>
-                                    <input type="number" id="sinusoidCycleDuration" value="3" min="0.5" max="30" step="0.5"
-                                        class="w-full px-2 py-1 text-sm border rounded" onchange="updateSinusoidStats()">
-                                </div>
-                                <div>
-                                    <label class="text-xs text-purple-600">Number of Cycles</label>
-                                    <input type="number" id="sinusoidCycles" value="2" min="1" max="20" step="1"
-                                        class="w-full px-2 py-1 text-sm border rounded" onchange="updateSinusoidStats()">
-                                </div>
-                            </div>
-                            <div class="bg-purple-100 text-purple-800 text-xs px-2 py-1 rounded mb-3 text-center font-medium">
-                                ⏱️ Total Duration: <span id="sinusoidTotalDuration" class="font-bold">6</span>s
-                            </div>
-                            
-                            <!-- Waypoint Rate (points per second) -->
-                            <div class="mb-3">
-                                <label for="waypointDensity" class="block text-xs font-medium text-purple-600 mb-1">
-                                    Rate: <span id="waypointDensityValue" class="font-bold">100</span> pts/s
-                                    <span class="text-purple-400 font-normal ml-2">
-                                        (Δt = <span id="waypointIntervalValue">10</span>ms)
-                                    </span>
-                                    <span class="text-gray-400 ml-2">• LINEAR interpolation</span>
-                                </label>
-                                <input type="range" id="waypointDensity" min="10" max="250" value="100" step="10"
-                                    class="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
-                                    oninput="updateSinusoidStats(this.value)" />
-                                <div class="flex justify-between text-xs text-purple-400 mt-1">
-                                    <span>10 pts/s</span>
-                                    <span>100 pts/s</span>
-                                    <span>250 pts/s</span>
-                                </div>
-                            </div>
-                            
-                            <div class="grid grid-cols-2 gap-2">
-                                <button id="sendCanWaypointSequenceBtn" type="button"
-                                    class="px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600 font-medium"
-                                    title="Send sinusoidal test sequence with LINEAR interpolation between many waypoints">
-                                    <i class="fas fa-wave-square mr-1"></i>Sinusoid (LINEAR)
-                                </button>
-                                <button id="sendCosineOscillationBtn" type="button"
-                                    class="px-4 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600 font-medium"
-                                    title="Oscillation with COSINE S-curve waypoints (min↔max, LINEAR interp)">
-                                    <i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)
-                                </button>
-                            </div>
-                            <p class="text-xs text-purple-500 mt-2 text-center" id="sinusoidDescription">
-                                <span id="sinusoidCyclesDisplay">2</span> cycles × <span id="sinusoidCycleDurationDisplay">3</span>s = <span id="sinusoidTotalDurationDisplay">6</span>s • <span id="sinusoidFreqDisplay">0.33</span>Hz • <span id="totalWaypointsValue">600</span> total pts
+                            <p id="impedanceButtonInfo" class="text-xs text-gray-400 mt-2">
+                                Toggle auto-execute, then click a button to move via SET_IMPEDANCE.
                             </p>
-                            </div><!-- end #sinusoidContent -->
                         </div>
 
-                        <!-- Continuous Stream Test Section (Collapsible) -->
-                        <div class="bg-teal-50 rounded-md border border-teal-200">
+                        <!-- Impedance Oscillation Test (Collapsible) -->
+                        <div class="bg-purple-50 rounded-md border border-purple-200">
                             <button type="button"
-                                    onclick="$('#streamTestContent').slideToggle(200); $(this).find('.fa-chevron-down, .fa-chevron-right').toggleClass('fa-chevron-down fa-chevron-right');"
-                                    class="w-full p-3 text-left flex items-center justify-between hover:bg-teal-100 rounded-t-md transition-colors">
-                                <h3 class="text-sm font-semibold text-teal-700">
-                                    <i class="fas fa-stream mr-1"></i>Continuous Stream Test
+                                    onclick="$('#impedanceOscContent').slideToggle(200); $(this).find('.fa-chevron-down, .fa-chevron-right').toggleClass('fa-chevron-down fa-chevron-right');"
+                                    class="w-full p-3 text-left flex items-center justify-between hover:bg-purple-100 rounded-t-md transition-colors">
+                                <h3 class="text-sm font-semibold text-purple-700">
+                                    <i class="fas fa-wave-square mr-1"></i>Impedance Oscillation
                                 </h3>
-                                <i class="fas fa-chevron-right text-teal-400 text-xs"></i>
+                                <i class="fas fa-chevron-right text-purple-400 text-xs"></i>
                             </button>
-                            <div id="streamTestContent" class="p-4 pt-0 hidden">
-
-                            <!-- Joint: uses global #jointSelect -->
-                            <div class="mb-2 mt-2">
-                                <label class="text-xs font-medium text-teal-600 block mb-1">
-                                    Joint: <span id="streamTestJointLabel" class="font-bold text-teal-700">-</span>
-                                    <span class="text-gray-400 ml-1">(from Joint selector above)</span>
-                                </label>
-                            </div>
-
-                            <!-- Active DOF Selector (dynamic radio buttons) -->
-                            <div id="streamTestDofSelector" class="mb-2">
-                                <label class="text-xs font-medium text-teal-600 block mb-1">Active DOF</label>
-                                <div id="streamTestDofRadios" class="flex flex-wrap gap-2">
-                                    <!-- Populated dynamically from jointConfigData -->
+                            <div id="impedanceOscContent" class="p-4 pt-0 hidden">
+                                <div class="grid grid-cols-3 gap-2 mb-3 mt-2">
+                                    <div>
+                                        <label class="text-xs text-purple-600">Amplitude (°)</label>
+                                        <input type="number" id="impedanceOscAmplitude" value="20" min="1" max="90" step="1"
+                                            class="w-full px-2 py-1 text-sm border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="text-xs text-purple-600">Frequency (Hz)</label>
+                                        <input type="number" id="impedanceOscFrequency" value="0.5" min="0.05" max="5" step="0.05"
+                                            class="w-full px-2 py-1 text-sm border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="text-xs text-purple-600">Cycles</label>
+                                        <input type="number" id="impedanceOscCycles" value="3" min="1" max="50" step="1"
+                                            class="w-full px-2 py-1 text-sm border rounded">
+                                    </div>
+                                </div>
+                                <div class="text-xs text-purple-500 mb-3 text-center">
+                                    Center: <span id="impedanceOscCenter" class="font-bold">—</span>° |
+                                    Duration: <span id="impedanceOscDuration" class="font-bold">—</span>s |
+                                    50 Hz update rate via SET_IMPEDANCE fast path
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <button id="impedanceOscStartBtn" type="button"
+                                        class="px-4 py-2 rounded-md bg-purple-500 text-white hover:bg-purple-600 font-medium text-sm">
+                                        <i class="fas fa-play mr-1"></i>Start Oscillation
+                                    </button>
+                                    <button id="impedanceOscStopBtn" type="button"
+                                        class="px-4 py-2 rounded-md bg-red-400 text-white hover:bg-red-500 font-medium text-sm">
+                                        <i class="fas fa-stop mr-1"></i>Stop
+                                    </button>
                                 </div>
                             </div>
-
-                            <!-- Safe Limits Display -->
-                            <div id="streamTestSafeLimitsInfo" class="text-xs text-teal-600 mb-2 hidden">
-                                Safe limits DOF <span id="streamTestSafeDof">0</span>:
-                                [<span id="streamTestSafeMin">-</span>&deg;, <span id="streamTestSafeMax">-</span>&deg;]
-                            </div>
-                            <div id="streamTestNoSafeLimits" class="text-xs text-amber-600 mb-2 hidden">
-                                ⚠ No firmware safe limits &mdash; manual Min/Max will be used
-                            </div>
-
-                            <!-- Min / Max / Start At -->
-                            <div class="grid grid-cols-3 gap-2 mb-2">
-                                <div>
-                                    <label class="text-xs text-teal-600">Min (&deg;)</label>
-                                    <input type="number" id="streamTestMinDeg" value="20" step="0.5"
-                                        class="w-full px-2 py-1 text-sm border rounded">
-                                </div>
-                                <div>
-                                    <label class="text-xs text-teal-600">Max (&deg;)</label>
-                                    <input type="number" id="streamTestMaxDeg" value="80" step="0.5"
-                                        class="w-full px-2 py-1 text-sm border rounded">
-                                </div>
-                                <div>
-                                    <label class="text-xs text-teal-600">Start at</label>
-                                    <select id="streamTestStartAt" class="w-full px-2 py-1 text-sm border rounded">
-                                        <option value="min" selected>Min</option>
-                                        <option value="max">Max</option>
-                                    </select>
-                                </div>
-                            </div>
-
-                            <!-- Rate & Duration -->
-                            <div class="grid grid-cols-3 gap-2 mb-2">
-                                <div>
-                                    <label class="text-xs text-teal-600">Rate (Hz)</label>
-                                    <select id="streamTestRate" class="w-full px-2 py-1 text-sm border rounded">
-                                        <option value="50" selected>50</option>
-                                        <option value="100">100</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label class="text-xs text-teal-600">Duration</label>
-                                    <select id="streamTestDuration" class="w-full px-2 py-1 text-sm border rounded">
-                                        <option value="30">30s</option>
-                                        <option value="60" selected>60s</option>
-                                        <option value="120">120s</option>
-                                        <option value="600">10min</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label class="text-xs text-teal-600">Horizon (ms)</label>
-                                    <input type="number" id="streamTestHorizon" value="250" min="100" max="500" step="50"
-                                        class="w-full px-2 py-1 text-sm border rounded">
-                                </div>
-                            </div>
-
-                            <!-- Frequency -->
-                            <div class="grid grid-cols-3 gap-2 mb-2">
-                                <div>
-                                    <label class="text-xs text-teal-600">Frequency (Hz)</label>
-                                    <input type="number" id="streamTestFreq" value="0.5" min="0.1" max="5" step="0.1"
-                                        class="w-full px-2 py-1 text-sm border rounded">
-                                </div>
-                            </div>
-
-                            <!-- Fault Profile -->
-                            <div class="mb-3">
-                                <label class="text-xs text-teal-600">Fault Profile</label>
-                                <select id="streamTestFault" class="w-full px-2 py-1 text-sm border rounded">
-                                    <option value="none" selected>None</option>
-                                    <option value="delay_jitter">Delay Jitter</option>
-                                    <option value="drop_rate">Drop Rate (1%)</option>
-                                    <option value="burst_pause">Burst Pause</option>
-                                    <option value="sync_stale">Sync Stale</option>
-                                    <option value="conflict_spike">Conflict Spike (409)</option>
-                                </select>
-                            </div>
-
-                            <!-- Start / Stop -->
-                            <div class="grid grid-cols-2 gap-2 mb-3">
-                                <button id="streamTestStartBtn" type="button" onclick="startStreamTest()"
-                                    class="px-4 py-2 rounded-md bg-teal-500 text-white hover:bg-teal-600 font-medium text-sm">
-                                    <i class="fas fa-play mr-1"></i>Start
-                                </button>
-                                <button id="streamTestStopBtn" type="button" onclick="stopStreamTest()" disabled
-                                    class="px-4 py-2 rounded-md bg-red-400 text-white hover:bg-red-500 font-medium text-sm disabled:opacity-50">
-                                    <i class="fas fa-stop mr-1"></i>Stop
-                                </button>
-                            </div>
-
-                            <!-- Live KPI Panel -->
-                            <div id="streamTestKPI" class="bg-white rounded border border-teal-100 p-3 text-xs space-y-1 hidden">
-                                <div class="flex justify-between">
-                                    <span class="font-semibold text-teal-700">State</span>
-                                    <span id="streamKpiState" class="font-bold">IDLE</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Uptime</span>
-                                    <span id="streamKpiUptime">-</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Target / Actual Hz</span>
-                                    <span><span id="streamKpiTargetHz">-</span> / <span id="streamKpiActualHz">-</span></span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Drift p95</span>
-                                    <span id="streamKpiDrift">-</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Partial ratio</span>
-                                    <span id="streamKpiPartialRatio">-</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Late waypoints</span>
-                                    <span id="streamKpiLateWp" class="text-orange-500">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Late ratio</span>
-                                    <span id="streamKpiLateRatio">-</span>
-                                </div>
-                                <hr class="border-teal-100">
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Chunks sent</span>
-                                    <span id="streamKpiSent">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Confirmed</span>
-                                    <span id="streamKpiConfirmed" class="text-green-600">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Failed</span>
-                                    <span id="streamKpiFailed" class="text-red-500">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Dropped</span>
-                                    <span id="streamKpiDropped" class="text-red-500">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Deferred</span>
-                                    <span id="streamKpiDeferred" class="text-yellow-600">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Retries</span>
-                                    <span id="streamKpiRetries">0</span>
-                                </div>
-                                <hr class="border-teal-100">
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">HTTP 409</span>
-                                    <span id="streamKpi409" class="text-orange-500">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">HTTP 502/503</span>
-                                    <span id="streamKpi502" class="text-red-500">0</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Sync refreshes</span>
-                                    <span id="streamKpiSync">0</span>
-                                </div>
-                                <hr class="border-teal-100">
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">FW accepted</span>
-                                    <span id="streamKpiFwAccepted" class="text-green-600">-</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">FW dropped</span>
-                                    <span id="streamKpiFwDropped" class="text-red-500">-</span>
-                                </div>
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">FW buffer fill</span>
-                                    <span id="streamKpiFwBufFill">-</span>
-                                </div>
-                                <!-- Queue fill per joint -->
-                                <div id="streamKpiQueues" class="mt-1"></div>
-                            </div>
-
-                            <!-- Pass/Fail Badge -->
-                            <div id="streamTestVerdict" class="mt-2 text-center text-xs font-medium hidden">
-                                <!-- Populated by JS -->
-                            </div>
-
-                            </div><!-- end #streamTestContent -->
                         </div>
-
-                        <!-- Hidden mode selector (keep for compatibility) -->
-                        <input type="hidden" id="canWaypointMode" value="1" />
 
                         <!-- Status Display -->
                         <div class="grid grid-cols-2 gap-3 text-xs">

@@ -63,9 +63,6 @@ volatile uint16_t inner_loop_period_us = 2000;  // 2000µs = 500Hz (default)
 volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, same as inner)
 volatile uint16_t torque_ramp_time_ms = 100;    // Time for 0→max torque (default: 100ms, 0=disabled)
 volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold (default: 100ms)
-// Waypoint re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-// Default is enabled at 50 WPs for stable long-running streams.
-volatile uint16_t wp_reanchor_interval = 50;
 // CAN error detection: time-window based (more robust to EMI glitches)
 volatile uint16_t can_error_window_ms = 50;      // 50ms window (default)
 volatile uint8_t can_error_threshold = 5;         // 5 errors in window = emergency stop
@@ -154,9 +151,6 @@ volatile uint8_t can_startup_joint_id = 0;
 volatile int16_t can_startup_torque = 0;
 volatile int16_t can_startup_duration = 0;
 
-// Startup waypoint injection guard (Core0 sets, Core1 checks)
-volatile bool startup_injecting_waypoints = false;
-
 // CAN-triggered set-zero (Core1 sets flags, Core0 executes)
 volatile bool can_set_zero_requested = false;
 volatile uint8_t can_set_zero_dof_index = 0;
@@ -181,7 +175,7 @@ volatile uint16_t can_auto_start_duration = 0;
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 queue_t startup_event_queue;
 
-// PID diagnostics for tuning (updated by Core1 waypoint loop)
+// PID diagnostics for tuning (updated by Core1 control loop)
 PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
 volatile bool pid_diag_terms_enabled = false;  // OFF by default — P/I/D breakdown
@@ -204,8 +198,12 @@ volatile bool metrics_tracking_enabled = true;  // Enable by default
 // Global variable for auto‑mapping state
 AutoMappingState_t auto_mapping_state = {0};
 
+// DOF control state (replaces waypoint_buffer state machine)
+volatile DofState dof_state[MAX_DOFS] = {DofState::IDLE, DofState::IDLE, DofState::IDLE};
+volatile float dof_hold_angle[MAX_DOFS] = {0};
+volatile uint32_t dof_hold_time[MAX_DOFS] = {0};
+
 // Impedance control state (Scenario B — SET_IMPEDANCE CAN command)
-volatile DofControlMode dof_control_mode[MAX_DOFS] = {MODE_WAYPOINT, MODE_WAYPOINT, MODE_WAYPOINT};
 ImpedanceTarget impedance_target[MAX_DOFS] = {};
 ImpedanceRollingSegment impedance_segment[MAX_DOFS] = {};
 volatile uint32_t impedance_watchdog_ms = 100;  // 100ms default watchdog
@@ -425,7 +423,7 @@ void setup() {
     LOG_INFO("Host CAN (J5) initialized successfully on SPI1, CS=GP" + String(CAN_HOST_CS_PIN));
     
     // SAFETY: Flush any stale messages from MCP2515 RX buffers
-    // This prevents old waypoints from executing after a reset
+    // This prevents old commands from executing after a reset
     int flushed = 0;
     unsigned long flush_start = millis();
     while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && (millis() - flush_start) < 100) {
@@ -440,7 +438,7 @@ void setup() {
     }
   } else {
     LOG_ERROR("Failed to initialize Host CAN on SPI1!");
-    LOG_INFO("Continuing without Host CAN (waypoints via serial only)");
+    LOG_INFO("Continuing without Host CAN (impedance via serial only)");
   }
   
   // Host CAN loopback test
@@ -448,10 +446,6 @@ void setup() {
     const unsigned char host_test_data[8] = {0xCA, 0xFE, 0xBA, 0xBE, 0x11, 0x22, 0x33, 0x44};
     can_loopback_test(CAN_HOST, "Host CAN (J5)", 0x123, host_test_data);
   }
-
-  // Initialize waypoint buffers for CAN-based control
-  waypoint_buffers_init(ACTIVE_JOINT_CONFIG.dof_count);
-  LOG_INFO("Waypoint buffers initialized for " + String(ACTIVE_JOINT_CONFIG.dof_count) + " DOFs");
 
   // Verify CS pins are HIGH (inactive) after initialization
   LOG_INFO("CS pin state: Motor CAN (GP" + String(CAN_CS_PIN) + ")=" + String(digitalRead(CAN_CS_PIN)) +

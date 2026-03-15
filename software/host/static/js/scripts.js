@@ -23,30 +23,14 @@ let encoderTestData = {
     dofData: {} // Organized as dofData[dof] = {timestamps: [], values: []}
 };
 
-// Movement Sequence Builder variables
-let movementSequence = []; // Array of {type: "move", dof0, dof1} or {type: "pause", duration}
-let isSequencePlaying = false;
-let sequencePlaybackHandle = null;
-let sequenceExecutionData = []; // Collected during playback: {stepIndex, targetDof0, targetDof1, startTimestamp, endTimestamp, encoderSamples[]}
-let isAddToSequenceMode = false;
 
-// Waypoint trajectory state tracking (prevents conflicts from overlapping commands)
-let waypointTrajectoryActive = false;
-let waypointTrajectoryStartTime = 0;
-
-// Last waypoint batch info for debugging
-let lastWaypointBatch = {
-    timestamp: null,
-    joint: null,
-    source: null,  // 'manual', 'auto-single', 'auto-dual', 'preview'
-    startAngles: null,
-    targetAngles: null,
-    waypoints: [],
-    rate: null,
-    totalTimeMs: null,
-    sent: false,
-    startSource: null  // 'encoder' or 'default (0°)' - indicates where start angle came from
-};
+// Impedance Move state
+let impedanceGainsInitialized = {};  // per-DOF: { 0: true, 1: true }
+let impedanceOscInterval = null;
+let impedanceLastKnownPos = {};  // { dofIndex: angleDeg }
+let impedanceStateRateCount = 0;
+let impedanceStateRateStart = 0;
+let impedanceStagedTarget = null;  // { dofs: [{ dof, angle }] } — staged when auto-send OFF
 
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
@@ -130,101 +114,10 @@ const DEFAULT_PARAMS = {
 // Safety limit for waypoint velocity (must match firmware ABSOLUTE_MAX_VELOCITY_DEG_S)
 const MAX_SAFE_VELOCITY_DEG_S = 150;
 
-// Below this peak velocity, use linear profile instead of cosine S-curve.
-// At low speeds the cosine wastes waypoints at start/end (Δangle < CAN resolution)
-// and creates stick-slip zones. Linear gives constant velocity, every WP meaningful.
-const SLOW_MOTION_THRESHOLD_DEG_S = 15;
-
-// CAN waypoint angle resolution: int16 / 100 → 0.01° per count
-const WAYPOINT_ANGLE_RESOLUTION = 100;
-const REANCHOR_INTERVAL_DEFAULT = 50;
-const REANCHOR_INTERVAL_MAX = 2000;  // Must match firmware WAYPOINT_BUFFER_DEPTH
-
-/**
- * Remove consecutive waypoints that quantize to the same angle values.
- *
- * CAN waypoints encode angles as int16 × 100 (0.01° resolution). At low
- * velocities the cosine S-curve produces adjacent angles that round to the
- * same int16 value, creating "zero-steps" — the firmware sees no movement
- * and the PID stalls. Removing duplicates lets the firmware interpolate
- * over a longer interval instead, producing a smooth (albeit slightly
- * time-shifted) trajectory with no stalls.
- *
- * @param {Array} waypoints - Array of {angles_deg: [a0,a1,a2], t_offset_ms, ...}
- * @returns {Array} Filtered waypoints with zero-step duplicates removed
- */
-function deduplicateWaypoints(waypoints) {
-    if (waypoints.length <= 1) return waypoints;
-    const result = [waypoints[0]];
-    for (let i = 1; i < waypoints.length; i++) {
-        const prev = result[result.length - 1].angles_deg;
-        const curr = waypoints[i].angles_deg;
-        let same = true;
-        for (let d = 0; d < 3; d++) {
-            if (prev[d] === null && curr[d] === null) continue;
-            if (prev[d] === null || curr[d] === null) { same = false; break; }
-            if (Math.round(prev[d] * WAYPOINT_ANGLE_RESOLUTION) !==
-                Math.round(curr[d] * WAYPOINT_ANGLE_RESOLUTION)) { same = false; break; }
-        }
-        if (!same) {
-            result.push(waypoints[i]);
-        }
-    }
-    return result;
-}
-
-/**
- * Choose interpolation profile based on peak velocity of the movement.
- *
- * For slow movements (peak velocity < SLOW_MOTION_THRESHOLD_DEG_S), returns
- * linear progress (t) — constant velocity, no zero-step waste at boundaries.
- * For fast movements, returns cosine S-curve — smooth acceleration/deceleration.
- *
- * @param {number} t - Normalized time progress (0.0 to 1.0)
- * @param {number} peakVelocityDegS - Peak velocity of the cosine profile (deg/s)
- * @returns {number} Smoothed progress (0.0 to 1.0)
- */
-function interpolationProfile(t, peakVelocityDegS) {
-    if (peakVelocityDegS < SLOW_MOTION_THRESHOLD_DEG_S) {
-        return t;  // Linear: constant velocity, every WP carries meaningful delta
-    }
-    return 0.5 * (1 - Math.cos(t * Math.PI));  // Cosine S-curve
-}
-
-/**
- * Read re-anchor interval from UI and clamp to firmware-supported range.
- * 0 disables re-anchor; 1..REANCHOR_INTERVAL_MAX enables periodic correction.
- */
-function getReanchorIntervalFromUI() {
-    let rawValue = parseInt($("#multiWpReanchor").val(), 10);
-    if (Number.isNaN(rawValue)) {
-        rawValue = REANCHOR_INTERVAL_DEFAULT;
-    }
-
-    const clampedValue = Math.max(0, Math.min(REANCHOR_INTERVAL_MAX, rawValue));
-    if (clampedValue !== rawValue) {
-        appendStatusMessage(`⚠️ Re-anchor clamped to ${clampedValue} (valid range: 0-${REANCHOR_INTERVAL_MAX})`);
-    }
-
-    $("#multiWpReanchor").val(clampedValue);
-    $("#multiWpReanchorValue").text(String(clampedValue));
-    return clampedValue;
-}
-
-/**
- * Push current re-anchor setting to firmware synchronously.
- */
-function pushReanchorIntervalSetting() {
-    const reanchorInterval = getReanchorIntervalFromUI();
-    $.ajax({
-        url: '/can/reanchor_interval',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ interval: reanchorInterval }),
-        async: false
-    });
-    return reanchorInterval;
-}
+// Encoder freshness tracking: { "joint_dof": timestamp_ms }
+// Updated by encoder_stream listener, checked by getCurrentEncoderAngle()
+const ENCODER_FRESHNESS_MS = 2000;  // Max age before data is considered stale
+const encoderLastUpdateMs = {};
 
 /**
  * Get current encoder angle from LIVE streaming data only.
@@ -238,29 +131,29 @@ function pushReanchorIntervalSetting() {
 function getCurrentEncoderAngle(joint, dofIndex) {
     const jointType = joint.split('_')[0].toLowerCase();
     
-    // === SAFETY: Only use LIVE encoder data, never cached/stale values ===
-    
-    // Check UI display for live data (streaming must be active)
-    const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
-    if (jointEncoderText && jointEncoderText !== '-' && jointEncoderText.trim() !== '') {
-        const parsed = parseFloat(jointEncoderText.replace('°', ''));
-        if (!isNaN(parsed)) {
-            return parsed;
-        }
-    }
-    
-    // Fallback: check generic encoder display
-    const genericEncoderText = $(`#encoderDof${dofIndex}`).text();
-    if (genericEncoderText && genericEncoderText !== '-' && genericEncoderText.trim() !== '') {
-        const parsed = parseFloat(genericEncoderText.replace('°', ''));
-        if (!isNaN(parsed)) {
-            return parsed;
+    // === SAFETY: Only use LIVE encoder data with freshness check ===
+    // The encoder_stream listener records a timestamp on every update.
+    // If data is older than ENCODER_FRESHNESS_MS, it's considered stale
+    // (stream may have stopped or stalled without a clean UI teardown).
+
+    const freshnessKey = `${jointType}_${dofIndex}`;
+    const lastUpdate = encoderLastUpdateMs[freshnessKey];
+    const now = Date.now();
+
+    if (lastUpdate && (now - lastUpdate) < ENCODER_FRESHNESS_MS) {
+        // Data is fresh — read from DOM
+        const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
+        if (jointEncoderText && jointEncoderText !== '-' && jointEncoderText.trim() !== '') {
+            const parsed = parseFloat(jointEncoderText.replace('°', ''));
+            if (!isNaN(parsed)) {
+                return parsed;
+            }
         }
     }
     
     // No live data available - try to auto-start encoder streaming
     console.log(`[Encoder] No live data for ${joint} DOF${dofIndex}, attempting auto-start...`);
-    
+
     let streamingStarted = false;
     $.ajax({
         url: '/can/encoder_stream/start',
@@ -278,83 +171,46 @@ function getCurrentEncoderAngle(joint, dofIndex) {
             appendStatusMessage(`❌ Failed to auto-start encoder streaming`);
         }
     });
-    
+
     if (!streamingStarted) {
         return null;
     }
-    
-    // Wait for live data to appear in UI (max 500ms)
+
+    // Activate the Socket.IO listener flags so encoder_stream events are processed.
+    // Without these, the listener (line ~463) silently drops incoming frames.
+    encoderTestActive = true;
+    currentEncoderJointType = jointType;
+
+    // Wait for FRESH data (max 500ms) — check encoderLastUpdateMs, not stale DOM text
+    const autoStartTime = Date.now();
     let liveAngle = null;
     for (let attempt = 0; attempt < 10; attempt++) {
         // Small delay
         const start = Date.now();
         while (Date.now() - start < 50) { /* busy wait */ }
-        
-        // Re-check UI for fresh data
-        const freshText = $(`#${jointType}EncoderDof${dofIndex}`).text();
-        if (freshText && freshText !== '-' && freshText.trim() !== '') {
-            const parsed = parseFloat(freshText.replace('°', ''));
-            if (!isNaN(parsed)) {
-                liveAngle = parsed;
-                break;
+
+        // Check freshness timestamp — only accept data updated AFTER we started the stream
+        const freshTs = encoderLastUpdateMs[freshnessKey];
+        if (freshTs && freshTs > autoStartTime) {
+            const freshText = $(`#${jointType}EncoderDof${dofIndex}`).text();
+            if (freshText && freshText !== '-' && freshText.trim() !== '') {
+                const parsed = parseFloat(freshText.replace('°', ''));
+                if (!isNaN(parsed)) {
+                    liveAngle = parsed;
+                    break;
+                }
             }
         }
     }
-    
+
     if (liveAngle !== null) {
         console.log(`[Encoder] Live data acquired: DOF${dofIndex} = ${liveAngle.toFixed(2)}°`);
     } else {
         appendStatusMessage(`❌ Encoder streaming started but no data received - check CAN connection`);
     }
-    
+
     return liveAngle;
 }
-
-/**
- * Validate encoder readings for multiple DOFs
- * @param {string} joint - Joint name
- * @param {number[]} dofIndices - Array of DOF indices to validate
- * @returns {Object} {valid: boolean, angles: {dof: angle}, missing: [dof indices]}
- */
-function validateEncoderForWaypoints(joint, dofIndices) {
-    const result = { valid: true, angles: {}, missing: [] };
-    
-    for (const dof of dofIndices) {
-        const angle = getCurrentEncoderAngle(joint, dof);
-        if (angle === null) {
-            result.valid = false;
-            result.missing.push(dof);
-        } else {
-            result.angles[dof] = angle;
-        }
-    }
-    
-    return result;
-}
-
-/**
- * Check if a waypoint trajectory is already active.
- * Prevents conflicting waypoint commands that cause jerky movements.
- * @returns {boolean} true if safe to send new waypoints, false if should block
- */
-function checkTrajectoryNotActive() {
-    if (waypointTrajectoryActive) {
-        const elapsed = Date.now() - waypointTrajectoryStartTime;
-        appendStatusMessage(`❌ SAFETY: Cannot send new waypoints - trajectory already in progress (${(elapsed/1000).toFixed(1)}s)`);
-        appendStatusMessage(`⚠️ Wait for current movement to complete, or press Emergency Stop to clear`);
-        return false;
-    }
-    return true;
-}
-
-/**
- * Mark waypoint trajectory as active (call when starting to send waypoints)
- */
-function markTrajectoryActive() {
-    waypointTrajectoryActive = true;
-    waypointTrajectoryStartTime = Date.now();
-}
-
     // Main function executed when DOM is ready
 $(document).ready(function() {
     // Socket.IO initialization
@@ -506,6 +362,42 @@ $(document).ready(function() {
         const kdText = Number.isFinite(values.kd) ? values.kd.toFixed(3) : values.kd;
 
         appendStatusMessage(`External PID received for DOF ${dof}: Kp=${kpText}, Ki=${kiText}, Kd=${kdText}, Stiff=${stiffnessText}°, Cascade=${cascadeText}%`);
+
+        // Invalidate impedance gains for this DOF when PID values change from firmware
+        impedanceGainsInitialized[dof] = false;
+    });
+
+    // Listener for JOINT_STATE broadcast from firmware (impedance status)
+    socket.on('joint_state', function(data) {
+        // data: { joint_name, dof, q_deg, dq_deg_s, tau_a, tau_b, valid, holding, watchdog_warning, ... }
+        const currentJoint = $("#jointSelect").val();
+        if (data.joint_name && data.joint_name !== currentJoint) return;
+
+        const dof = data.dof !== undefined ? data.dof : 0;
+        impedanceLastKnownPos[dof] = data.q_deg;
+
+        // Update position display (show DOF0 by default)
+        if (dof === 0) {
+            const posText = Number.isFinite(data.q_deg) ? data.q_deg.toFixed(1) + '°' : '—';
+            $('#impedanceCurrentPos').text(posText);
+        }
+
+        // Update status dots
+        $('#impedanceDotValid').css('background-color', data.valid ? '#22c55e' : '#d1d5db');
+        $('#impedanceDotHolding').css('background-color', data.holding ? '#eab308' : '#d1d5db');
+        $('#impedanceDotWatchdog').css('background-color', data.watchdog_warning ? '#ef4444' : '#d1d5db');
+
+        // Rate counter
+        impedanceStateRateCount++;
+        const now = Date.now();
+        if (impedanceStateRateStart === 0) impedanceStateRateStart = now;
+        const elapsed = now - impedanceStateRateStart;
+        if (elapsed >= 2000) {
+            const hz = (impedanceStateRateCount / (elapsed / 1000)).toFixed(0);
+            $('#impedanceStateRate').text(hz + ' Hz');
+            impedanceStateRateCount = 0;
+            impedanceStateRateStart = now;
+        }
     });
 
     // Listener for mapping data from MAPPING_DATA protocol
@@ -545,7 +437,7 @@ $(document).ready(function() {
         // Regenerate smart buttons with new mapping data
         setTimeout(() => {
             generateSmartQuickButtons();
-            generateSmartWaypointButtons();
+            generateSmartImpedanceButtons();
         }, 200);
         
         // Show status message
@@ -553,25 +445,6 @@ $(document).ready(function() {
         appendStatusMessage(`Mapping data received${jointInfo}: ${data.total_points} points, ${effectiveDofCount} effective DOF`);
     });
 
-    // Listener for real-time data from sockets (used for sequence playback)
-    socket.on('joint_measure', function(data) {
-        // Handle sequence playback data collection
-        if (isSequencePlaying && sequenceExecutionData.length > 0) {
-            const currentExecution = sequenceExecutionData[sequenceExecutionData.length - 1];
-            
-            // Collect encoder sample with all available data
-            currentExecution.encoderSamples.push({
-                timestamp: Date.now(),
-                serverTimestamp: data.timestamp,
-                joint: data.joint,
-                dof: data.dof,
-                measurements: data.data, // Raw measurement data
-                jointAngles: data.joint_angles || null, // DOF positions if available
-                motorPositions: data.motor_positions || null // Raw motor data if available
-            });
-        }
-    });
-    
     socket.on('update_active_joint', function(data) {
         // Update UI combo boxes when active joint changes
         if (data && data.joint) {
@@ -645,11 +518,7 @@ $(document).ready(function() {
             // Update holding target display for this DOF
             updateHoldingTargetDisplay(data.dof, data.angle);
             
-            // Clear waypoint trajectory active flag - movement complete
-            if (waypointTrajectoryActive) {
-                waypointTrajectoryActive = false;
-                console.log(`[Waypoint] Trajectory complete for DOF ${data.dof}, target reached: ${data.angle.toFixed(2)}°`);
-            }
+            // (Waypoint trajectory tracking removed)
         }
     });
 
@@ -680,9 +549,6 @@ $(document).ready(function() {
             firmwareSafeLimits[key] = { min: data.min, max: data.max };
             console.log(`Safe limits DOF ${data.dof}: [${data.min}, ${data.max}]`);
             // Refresh the limits panel with new data
-            updateTrajectoryLimitsPanel($("#jointSelect").val());
-            // Refresh stream test safe limits display
-            _updateStreamTestSafeLimits();
         }
     });
 
@@ -862,12 +728,18 @@ $(document).ready(function() {
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
-    $("#sendCanTimeSync").on('click', sendCanTimeSyncCommand);
-    $("#sendCanWaypointBtn").on('click', sendCanWaypointCommand);
-    $("#sendMultiWaypointSmoothBtn").on('click', sendMultiWaypointSmoothCurve);
-    $("#sendCanWaypointSequenceBtn").on('click', sendCanWaypointSequence);
-    $("#sendCosineOscillationBtn").on('click', sendCosineOscillation);
-    $("#sendCanEmergency").on('click', sendCanEmergencyStop);
+    // [Removed] Time sync button handler (waypoint infrastructure removed)
+$("#sendCanEmergency").on('click', function() {
+        sendCanEmergencyStop();
+        // Also disable impedance and stop oscillation
+        stopImpedanceOscillation();
+        impedanceGainsInitialized = {};
+        impedanceStagedTarget = null;
+        const joint = $("#jointSelect").val();
+        if (joint) {
+            postImpedanceCtrl(joint, 0);  // sub_cmd 0 = disable
+        }
+    });
 
     // Initialize charts
     initializeCharts();
@@ -881,8 +753,8 @@ $(document).ready(function() {
         // Prevents smart waypoint buttons from showing previous joint's data
         automaticMappingData = null;
         
-        // Update CAN Motion Control panel (joint label + DOF options)
-        updateCanMotionJoint();
+        // Update Impedance Move panel (joint label + reset state)
+        updateImpedanceMoveJoint();
         
         // Update DOF tab availability based on joint configuration
         updateDofTabsAvailability(joint);
@@ -901,14 +773,7 @@ $(document).ready(function() {
         
         updateJointPanels();
         
-        // Update oscillation test and sinusoid defaults for the new joint
-        updateOscillationDefaults(joint);
-        
         // Automatically load mapping data for new joint
-        // Smart waypoint buttons are regenerated inside fetchMappingChartData's
-        // success callback (renderMappingChart → generateSmartWaypointButtons).
-        // No separate setTimeout needed — avoids race condition where buttons
-        // generated before mapping data arrives (showing previous joint's data).
         setTimeout(() => {
             fetchMappingChartData();
         }, 100);
@@ -916,74 +781,58 @@ $(document).ready(function() {
         // Send command to select joint and load PIDs
         sendCommand('select-joint', { joint: joint });
         
-        // Clear movement sequence when changing joint (sequence is joint-specific)
-        if (movementSequence.length > 0) {
-            clearSequence(true); // Silent clear
-            appendStatusMessage("🔄 Movement sequence cleared (joint changed)");
-        }
-        
-        // Update sequence builder visibility (only for ANKLE and KNEE)
-        updateSequenceBuilderVisibility(joint);
-        
         // Show expected mapping grid for new joint
         showExpectedMappingGrid(joint);
     });
 
     // DOF selection removed - now per-DOF controls handle specific DOF operations
     
-    // Toggle mutual exclusion logic for auto-execute and sequence mode
-    $("#autoExecuteToggle").change(function() {
+    // Impedance Move panel handlers
+    $("#autoImpedanceSendToggle").change(function() {
         if ($(this).is(":checked")) {
-            // Disable sequence mode when auto-execute is enabled
-            $("#sequenceModeToggle").prop("checked", false);
-            isAddToSequenceMode = false;
-            // Hide sequence builder and update visibility
-            const currentJoint = $("#jointSelect").val();
-            updateSequenceBuilderVisibility(currentJoint);
-            // Add auto-execute visual indicator
-            $("#smartQuickButtons").addClass("auto-execute-enabled");
-            appendStatusMessage("⚡ Auto-execute mode enabled");
+            $("#smartImpedanceButtons").addClass("auto-execute-enabled");
+            appendStatusMessage("⚡ Impedance auto-send enabled");
+            // Fire staged target if one exists
+            if (impedanceStagedTarget && impedanceStagedTarget.dofs) {
+                const dofs = impedanceStagedTarget.dofs;
+                if (dofs.length === 1) {
+                    setImpedanceQuickAngle(dofs[0].dof, dofs[0].angle);
+                } else if (dofs.length === 2) {
+                    setImpedanceQuickAngles(dofs[0].angle, dofs[1].angle);
+                }
+                impedanceStagedTarget = null;
+            }
         } else {
-            // Remove auto-execute visual indicator
-            $("#smartQuickButtons").removeClass("auto-execute-enabled");
-            appendStatusMessage("⏸️ Auto-execute mode disabled");
+            $("#smartImpedanceButtons").removeClass("auto-execute-enabled");
+            appendStatusMessage("⏸️ Impedance auto-send disabled");
         }
-    });
-    
-    $("#sequenceModeToggle").change(function() {
-        if ($(this).is(":checked")) {
-            // Disable auto-execute when sequence mode is enabled
-            $("#autoExecuteToggle").prop("checked", false);
-            isAddToSequenceMode = true;
-            // Remove auto-execute visual indicator
-            $("#smartQuickButtons").removeClass("auto-execute-enabled");
-            // Update sequence builder visibility
-            const currentJoint = $("#jointSelect").val();
-            updateSequenceBuilderVisibility(currentJoint);
-            appendStatusMessage("📝 Sequence mode enabled - click grid buttons to build sequence");
-        } else {
-            isAddToSequenceMode = false;
-            // Update sequence builder visibility (will hide)
-            const currentJoint = $("#jointSelect").val();
-            updateSequenceBuilderVisibility(currentJoint);
-            appendStatusMessage("Sequence mode disabled");
-        }
+        generateSmartImpedanceButtons();
     });
 
-    $("#autoWaypointSendToggle").change(function() {
-        if ($(this).is(":checked")) {
-            $("#smartWaypointButtons").addClass("auto-execute-enabled");
-            appendStatusMessage("⚡ Waypoint auto-send enabled");
-        } else {
-            $("#smartWaypointButtons").removeClass("auto-execute-enabled");
-            appendStatusMessage("⏸️ Waypoint auto-send disabled");
-        }
-        generateSmartWaypointButtons();
+    $("#impedanceDqCruise").on('input', function() {
+        $("#impedanceDqCruiseVal").text($(this).val());
     });
-    
-    // Initialize sequence builder visibility based on initial joint
-    updateSequenceBuilderVisibility($("#jointSelect").val());
 
+    $("#impedanceOscStartBtn").on('click', startImpedanceOscillation);
+    $("#impedanceOscStopBtn").on('click', stopImpedanceOscillation);
+
+    // Invalidate impedance gains when PID inputs change in tuning section
+    // Extract DOF index from input ID (e.g. "outerPidDof0Kp" → 0)
+    $(document).on('change',
+        '[id^="outerPidDof"][id$="Kp"], [id^="outerPidDof"][id$="Ki"], [id^="outerPidDof"][id$="Kd"], ' +
+        '[id^="outerPidDof"][id$="Stiffness"], [id^="outerPidDof"][id$="Cascade"], ' +
+        '[id^="agonistPidDof"][id$="Kp"], [id^="agonistPidDof"][id$="Ki"], [id^="agonistPidDof"][id$="Kd"]',
+        function() {
+            const match = this.id.match(/Dof(\d)/);
+            if (match) {
+                impedanceGainsInitialized[parseInt(match[1])] = false;
+            } else {
+                impedanceGainsInitialized = {};
+            }
+            updateImpedanceStiffnessDisplay();
+        }
+    );
+    
     $("#serialPortSelect").change(function() {
         const joint = $("#jointSelect").val();
         const port = $(this).val() || null;
@@ -1029,7 +878,7 @@ $(document).ready(function() {
     
     // Initialize smart buttons on load
     setTimeout(generateSmartQuickButtons, 250);
-    setTimeout(generateSmartWaypointButtons, 300);
+    setTimeout(generateSmartImpedanceButtons, 350);
     
     // DOF-specific buttons are now initialized in fetchJointPhysicalLimits().done() callback
     
@@ -1085,98 +934,7 @@ function updateJointPanels() {
         // Hip temporal charts are initialized automatically
     }
     
-    // Update sinusoid parameters for the selected joint
-    updateSinusoidParamsForJoint(joint);
 }
-
-/**
- * Update oscillation test defaults based on selected joint
- * Sets appropriate min/max angles for both Oscillation Test and Sinusoid Test sections
- */
-function updateOscillationDefaults(jointName) {
-    if (!jointName) return;
-    
-    const jointType = jointName.split('_')[0].toUpperCase();
-    
-    // Define sensible defaults for each joint type (restricted range within safe limits)
-    const jointDefaults = {
-        'KNEE': { min: 20, max: 80 },      // Knee: 0-100° safe, use 20-80°
-        'ANKLE': { min: -15, max: 15 },    // Ankle: typically -30° to +30°, use -15 to +15°
-        'HIP': { min: -20, max: 20 }       // Hip: varies, use -20 to +20°
-    };
-    
-    const defaults = jointDefaults[jointType] || { min: 20, max: 80 };
-    
-    // Update Oscillation Test (PID Tuning) section
-    $('#oscTestPointA').val(defaults.min);
-    $('#oscTestPointB').val(defaults.max);
-    
-    // Update Sinusoidal Trajectory Test section (DOF 0)
-    $('#sinusoidDof0Min').val(defaults.min);
-    $('#sinusoidDof0Max').val(defaults.max);
-    
-    // Also update DOF 1 if present (for multi-DOF joints like ankle)
-    if ($('#sinusoidDof1Min').length) {
-        $('#sinusoidDof1Min').val(defaults.min);
-        $('#sinusoidDof1Max').val(defaults.max);
-    }
-}
-
-/**
- * Update sinusoid parameters UI based on selected joint configuration
- * Preloads min/max values from joint_config and shows/hides DOF containers
- */
-function updateSinusoidParamsForJoint(jointName) {
-    if (!jointName) return;
-    
-    // Get joint config from jointConfigData (loaded from server via fetchJointConfig)
-    const jointKey = jointName.toLowerCase();
-    const jointConfig = jointConfigData?.joints?.[jointKey];
-    
-    if (!jointConfig) {
-        console.warn('Joint config not found for:', jointKey);
-        return;
-    }
-    
-    const dofCount = jointConfig.dof_count || 1;
-    const dofs = jointConfig.dofs || [];
-    
-    // Show/hide DOF containers based on dof_count
-    $("#sinusoidDof1Container").toggle(dofCount >= 2);
-    $("#sinusoidDof2Container").toggle(dofCount >= 3);
-    
-    // Update each DOF with values from config
-    dofs.forEach((dof, index) => {
-        const prefix = `#sinusoidDof${index}`;
-        
-        // Update DOF name
-        $(`${prefix}Name`).text(dof.name?.replace(/_/g, '-') || `DOF ${index}`);
-        
-        // Calculate sensible oscillation range (use auto_mapping range or 50% of full range)
-        let minOsc, maxOsc;
-        if (dof.auto_mapping_min_angle !== undefined && dof.auto_mapping_max_angle !== undefined) {
-            // Use auto-mapping range as default oscillation range
-            minOsc = dof.auto_mapping_min_angle;
-            maxOsc = dof.auto_mapping_max_angle;
-        } else {
-            // Use 50% of full range centered on middle
-            const center = (dof.min_angle + dof.max_angle) / 2;
-            const halfRange = (dof.max_angle - dof.min_angle) / 4;
-            minOsc = center - halfRange;
-            maxOsc = center + halfRange;
-        }
-        
-        $(`${prefix}Min`).val(Math.round(minOsc));
-        $(`${prefix}Max`).val(Math.round(maxOsc));
-        
-        // Set DOF 0 active by default, others unchecked
-        $(`${prefix}Active`).prop('checked', index === 0);
-    });
-    
-    // Update stats display
-    updateSinusoidStats();
-}
-
 function initializeCharts() {
     // Knee Chart
     const kneeCtx = document.getElementById('kneeChart').getContext('2d');
@@ -2809,9 +2567,18 @@ function updateCanStatusUI(state = {}) {
         rawMessages.empty();
         if (state.status_messages && state.status_messages.length > 0) {
             state.status_messages.slice(0, 6).forEach(msg => {
-                const text = msg.type === "status"
-                    ? `${msg.data.arbitration_id} joint=${msg.data.joint} flags=0x${msg.data.flags.toString(16)}`
-                    : `${msg.frame.id} data=${msg.frame.data}`;
+                let text;
+                if (msg.type === "status") {
+                    text = `${msg.data.arbitration_id} joint=${msg.data.joint} flags=0x${msg.data.flags.toString(16)}`;
+                } else if (msg.type === "startup_status") {
+                    text = `STARTUP ${msg.data.joint}: ${msg.data.event} DOF=${msg.data.dof_index} reason=${msg.data.reason} ${msg.data.elapsed_ms}ms`;
+                } else if (msg.type === "joint_announce") {
+                    text = `ANNOUNCE ${msg.data.joint}: ${msg.data.dof_count}DOF fw=${msg.data.fw_version} ready=${msg.data.ready ? 'Y' : 'N'}`;
+                } else if (msg.frame) {
+                    text = `${msg.frame.id} data=${msg.frame.data}`;
+                } else {
+                    text = `[${msg.type || 'unknown'}]`;
+                }
                 rawMessages.append(`<div class="text-xs font-mono">${text}</div>`);
             });
         } else {
@@ -2820,23 +2587,7 @@ function updateCanStatusUI(state = {}) {
     }
 }
 
-function sendCanTimeSyncCommand() {
-    $.ajax({
-        url: '/can/time_sync',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({})
-    }).done(response => {
-        if (response.status === 'success') {
-            appendStatusMessage(`🕒 Time sync @ ${response.result?.timestamp_ms || 'unknown'} ms`);
-        } else {
-            appendStatusMessage(`⚠️ ${response.message || 'Time sync failed'}`);
-        }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Time sync error: ${message}`);
-    });
-}
+// [Removed] sendCanTimeSyncCommand — time sync no longer needed (waypoint infrastructure removed)
 
 function sendCanEmergencyStop() {
     $.ajax({
@@ -2860,25 +2611,6 @@ function sendCanEmergencyStop() {
  * Update CAN Motion Control panel to reflect selected joint
  * Called when jointSelect changes
  */
-function updateCanMotionJoint() {
-    const joint = $("#jointSelect").val();
-    
-    // Update the joint label in CAN Motion Control panel
-    const label = $("#canMotionJointLabel");
-    if (label.length) {
-        label.text(joint);
-    }
-    
-    // Update DOF options based on selected joint
-    updateCanWaypointDofOptions();
-    
-    // Switch between 1DOF and 2DOF input layouts
-    updateWaypointInputLayout();
-    
-    // Update movement limits panel
-    updateTrajectoryLimitsPanel(joint);
-}
-
 /**
  * Get number of DOFs for a joint
  */
@@ -2888,30 +2620,6 @@ function getJointDofCount(joint) {
     const jointEntry = jointConfigData.joints[configKey];
     return jointEntry ? jointEntry.dofs.length : 1;
 }
-
-/**
- * Switch waypoint input layout between 1DOF and 2DOF mode
- */
-function updateWaypointInputLayout() {
-    const joint = $("#jointSelect").val();
-    const dofCount = getJointDofCount(joint);
-    
-    if (dofCount >= 2) {
-        // 2DOF mode: show dual angle inputs
-        $("#waypointInput1DOF").hide();
-        $("#waypointInput2DOF").show();
-        
-        // Update labels based on joint type
-        const dofLabels = getJointDofLabels(joint);
-        $("label[for='canWaypointAngleDof0']").text(dofLabels[0] + " (°)");
-        $("label[for='canWaypointAngleDof1']").text(dofLabels[1] + " (°)");
-    } else {
-        // 1DOF mode: show DOF selector + single angle
-        $("#waypointInput1DOF").show();
-        $("#waypointInput2DOF").hide();
-    }
-}
-
 /**
  * Get descriptive labels for DOFs of a joint
  */
@@ -2932,735 +2640,6 @@ function getJointDofLabels(joint) {
         return `DOF${idx}`;
     });
 }
-
-function updateCanWaypointDofOptions() {
-    const joint = $("#jointSelect").val();
-    const dofSelect = $("#canWaypointDof");
-    if (!joint || !dofSelect.length || !jointConfigData || !jointConfigData.joints) {
-        return;
-    }
-
-    const configKey = joint.toLowerCase();
-    const jointEntry = jointConfigData.joints[configKey];
-    if (!jointEntry) {
-        dofSelect.empty().append('<option value="0">DOF 0</option>');
-        return;
-    }
-
-    dofSelect.empty();
-    jointEntry.dofs.forEach((dof, idx) => {
-        const label = dof.name ? dof.name.replace('_', ' ') : `DOF ${idx}`;
-        dofSelect.append(`<option value="${idx}">${idx} · ${label}</option>`);
-    });
-}
-
-function sendCanWaypointCommand() {
-    const joint = $("#jointSelect").val();
-    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
-    const angle = parseFloat($("#canWaypointAngle").val());
-    const arrivalOffset = parseInt($("#canWaypointArrival").val(), 10) || 50;
-
-    if (!joint) {
-        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
-        return;
-    }
-    if (Number.isNaN(angle)) {
-        appendStatusMessage("⚠️ Enter a valid angle in degrees.");
-        return;
-    }
-
-    // Validate angle against effective limits
-    const angleInput = document.getElementById('canWaypointAngle');
-    if (angleInput && angleInput.min !== '' && angleInput.max !== '') {
-        const limMin = parseFloat(angleInput.min);
-        const limMax = parseFloat(angleInput.max);
-        if (angle < limMin || angle > limMax) {
-            appendStatusMessage(`⚠️ Angle ${angle}° is outside safe range [${limMin.toFixed(1)}, ${limMax.toFixed(1)}] for DOF ${dofIndex}`);
-            return;
-        }
-    }
-
-    // Set interpolation mode before sending waypoint
-    const interpolationMode = $('#singleWaypointInterpolation').val() || 'linear';
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: interpolationMode }),
-        async: false  // Ensure mode is set before waypoint
-    });
-
-    // Refresh time sync so waypoint preflight doesn't reject as stale
-    $.ajax({
-        url: '/can/time_sync',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({}),
-        async: false
-    });
-
-    const modeLabel = interpolationMode === 'cosine' ? 'SMOOTH' : 'LINEAR';
-
-    // Build Multi-DOF format: set only the target DOF, null for others
-    const angles = [null, null, null];
-    angles[dofIndex] = angle;
-
-    $.ajax({
-        url: '/can/waypoint',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({
-            joint: joint,
-            angles_deg: angles,
-            t_offset_ms: arrivalOffset
-        })
-    }).done(response => {
-        if (response.status === 'success') {
-            appendStatusMessage(`📡 Waypoint sent: ${joint} DOF${dofIndex} @ ${angle}° [${modeLabel}]`);
-        } else {
-            appendStatusMessage(`⚠️ ${response.message || 'Failed to send waypoint'}`);
-        }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Waypoint error: ${message}`);
-    });
-}
-
-/**
- * Send multiple waypoints that describe a COSINE curve (for comparison with single SMOOTH waypoint)
- * This generates N waypoints following the COSINE S-curve formula, then sends them with LINEAR interpolation.
- * The result SHOULD be identical to a single waypoint with COSINE interpolation.
- */
-function sendMultiWaypointSmoothCurve() {
-    const joint = $("#jointSelect").val();
-    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
-    const targetAngle = parseFloat($("#canWaypointAngle").val());
-    const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
-    
-    // Slider now represents points per second (rate)
-    const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
-    // Calculate number of points from rate: numPoints = rate × (totalTime / 1000)
-    const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
-    const deltaT = Math.round(1000 / waypointRate);  // Δt = 1000ms / rate
-
-    if (!joint) {
-        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
-        return;
-    }
-    if (Number.isNaN(targetAngle)) {
-        appendStatusMessage("⚠️ Enter a valid angle in degrees.");
-        return;
-    }
-    
-    // SAFETY: Check if a trajectory is already in progress
-    if (!checkTrajectoryNotActive()) {
-        return;
-    }
-
-    // SAFETY: Get current angle from encoder display (REQUIRED - prevents dangerous waypoints)
-    const startAngle = getCurrentEncoderAngle(joint, dofIndex);
-    
-    // SAFETY: Require valid encoder reading before generating waypoints
-    if (startAngle === null) {
-        appendStatusMessage("❌ SAFETY: Cannot generate waypoints without valid encoder reading!");
-        appendStatusMessage("⚠️ Please start 'Encoder Test' (CAN streaming) first to get current joint position.");
-        return;
-    }
-    
-    // Calculate peak velocity of the cosine S-curve to check for dangerous movements
-    // For a cosine S-curve: angle(t) = start + delta * 0.5*(1 - cos(pi*t/T))
-    // Peak velocity = delta * pi / (2 * T)  (at t = T/2, midpoint of the curve)
-    const angleDelta = Math.abs(targetAngle - startAngle);
-    const totalTimeSec = totalTimeMs / 1000;
-    const peakVelocity = angleDelta * Math.PI / (2 * totalTimeSec); // deg/s
-
-    if (peakVelocity > MAX_SAFE_VELOCITY_DEG_S * 0.8) {
-        appendStatusMessage(`⚠️ WARNING: Peak velocity ${peakVelocity.toFixed(1)}°/s is high (limit: ${MAX_SAFE_VELOCITY_DEG_S}°/s)`);
-        appendStatusMessage(`💡 Consider: increase time, reduce angle delta, or move joint closer to target first`);
-    }
-
-    const profileName = peakVelocity < SLOW_MOTION_THRESHOLD_DEG_S ? 'LINEAR' : 'COSINE';
-    appendStatusMessage(`🔬 Multi-WP: ${startAngle.toFixed(1)}° → ${targetAngle}° @ ${waypointRate} pts/s (${numPoints} pts, Δt=${deltaT}ms)`);
-    appendStatusMessage(`Profile: ${profileName} (peak ${peakVelocity.toFixed(1)}°/s, threshold ${SLOW_MOTION_THRESHOLD_DEG_S}°/s)`);
-
-    // Force LINEAR interpolation (the COSINE curve is in the waypoints themselves)
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: 'linear' }),
-        async: false
-    });
-
-    // Refresh time sync so waypoint batch preflight doesn't reject as stale
-    $.ajax({
-        url: '/can/time_sync',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({}),
-        async: false
-    });
-
-    // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-    const reanchorInterval = pushReanchorIntervalSetting();
-    if (reanchorInterval > 0) {
-        appendStatusMessage(`Re-anchor every ${reanchorInterval} WPs`);
-    }
-
-    // Generate waypoints (COSINE S-curve for fast moves, LINEAR for slow moves)
-    const waypoints = [];
-    const actualDeltaT = totalTimeMs / numPoints;
-
-    // Small fixed lead-in; firmware batch-anchor uses this as reference
-    const initialOffset = 50;
-
-    for (let i = 0; i <= numPoints; i++) {
-        const t = i / numPoints; // 0.0 to 1.0
-
-        // Adaptive profile: linear for slow movements, cosine for fast
-        const smoothT = interpolationProfile(t, peakVelocity);
-        
-        // Calculate interpolated angle
-        const angle = startAngle + (targetAngle - startAngle) * smoothT;
-        
-        // Calculate desired arrival time from batch start
-        // Firmware anchors all offsets to the first-WP arrival time
-        const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
-        
-        // Build waypoint
-        const angles = [null, null, null];
-        angles[dofIndex] = angle;
-        
-        waypoints.push({
-            joint: joint,
-            angles_deg: angles,
-            t_offset_ms: Math.round(desiredArrivalFromStart)
-        });
-    }
-
-    // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
-    const rawCount = waypoints.length;
-    const dedupedWaypoints = deduplicateWaypoints(waypoints);
-    if (dedupedWaypoints.length < rawCount) {
-        appendStatusMessage(`📊 Generated ${rawCount} waypoints (${rawCount - dedupedWaypoints.length} zero-step duplicates removed)`);
-    } else {
-        appendStatusMessage(`📊 Generated ${rawCount} waypoints`);
-    }
-
-    // Save waypoint batch info for debugging
-    lastWaypointBatch = {
-        timestamp: new Date(),
-        joint: joint,
-        source: 'single-dof',
-        startAngles: { dof0: dofIndex === 0 ? startAngle : null, dof1: dofIndex === 1 ? startAngle : null },
-        targetAngles: { dof0: dofIndex === 0 ? targetAngle : null, dof1: dofIndex === 1 ? targetAngle : null },
-        waypoints: dedupedWaypoints,
-        rate: waypointRate,
-        totalTimeMs: totalTimeMs,
-        numPoints: dedupedWaypoints.length,
-        deltaT: deltaT,
-        sent: false
-    };
-
-    // Mark trajectory as active before sending
-    markTrajectoryActive();
-
-    $.ajax({
-        url: '/can/waypoint_batch',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
-    }).done(response => {
-        if (response.status === 'success' || response.status === 'partial') {
-            if (response.status === 'partial') {
-                const r = response.result || {};
-                appendStatusMessage(`⚠️ Partial batch: ${r.sent}/${r.total} waypoints sent`);
-            }
-            appendStatusMessage(`✅ Multi-WP batch sent: ${dedupedWaypoints.length} waypoints [LINEAR interp]`);
-            lastWaypointBatch.sent = true;
-            updateWaypointViewBtn();
-        } else {
-            appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
-            waypointTrajectoryActive = false;
-        }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Batch error: ${message}`);
-        waypointTrajectoryActive = false;
-    });
-}
-
-/**
- * Update sinusoid statistics display when parameters change
- * @param {number} rate - Points per second (optional, reads from UI if not provided)
- */
-function updateSinusoidStats(rate) {
-    // Input is now points per second (rate)
-    const pointsPerSecond = parseInt(rate, 10) || parseInt($("#waypointDensity").val(), 10) || 100;
-    const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
-    const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
-    const totalDurationSeconds = cycleDurationSeconds * numCycles;
-    
-    // Calculate interval between points: Δt = 1000ms / rate
-    const intervalMs = Math.round(1000 / pointsPerSecond);
-    
-    // Total waypoints for entire oscillation
-    const totalWaypoints = Math.round(pointsPerSecond * totalDurationSeconds);
-    
-    // Calculate frequency in Hz (1 / cycle duration)
-    const freqHz = (1 / cycleDurationSeconds).toFixed(2);
-    
-    // Update UI elements
-    const updateElement = (id, value) => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = value;
-    };
-    
-    updateElement('waypointDensityValue', pointsPerSecond);  // Now shows pts/s
-    updateElement('waypointIntervalValue', intervalMs);      // Δt in ms
-    updateElement('totalWaypointsValue', totalWaypoints);    // Total waypoints
-    updateElement('sinusoidCycleDurationDisplay', cycleDurationSeconds);
-    updateElement('sinusoidCyclesDisplay', numCycles);
-    updateElement('sinusoidTotalDuration', totalDurationSeconds);
-    updateElement('sinusoidTotalDurationDisplay', totalDurationSeconds);
-    updateElement('sinusoidFreqDisplay', freqHz);
-    
-    // Warn if buffer might overflow (250 max)
-    const bufferWarning = document.getElementById('bufferWarning');
-    if (bufferWarning) {
-        if (totalWaypoints > 250) {
-            bufferWarning.textContent = `⚠️ ${totalWaypoints} pts > 250 buffer!`;
-            bufferWarning.style.display = 'inline';
-        } else {
-            bufferWarning.style.display = 'none';
-        }
-    }
-}
-
-function sendCanWaypointSequence() {
-    const joint = $("#jointSelect").val();
-    const mode = parseInt($("#canWaypointMode").val(), 10) || 1;
-    
-    // Get parameters from UI
-    // Slider now represents points per second (rate)
-    const waypointRate = parseInt($("#waypointDensity").val(), 10) || 100;
-    const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
-    const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
-    const totalDurationSeconds = cycleDurationSeconds * numCycles;
-    const totalDuration = totalDurationSeconds * 1000;  // Convert to ms
-    const frequency = 1 / cycleDurationSeconds;  // Hz (frequency of a single cycle)
-    
-    // Calculate total waypoints from rate: pts/s × duration
-    const totalWaypoints = Math.round(waypointRate * totalDurationSeconds);
-
-    if (!joint) {
-        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
-        return;
-    }
-    
-    // Get active DOFs and their oscillation parameters
-    const activeDofs = [];
-    for (let dof = 0; dof < 3; dof++) {
-        const isActive = $(`#sinusoidDof${dof}Active`).is(':checked');
-        const container = $(`#sinusoidDof${dof}Container`);
-        
-        if (isActive && (dof === 0 || container.is(':visible'))) {
-            const minAngle = parseFloat($(`#sinusoidDof${dof}Min`).val()) || -10;
-            const maxAngle = parseFloat($(`#sinusoidDof${dof}Max`).val()) || 10;
-            const centerAngle = (minAngle + maxAngle) / 2;
-            const amplitude = (maxAngle - minAngle) / 2;
-            
-            activeDofs.push({
-                index: dof,
-                centerAngle: centerAngle,
-                amplitude: amplitude,
-                minAngle: minAngle,
-                maxAngle: maxAngle
-            });
-        }
-    }
-    
-    if (activeDofs.length === 0) {
-        appendStatusMessage("⚠️ Select at least one DOF for the sinusoid test.");
-        return;
-    }
-    
-    // SAFETY: Check if a trajectory is already in progress
-    if (!checkTrajectoryNotActive()) {
-        return;
-    }
-    
-    // SAFETY: Validate encoder data is available for all active DOFs
-    const dofIndices = activeDofs.map(d => d.index);
-    const encoderValidation = validateEncoderForWaypoints(joint, dofIndices);
-    if (!encoderValidation.valid) {
-        appendStatusMessage(`❌ SAFETY: Cannot generate waypoints without valid encoder readings for DOF(s): ${encoderValidation.missing.join(', ')}`);
-        appendStatusMessage(`⚠️ Please start 'Encoder Test' (CAN streaming) first to get current joint position.`);
-        return;
-    }
-
-    // Disable button during sequence
-    const btn = $("#sendCanWaypointSequenceBtn");
-    btn.prop('disabled', true);
-    btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
-
-    // Force LINEAR interpolation for sinusoidal trajectory
-    // Sinusoid uses many waypoints that form the curve - LINEAR connects them without stopping
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: 'linear' }),
-        async: false
-    });
-
-    // Refresh time sync so waypoint batch preflight doesn't reject as stale
-    $.ajax({
-        url: '/can/time_sync',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({}),
-        async: false
-    });
-
-    // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-    const reanchorInterval = pushReanchorIntervalSetting();
-    if (reanchorInterval > 0) {
-        appendStatusMessage(`🔄 Re-anchor every ${reanchorInterval} WPs`);
-    }
-
-    appendStatusMessage(`⚙️ Interpolation: LINEAR (sinusoid)`);
-
-    // Calculate timing parameters for batch sending
-    // Small fixed lead-in; firmware batch-anchor uses this as reference
-    const initialOffset = 50;
-    
-    // Generate waypoints for all active DOFs
-    const testSequence = [];
-    for (let i = 0; i < totalWaypoints; i++) {
-        const t = (i / (totalWaypoints - 1)) * totalDuration;  // Time in ms
-        const tSeconds = t / 1000;
-        
-        // Calculate angles for each active DOF
-        const angles = [null, null, null];
-        activeDofs.forEach(dof => {
-            // Sinusoidal angle: center + amplitude * sin(2π * frequency * t)
-            const angle = dof.centerAngle + dof.amplitude * Math.sin(2 * Math.PI * frequency * tSeconds);
-            angles[dof.index] = Math.round(angle * 100) / 100;
-        });
-        
-        testSequence.push({
-            angles: angles,
-            arrival_offset_ms: Math.round(t) + initialOffset
-        });
-    }
-    
-    // Add FINAL waypoint at center position (0° for symmetric oscillation)
-    // This ensures the sequence ends exactly at center
-    // With batch mode, order is guaranteed so we push to the end
-    const finalAngles = [null, null, null];
-    activeDofs.forEach(dof => {
-        finalAngles[dof.index] = dof.centerAngle;  // Exactly at center
-    });
-    testSequence.push({
-        angles: finalAngles,
-        arrival_offset_ms: totalDuration + initialOffset + 200  // 200ms after last sinusoid point
-    });
-    
-    // Calculate delta-t between points for logging (Δt = 1000 / rate)
-    const deltaT = Math.round(1000 / waypointRate);
-    
-    // Warn if exceeding host batch limit (MAX_BATCH_SIZE=1800 in waypoint_types.py)
-    if (testSequence.length > 1800) {
-        appendStatusMessage(`⚠️ Warning: ${testSequence.length} waypoints exceeds batch limit (1800). Reduce rate or cycles.`);
-    }
-
-    // Log active DOFs info
-    const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
-    const centerInfo = activeDofs.map(d => `${d.centerAngle}°`).join(', ');
-    appendStatusMessage(`🚀 Sending SINUSOIDAL sequence for ${joint}`);
-    appendStatusMessage(`   📊 ${testSequence.length} waypoints @ ${waypointRate} pts/s (Δt=${deltaT}ms)`);
-    appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total @ ${frequency.toFixed(2)}Hz`);
-    appendStatusMessage(`   🎯 Active: ${dofInfo}`);
-    appendStatusMessage(`   🏁 Final target: ${centerInfo}`);
-
-    // === DETERMINISTIC BATCH SENDING ===
-    // Send all waypoints in a single request - server forwards them sequentially
-    // This guarantees order and completeness (no lost waypoints)
-    
-    // Convert to batch format and deduplicate
-    const batchPayload = testSequence.map(wp => ({
-        angles_deg: wp.angles,
-        t_offset_ms: wp.arrival_offset_ms
-    }));
-    const dedupedBatch = deduplicateWaypoints(batchPayload);
-
-    appendStatusMessage(`📡 Sending ${dedupedBatch.length} waypoints (batch mode, deduped from ${batchPayload.length})...`);
-
-    // Mark trajectory as active before sending
-    markTrajectoryActive();
-
-    $.ajax({
-        url: '/can/waypoint_batch',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({
-            joint: joint,
-            waypoints: dedupedBatch
-        })
-    }).done(response => {
-        if (response.status === 'success' || response.status === 'partial') {
-            const result = response.result || {};
-            appendStatusMessage(`📤 Batch sent: ${result.sent || result.success}/${result.total} waypoints queued`);
-
-            if (response.status === 'partial') {
-                appendStatusMessage(`  ⚠️ Partial: ${result.sent}/${result.total} waypoints sent`);
-            }
-            if (result.errors > 0) {
-                appendStatusMessage(`  ⚠️ ${result.errors} waypoints failed`);
-            }
-
-            // Wait for sequence to complete
-            const waitTime = totalDuration + initialOffset + 500;
-            setTimeout(() => {
-                btn.prop('disabled', false);
-                btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
-                appendStatusMessage(`✅ Sequence execution complete`);
-            }, waitTime);
-        } else {
-            appendStatusMessage(`❌ Batch failed: ${response.message}`);
-            btn.prop('disabled', false);
-            btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
-        }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Batch error: ${message}`);
-        btn.prop('disabled', false);
-        btn.html('<i class="fas fa-wave-square mr-1"></i>Send Sinusoid');
-    });
-}
-
-/**
- * Send oscillation using COSINE S-curve waypoints with LINEAR interpolation.
- * Like Multi-WP: waypoints themselves describe a smooth S-curve, firmware uses LINEAR between them.
- * Oscillates directly between min and max (no center point).
- */
-function sendCosineOscillation() {
-    const joint = $("#jointSelect").val();
-    
-    // Get parameters from UI (same slider as sinusoid)
-    // Slider now represents points per second (rate)
-    const waypointRate = parseInt($("#waypointDensity").val(), 10) || 100;
-    const cycleDurationSeconds = parseFloat($("#sinusoidCycleDuration").val()) || 3;
-    const numCycles = parseInt($("#sinusoidCycles").val(), 10) || 2;
-    const totalDurationSeconds = cycleDurationSeconds * numCycles;
-    const totalDuration = totalDurationSeconds * 1000;  // Convert to ms
-
-    if (!joint) {
-        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
-        return;
-    }
-    
-    // Get active DOFs and their oscillation parameters
-    const activeDofs = [];
-    for (let dof = 0; dof < 3; dof++) {
-        const isActive = $(`#sinusoidDof${dof}Active`).is(':checked');
-        const container = $(`#sinusoidDof${dof}Container`);
-        
-        if (isActive && (dof === 0 || container.is(':visible'))) {
-            const minAngle = parseFloat($(`#sinusoidDof${dof}Min`).val()) || -10;
-            const maxAngle = parseFloat($(`#sinusoidDof${dof}Max`).val()) || 10;
-            
-            activeDofs.push({
-                index: dof,
-                minAngle: minAngle,
-                maxAngle: maxAngle
-            });
-        }
-    }
-    
-    if (activeDofs.length === 0) {
-        appendStatusMessage("⚠️ Select at least one DOF for the oscillation test.");
-        return;
-    }
-    
-    // SAFETY: Check if a trajectory is already in progress
-    if (!checkTrajectoryNotActive()) {
-        return;
-    }
-    
-    // SAFETY: Validate encoder data is available for all active DOFs
-    const dofIndices = activeDofs.map(d => d.index);
-    const encoderValidation = validateEncoderForWaypoints(joint, dofIndices);
-    if (!encoderValidation.valid) {
-        appendStatusMessage(`❌ SAFETY: Cannot generate waypoints without valid encoder readings for DOF(s): ${encoderValidation.missing.join(', ')}`);
-        appendStatusMessage(`⚠️ Please start 'Encoder Test' (CAN streaming) first to get current joint position.`);
-        return;
-    }
-    
-    // SAFETY: Check if current position is near oscillation start (minAngle)
-    // Warn if joint needs to jump more than 10° to reach minAngle
-    for (const dof of activeDofs) {
-        const currentAngle = encoderValidation.angles[dof.index];
-        if (currentAngle !== undefined) {
-            const jumpToMin = Math.abs(currentAngle - dof.minAngle);
-            const jumpToMax = Math.abs(currentAngle - dof.maxAngle);
-            const minJump = Math.min(jumpToMin, jumpToMax);
-            
-            if (minJump > 10) {
-                appendStatusMessage(`⚠️ DOF ${dof.index}: Current pos ${currentAngle.toFixed(1)}° is ${minJump.toFixed(1)}° from oscillation range [${dof.minAngle}, ${dof.maxAngle}]`);
-                appendStatusMessage(`💡 Consider moving joint closer to oscillation range first`);
-            }
-        }
-    }
-
-    // Disable button during sequence
-    const btn = $("#sendCosineOscillationBtn");
-    btn.prop('disabled', true);
-    btn.html('<i class="fas fa-spinner fa-spin mr-1"></i>Sending...');
-
-    // Force LINEAR interpolation - the S-curve is in the waypoints themselves
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: 'linear' }),
-        async: false
-    });
-
-    // Refresh time sync so waypoint batch preflight doesn't reject as stale
-    $.ajax({
-        url: '/can/time_sync',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({}),
-        async: false
-    });
-
-    // Calculate timing parameters (same approach as Multi-WP)
-    // waypointRate is points per second, convert to points per half-cycle
-    const halfCycleSeconds = cycleDurationSeconds / 2;
-    const halfCycleMs = halfCycleSeconds * 1000;
-    const totalHalfCycles = numCycles * 2;
-    const pointsPerHalfCycle = Math.round(waypointRate * halfCycleSeconds);
-    const deltaT = 1000 / waypointRate;  // Time between points = 1000ms / rate
-
-    // Peak velocity for half-cycle (max across all active DOFs)
-    const maxDeltaAngle = Math.max(...activeDofs.map(d => Math.abs(d.maxAngle - d.minAngle)));
-    const halfCyclePeakVelocity = maxDeltaAngle * Math.PI / (2 * halfCycleSeconds);
-    const profileName = halfCyclePeakVelocity < SLOW_MOTION_THRESHOLD_DEG_S ? 'LINEAR' : 'COSINE';
-    appendStatusMessage(`⚙️ Interpolation: LINEAR (${profileName} profile in waypoints, peak ${halfCyclePeakVelocity.toFixed(1)}°/s)`);
-
-    // Estimate total waypoints for batch timing
-    const estimatedTotalWaypoints = Math.round(waypointRate * totalDurationSeconds);
-    // Small fixed lead-in; firmware batch-anchor uses this as reference
-    const initialOffset = 50;
-
-    // Warn if exceeding host batch limit (MAX_BATCH_SIZE=1800 in waypoint_types.py)
-    if (estimatedTotalWaypoints > 1800) {
-        appendStatusMessage(`⚠️ Warning: ${estimatedTotalWaypoints} waypoints exceeds batch limit (1800). Reduce rate or cycles.`);
-    }
-
-    // Generate waypoints (COSINE for fast half-cycles, LINEAR for slow)
-    const testSequence = [];
-
-    for (let halfCycle = 0; halfCycle < totalHalfCycles; halfCycle++) {
-        const isGoingToMax = (halfCycle % 2 === 0);
-
-        // Generate points for this half-cycle (same as Multi-WP: 0 to pointsPerHalfCycle inclusive)
-        const startIndex = (halfCycle === 0) ? 0 : 1;  // Skip only first point of subsequent half-cycles
-
-        for (let p = startIndex; p <= pointsPerHalfCycle; p++) {
-            // Progress within this half-cycle (0.0 to 1.0)
-            const t = p / pointsPerHalfCycle;
-
-            // Adaptive profile: linear for slow movements, cosine for fast
-            const smoothT = interpolationProfile(t, halfCyclePeakVelocity);
-            
-            // Calculate angles for each DOF
-            const angles = [null, null, null];
-            activeDofs.forEach(dof => {
-                const fromAngle = isGoingToMax ? dof.minAngle : dof.maxAngle;
-                const toAngle = isGoingToMax ? dof.maxAngle : dof.minAngle;
-                const angle = fromAngle + (toAngle - fromAngle) * smoothT;
-                angles[dof.index] = Math.round(angle * 100) / 100;
-            });
-            
-            // Calculate desired arrival time from batch start
-            // Backend compensates for actual elapsed time when sending each waypoint
-            const desiredArrivalFromStart = initialOffset + (halfCycle * halfCycleMs) + (p * deltaT);
-            
-            testSequence.push({
-                angles: angles,
-                arrival_offset_ms: Math.round(desiredArrivalFromStart)
-            });
-        }
-    }
-    
-    // Calculate final time based on last waypoint
-    const finalTime = testSequence.length > 0 
-        ? testSequence[testSequence.length - 1].arrival_offset_ms 
-        : initialOffset + totalDuration;
-    
-    // Log info (deltaT already declared above)
-    const dofInfo = activeDofs.map(d => `DOF${d.index}[${d.minAngle}°↔${d.maxAngle}°]`).join(', ');
-    appendStatusMessage(`🚀 Sending S-curve oscillation for ${joint}`);
-    appendStatusMessage(`   📊 ${testSequence.length} waypoints @ ${waypointRate} pts/s (Δt=${Math.round(deltaT)}ms)`);
-    appendStatusMessage(`   📈 ${numCycles} cycles × ${cycleDurationSeconds}s = ${totalDurationSeconds}s total`);
-    appendStatusMessage(`   🎯 Active: ${dofInfo} (min↔max direct)`);
-
-    // Convert to batch format and deduplicate
-    const batchPayload = testSequence.map(wp => ({
-        angles_deg: wp.angles,
-        t_offset_ms: wp.arrival_offset_ms
-    }));
-    const dedupedBatch = deduplicateWaypoints(batchPayload);
-
-    appendStatusMessage(`📡 Sending ${dedupedBatch.length} waypoints (batch mode, deduped from ${batchPayload.length})...`);
-
-    // Mark trajectory as active before sending
-    markTrajectoryActive();
-
-    $.ajax({
-        url: '/can/waypoint_batch',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({
-            joint: joint,
-            waypoints: dedupedBatch
-        })
-    }).done(response => {
-        if (response.status === 'success' || response.status === 'partial') {
-            const result = response.result || {};
-            appendStatusMessage(`📤 Batch sent: ${result.sent || result.success}/${result.total} waypoints queued`);
-
-            if (response.status === 'partial') {
-                appendStatusMessage(`  ⚠️ Partial: ${result.sent}/${result.total} waypoints sent`);
-            }
-
-            // Wait for sequence to complete
-            const waitTime = finalTime + 500;
-            setTimeout(() => {
-                btn.prop('disabled', false);
-                btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
-                appendStatusMessage(`✅ S-curve oscillation complete`);
-            }, waitTime);
-        } else {
-            appendStatusMessage(`❌ Batch failed: ${response.message}`);
-            btn.prop('disabled', false);
-            btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
-            waypointTrajectoryActive = false;  // Clear on error
-        }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Batch error: ${message}`);
-        btn.prop('disabled', false);
-        waypointTrajectoryActive = false;  // Clear on error
-        btn.html('<i class="fas fa-bezier-curve mr-1"></i>Oscillation (S-curve)');
-    });
-}
-
-
 function startCanStatusPolling() {
     if (canStatusPollHandle) {
         clearInterval(canStatusPollHandle);
@@ -3724,7 +2703,7 @@ function loadMemoryMappingData(jointName) {
         updateMappingDataInfo(`No active data for ${jointName}`);
         // Still regenerate smart buttons with config-based defaults (no mapping data)
         generateSmartQuickButtons();
-        generateSmartWaypointButtons();
+        generateSmartImpedanceButtons();
         return;
     }
 
@@ -3740,11 +2719,11 @@ function loadMemoryMappingData(jointName) {
             if (response.has_data) {
                 // Use mapping data in memory
                 automaticMappingData = response.data;
-                
+
                 // Determine actual number of DOF and points
                 const dofCount = response.data.actual_dof_count || response.data.dof_count || 1;
                 const totalPoints = response.data.total_points || 0;
-                
+
                 renderMappingChart({
                     total_points: totalPoints,
                     dof_count: dofCount,
@@ -3757,7 +2736,7 @@ function loadMemoryMappingData(jointName) {
                 updateMappingDataInfo(`No data available for ${jointName}`);
                 // Regenerate smart buttons with config defaults (no mapping data)
                 generateSmartQuickButtons();
-                generateSmartWaypointButtons();
+                generateSmartImpedanceButtons();
             }
         },
         error: function(xhr, status, error) {
@@ -3768,7 +2747,7 @@ function loadMemoryMappingData(jointName) {
             updateMappingDataInfo('Error loading');
             // Regenerate smart buttons with config defaults
             generateSmartQuickButtons();
-            generateSmartWaypointButtons();
+            generateSmartImpedanceButtons();
         }
     });
 }
@@ -3975,8 +2954,8 @@ function renderMappingChart(mappingData) {
     // Regenerate smart buttons after loading new mapping data
     // Called synchronously — automaticMappingData is already set and enriched above
     generateSmartQuickButtons();
-    generateSmartWaypointButtons();
-    
+    generateSmartImpedanceButtons();
+
     appendStatusMessage(`Displayed mapping charts for ${selectedJoint}: ${dofInfo}`);
 }
 
@@ -4286,12 +3265,7 @@ function refreshMappingDataForCurrentJoint() {
 // NOTE: setMultiDofQuickAngles — serial MOVE_MULTI_DOF removed.
 // Kept as stub for any remaining generated buttons; use CAN waypoint buttons instead.
 function setMultiDofQuickAngles(angle0, angle1) {
-    if ($("#sequenceModeToggle").is(":checked")) {
-        addStepToSequence(angle0, angle1);
-        appendStatusMessage(`➕ Added to sequence: DOF0=${angle0}°, DOF1=${angle1}°`);
-    } else {
-        appendStatusMessage(`⚠️ Serial MOVE_MULTI_DOF deprecated. Use CAN waypoint buttons instead.`);
-    }
+    appendStatusMessage(`⚠️ Serial MOVE_MULTI_DOF deprecated. Use impedance buttons instead.`);
 }
 
 /**
@@ -4533,537 +3507,379 @@ function generateIntelligentQuickButtons(ranges, container) {
         container.removeClass("auto-execute-enabled");
     }
 }
+// ============================================================================
+// IMPEDANCE MOVE PANEL — Functions
+// ============================================================================
 
 /**
- * Set waypoint input fields from smart buttons (single-DOF).
+ * Update Impedance Move panel when joint changes.
+ * Replaces old updateCanMotionJoint().
  */
-function setWaypointQuickAngle(dofIndex, angle) {
-    $("#canWaypointDof").val(String(dofIndex));
-    $("#canWaypointAngle").val(angle);
-    
-    // Check if waypoint sequence mode is active
-    if (isWpSequenceModeActive()) {
-        const angle0 = dofIndex === 0 ? angle : null;
-        const angle1 = dofIndex === 1 ? angle : null;
-        addWpStepToSequence(angle0, angle1);
-        return;
-    }
-    
-    const autoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
-    if (autoSendEnabled) {
-        appendStatusMessage(`⚡ Auto-send: DOF${dofIndex} → ${angle}° (Multi-WP)`);
-        sendMultiWaypointSmoothCurve();
-    } else {
-        appendStatusMessage(`Smart waypoint set: DOF${dofIndex} = ${angle}°`);
-    }
-}
-
-/**
- * Set waypoint for dual-DOF from grid buttons (2D grid click).
- * Sends waypoints for both DOF0 and DOF1 together.
- */
-function setWaypointQuickAngles(angle0, angle1) {
-    // Always update the 2DOF input textboxes
-    $("#canWaypointAngleDof0").val(angle0);
-    $("#canWaypointAngleDof1").val(angle1);
-    
-    // Check if waypoint sequence mode is active
-    if (isWpSequenceModeActive()) {
-        addWpStepToSequence(angle0, angle1);
-        return;
-    }
-    
-    const autoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
-    if (autoSendEnabled) {
-        appendStatusMessage(`⚡ Auto-send: DOF0=${angle0}°, DOF1=${angle1}° (Multi-WP)`);
-        sendMultiWaypointDualDof(angle0, angle1);
-    } else {
-        appendStatusMessage(`Target set: DOF0=${angle0}°, DOF1=${angle1}°`);
-    }
-}
-
-/**
- * Send multi-waypoint smooth curve for both DOF0 and DOF1 simultaneously.
- * Generates waypoints with angles for both DOFs at each step.
- */
-function sendMultiWaypointDualDof(targetAngle0, targetAngle1) {
+function updateImpedanceMoveJoint() {
     const joint = $("#jointSelect").val();
-    const totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 500;
-    const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
-    const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
-    const deltaT = Math.round(1000 / waypointRate);
 
-    if (!joint) {
-        appendStatusMessage("⚠️ Select a joint in Joint & Connection Setup.");
-        return;
+    // Update label
+    const label = $("#impedanceJointLabel");
+    if (label.length) label.text(joint);
+
+    // Reset impedance state
+    impedanceGainsInitialized = {};
+    impedanceLastKnownPos = {};
+    impedanceStagedTarget = null;
+    stopImpedanceOscillation();
+
+    // Reset status display
+    $('#impedanceCurrentPos').text('—');
+    $('#impedanceDotValid, #impedanceDotHolding, #impedanceDotWatchdog').css('background-color', '#d1d5db');
+    $('#impedanceStateRate').text('—');
+    impedanceStateRateCount = 0;
+    impedanceStateRateStart = 0;
+
+    // Update stiffness display from PID section
+    updateImpedanceStiffnessDisplay();
+
+    // Regenerate smart impedance buttons (mapping data may arrive later)
+    generateSmartImpedanceButtons();
+}
+
+/**
+ * Read stiffness from PID Tuning section and display it in impedance panel.
+ */
+function updateImpedanceStiffnessDisplay() {
+    const stiff = parseFloat($('#outerPidDof0Stiffness').val());
+    const display = $('#impedanceStiffnessDisplay');
+    if (display.length) {
+        display.text(Number.isFinite(stiff) ? stiff.toFixed(2) : '—');
     }
-    
-    // SAFETY: Check if a trajectory is already in progress
-    if (!checkTrajectoryNotActive()) {
-        return;
-    }
+}
 
-    // Get current angles from encoder for both DOFs
-    const startAngle0 = getCurrentEncoderAngle(joint, 0);
-    const startAngle1 = getCurrentEncoderAngle(joint, 1);
-    
-    if (startAngle0 === null || startAngle1 === null) {
-        appendStatusMessage("❌ SAFETY: Cannot generate waypoints without valid encoder readings for both DOFs!");
-        appendStatusMessage("⚠️ Please start 'Encoder Test' (CAN streaming) first.");
-        return;
-    }
-
-    // Peak velocity = max across both DOFs (cosine profile)
-    const totalTimeSec = totalTimeMs / 1000;
-    const peakVelocity = Math.max(
-        Math.abs(targetAngle0 - startAngle0),
-        Math.abs(targetAngle1 - startAngle1)
-    ) * Math.PI / (2 * totalTimeSec);
-    const profileName = peakVelocity < SLOW_MOTION_THRESHOLD_DEG_S ? 'LINEAR' : 'COSINE';
-
-    appendStatusMessage(`🔬 Dual-DOF WP: (${startAngle0.toFixed(1)}°,${startAngle1.toFixed(1)}°) → (${targetAngle0}°,${targetAngle1}°) @ ${waypointRate} pts/s`);
-    appendStatusMessage(`Profile: ${profileName} (peak ${peakVelocity.toFixed(1)}°/s, threshold ${SLOW_MOTION_THRESHOLD_DEG_S}°/s)`);
-
-    // Force LINEAR interpolation
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: 'linear' }),
-        async: false
-    });
-
-    // Refresh time sync so waypoint batch preflight doesn't reject as stale
-    $.ajax({
-        url: '/can/time_sync',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({}),
-        async: false
-    });
-
-    // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-    const reanchorInterval = pushReanchorIntervalSetting();
-    if (reanchorInterval > 0) {
-        appendStatusMessage(`🔄 Re-anchor every ${reanchorInterval} WPs`);
-    }
-
-    // Generate waypoints for both DOFs (COSINE for fast, LINEAR for slow)
-    const waypoints = [];
-    const actualDeltaT = totalTimeMs / numPoints;
-    const initialOffset = 50;
-
-    for (let i = 0; i <= numPoints; i++) {
-        const t = i / numPoints;
-        const smoothT = interpolationProfile(t, peakVelocity);
-        
-        const angle0 = startAngle0 + (targetAngle0 - startAngle0) * smoothT;
-        const angle1 = startAngle1 + (targetAngle1 - startAngle1) * smoothT;
-        const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
-        
-        waypoints.push({
-            joint: joint,
-            angles_deg: [angle0, angle1, null],
-            t_offset_ms: Math.round(desiredArrivalFromStart)
-        });
-    }
-
-    // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
-    const rawCount = waypoints.length;
-    const dedupedWaypoints = deduplicateWaypoints(waypoints);
-    if (dedupedWaypoints.length < rawCount) {
-        appendStatusMessage(`📊 Generated ${rawCount} dual-DOF waypoints (${rawCount - dedupedWaypoints.length} zero-step duplicates removed)`);
-    } else {
-        appendStatusMessage(`📊 Generated ${rawCount} dual-DOF waypoints`);
-    }
-
-    // Save waypoint batch info for debugging
-    lastWaypointBatch = {
-        timestamp: new Date(),
-        joint: joint,
-        source: 'dual-dof',
-        startAngles: { dof0: startAngle0, dof1: startAngle1 },
-        targetAngles: { dof0: targetAngle0, dof1: targetAngle1 },
-        waypoints: dedupedWaypoints,
-        rate: waypointRate,
-        totalTimeMs: totalTimeMs,
-        numPoints: dedupedWaypoints.length,
-        deltaT: deltaT,
-        sent: false
+/**
+ * Read PID gains from the PID Tuning section inputs.
+ * @param {number} dof - DOF index
+ * @returns {object} { kp, ki, kd, stiffness, cascade, kp_inner, ki_inner, kd_inner }
+ */
+function getImpedancePidFromTuningSection(dof) {
+    return {
+        kp:       parseFloat($(`#outerPidDof${dof}Kp`).val()) || 0,
+        ki:       parseFloat($(`#outerPidDof${dof}Ki`).val()) || 0,
+        kd:       parseFloat($(`#outerPidDof${dof}Kd`).val()) || 0,
+        stiffness: parseFloat($(`#outerPidDof${dof}Stiffness`).val()) || 25,
+        cascade:  parseFloat($(`#outerPidDof${dof}Cascade`).val()) || 0,
+        kp_inner: parseFloat($(`#agonistPidDof${dof}Kp`).val()) || 0,
+        ki_inner: parseFloat($(`#agonistPidDof${dof}Ki`).val()) || 0,
+        kd_inner: parseFloat($(`#agonistPidDof${dof}Kd`).val()) || 0,
     };
+}
 
-    markTrajectoryActive();
-
-    $.ajax({
-        url: '/can/waypoint_batch',
+/**
+ * POST to /api/impedance/target
+ */
+function postImpedanceTarget(payload) {
+    return $.ajax({
+        url: '/api/impedance/target',
         method: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
-    }).done(response => {
-        if (response.status === 'success' || response.status === 'partial') {
-            if (response.status === 'partial') {
-                const r = response.result || {};
-                appendStatusMessage(`⚠️ Partial batch: ${r.sent}/${r.total} waypoints sent`);
-            }
-            appendStatusMessage(`✅ Dual-DOF batch sent: ${dedupedWaypoints.length} waypoints`);
-            lastWaypointBatch.sent = true;
-            updateWaypointViewBtn();
-        } else {
-            appendStatusMessage(`⚠️ ${response.message || 'Failed to send batch'}`);
-            waypointTrajectoryActive = false;
-        }
-    }).fail(xhr => {
-        const message = xhr.responseJSON?.message || xhr.statusText || 'Unknown error';
-        appendStatusMessage(`❌ Batch error: ${message}`);
-        waypointTrajectoryActive = false;
+        data: JSON.stringify(payload)
     });
 }
 
 /**
- * Update the waypoint view button label based on state.
- * Shows "Last Batch" if a batch was sent, "Preview" otherwise.
+ * POST to /api/impedance/ctrl
  */
-function updateWaypointViewBtn() {
-    const label = document.getElementById('waypointViewBtnLabel');
-    if (!label) return;
-    if (lastWaypointBatch.timestamp && lastWaypointBatch.sent) {
-        label.textContent = 'Last Batch';
-    } else {
-        label.textContent = 'Preview';
-    }
+function postImpedanceCtrl(jointName, subCmd, param) {
+    return $.ajax({
+        url: '/api/impedance/ctrl',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            joint_name: jointName,
+            sub_cmd: subCmd,
+            param: param || 0
+        })
+    });
 }
 
 /**
- * Preview waypoint batch - shows last sent batch if available, otherwise generates a new one.
- * If a batch was already sent via auto-send, shows those waypoints (the actual trajectory).
- * Otherwise generates a preview using current input values.
+ * Sync outer loop PID to firmware via CAN-only SET_PID_OUTER (0x014).
+ * Uses /api/impedance/sync_outer — no serial port requirement.
+ * Returns a jQuery promise so callers can chain on completion.
  */
-function previewWaypointBatch() {
-    // If we have a recently sent batch, show that instead of regenerating
-    if (lastWaypointBatch.timestamp && lastWaypointBatch.sent) {
-        showLastWaypointInfo();
+function syncOuterLoopForImpedance(dof) {
+    const joint = $("#jointSelect").val();
+    if (!joint) return $.Deferred().reject().promise();
+
+    const pid = getImpedancePidFromTuningSection(dof);
+    return $.ajax({
+        url: '/api/impedance/sync_outer',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            joint_name: joint,
+            dof_index: dof,
+            kp: pid.kp,
+            ki: pid.ki,
+            kd: pid.kd,
+            stiffness: pid.stiffness,
+            cascade: pid.cascade
+        })
+    });
+}
+
+/**
+ * Send full Init Gains + Hold (4 CAN frames).
+ * Reads current encoder position for hold target.
+ * Returns a jQuery promise that resolves when init is complete.
+ */
+function sendImpedanceInitGains(dof) {
+    const joint = $("#jointSelect").val();
+    if (!joint) return $.Deferred().reject('no joint').promise();
+
+    // Get current position from live encoder — no fallback to stale data.
+    // After disable/startup/E-Stop, JOINT_STATE stops broadcasting and
+    // impedanceLastKnownPos may be arbitrarily old, so we require a live reading.
+    const currentPos = getCurrentEncoderAngle(joint, dof);
+    if (currentPos === null || currentPos === undefined) {
+        appendStatusMessage('⚠️ No live encoder data — cannot init impedance (start encoder streaming first)');
+        return $.Deferred().reject('no encoder').promise();
+    }
+
+    const pid = getImpedancePidFromTuningSection(dof);
+    const dqCruise = parseFloat($('#impedanceDqCruise').val()) || 20;
+    const tauFf = parseInt($('#impedanceTauFf').val()) || 0;
+
+    // Chain: sync outer loop first, then send full SET_IMPEDANCE
+    return syncOuterLoopForImpedance(dof).then(() => {
+        const payload = {
+            joint_name: joint,
+            dof_index: dof,
+            q_target: currentPos,
+            dq_target: dqCruise,
+            stiffness: pid.stiffness,
+            kp: pid.kp,
+            ki: pid.ki,
+            kd: pid.kd,
+            tau_ff: tauFf,
+            kp_inner: pid.kp_inner,
+            ki_inner: pid.ki_inner,
+            kd_inner: pid.kd_inner
+        };
+
+        return postImpedanceTarget(payload).done(response => {
+            if (response.status === 'success') {
+                impedanceGainsInitialized[dof] = true;
+                appendStatusMessage(`✅ Impedance init DOF${dof}: hold @ ${currentPos.toFixed(1)}° [4f CAN]`);
+            } else {
+                impedanceGainsInitialized[dof] = false;
+                appendStatusMessage(`⚠️ Impedance init DOF${dof} failed: ${response.message}`);
+            }
+        }).fail(xhr => {
+            impedanceGainsInitialized[dof] = false;
+            appendStatusMessage(`❌ Impedance init DOF${dof} error: ${xhr.responseJSON?.message || xhr.statusText}`);
+        });
+    }, () => {
+        impedanceGainsInitialized[dof] = false;
+        appendStatusMessage('⚠️ Outer PID sync failed — cannot init impedance');
+        return $.Deferred().reject('sync_outer failed').promise();
+    });
+}
+
+/**
+ * Send fast target (1 CAN frame — q + dq + stiffness only, gains cached in firmware).
+ */
+function sendImpedanceFastTarget(dof, qTarget, dqCruise, stiffness) {
+    const joint = $("#jointSelect").val();
+    if (!joint) return;
+
+    const payload = {
+        joint_name: joint,
+        dof_index: dof,
+        q_target: qTarget,
+        dq_target: dqCruise,
+        stiffness: stiffness
+    };
+
+    return postImpedanceTarget(payload);
+}
+
+/**
+ * Handle click on 1DOF impedance grid button.
+ */
+function setImpedanceQuickAngle(dofIndex, angle) {
+    const autoSend = $("#autoImpedanceSendToggle").is(":checked");
+    if (!autoSend) {
+        // Staged mode: store target for later
+        impedanceStagedTarget = { dofs: [{ dof: dofIndex, angle: angle }] };
+        appendStatusMessage(`🎯 Target staged: DOF${dofIndex} = ${angle}° — toggle auto-send or click again`);
         return;
     }
-    const joint = $("#jointSelect").val() || "UNKNOWN";
-    const dofCount = getJointDofCount(joint);
-    const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
-    const deltaT = Math.round(1000 / waypointRate);
-    
-    let totalTimeMs, targetAngle0, targetAngle1, startAngle0, startAngle1;
-    let startSource = "default (0°)";
-    let is2DOF = dofCount >= 2;
-    
-    if (is2DOF) {
-        // 2DOF mode: read from dual inputs
-        targetAngle0 = parseFloat($("#canWaypointAngleDof0").val());
-        targetAngle1 = parseFloat($("#canWaypointAngleDof1").val());
-        totalTimeMs = parseInt($("#canWaypointArrival2DOF").val(), 10) || 1000;
-        
-        if (Number.isNaN(targetAngle0) || Number.isNaN(targetAngle1)) {
-            showWaypointPopup("Error", "<p class='text-red-500'>Enter valid angles for DOF0 and DOF1.</p>");
-            return;
-        }
-        
-        // Validate angles against effective limits
-        const dof0Input = document.getElementById('canWaypointAngleDof0');
-        const dof1Input = document.getElementById('canWaypointAngleDof1');
-        if (dof0Input && dof0Input.min !== '' && dof0Input.max !== '') {
-            const lMin = parseFloat(dof0Input.min), lMax = parseFloat(dof0Input.max);
-            if (targetAngle0 < lMin || targetAngle0 > lMax) {
-                appendStatusMessage(`⚠️ DOF0 angle ${targetAngle0}° outside safe range [${lMin.toFixed(1)}, ${lMax.toFixed(1)}]`);
-                return;
-            }
-        }
-        if (dof1Input && dof1Input.min !== '' && dof1Input.max !== '') {
-            const lMin = parseFloat(dof1Input.min), lMax = parseFloat(dof1Input.max);
-            if (targetAngle1 < lMin || targetAngle1 > lMax) {
-                appendStatusMessage(`⚠️ DOF1 angle ${targetAngle1}° outside safe range [${lMin.toFixed(1)}, ${lMax.toFixed(1)}]`);
-                return;
-            }
-        }
-        
-        // Get start angles
-        startAngle0 = getCurrentEncoderAngle(joint, 0);
-        startAngle1 = getCurrentEncoderAngle(joint, 1);
-        if (startAngle0 !== null && startAngle1 !== null) {
-            startSource = "encoder";
-        } else {
-            startAngle0 = startAngle0 ?? 0;
-            startAngle1 = startAngle1 ?? 0;
-        }
+
+    const pid = getImpedancePidFromTuningSection(dofIndex);
+    const dqCruise = parseFloat($('#impedanceDqCruise').val()) || 20;
+
+    if (!impedanceGainsInitialized[dofIndex]) {
+        // First click for this DOF: full init, then fast target (promise chain)
+        sendImpedanceInitGains(dofIndex).then(() => {
+            return sendImpedanceFastTarget(dofIndex, angle, dqCruise, pid.stiffness);
+        }).done(() => {
+            appendStatusMessage(`⚡ Impedance: DOF${dofIndex} → ${angle}° [init + 1f]`);
+        });
     } else {
-        // 1DOF mode: read from single input with DOF selector
-        const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
-        const targetAngle = parseFloat($("#canWaypointAngle").val());
-        totalTimeMs = parseInt($("#canWaypointArrival").val(), 10) || 1000;
-        
-        if (Number.isNaN(targetAngle)) {
-            showWaypointPopup("Error", "<p class='text-red-500'>Enter a valid target angle.</p>");
-            return;
-        }
-        
-        targetAngle0 = dofIndex === 0 ? targetAngle : null;
-        targetAngle1 = dofIndex === 1 ? targetAngle : null;
-        
-        const startAngle = getCurrentEncoderAngle(joint, dofIndex);
-        if (startAngle !== null) {
-            startSource = "encoder";
-            startAngle0 = dofIndex === 0 ? startAngle : null;
-            startAngle1 = dofIndex === 1 ? startAngle : null;
-        } else {
-            startAngle0 = dofIndex === 0 ? 0 : null;
-            startAngle1 = dofIndex === 1 ? 0 : null;
-        }
-    }
-
-    const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
-    const actualDeltaT = totalTimeMs / numPoints;
-    const initialOffset = 50;
-    const waypoints = [];
-
-    for (let i = 0; i <= numPoints; i++) {
-        const t = i / numPoints;
-        const smoothT = 0.5 * (1 - Math.cos(t * Math.PI));
-        const desiredArrivalFromStart = initialOffset + (i * actualDeltaT);
-        
-        const angles = [null, null, null];
-        if (targetAngle0 !== null) {
-            angles[0] = (startAngle0 ?? 0) + (targetAngle0 - (startAngle0 ?? 0)) * smoothT;
-        }
-        if (targetAngle1 !== null) {
-            angles[1] = (startAngle1 ?? 0) + (targetAngle1 - (startAngle1 ?? 0)) * smoothT;
-        }
-        
-        waypoints.push({
-            joint: joint,
-            angles_deg: angles,
-            t_offset_ms: Math.round(desiredArrivalFromStart)
+        sendImpedanceFastTarget(dofIndex, angle, dqCruise, pid.stiffness).done(() => {
+            appendStatusMessage(`⚡ Impedance: DOF${dofIndex} → ${angle}° [1f]`);
         });
     }
-
-    // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
-    const dedupedWaypoints = deduplicateWaypoints(waypoints);
-
-    // Save to lastWaypointBatch for info display
-    lastWaypointBatch = {
-        timestamp: new Date(),
-        joint: joint,
-        source: is2DOF ? 'preview-2dof' : 'preview',
-        startAngles: { dof0: startAngle0, dof1: startAngle1 },
-        targetAngles: { dof0: targetAngle0, dof1: targetAngle1 },
-        waypoints: dedupedWaypoints,
-        rate: waypointRate,
-        totalTimeMs: totalTimeMs,
-        numPoints: dedupedWaypoints.length,
-        deltaT: deltaT,
-        sent: false,
-        startSource: startSource
-    };
-    updateWaypointViewBtn();
-
-    // Show the info popup immediately
-    showLastWaypointInfo();
 }
 
 /**
- * Show information about the last waypoint batch generated/sent.
+ * Handle click on 2DOF impedance grid button.
+ * Sends init for DOF0+DOF1 if needed, then fast targets for both DOFs.
+ * Uses promise chains — no timers.
  */
-function showLastWaypointInfo() {
-    if (!lastWaypointBatch.timestamp) {
-        showWaypointPopup("No Data", "<p class='text-gray-500'>No waypoint batch generated yet.<br>Use <b>Preview</b> to generate without hardware.</p>");
+function setImpedanceQuickAngles(angle0, angle1) {
+    const autoSend = $("#autoImpedanceSendToggle").is(":checked");
+    if (!autoSend) {
+        // Staged mode: store target for later
+        impedanceStagedTarget = { dofs: [{ dof: 0, angle: angle0 }, { dof: 1, angle: angle1 }] };
+        appendStatusMessage(`🎯 Target staged: DOF0=${angle0}°, DOF1=${angle1}° — toggle auto-send or click again`);
         return;
     }
-    
-    const batch = lastWaypointBatch;
-    const timeStr = batch.timestamp.toLocaleTimeString();
-    const isPreview = batch.source === 'preview' || batch.source === 'preview-2dof';
-    const sentStatus = isPreview ? '<span class="text-blue-600">Preview only</span>' : 
-                       (batch.sent ? '<span class="text-green-600">Sent</span>' : '<span class="text-yellow-600">Not sent</span>');
-    
-    // Build HTML content
-    let html = `<div class="text-sm space-y-3">`;
-    
-    // Header info
-    html += `<div class="grid grid-cols-2 gap-2 text-xs">`;
-    html += `<div><span class="text-gray-500">Time:</span> ${timeStr}</div>`;
-    html += `<div><span class="text-gray-500">Joint:</span> <b>${batch.joint}</b></div>`;
-    html += `<div><span class="text-gray-500">Status:</span> ${sentStatus}</div>`;
-    html += `<div><span class="text-gray-500">Type:</span> ${batch.source}</div>`;
-    if (batch.startSource) {
-        html += `<div class="col-span-2"><span class="text-gray-500">Start from:</span> ${batch.startSource}</div>`;
-    }
-    html += `</div>`;
-    
-    // Movement details
-    // Movement details - check if both DOFs have values
-    html += `<div class="border-t pt-2">`;
-    const hasDof0 = batch.targetAngles.dof0 !== null && batch.targetAngles.dof0 !== undefined;
-    const hasDof1 = batch.targetAngles.dof1 !== null && batch.targetAngles.dof1 !== undefined;
-    
-    if (hasDof0 && hasDof1) {
-        // 2DOF movement
-        html += `<div class="text-xs"><span class="text-gray-500">Start:</span> DOF0=${batch.startAngles.dof0?.toFixed(1)}°, DOF1=${batch.startAngles.dof1?.toFixed(1)}°</div>`;
-        html += `<div class="text-xs"><span class="text-gray-500">Target:</span> <b>DOF0=${batch.targetAngles.dof0}°, DOF1=${batch.targetAngles.dof1}°</b></div>`;
+
+    const pid0 = getImpedancePidFromTuningSection(0);
+    const pid1 = getImpedancePidFromTuningSection(1);
+    const dqCruise = parseFloat($('#impedanceDqCruise').val()) || 20;
+
+    const sendBothTargets = () => {
+        return $.when(
+            sendImpedanceFastTarget(0, angle0, dqCruise, pid0.stiffness),
+            sendImpedanceFastTarget(1, angle1, dqCruise, pid1.stiffness)
+        ).done(() => {
+            appendStatusMessage(`⚡ Impedance: DOF0=${angle0}°, DOF1=${angle1}° [2f]`);
+        });
+    };
+
+    const needInit0 = !impedanceGainsInitialized[0];
+    const needInit1 = !impedanceGainsInitialized[1];
+
+    if (needInit0 || needInit1) {
+        // Init only DOFs that need it, sequentially, then send targets
+        let chain = $.Deferred().resolve().promise();
+        if (needInit0) {
+            chain = chain.then(() => sendImpedanceInitGains(0));
+        }
+        if (needInit1) {
+            chain = chain.then(() => sendImpedanceInitGains(1));
+        }
+        chain.then(() => {
+            return sendBothTargets();
+        }).done(() => {
+            appendStatusMessage(`⚡ Impedance: DOF0=${angle0}°, DOF1=${angle1}° [init + 2f]`);
+        });
     } else {
-        // 1DOF movement
-        const dof = hasDof0 ? 0 : 1;
-        const start = dof === 0 ? batch.startAngles.dof0 : batch.startAngles.dof1;
-        const target = dof === 0 ? batch.targetAngles.dof0 : batch.targetAngles.dof1;
-        html += `<div class="text-xs"><span class="text-gray-500">DOF${dof}:</span> ${start?.toFixed(1)}° → <b>${target}°</b></div>`;
+        sendBothTargets();
     }
-    html += `</div>`;
-    
-    // Trajectory params
-    html += `<div class="grid grid-cols-2 gap-1 text-xs border-t pt-2">`;
-    html += `<div><span class="text-gray-500">Rate:</span> ${batch.rate} pts/s</div>`;
-    html += `<div><span class="text-gray-500">Duration:</span> ${batch.totalTimeMs}ms</div>`;
-    html += `<div><span class="text-gray-500">Waypoints:</span> ${batch.numPoints}</div>`;
-    html += `<div><span class="text-gray-500">Δt:</span> ${batch.deltaT}ms</div>`;
-    html += `</div>`;
-    
-    // Waypoints table - show ALL points
-    if (batch.waypoints.length > 0) {
-        html += `<div class="border-t pt-2">`;
-        html += `<div class="text-xs text-gray-500 mb-1">All waypoints (${batch.waypoints.length}):</div>`;
-        html += `<div class="max-h-60 overflow-y-auto bg-gray-50 rounded p-1">`;
-        html += `<table class="w-full text-xs font-mono"><thead class="sticky top-0 bg-gray-100"><tr class="text-gray-500"><th class="text-left px-1">#</th><th class="text-left px-1">t(ms)</th><th class="text-right px-1">DOF0</th><th class="text-right px-1">DOF1</th></tr></thead><tbody>`;
-        
-        for (let i = 0; i < batch.waypoints.length; i++) {
-            const wp = batch.waypoints[i];
-            const dof0 = wp.angles_deg[0] !== null ? wp.angles_deg[0].toFixed(1) + "°" : "--";
-            const dof1 = wp.angles_deg[1] !== null ? wp.angles_deg[1].toFixed(1) + "°" : "--";
-            const rowClass = i % 2 === 0 ? 'bg-white' : 'bg-gray-50';
-            html += `<tr class="${rowClass}"><td class="px-1">${i}</td><td class="px-1">${wp.t_offset_ms}</td><td class="text-right px-1">${dof0}</td><td class="text-right px-1">${dof1}</td></tr>`;
-        }
-        
-        html += `</tbody></table></div></div>`;
-    }
-    
-    html += `</div>`;
-    
-    const title = isPreview ? "Waypoint Preview" : "Last Waypoint Batch";
-    showWaypointPopup(title, html);
-    
-    // Also log to console for debugging
-    console.log("Waypoint batch info:", batch);
 }
 
 /**
- * Show a popup modal with waypoint information.
+ * Clamp an extended mapping range to physical safe limits.
+ * Returns { min, max } clamped to the physical limits with safety margin.
+ * Falls back to extended range if no physical limits are configured.
  */
-function showWaypointPopup(title, content) {
-    // Remove existing popup if any
-    $('#waypointInfoPopup').remove();
-    
-    const popup = $(`
-        <div id="waypointInfoPopup" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div class="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[80vh] flex flex-col">
-                <div class="flex items-center justify-between p-3 border-b">
-                    <h3 class="font-semibold text-gray-800"><i class="fas fa-route mr-2"></i>${title}</h3>
-                    <button onclick="$('#waypointInfoPopup').remove()" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
-                </div>
-                <div class="p-4 overflow-y-auto">
-                    ${content}
-                </div>
-                <div class="p-3 border-t text-right">
-                    <button onclick="$('#waypointInfoPopup').remove()" class="px-4 py-1 bg-gray-200 hover:bg-gray-300 rounded text-sm">Close</button>
-                </div>
-            </div>
-        </div>
-    `);
-    
-    // Close on background click
-    popup.on('click', function(e) {
-        if (e.target === this) {
-            $(this).remove();
-        }
-    });
-    
-    // Close on Escape key
-    $(document).on('keydown.waypointPopup', function(e) {
-        if (e.key === 'Escape') {
-            $('#waypointInfoPopup').remove();
-            $(document).off('keydown.waypointPopup');
-        }
-    });
-    
-    $('body').append(popup);
+function clampRangeToPhysicalLimits(jointName, dofIndex, mappingRange) {
+    if (!mappingRange) return null;
+
+    let rangeMin = mappingRange.extended_min;
+    let rangeMax = mappingRange.extended_max;
+
+    const physLimits = getPhysicalLimitsForJoint(jointName, dofIndex);
+    if (physLimits) {
+        const SAFETY_MARGIN = 1.0;  // 1° margin inside physical limits
+        rangeMin = Math.max(rangeMin, physLimits.min + SAFETY_MARGIN);
+        rangeMax = Math.min(rangeMax, physLimits.max - SAFETY_MARGIN);
+    }
+
+    if (rangeMin >= rangeMax) {
+        // Fallback: use physical limits directly
+        if (physLimits) return { min: physLimits.min + 1, max: physLimits.max - 1 };
+        return { min: mappingRange.extended_min, max: mappingRange.extended_max };
+    }
+
+    return { min: rangeMin, max: rangeMax };
 }
 
 /**
- * Generates smart waypoint buttons with grid layout (like Direct Movement).
- * - KNEE: single column with step 5° (top view, like ankle center column)
- * - ANKLE/HIP: 2D grid with step 5°
+ * Generate smart impedance buttons grid.
+ * Generates smart impedance buttons using mapping data and impedance click handlers.
  */
-function generateSmartWaypointButtons() {
+function generateSmartImpedanceButtons() {
     const joint = $("#jointSelect").val();
     const jointType = joint ? joint.split('_')[0] : '';
-    const container = $('#smartWaypointButtons');
+    const container = $('#smartImpedanceButtons');
     if (!container.length) return;
 
     if (!joint) {
-        container.empty().append('<div class="text-xs text-gray-500">Select a joint to load smart positions.</div>');
+        container.empty().append('<div class="text-xs text-gray-500">Select a joint to load positions.</div>');
         return;
     }
 
-    const isAutoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
+    const isAutoSendEnabled = $("#autoImpedanceSendToggle").is(":checked");
 
-    // If no mapping data available, use defaults
+    // If no mapping data, use defaults
     if (!automaticMappingData || !automaticMappingData.present_dofs) {
-        console.log(`[SmartWP] No mapping data for ${joint}, using defaults`);
-        generateDefaultWaypointButtons(jointType, container);
+        console.log(`[ImpedanceGrid] No mapping data for ${joint}, using defaults`);
+        generateDefaultImpedanceButtons(jointType, container);
         return;
     }
 
-    // Verify mapping data belongs to the currently selected joint
-    // Prevents showing stale data from a previously selected joint
+    // Verify mapping data belongs to currently selected joint
     const dataJoint = automaticMappingData.joint_name;
     if (dataJoint && dataJoint !== joint) {
-        console.log(`[SmartWP] Mapping data is for ${dataJoint}, not ${joint} — using defaults`);
-        generateDefaultWaypointButtons(jointType, container);
+        console.log(`[ImpedanceGrid] Mapping data is for ${dataJoint}, not ${joint} — using defaults`);
+        generateDefaultImpedanceButtons(jointType, container);
         return;
     }
 
     const mappingRanges = extractMappingRanges(automaticMappingData, jointType);
     if (!mappingRanges) {
-        console.log(`[SmartWP] No valid mapping ranges for ${joint}, using defaults`);
-        generateDefaultWaypointButtons(jointType, container);
+        console.log(`[ImpedanceGrid] No valid mapping ranges for ${joint}, using defaults`);
+        generateDefaultImpedanceButtons(jointType, container);
         return;
     }
 
     container.empty();
-    
-    // Info text about trajectory behavior (no duplicate title - it's in HTML)
-    const modeText = isAutoSendEnabled 
-        ? '<span class="text-orange-600 font-medium">Click = smooth trajectory</span>' 
-        : '<span class="text-gray-500">Click to set target angle</span>';
+
+    const modeText = isAutoSendEnabled
+        ? '<span class="text-orange-600 font-medium">Click = impedance move</span>'
+        : '<span class="text-gray-500">Click to stage target (auto-send OFF)</span>';
     container.append(`<div class="text-xs mb-2">${modeText}</div>`);
 
     const range0 = mappingRanges[0];
     const range1 = mappingRanges[1];
 
-    // KNEE (1 DOF): single column with step 10° (top view, min at top = extended leg)
-    if (jointType === 'KNEE' && range0) {
-        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view:</h5>');
-        
-        // Generate angles from min to max (top to bottom: extended → bent)
+    // Clamp ranges to physical safe limits
+    const safe0 = clampRangeToPhysicalLimits(joint, 0, range0);
+    const safe1 = range1 ? clampRangeToPhysicalLimits(joint, 1, range1) : null;
+
+    // KNEE (1 DOF): single column with step 10°
+    if (jointType === 'KNEE' && safe0) {
+        const limitsNote = `[${safe0.min.toFixed(0)}°, ${safe0.max.toFixed(0)}°]`;
+        container.append(`<h5 class="text-xs font-medium text-gray-600 mb-1">Top view: ${limitsNote}</h5>`);
+
         const dof0Values = [];
-        for (let angle = Math.floor(range0.extended_min / 10) * 10; 
-             angle <= Math.ceil(range0.extended_max / 10) * 10; 
+        for (let angle = Math.ceil(safe0.min / 10) * 10;
+             angle <= Math.floor(safe0.max / 10) * 10;
              angle += 10) {
             dof0Values.push(angle);
         }
-        
-        // Single column grid (centered, compact size)
+
         const gridContainer = $('<div class="grid gap-0.5" style="grid-template-columns: 29px; justify-content: center;"></div>');
-        
+
         dof0Values.forEach(angle => {
             const colorClass = angle === 0 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-indigo-400 hover:bg-indigo-500';
             gridContainer.append(`
-                <button onclick="setWaypointQuickAngle(0, ${angle})"
+                <button onclick="setImpedanceQuickAngle(0, ${angle})"
                         class="${colorClass} text-white rounded transition-colors"
                         style="width: 29px; height: 29px; font-size: 8px; padding: 1px; line-height: 1.1;"
-                        title="Target: ${angle}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
+                        title="Impedance target: ${angle}°${isAutoSendEnabled ? ' (auto)' : ''}">
                     ${angle}°
                 </button>
             `);
@@ -5071,150 +3887,29 @@ function generateSmartWaypointButtons() {
         container.append(gridContainer);
     }
     // ANKLE/HIP (2 DOF): 2D grid with step 5°
-    else if (jointType !== 'KNEE' && range0 && range1) {
+    else if (jointType !== 'KNEE' && safe0 && safe1) {
         container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (DOF0 ↕ / DOF1 ↔):</h5>');
-        
-        // Generate DOF 0 values (rows): from max to min, step 5°
+
         const dof0Values = [];
-        for (let angle = Math.ceil(range0.extended_max / 5) * 5; 
-             angle >= Math.floor(range0.extended_min / 5) * 5; 
+        for (let angle = Math.floor(safe0.max / 5) * 5;
+             angle >= Math.ceil(safe0.min / 5) * 5;
              angle -= 5) {
             dof0Values.push(angle);
         }
-        
-        // Generate DOF 1 values (cols): from min to max, step 5°
+
         const dof1Values = [];
-        for (let angle = Math.floor(range1.extended_min / 5) * 5; 
-             angle <= Math.ceil(range1.extended_max / 5) * 5; 
+        for (let angle = Math.ceil(safe1.min / 5) * 5;
+             angle <= Math.floor(safe1.max / 5) * 5;
              angle += 5) {
             dof1Values.push(angle);
         }
-        
-        // Create grid container (centered, compact size)
+
         const gridCols = dof1Values.length;
         const gridContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 29px); justify-content: center;"></div>`);
-        
-        // Generate grid buttons
+
         dof0Values.forEach(angle0 => {
             dof1Values.forEach(angle1 => {
                 let colorClass;
-                
-                // Zero position (center of cross)
-                if (angle0 === 0 && angle1 === 0) {
-                    colorClass = 'bg-gray-500 hover:bg-gray-600';
-                }
-                // Horizontal axis: DOF 0 movements (DOF 1 = 0) - Blue
-                else if (angle1 === 0) {
-                    colorClass = 'bg-indigo-400 hover:bg-indigo-500';
-                }
-                // Vertical axis: DOF 1 movements (DOF 0 = 0) - Teal
-                else if (angle0 === 0) {
-                    colorClass = 'bg-teal-400 hover:bg-teal-500';
-                }
-                // Edge positions (multi-DOF extremes)
-                else if (angle0 === dof0Values[0] || angle0 === dof0Values[dof0Values.length - 1] ||
-                         angle1 === dof1Values[0] || angle1 === dof1Values[dof1Values.length - 1]) {
-                    colorClass = 'bg-purple-500 hover:bg-purple-600';
-                }
-                // Internal multi-DOF positions
-                else {
-                    colorClass = 'bg-purple-400 hover:bg-purple-500';
-                }
-                
-                gridContainer.append(`
-                    <button onclick="setWaypointQuickAngles(${angle0}, ${angle1})" 
-                            class="${colorClass} text-white rounded transition-colors"
-                            style="width: 29px; height: 29px; font-size: 7px; padding: 1px; line-height: 1.1;"
-                            title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
-                        ${angle0}°<br>${angle1}°
-                    </button>
-                `);
-            });
-        });
-        
-        container.append(gridContainer);
-    }
-
-    if (isAutoSendEnabled) {
-        container.addClass("auto-execute-enabled");
-    } else {
-        container.removeClass("auto-execute-enabled");
-    }
-}
-
-/**
- * Generates default waypoint buttons when no mapping data is available.
- * Uses fixed ranges based on joint type with step 5°.
- */
-function generateDefaultWaypointButtons(jointType, container) {
-    container.empty();
-    const isAutoSendEnabled = $("#autoWaypointSendToggle").is(":checked");
-    
-    // Define default ranges per joint type
-    const defaultRanges = {
-        'KNEE': { dof0: { min: 0, max: 120 } },
-        'ANKLE': { dof0: { min: -50, max: 25 }, dof1: { min: -25, max: 25 } },
-        'HIP': { dof0: { min: -30, max: 90 }, dof1: { min: -30, max: 45 } }  // Flex/Abd
-    };
-    
-    const ranges = defaultRanges[jointType] || defaultRanges['KNEE'];
-
-    // Info text (no duplicate title - it's in HTML)
-    const modeText = isAutoSendEnabled 
-        ? '<span class="text-orange-600 font-medium">Click = smooth trajectory</span>' 
-        : '<span class="text-gray-500">Click to set target angle</span>';
-    container.append(`<div class="text-xs mb-2">${modeText}</div>`);
-
-    // KNEE (1 DOF): single column with step 10° (top view, min at top = extended leg)
-    if (jointType === 'KNEE') {
-        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (default):</h5>');
-        
-        // Generate angles from min to max (top to bottom: extended → bent)
-        const dof0Values = [];
-        for (let angle = ranges.dof0.min; angle <= ranges.dof0.max; angle += 10) {
-            dof0Values.push(angle);
-        }
-        
-        // Single column grid (centered, compact size)
-        const gridContainer = $('<div class="grid gap-0.5" style="grid-template-columns: 29px; justify-content: center;"></div>');
-        
-        dof0Values.forEach(angle => {
-            const colorClass = angle === 0 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-indigo-400 hover:bg-indigo-500';
-            gridContainer.append(`
-                <button onclick="setWaypointQuickAngle(0, ${angle})"
-                        class="${colorClass} text-white rounded transition-colors"
-                        style="width: 29px; height: 29px; font-size: 8px; padding: 1px; line-height: 1.1;"
-                        title="Target: ${angle}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
-                    ${angle}°
-                </button>
-            `);
-        });
-        container.append(gridContainer);
-    }
-    // ANKLE/HIP (2 DOF): 2D grid with step 5°
-    else if (ranges.dof0 && ranges.dof1) {
-        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (DOF0 ↕ / DOF1 ↔):</h5>');
-        
-        // Generate DOF 0 values (rows): from max to min
-        const dof0Values = [];
-        for (let angle = ranges.dof0.max; angle >= ranges.dof0.min; angle -= 5) {
-            dof0Values.push(angle);
-        }
-        
-        // Generate DOF 1 values (cols): from min to max
-        const dof1Values = [];
-        for (let angle = ranges.dof1.min; angle <= ranges.dof1.max; angle += 5) {
-            dof1Values.push(angle);
-        }
-        
-        // Create grid container (compact size)
-        const gridCols = dof1Values.length;
-        const gridContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 29px); justify-content: center;"></div>`);
-        
-        dof0Values.forEach(angle0 => {
-            dof1Values.forEach(angle1 => {
-                let colorClass;
-                
                 if (angle0 === 0 && angle1 === 0) {
                     colorClass = 'bg-gray-500 hover:bg-gray-600';
                 } else if (angle1 === 0) {
@@ -5227,29 +3922,254 @@ function generateDefaultWaypointButtons(jointType, container) {
                 } else {
                     colorClass = 'bg-purple-400 hover:bg-purple-500';
                 }
-                
+
                 gridContainer.append(`
-                    <button onclick="setWaypointQuickAngles(${angle0}, ${angle1})" 
+                    <button onclick="setImpedanceQuickAngles(${angle0}, ${angle1})"
                             class="${colorClass} text-white rounded transition-colors"
                             style="width: 29px; height: 29px; font-size: 7px; padding: 1px; line-height: 1.1;"
-                            title="DOF 0: ${angle0}°, DOF 1: ${angle1}°${isAutoSendEnabled ? ' (trajectory)' : ''}">
+                            title="DOF0: ${angle0}°, DOF1: ${angle1}°${isAutoSendEnabled ? ' (auto)' : ''}">
                         ${angle0}°<br>${angle1}°
                     </button>
                 `);
             });
         });
-        
+
         container.append(gridContainer);
     }
 
-    container.append('<div class="mt-2 text-xs text-gray-600">⚠️ No mapping data - using default ranges</div>');
-    
     if (isAutoSendEnabled) {
         container.addClass("auto-execute-enabled");
     } else {
         container.removeClass("auto-execute-enabled");
     }
 }
+
+/**
+ * Generate default impedance buttons when no mapping data is available.
+ * Clamps to physical limits if available.
+ */
+function generateDefaultImpedanceButtons(jointType, container) {
+    container.empty();
+    const joint = $("#jointSelect").val();
+    const isAutoSendEnabled = $("#autoImpedanceSendToggle").is(":checked");
+
+    const defaultRanges = {
+        'KNEE': { dof0: { min: 0, max: 120 } },
+        'ANKLE': { dof0: { min: -50, max: 25 }, dof1: { min: -25, max: 25 } },
+        'HIP': { dof0: { min: -30, max: 90 }, dof1: { min: -30, max: 45 } }
+    };
+
+    const rawRanges = defaultRanges[jointType] || defaultRanges['KNEE'];
+
+    // Clamp defaults to physical limits if available
+    const ranges = {};
+    if (rawRanges.dof0) {
+        const clamped = clampRangeToPhysicalLimits(joint, 0,
+            { extended_min: rawRanges.dof0.min, extended_max: rawRanges.dof0.max });
+        ranges.dof0 = clamped || rawRanges.dof0;
+    }
+    if (rawRanges.dof1) {
+        const clamped = clampRangeToPhysicalLimits(joint, 1,
+            { extended_min: rawRanges.dof1.min, extended_max: rawRanges.dof1.max });
+        ranges.dof1 = clamped || rawRanges.dof1;
+    }
+
+    const modeText = isAutoSendEnabled
+        ? '<span class="text-orange-600 font-medium">Click = impedance move</span>'
+        : '<span class="text-gray-500">Click to stage target (auto-send OFF)</span>';
+    container.append(`<div class="text-xs mb-2">${modeText}</div>`);
+
+    // KNEE (1 DOF): single column step 10°
+    if (jointType === 'KNEE') {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (default):</h5>');
+
+        const dof0Values = [];
+        for (let angle = ranges.dof0.min; angle <= ranges.dof0.max; angle += 10) {
+            dof0Values.push(angle);
+        }
+
+        const gridContainer = $('<div class="grid gap-0.5" style="grid-template-columns: 29px; justify-content: center;"></div>');
+
+        dof0Values.forEach(angle => {
+            const colorClass = angle === 0 ? 'bg-gray-500 hover:bg-gray-600' : 'bg-indigo-400 hover:bg-indigo-500';
+            gridContainer.append(`
+                <button onclick="setImpedanceQuickAngle(0, ${angle})"
+                        class="${colorClass} text-white rounded transition-colors"
+                        style="width: 29px; height: 29px; font-size: 8px; padding: 1px; line-height: 1.1;"
+                        title="Impedance target: ${angle}°${isAutoSendEnabled ? ' (auto)' : ''}">
+                    ${angle}°
+                </button>
+            `);
+        });
+        container.append(gridContainer);
+    }
+    // ANKLE/HIP (2 DOF): 2D grid step 5°
+    else if (ranges.dof0 && ranges.dof1) {
+        container.append('<h5 class="text-xs font-medium text-gray-600 mb-1">Top view (DOF0 ↕ / DOF1 ↔):</h5>');
+
+        const dof0Values = [];
+        for (let angle = ranges.dof0.max; angle >= ranges.dof0.min; angle -= 5) {
+            dof0Values.push(angle);
+        }
+
+        const dof1Values = [];
+        for (let angle = ranges.dof1.min; angle <= ranges.dof1.max; angle += 5) {
+            dof1Values.push(angle);
+        }
+
+        const gridCols = dof1Values.length;
+        const gridContainer = $(`<div class="grid gap-0.5" style="grid-template-columns: repeat(${gridCols}, 29px); justify-content: center;"></div>`);
+
+        dof0Values.forEach(angle0 => {
+            dof1Values.forEach(angle1 => {
+                let colorClass;
+                if (angle0 === 0 && angle1 === 0) {
+                    colorClass = 'bg-gray-500 hover:bg-gray-600';
+                } else if (angle1 === 0) {
+                    colorClass = 'bg-indigo-400 hover:bg-indigo-500';
+                } else if (angle0 === 0) {
+                    colorClass = 'bg-teal-400 hover:bg-teal-500';
+                } else if (angle0 === dof0Values[0] || angle0 === dof0Values[dof0Values.length - 1] ||
+                         angle1 === dof1Values[0] || angle1 === dof1Values[dof1Values.length - 1]) {
+                    colorClass = 'bg-purple-500 hover:bg-purple-600';
+                } else {
+                    colorClass = 'bg-purple-400 hover:bg-purple-500';
+                }
+
+                gridContainer.append(`
+                    <button onclick="setImpedanceQuickAngles(${angle0}, ${angle1})"
+                            class="${colorClass} text-white rounded transition-colors"
+                            style="width: 29px; height: 29px; font-size: 7px; padding: 1px; line-height: 1.1;"
+                            title="DOF0: ${angle0}°, DOF1: ${angle1}°${isAutoSendEnabled ? ' (auto)' : ''}">
+                        ${angle0}°<br>${angle1}°
+                    </button>
+                `);
+            });
+        });
+
+        container.append(gridContainer);
+    }
+
+    container.append('<div class="mt-2 text-xs text-gray-600">⚠️ No mapping data - using default ranges</div>');
+
+    if (isAutoSendEnabled) {
+        container.addClass("auto-execute-enabled");
+    } else {
+        container.removeClass("auto-execute-enabled");
+    }
+}
+
+/**
+ * Start impedance-based oscillation.
+ * Sends sinusoidal SET_IMPEDANCE fast targets at 50Hz.
+ * Validates center ± amplitude against safe limits before starting.
+ */
+function startImpedanceOscillation() {
+    if (impedanceOscInterval) {
+        appendStatusMessage('⚠️ Oscillation already running');
+        return;
+    }
+
+    const joint = $("#jointSelect").val();
+    if (!joint) return;
+
+    const amplitude = parseFloat($('#impedanceOscAmplitude').val()) || 20;
+    const frequency = parseFloat($('#impedanceOscFrequency').val()) || 0.5;
+    const cycles = parseInt($('#impedanceOscCycles').val()) || 3;
+    const dqCruise = parseFloat($('#impedanceDqCruise').val()) || 20;
+    const pid = getImpedancePidFromTuningSection(0);
+
+    // Get center position from live encoder — no fallback to stale data
+    const center = getCurrentEncoderAngle(joint, 0);
+    if (center === null || center === undefined) {
+        appendStatusMessage('⚠️ No live encoder data — cannot start oscillation (start encoder streaming first)');
+        return;
+    }
+
+    // Safety: check oscillation range against mapping-clamped safe limits
+    // Uses the same clampRangeToPhysicalLimits() as the grid, so the
+    // oscillation envelope is never wider than the generated buttons.
+    const jointType = joint.split('_')[0];
+    let safeLimits = null;
+    const mappingRanges = (automaticMappingData && automaticMappingData.present_dofs)
+        ? extractMappingRanges(automaticMappingData, jointType)
+        : null;
+    if (mappingRanges && mappingRanges[0]) {
+        safeLimits = clampRangeToPhysicalLimits(joint, 0, mappingRanges[0]);
+    } else {
+        // Fallback: use physical limits directly
+        const phys = getPhysicalLimitsForJoint(joint, 0);
+        if (phys) safeLimits = { min: phys.min + 1, max: phys.max - 1 };
+    }
+    if (safeLimits) {
+        const oscMin = center - amplitude;
+        const oscMax = center + amplitude;
+        if (oscMin < safeLimits.min || oscMax > safeLimits.max) {
+            appendStatusMessage(
+                `🚫 Oscillation blocked: range [${oscMin.toFixed(1)}°, ${oscMax.toFixed(1)}°] ` +
+                `exceeds safe limits [${safeLimits.min.toFixed(1)}°, ${safeLimits.max.toFixed(1)}°]`
+            );
+            return;
+        }
+    }
+
+    const totalDuration = cycles / frequency;  // seconds
+
+    // Update telemetry display
+    $('#impedanceOscCenter').text(center.toFixed(1));
+    $('#impedanceOscDuration').text(totalDuration.toFixed(1));
+
+    // Start oscillation loop — chained on init if needed
+    const beginLoop = () => {
+        const tickMs = 20;  // 50 Hz
+        const startTime = Date.now();
+
+        appendStatusMessage(`🔄 Oscillation: center=${center.toFixed(1)}° A=${amplitude}° f=${frequency}Hz ×${cycles} (${totalDuration.toFixed(1)}s)`);
+
+        impedanceOscInterval = setInterval(() => {
+            const elapsed = (Date.now() - startTime) / 1000;
+
+            if (elapsed >= totalDuration) {
+                stopImpedanceOscillation();
+                // Hold at center
+                sendImpedanceFastTarget(0, center, dqCruise, pid.stiffness);
+                appendStatusMessage('✅ Oscillation complete — holding at center');
+                return;
+            }
+
+            const q = center + amplitude * Math.sin(2 * Math.PI * frequency * elapsed);
+            sendImpedanceFastTarget(0, q, dqCruise, pid.stiffness);
+        }, tickMs);
+    };
+
+    if (!impedanceGainsInitialized[0]) {
+        // Wait for init to fully complete before starting loop
+        sendImpedanceInitGains(0).then(() => {
+            beginLoop();
+        }).fail(() => {
+            appendStatusMessage('❌ Cannot start oscillation — init failed');
+        });
+    } else {
+        beginLoop();
+    }
+}
+
+/**
+ * Stop impedance oscillation and reset telemetry display.
+ */
+function stopImpedanceOscillation() {
+    if (impedanceOscInterval) {
+        clearInterval(impedanceOscInterval);
+        impedanceOscInterval = null;
+        appendStatusMessage('⏹️ Oscillation stopped');
+        $('#impedanceOscCenter').text('—');
+        $('#impedanceOscDuration').text('—');
+    }
+}
+
+// ============================================================================
+// END IMPEDANCE MOVE PANEL
+// ============================================================================
 
 /**
  * Builds an ordered list of angles from a mapping range.
@@ -5650,17 +4570,10 @@ function getDefaultButtonsForJoint(jointType) {
     
     return defaults[jointType] || defaults['KNEE'];
 }
-
-// NOTE: sendMultiDofMove() removed — serial MOVE_MULTI_DOF is deprecated.
-// Use CAN waypoints instead (sendCanWaypointCommand, sendMultiWaypointSmoothCurve).
-function sendMultiDofMove() {
-    appendStatusMessage("❌ Serial MOVE_MULTI_DOF is deprecated. Use CAN waypoints instead.");
-}
-
 // Add event handlers when document is ready
 $(document).ready(function() {
-    // Initialize CAN waypoint buttons on load
-    setTimeout(generateSmartWaypointButtons, 300);
+    // Initialize smart impedance buttons on load
+    setTimeout(generateSmartImpedanceButtons, 350);
     
     // Initialize DOF-specific buttons on load
     renderDofControlButtons();
@@ -5890,7 +4803,6 @@ function fetchJointPhysicalLimits() {
         appendStatusMessage(`⚠️ Impossibile recuperare i limiti fisici dal backend: ${error || status}`);
     });
 }
-
 
 
 // === ENCODER TEST FUNCTIONS ===
@@ -6470,42 +5382,65 @@ function startOscillationTest() {
     const pauseMs = parseInt($('#oscTestPause').val());
     const moveTimeMs = parseInt($('#oscTestMoveTime').val());
     const reps = parseInt($('#oscTestReps').val());
-    const interpolationMode = $('#oscTestInterpolation').val() || 'linear';
-    
+
     // Validation
     if (isNaN(pointA) || isNaN(pointB) || pointA === pointB) {
         appendStatusMessage('❌ Invalid points: A and B must be different');
         return;
     }
-    
-    // Set interpolation mode via CAN before starting
-    $.ajax({
-        url: '/can/interpolation_mode',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ mode: interpolationMode })
-    }).done(response => {
-        const modeLabel = interpolationMode === 'cosine' ? 'SMOOTH' : 'LINEAR';
-        appendStatusMessage(`⚙️ Interpolation mode set to: ${modeLabel}`);
-        
-        // Now start the oscillation test
+
+    // Safety: validate Point A and B against safe limits (same logic as sinusoidal oscillation)
+    const joint = $("#jointSelect").val();
+    if (joint) {
+        const jointType = joint.split('_')[0];
+        let safeLimits = null;
+        const mappingRanges = (automaticMappingData && automaticMappingData.present_dofs)
+            ? extractMappingRanges(automaticMappingData, jointType)
+            : null;
+        if (mappingRanges && mappingRanges[dof]) {
+            safeLimits = clampRangeToPhysicalLimits(joint, dof, mappingRanges[dof]);
+        } else {
+            const phys = getPhysicalLimitsForJoint(joint, dof);
+            if (phys) safeLimits = { min: phys.min + 1, max: phys.max - 1 };
+        }
+        if (safeLimits) {
+            const oscMin = Math.min(pointA, pointB);
+            const oscMax = Math.max(pointA, pointB);
+            if (oscMin < safeLimits.min || oscMax > safeLimits.max) {
+                appendStatusMessage(
+                    `🚫 Oscillation blocked: range [${oscMin.toFixed(1)}°, ${oscMax.toFixed(1)}°] ` +
+                    `exceeds safe limits [${safeLimits.min.toFixed(1)}°, ${safeLimits.max.toFixed(1)}°]`
+                );
+                return;
+            }
+        }
+    }
+
+    // Ensure impedance gains are initialized before starting
+    const initPromise = impedanceGainsInitialized[dof]
+        ? $.Deferred().resolve().promise()
+        : sendImpedanceInitGains(dof);
+
+    initPromise.then(() => {
+        impedanceGainsInitialized[dof] = true;
+
         oscTestActive = true;
         oscTestCurrentRep = 0;
         oscTestTotalReps = reps;
         oscTestCurrentPoint = 'A';
         oscTestMetricsReceived = 0;
-        
+
         // Update UI
         $('#oscTestStartBtn').prop('disabled', true);
         $('#oscTestStopBtn').prop('disabled', false);
         updateOscTestStatus(`Starting... 0/${reps} reps`);
-        
-        appendStatusMessage(`🔄 Oscillation test started: DOF${dof} ${pointA}° ↔ ${pointB}° × ${reps} reps (${modeLabel})`);
-        
+
+        appendStatusMessage(`🔄 Oscillation test started (impedance): DOF${dof} ${pointA}° ↔ ${pointB}° × ${reps} reps`);
+
         // Start the oscillation loop
         oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs);
-    }).fail(xhr => {
-        appendStatusMessage(`❌ Failed to set interpolation mode: ${xhr.responseJSON?.message || 'Unknown error'}`);
+    }).fail(err => {
+        appendStatusMessage(`❌ Failed to init impedance gains: ${err}`);
     });
 }
 
@@ -6547,32 +5482,28 @@ function oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs) {
 }
 
 /**
- * Send a single waypoint for oscillation test
+ * Send a single impedance target for oscillation test.
+ * Derives dq_cruise from the full A↔B distance and moveTimeMs so the
+ * actual movement duration matches the UI setting.
  */
 function sendOscTestWaypoint(dof, angle, moveTimeMs) {
-    const joint = $('#jointSelect').val() || 'ANKLE_RIGHT';
-    
-    // Build angles array with null for unused DOFs
-    const angles = [null, null, null];
-    angles[dof] = angle;
-    
-    const data = {
-        joint: joint,
-        angles_deg: angles,
-        t_offset_ms: moveTimeMs
-    };
-    
-    $.ajax({
-        url: '/can/waypoint',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify(data)
-    }).done(response => {
-        console.log(`Osc waypoint sent: DOF${dof} → ${angle}°`);
-    }).fail(xhr => {
-        console.error('Osc waypoint failed:', xhr.responseJSON);
-        appendStatusMessage(`❌ Oscillation waypoint failed`);
-    });
+    const pid = getImpedancePidFromTuningSection(dof);
+
+    // Compute cruise speed from the declared move time and full swing
+    const pointA = parseFloat($('#oscTestPointA').val()) || 0;
+    const pointB = parseFloat($('#oscTestPointB').val()) || 0;
+    const distance = Math.abs(pointB - pointA);
+    const moveTimeSec = Math.max(moveTimeMs, 50) / 1000;   // floor 50 ms
+    const dqCruise = distance / moveTimeSec;                // deg/s
+
+    sendImpedanceFastTarget(dof, angle, dqCruise, pid.stiffness)
+        .done(() => {
+            console.log(`Osc impedance sent: DOF${dof} → ${angle}° dq=${dqCruise.toFixed(1)}°/s`);
+        })
+        .fail((xhr) => {
+            console.error('Osc impedance failed:', xhr.responseJSON);
+            appendStatusMessage('❌ Oscillation impedance target failed');
+        });
 }
 
 /**
@@ -6632,9 +5563,6 @@ function resetOscillationTest() {
 function cleanupHostTrajectoryState(reason = 'Unknown') {
     console.log('Cleaning up host trajectory state:', reason);
     
-    // Clear waypoint trajectory active flag
-    waypointTrajectoryActive = false;
-    
     // Stop oscillation test if active
     if (oscTestActive) {
         oscTestActive = false;
@@ -6645,13 +5573,6 @@ function cleanupHostTrajectoryState(reason = 'Unknown') {
         $('#oscTestStartBtn').prop('disabled', false);
         $('#oscTestStopBtn').prop('disabled', true);
         updateOscTestStatus(`⚠️ Aborted: ${reason}`);
-    }
-    
-    // Stop sinusoidal trajectory test if running
-    if (typeof sinusoidalTestRunning !== 'undefined' && sinusoidalTestRunning) {
-        sinusoidalTestRunning = false;
-        $('#startSinusoidalTest').prop('disabled', false);
-        $('#stopSinusoidalTest').prop('disabled', true);
     }
     
     // Stop PID diagnostic oscillation if active
@@ -6698,15 +5619,6 @@ function abortAllTrajectories(reason = 'Unknown') {
 /**
  * Handle interpolation mode change - show warning for smooth mode
  */
-function onInterpolationModeChange() {
-    const mode = $('#oscTestInterpolation').val();
-    if (mode === 'cosine') {
-        $('#oscTestSmoothWarning').show();
-    } else {
-        $('#oscTestSmoothWarning').hide();
-    }
-}
-
 /**
  * Update oscillation test status display
  */
@@ -7159,11 +6071,14 @@ function updateEncoderChartFromCanStream(dataPoint) {
     const jointType = currentEncoderJointType.toLowerCase();
     
     // Update numeric displays (e.g., kneeEncoderDof0, ankleEncoderDof1, etc.)
+    const now = Date.now();
     dataPoint.angles_deg.forEach((angle, dofIndex) => {
         const spanId = `${jointType}EncoderDof${dofIndex}`;
         const span = document.getElementById(spanId);
         if (span && angle !== null) {
             span.textContent = angle.toFixed(2) + ' °';
+            // Record freshness timestamp for getCurrentEncoderAngle() safety check
+            encoderLastUpdateMs[`${jointType}_${dofIndex}`] = now;
         }
     });
     
@@ -7789,20 +6704,11 @@ function fetchJointConfig() {
             if (response.status === 'success' && response.config) {
                 jointConfigData = response.config;
                 console.log('Joint configuration loaded:', jointConfigData);
-                updateCanMotionJoint();
-                
-                // Initialize sinusoid parameters for the currently selected joint
-                const initialJoint = $("#jointSelect").val();
-                updateSinusoidParamsForJoint(initialJoint);
-                
-                // Initialize sinusoid stats with default slider value (100 pts/s)
-                updateSinusoidStats($("#waypointDensity").val() || 100);
-                
-                // Show expected mapping grid for initially selected joint
-                showExpectedMappingGrid(initialJoint);
+                updateImpedanceMoveJoint();
 
-                // Initialize stream test DOF selector
-                _updateStreamTestDof();
+                // Show expected mapping grid for initially selected joint
+                const initialJoint = $("#jointSelect").val();
+                showExpectedMappingGrid(initialJoint);
             } else {
                 console.error('Failed to load joint config:', response);
             }
@@ -7861,429 +6767,6 @@ function showExpectedMappingGrid(jointName) {
     // Store for later use
     autoMappingTotalPoints = totalPoints;
 }
-
-// ============================================================================
-// MOVEMENT SEQUENCE BUILDER FUNCTIONS
-// ============================================================================
-
-/**
- * Updates visibility of sequence builder container based on joint type and toggle state
- * Only visible for ANKLE and KNEE joints AND when sequence mode toggle is active
- */
-function updateSequenceBuilderVisibility(joint) {
-    const container = $("#sequenceBuilderContainer");
-    const isSequenceModeActive = $("#sequenceModeToggle").is(":checked");
-    
-    // Show only if: supported joint (ANKLE/KNEE) AND sequence mode toggle is ON
-    if (joint && (joint.includes('ANKLE') || joint.includes('KNEE')) && isSequenceModeActive) {
-        container.show();
-    } else {
-        container.hide();
-        // Clear sequence when switching to non-supported joint
-        if (!joint || (!joint.includes('ANKLE') && !joint.includes('KNEE'))) {
-            if (movementSequence.length > 0) {
-                clearSequence(true); // Silent clear
-            }
-        }
-    }
-}
-
-/**
- * Adds a step to the movement sequence
- */
-function addStepToSequence(dof0, dof1) {
-    movementSequence.push({
-        type: "move",
-        dof0: dof0,
-        dof1: dof1
-    });
-    
-    renderSequenceList();
-    
-    // Show sequence builder if hidden
-    $("#sequenceBuilderContainer").show();
-}
-
-/**
- * Adds a pause step to the movement sequence
- */
-function addPauseToSequence() {
-    const duration = parseFloat($("#pauseDuration").val()) || 1.0;
-    
-    movementSequence.push({
-        type: "pause",
-        duration: duration
-    });
-    
-    renderSequenceList();
-    appendStatusMessage(`⏸️ Added pause: ${duration}s`);
-    
-    // Show sequence builder if hidden
-    $("#sequenceBuilderContainer").show();
-}
-
-/**
- * Removes a specific step from the sequence
- */
-function removeStep(index) {
-    if (index >= 0 && index < movementSequence.length) {
-        movementSequence.splice(index, 1);
-        renderSequenceList();
-        appendStatusMessage(`🗑️ Removed step ${index + 1}`);
-    }
-}
-
-/**
- * Removes the last step from the sequence
- */
-function removeLastStep() {
-    if (movementSequence.length === 0) {
-        appendStatusMessage("⚠️ Sequence is already empty");
-        return;
-    }
-    
-    movementSequence.pop();
-    renderSequenceList();
-    appendStatusMessage(`⬅️ Removed last step (${movementSequence.length} steps remaining)`);
-}
-
-/**
- * Clears the entire sequence
- */
-function clearSequence(silent = false) {
-    if (!silent && movementSequence.length > 3) {
-        if (!confirm(`Clear all ${movementSequence.length} steps from sequence?`)) {
-            return;
-        }
-    }
-    
-    movementSequence = [];
-    sequenceExecutionData = [];
-    renderSequenceList();
-    
-    // Hide export button
-    $("#exportSequenceBtn").hide();
-    
-    if (!silent) {
-        appendStatusMessage("🗑️ Sequence cleared");
-    }
-}
-
-/**
- * Renders the sequence list UI with all steps
- */
-function renderSequenceList() {
-    const container = $("#sequenceList");
-    
-    if (movementSequence.length === 0) {
-        container.html('<div class="sequence-empty-state">Click grid buttons to add steps to sequence</div>');
-        return;
-    }
-    
-    let html = '';
-    movementSequence.forEach((step, index) => {
-        if (step.type === "pause") {
-            // Render pause step
-            html += `
-                <div class="sequence-step pause" data-step-index="${index}">
-                    <span class="sequence-step-number">Step ${index + 1}</span>
-                    <span class="sequence-step-angles"><i class="fas fa-pause-circle mr-1"></i>Pause: ${step.duration}s</span>
-                    <button class="sequence-step-remove" onclick="removeStep(${index})" title="Remove this step">×</button>
-                </div>
-            `;
-        } else {
-            // Render movement step
-            html += `
-                <div class="sequence-step" data-step-index="${index}">
-                    <span class="sequence-step-number">Step ${index + 1}</span>
-                    <span class="sequence-step-angles"><i class="fas fa-arrows-alt mr-1"></i>DOF0: ${step.dof0}°, DOF1: ${step.dof1}°</span>
-                    <button class="sequence-step-remove" onclick="removeStep(${index})" title="Remove this step">×</button>
-                </div>
-            `;
-        }
-    });
-    
-    container.html(html);
-}
-
-/**
- * Highlights a specific step during playback
- */
-function highlightSequenceStep(index) {
-    // Remove current highlight from all steps
-    $(".sequence-step").removeClass("current");
-    
-    // Add highlight to current step
-    if (index >= 0 && index < movementSequence.length) {
-        $(`.sequence-step[data-step-index="${index}"]`).addClass("current");
-        
-        // Scroll into view if needed
-        const stepElement = $(`.sequence-step[data-step-index="${index}"]`)[0];
-        if (stepElement) {
-            stepElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-    }
-}
-
-/**
- * Updates playback control buttons state
- */
-function updatePlaybackControls() {
-    if (isSequencePlaying) {
-        $("#playSequenceBtn").prop("disabled", true).addClass("opacity-50");
-        $("#stopSequenceBtn").prop("disabled", false).removeClass("opacity-50");
-    } else {
-        $("#playSequenceBtn").prop("disabled", false).removeClass("opacity-50");
-        $("#stopSequenceBtn").prop("disabled", true).addClass("opacity-50");
-    }
-}
-
-/**
- * Shows the export data button after playback
- */
-function showExportButton() {
-    if (sequenceExecutionData.length > 0) {
-        $("#exportSequenceBtn").show();
-    }
-}
-
-/**
- * Helper function to sleep for a specified duration (in ms)
- */
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// NOTE: sendMultiDofMoveAsync() removed — serial MOVE_MULTI_DOF is deprecated.
-// Use CAN waypoints instead.
-function sendMultiDofMoveAsync() {
-    return Promise.reject(new Error("Serial MOVE_MULTI_DOF is deprecated. Use CAN waypoints."));
-}
-
-/**
- * Main playback function - executes the movement sequence
- */
-async function playSequence() {
-    if (movementSequence.length === 0) {
-        alert("Sequence is empty. Add steps first.");
-        return;
-    }
-    
-    const loopEnabled = $("#sequenceLoopToggle").is(":checked");
-    isSequencePlaying = true;
-    sequenceExecutionData = []; // Reset data collection
-    updatePlaybackControls();
-    
-    // Start sequence data collection on backend
-    try {
-        await $.ajax({
-            url: "/sequence/start",
-            method: "POST",
-            contentType: "application/json"
-        });
-        appendStatusMessage(`📊 Backend data collection started`);
-    } catch (error) {
-        console.error("Error starting sequence data collection:", error);
-    }
-    
-    appendStatusMessage(`▶️ Starting sequence playback (${movementSequence.length} steps${loopEnabled ? ', loop enabled' : ''})`);
-    
-    let loopCount = 0;
-    
-    do {
-        if (loopEnabled) {
-            loopCount++;
-            appendStatusMessage(`🔄 Loop iteration ${loopCount}`);
-        }
-        
-        for (let i = 0; i < movementSequence.length; i++) {
-            if (!isSequencePlaying) {
-                appendStatusMessage("⏹️ Sequence stopped by user");
-                break;
-            }
-            
-            const step = movementSequence[i];
-            const startTime = Date.now();
-            
-            if (step.type === "pause") {
-                // Handle pause step
-                appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: ⏸️ Pause ${step.duration}s`);
-                
-                // Highlight current step AFTER logging, BEFORE execution
-                highlightSequenceStep(i);
-                
-                await sleep(step.duration * 1000); // Convert seconds to milliseconds
-                
-                // Record execution (optional, for tracking)
-                const executionRecord = {
-                    stepIndex: i,
-                    loopIteration: loopCount,
-                    type: "pause",
-                    duration: step.duration,
-                    startTimestamp: startTime,
-                    endTimestamp: Date.now()
-                };
-                sequenceExecutionData.push(executionRecord);
-            } else {
-                // Handle movement step
-                // Set angles in UI
-                $("#multiDofAngle0").val(step.dof0);
-                $("#multiDofAngle1").val(step.dof1);
-                updateMultiDofCommandPreview();
-                
-                // Collect execution data
-                const executionRecord = {
-                    stepIndex: i,
-                    loopIteration: loopCount,
-                    type: "move",
-                    targetDof0: step.dof0,
-                    targetDof1: step.dof1,
-                    startTimestamp: startTime,
-                    encoderSamples: [] // Will be populated by socket listener
-                };
-                
-                sequenceExecutionData.push(executionRecord);
-                
-                appendStatusMessage(`  Step ${i + 1}/${movementSequence.length}: DOF0=${step.dof0}°, DOF1=${step.dof1}°`);
-                
-                // Highlight current step AFTER logging, BEFORE sending command
-                highlightSequenceStep(i);
-                
-                // Execute movement - now waits for acknowledgment from firmware
-                await sendMultiDofMoveAsync();
-                
-                executionRecord.endTimestamp = Date.now();
-                executionRecord.actualDuration = executionRecord.endTimestamp - executionRecord.startTimestamp;
-            }
-        }
-    } while (loopEnabled && isSequencePlaying);
-    
-    isSequencePlaying = false;
-    highlightSequenceStep(-1); // Remove all highlights
-    updatePlaybackControls();
-    
-    // Stop sequence data collection on backend
-    try {
-        const response = await $.ajax({
-            url: "/sequence/stop",
-            method: "POST",
-            contentType: "application/json"
-        });
-        appendStatusMessage(`📊 Backend data collection stopped - ${response.steps_collected} steps collected`);
-    } catch (error) {
-        console.error("Error stopping sequence data collection:", error);
-    }
-    
-    showExportButton();
-    
-    appendStatusMessage(`✅ Sequence playback completed (${sequenceExecutionData.length} executions recorded)`);
-}
-
-/**
- * Stops the sequence playback
- */
-function stopSequence() {
-    if (isSequencePlaying) {
-        isSequencePlaying = false;
-        appendStatusMessage("⏹️ Stopping sequence playback...");
-        // The playback loop will stop at next iteration check
-    }
-}
-
-/**
- * Exports sequence movement data as CSV file
- */
-async function exportSequenceData() {
-    try {
-        appendStatusMessage(`📥 Fetching sequence movement data from backend...`);
-        
-        // Get accumulated movement data from backend
-        const response = await $.ajax({
-            url: "/sequence/data",
-            method: "GET"
-        });
-        
-        if (response.status !== "success" || !response.data || response.data.length === 0) {
-            alert("No movement data available. The sequence may not have been executed or data collection failed.");
-            return;
-        }
-        
-        appendStatusMessage(`📊 Processing ${response.steps} steps of movement data...`);
-        
-        // Build CSV
-        const csvLines = [];
-        
-        // CSV Header
-        csvLines.push([
-            "Step",
-            "Joint",
-            "DOF",
-            "Sample_Index",
-            "Joint_Target_deg",
-            "Joint_Actual_deg",
-            "Motor_Agonist_Current_deg",
-            "Motor_Antagonist_Current_deg",
-            "Motor_Agonist_Ref_deg",
-            "Motor_Antagonist_Ref_deg",
-            "Torque_Agonist",
-            "Torque_Antagonist"
-        ].join(","));
-        
-        // Process each step
-        for (const stepData of response.data) {
-            const stepIndex = stepData.step_index;
-            const jointName = stepData.joint_name;
-            const dofData = stepData.dof_data;
-            
-            // Process each DOF
-            for (const [dofIndex, dofArrays] of Object.entries(dofData)) {
-                const sampleCount = dofArrays.joint_targets.length;
-                
-                // Process each sample
-                for (let i = 0; i < sampleCount; i++) {
-                    const row = [
-                        stepIndex,
-                        jointName,
-                        dofIndex,
-                        i,
-                        dofArrays.joint_targets[i].toFixed(4),
-                        dofArrays.joint_angles[i].toFixed(4),
-                        dofArrays.motor_angles.agonist_current[i].toFixed(4),
-                        dofArrays.motor_angles.antagonist_current[i].toFixed(4),
-                        dofArrays.motor_angles.agonist_next[i].toFixed(4),
-                        dofArrays.motor_angles.antagonist_next[i].toFixed(4),
-                        dofArrays.motor_torques.agonist[i].toFixed(2),
-                        dofArrays.motor_torques.antagonist[i].toFixed(2)
-                    ];
-                    csvLines.push(row.join(","));
-                }
-            }
-        }
-        
-        // Create CSV file
-        const csvContent = csvLines.join("\n");
-        const blob = new Blob([csvContent], {type: 'text/csv;charset=utf-8;'});
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const joint = $("#jointSelect").val();
-        link.download = `sequence_movement_${joint}_${timestamp}.csv`;
-        
-        link.click();
-        URL.revokeObjectURL(url);
-        
-        const totalSamples = csvLines.length - 1; // Exclude header
-        appendStatusMessage(`💾 Exported ${totalSamples} movement samples from ${response.steps} steps to CSV`);
-        
-    } catch (error) {
-        console.error("Error exporting sequence data:", error);
-        appendStatusMessage(`❌ Error exporting sequence data: ${error.message || error}`);
-        alert("Failed to export sequence data. Check console for details.");
-    }
-}
-
 // ============================================================================
 // Auto-Start Functions
 // ============================================================================
@@ -8327,583 +6810,8 @@ function handleAutoStartResponse(message) {
     }
 }
 
-// ============================================================================
-// WAYPOINT SEQUENCE BUILDER (CAN)
-// ============================================================================
 
-let wpSequence = [];
-let isWpSequencePlaying = false;
-
-/**
- * Initialize Waypoint Sequence Builder event handlers
- */
-$(document).ready(function() {
-    // Toggle sequence mode
-    $("#wpSequenceModeToggle").change(function() {
-        const enabled = $(this).is(":checked");
-        if (enabled) {
-            $("#wpSequenceBuilderContainer").slideDown(200);
-            appendStatusMessage(`🎬 Waypoint Sequence Mode: ON - Click Smart Waypoints to build sequence`);
-        } else {
-            $("#wpSequenceBuilderContainer").slideUp(200);
-            appendStatusMessage(`🎬 Waypoint Sequence Mode: OFF`);
-        }
-    });
-});
-
-/**
- * Check if waypoint sequence mode is active
- */
-function isWpSequenceModeActive() {
-    return $("#wpSequenceModeToggle").is(":checked");
-}
-
-/**
- * Add waypoint step to sequence (called from Smart Waypoint buttons when sequence mode is ON)
- */
-function addWpStepToSequence(angle0, angle1) {
-    const joint = $("#jointSelect").val();
-    const totalTimeMs = parseInt($("#canWaypointArrival2DOF").val() || $("#canWaypointArrival").val(), 10) || 1000;
-    
-    wpSequence.push({
-        type: "waypoint",
-        joint: joint,
-        angle0: angle0,
-        angle1: angle1,
-        durationMs: totalTimeMs
-    });
-    
-    renderWpSequenceList();
-    appendStatusMessage(`➕ Added waypoint: DOF0=${angle0}°, DOF1=${angle1}°`);
-}
-
-/**
- * Add pause step to waypoint sequence
- */
-function addWpPauseToSequence() {
-    const duration = parseFloat($("#wpPauseDuration").val()) || 1.0;
-    
-    wpSequence.push({
-        type: "pause",
-        duration: duration
-    });
-    
-    renderWpSequenceList();
-    appendStatusMessage(`⏸️ Added pause: ${duration}s`);
-}
-
-/**
- * Render the waypoint sequence list UI
- */
-function renderWpSequenceList() {
-    const container = $("#wpSequenceList");
-    container.empty();
-    
-    if (wpSequence.length === 0) {
-        container.html('<div class="sequence-empty-state">Click Smart Waypoint buttons to add steps</div>');
-        return;
-    }
-    
-    wpSequence.forEach((step, index) => {
-        const stepEl = $('<div class="sequence-step"></div>');
-        
-        if (step.type === "waypoint") {
-            const angles = step.angle1 !== null ? 
-                `DOF0: ${step.angle0}° / DOF1: ${step.angle1}°` : 
-                `DOF0: ${step.angle0}°`;
-            stepEl.html(`
-                <span class="step-number">${index + 1}</span>
-                <span class="step-content">
-                    <i class="fas fa-crosshairs text-indigo-500 mr-1"></i>
-                    ${angles}
-                    <span class="text-gray-400 text-xs ml-1">(${step.durationMs}ms)</span>
-                </span>
-                <button onclick="removeWpStep(${index})" class="step-remove" title="Remove step">
-                    <i class="fas fa-times"></i>
-                </button>
-            `);
-        } else if (step.type === "pause") {
-            stepEl.html(`
-                <span class="step-number">${index + 1}</span>
-                <span class="step-content">
-                    <i class="fas fa-pause text-yellow-500 mr-1"></i>
-                    Pause ${step.duration}s
-                </span>
-                <button onclick="removeWpStep(${index})" class="step-remove" title="Remove step">
-                    <i class="fas fa-times"></i>
-                </button>
-            `);
-        }
-        
-        container.append(stepEl);
-    });
-}
-
-/**
- * Remove a specific step from waypoint sequence
- */
-function removeWpStep(index) {
-    if (index >= 0 && index < wpSequence.length) {
-        wpSequence.splice(index, 1);
-        renderWpSequenceList();
-        appendStatusMessage(`🗑️ Removed waypoint step ${index + 1}`);
-    }
-}
-
-/**
- * Remove the last step from waypoint sequence
- */
-function removeLastWpStep() {
-    if (wpSequence.length === 0) {
-        appendStatusMessage(`⚠️ Sequence is empty`);
-        return;
-    }
-    wpSequence.pop();
-    renderWpSequenceList();
-    appendStatusMessage(`↩️ Removed last waypoint step`);
-}
-
-/**
- * Clear all waypoint sequence steps
- */
-function clearWpSequence() {
-    wpSequence = [];
-    renderWpSequenceList();
-    appendStatusMessage(`🗑️ Waypoint sequence cleared`);
-}
-
-/**
- * Play the waypoint sequence
- */
-async function playWpSequence() {
-    if (wpSequence.length === 0) {
-        appendStatusMessage(`⚠️ Waypoint sequence is empty. Add steps first.`);
-        return;
-    }
-    
-    const loopEnabled = $("#wpSequenceLoopToggle").is(":checked");
-    // Capture joint and DOF once at sequence start to avoid DOM re-read race
-    const joint = $("#jointSelect").val();
-    const dofIndex = parseInt($("#canWaypointDof").val(), 10) || 0;
-    isWpSequencePlaying = true;
-    updateWpPlaybackControls();
-
-    appendStatusMessage(`▶️ Starting waypoint sequence (${wpSequence.length} steps${loopEnabled ? ', loop' : ''}) for ${joint}`);
-
-    let loopCount = 0;
-
-    do {
-        if (loopEnabled && loopCount > 0) {
-            appendStatusMessage(`🔄 Loop iteration ${loopCount + 1}`);
-        }
-
-        for (let i = 0; i < wpSequence.length; i++) {
-            if (!isWpSequencePlaying) {
-                appendStatusMessage(`⏹️ Waypoint sequence stopped`);
-                updateWpPlaybackControls();
-                return;
-            }
-
-            const step = wpSequence[i];
-
-            if (step.type === "waypoint") {
-                appendStatusMessage(`📍 Step ${i + 1}: Moving to DOF0=${step.angle0}°${step.angle1 !== null ? `, DOF1=${step.angle1}°` : ''}`);
-
-                // Send waypoint trajectory (joint captured at sequence start)
-                if (step.angle1 !== null) {
-                    await sendMultiWaypointDualDofAsync(step.angle0, step.angle1, step.durationMs, joint);
-                } else {
-                    // Single DOF
-                    await sendMultiWaypointSmoothCurveAsync(joint, dofIndex, step.angle0, step.durationMs);
-                }
-                
-                // Wait for movement to complete
-                await sleep(step.durationMs + 200);
-                
-            } else if (step.type === "pause") {
-                appendStatusMessage(`⏸️ Step ${i + 1}: Pause ${step.duration}s`);
-                await sleep(step.duration * 1000);
-            }
-        }
-        
-        loopCount++;
-        
-    } while (loopEnabled && isWpSequencePlaying);
-    
-    isWpSequencePlaying = false;
-    updateWpPlaybackControls();
-    appendStatusMessage(`✅ Waypoint sequence completed`);
-}
-
-/**
- * Stop the waypoint sequence playback
- */
-function stopWpSequence() {
-    isWpSequencePlaying = false;
-    updateWpPlaybackControls();
-    appendStatusMessage(`⏹️ Stopping waypoint sequence...`);
-}
-
-/**
- * Update playback control buttons state
- */
-function updateWpPlaybackControls() {
-    $("#playWpSequenceBtn").prop("disabled", isWpSequencePlaying);
-    $("#stopWpSequenceBtn").prop("disabled", !isWpSequencePlaying);
-}
-
-/**
- * Async version of sendMultiWaypointDualDof for sequence playback.
- * @param {number} targetAngle0 - Target angle for DOF0
- * @param {number} targetAngle1 - Target angle for DOF1
- * @param {number} totalTimeMs - Movement duration in ms
- * @param {string} joint - Joint name (captured once by caller to avoid DOM re-read race)
- */
-async function sendMultiWaypointDualDofAsync(targetAngle0, targetAngle1, totalTimeMs, joint) {
-    return new Promise((resolve, reject) => {
-        const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
-        const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
-        
-        // Get current angles
-        let startAngle0 = getCurrentEncoderAngle(joint, 0) ?? 0;
-        let startAngle1 = getCurrentEncoderAngle(joint, 1) ?? 0;
-
-        // Peak velocity for adaptive profile selection
-        const totalTimeSec = totalTimeMs / 1000;
-        const peakVelocity = Math.max(
-            Math.abs(targetAngle0 - startAngle0),
-            Math.abs(targetAngle1 - startAngle1)
-        ) * Math.PI / (2 * totalTimeSec);
-
-        // Generate waypoints
-        const waypoints = [];
-        const actualDeltaT = totalTimeMs / numPoints;
-        const initialOffset = 50;
-
-        for (let i = 0; i <= numPoints; i++) {
-            const t = i / numPoints;
-            const smoothT = interpolationProfile(t, peakVelocity);
-            const angle0 = startAngle0 + (targetAngle0 - startAngle0) * smoothT;
-            const angle1 = startAngle1 + (targetAngle1 - startAngle1) * smoothT;
-            const desiredArrival = initialOffset + (i * actualDeltaT);
-            
-            waypoints.push({
-                joint: joint,
-                angles_deg: [angle0, angle1, null],
-                t_offset_ms: Math.round(desiredArrival)
-            });
-        }
-
-        // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
-        const dedupedWaypoints = deduplicateWaypoints(waypoints);
-
-        // Refresh time sync so waypoint batch preflight doesn't reject as stale
-        $.ajax({
-            url: '/can/time_sync',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({}),
-            async: false
-        });
-
-        // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-        pushReanchorIntervalSetting();
-
-        // Send batch
-        $.ajax({
-            url: '/can/waypoint_batch',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
-        }).done(response => {
-            if (response.status === 'success' || response.status === 'partial') {
-                if (response.status === 'partial') {
-                    const r = response.result || {};
-                    console.warn(`[WP] Partial batch: ${r.sent}/${r.total} sent`);
-                }
-                resolve(response);
-            } else {
-                reject(new Error(response.message || 'Failed to send waypoints'));
-            }
-        }).fail((xhr) => {
-            reject(new Error(xhr.responseJSON?.message || 'Request failed'));
-        });
-    });
-}
-
-/**
- * Async version of sendMultiWaypointSmoothCurve for sequence playback.
- * @param {string} joint - Joint name (captured once by caller to avoid DOM re-read race)
- * @param {number} dofIndex - DOF index
- * @param {number} targetAngle - Target angle in degrees
- * @param {number} totalTimeMs - Movement duration in ms
- */
-async function sendMultiWaypointSmoothCurveAsync(joint, dofIndex, targetAngle, totalTimeMs) {
-    return new Promise((resolve, reject) => {
-        const waypointRate = parseInt($("#multiWpPoints").val(), 10) || 100;
-        const numPoints = Math.max(2, Math.round(waypointRate * (totalTimeMs / 1000)));
-        
-        let startAngle = getCurrentEncoderAngle(joint, dofIndex) ?? 0;
-
-        // Peak velocity for adaptive profile selection
-        const totalTimeSec = totalTimeMs / 1000;
-        const peakVelocity = Math.abs(targetAngle - startAngle) * Math.PI / (2 * totalTimeSec);
-
-        const waypoints = [];
-        const actualDeltaT = totalTimeMs / numPoints;
-        const initialOffset = 50;
-
-        for (let i = 0; i <= numPoints; i++) {
-            const t = i / numPoints;
-            const smoothT = interpolationProfile(t, peakVelocity);
-            const angle = startAngle + (targetAngle - startAngle) * smoothT;
-            const desiredArrival = initialOffset + (i * actualDeltaT);
-            
-            const angles = [null, null, null];
-            angles[dofIndex] = angle;
-            
-            waypoints.push({
-                joint: joint,
-                angles_deg: angles,
-                t_offset_ms: Math.round(desiredArrival)
-            });
-        }
-
-        // Remove zero-step duplicates caused by CAN angle quantization (0.01°)
-        const dedupedWaypoints = deduplicateWaypoints(waypoints);
-
-        // Refresh time sync so waypoint batch preflight doesn't reject as stale
-        $.ajax({
-            url: '/can/time_sync',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({}),
-            async: false
-        });
-
-        // Set re-anchor interval (0 = disabled, N = re-anchor every N consumed WPs)
-        pushReanchorIntervalSetting();
-
-        $.ajax({
-            url: '/can/waypoint_batch',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ joint: joint, waypoints: dedupedWaypoints })
-        }).done(response => {
-            if (response.status === 'success' || response.status === 'partial') {
-                if (response.status === 'partial') {
-                    const r = response.result || {};
-                    console.warn(`[WP] Partial batch: ${r.sent}/${r.total} sent`);
-                }
-                resolve(response);
-            } else {
-                reject(new Error(response.message || 'Failed to send waypoints'));
-            }
-        }).fail((xhr) => {
-            reject(new Error(xhr.responseJSON?.message || 'Request failed'));
-        });
-    });
-}
-
-/**
- * Sleep utility for async sequences
- */
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ============================================================================
-// TRAJECTORY LIMITS PANEL — Show movement limits per DOF
-// ============================================================================
-
-// Host-computed safe limits from saved mapping data (keyed by "JOINT_NAME_dof")
-let hostComputedSafeLimits = {};
-
-/**
- * Update the trajectory limits panel with all limit levels:
- * 1. Physical (from config)
- * 2. Mapping config (auto_mapping range from config)
- * 3. Host-computed safe (from saved mapping data + computeJointSafeRange)
- * 4. Firmware safe (from EVT:SAFE_LIMITS via CHECK_OFFSETS)
- *
- * Also loads saved mapping data to compute host-side safe range for comparison.
- */
-function updateTrajectoryLimitsPanel(jointName) {
-    const panel = document.getElementById('trajectoryLimitsPanel');
-    if (!panel) return;
-
-    if (!jointConfigData || !jointConfigData.joints) {
-        panel.classList.add('hidden');
-        return;
-    }
-
-    const configKey = jointName ? jointName.toLowerCase() : '';
-    const jointConfig = jointConfigData.joints[configKey];
-    if (!jointConfig || !jointConfig.dofs) {
-        panel.classList.add('hidden');
-        return;
-    }
-
-    // Render immediately with available data, then async-load host safe limits
-    renderTrajectoryLimitsHTML(jointName, jointConfig);
-
-    // Async: load saved mapping data to compute host-side safe range
-    $.ajax({
-        url: `/get_saved_mapping_data/${jointName}`,
-        method: 'GET',
-        dataType: 'json',
-        success: function(response) {
-            if (response.has_data && response.data && response.data.mapping_data) {
-                const mappingData = response.data.mapping_data;
-                for (let dof = 0; dof < (jointConfig.dofs || []).length; dof++) {
-                    const dofKey = `dof_${dof}`;
-                    if (mappingData[dofKey] && mappingData[dofKey].joint_angles) {
-                        const safeRange = computeJointSafeRange(jointName, dof, mappingData[dofKey].joint_angles);
-                        if (safeRange) {
-                            hostComputedSafeLimits[`${jointName}_${dof}`] = safeRange;
-                        }
-                    }
-                }
-                // Re-render with host safe limits now available
-                renderTrajectoryLimitsHTML(jointName, jointConfig);
-            }
-        }
-    });
-}
-
-/**
- * Render the limits panel HTML and apply input constraints.
- */
-function renderTrajectoryLimitsHTML(jointName, jointConfig) {
-    const panel = document.getElementById('trajectoryLimitsPanel');
-    if (!panel) return;
-
-    const jointId = jointConfig.id;
-    const dofs = jointConfig.dofs;
-    let html = '';
-    const effectiveLimits = [];
-
-    for (let i = 0; i < dofs.length; i++) {
-        const dof = dofs[i];
-        const dofName = (dof.name || `DOF ${i}`).replace(/_/g, ' ');
-        const physMin = dof.min_angle;
-        const physMax = dof.max_angle;
-        const mapMin = dof.auto_mapping_min_angle !== undefined ? dof.auto_mapping_min_angle : null;
-        const mapMax = dof.auto_mapping_max_angle !== undefined ? dof.auto_mapping_max_angle : null;
-
-        // Host-computed safe limits (from saved mapping data)
-        const hostSafe = hostComputedSafeLimits[`${jointName}_${i}`] || null;
-
-        // Firmware safe limits (from EVT:SAFE_LIMITS)
-        const fwSafe = firmwareSafeLimits[`${jointId}_${i}`] || null;
-
-        // Effective = most restrictive available
-        let effMin = physMin, effMax = physMax;
-        if (mapMin !== null) effMin = Math.max(effMin, mapMin);
-        if (mapMax !== null) effMax = Math.min(effMax, mapMax);
-        if (hostSafe) { effMin = Math.max(effMin, hostSafe.min); effMax = Math.min(effMax, hostSafe.max); }
-        if (fwSafe) { effMin = Math.max(effMin, fwSafe.min); effMax = Math.min(effMax, fwSafe.max); }
-        effectiveLimits.push({ min: effMin, max: effMax });
-
-        // Build row
-        html += `<div class="mb-1 ${i > 0 ? 'mt-1.5 pt-1.5 border-t border-gray-100' : ''}">`;
-        html += `<span class="font-semibold text-gray-700">DOF ${i}</span> <span class="text-gray-400">(${dofName})</span>`;
-        html += `<div class="grid grid-cols-4 gap-x-2 mt-0.5">`;
-
-        // Physical
-        html += `<div><span class="text-gray-400">Phys:</span> <span class="font-mono">${physMin.toFixed(1)}..${physMax.toFixed(1)}</span></div>`;
-
-        // Mapping config
-        if (mapMin !== null && mapMax !== null) {
-            html += `<div><span class="text-blue-400">Map:</span> <span class="font-mono text-blue-600">${mapMin.toFixed(1)}..${mapMax.toFixed(1)}</span></div>`;
-        } else {
-            html += `<div><span class="text-gray-300">Map: n/a</span></div>`;
-        }
-
-        // Host-computed safe (from saved mapping data)
-        if (hostSafe) {
-            html += `<div><span class="text-purple-400">Host:</span> <span class="font-mono text-purple-600">${hostSafe.min.toFixed(1)}..${hostSafe.max.toFixed(1)}</span></div>`;
-        } else {
-            html += `<div><span class="text-gray-300">Host: --</span></div>`;
-        }
-
-        // Firmware safe
-        if (fwSafe) {
-            // Highlight match/mismatch with host
-            let fwClass = 'text-green-700 font-semibold';
-            let matchIcon = '';
-            if (hostSafe) {
-                const delta = Math.abs(fwSafe.min - hostSafe.min) + Math.abs(fwSafe.max - hostSafe.max);
-                matchIcon = delta < 1.0 ? ' =' : ' ~';
-            }
-            html += `<div><span class="text-green-500">FW:</span> <span class="font-mono ${fwClass}">${fwSafe.min.toFixed(1)}..${fwSafe.max.toFixed(1)}${matchIcon}</span></div>`;
-        } else {
-            html += `<div><span class="text-gray-300">FW: --</span></div>`;
-        }
-
-        html += `</div>`;
-
-        // Drift indicator (shown after HOLDING entry, one-shot)
-        const driftKey = `${jointId}_${i}`;
-        const drift = driftStatuses[driftKey];
-        if (drift) {
-            if (drift.status === 'DRIFT') {
-                html += `<div class="mt-0.5 text-yellow-600 font-semibold">Drift: ${drift.errA.toFixed(1)}° / ${drift.errB.toFixed(1)}°</div>`;
-            } else {
-                html += `<div class="mt-0.5 text-green-600">Drift: none (${drift.errA.toFixed(1)}° / ${drift.errB.toFixed(1)}°)</div>`;
-            }
-        }
-
-        html += `</div>`;
-    }
-
-    panel.innerHTML = html;
-    panel.classList.remove('hidden');
-    applyAngleLimitsToInputs(dofs.length, effectiveLimits);
-}
-
-/**
- * Set min/max attributes on waypoint angle inputs and sinusoid fields.
- */
-function applyAngleLimitsToInputs(dofCount, effectiveLimits) {
-    if (effectiveLimits.length === 0) return;
-
-    // Single DOF input
-    const singleAngle = document.getElementById('canWaypointAngle');
-    if (singleAngle && effectiveLimits[0]) {
-        singleAngle.min = effectiveLimits[0].min;
-        singleAngle.max = effectiveLimits[0].max;
-        singleAngle.title = `Range: ${effectiveLimits[0].min.toFixed(1)} .. ${effectiveLimits[0].max.toFixed(1)}`;
-    }
-
-    // Dual DOF inputs
-    const dof0Input = document.getElementById('canWaypointAngleDof0');
-    if (dof0Input && effectiveLimits[0]) {
-        dof0Input.min = effectiveLimits[0].min;
-        dof0Input.max = effectiveLimits[0].max;
-        dof0Input.title = `Range: ${effectiveLimits[0].min.toFixed(1)} .. ${effectiveLimits[0].max.toFixed(1)}`;
-    }
-    const dof1Input = document.getElementById('canWaypointAngleDof1');
-    if (dof1Input && effectiveLimits.length > 1 && effectiveLimits[1]) {
-        dof1Input.min = effectiveLimits[1].min;
-        dof1Input.max = effectiveLimits[1].max;
-        dof1Input.title = `Range: ${effectiveLimits[1].min.toFixed(1)} .. ${effectiveLimits[1].max.toFixed(1)}`;
-    }
-
-    // Sinusoid inputs per DOF
-    for (let i = 0; i < Math.min(3, effectiveLimits.length); i++) {
-        const minInput = document.getElementById(`sinusoidDof${i}Min`);
-        const maxInput = document.getElementById(`sinusoidDof${i}Max`);
-        if (minInput) {
-            minInput.min = effectiveLimits[i].min;
-            minInput.max = effectiveLimits[i].max;
-        }
-        if (maxInput) {
-            maxInput.min = effectiveLimits[i].min;
-            maxInput.max = effectiveLimits[i].max;
-        }
-    }
-}
+// [Removed] Trajectory Limits Panel — panel no longer in template (waypoint cleanup)
 
 // ============================================================================
 // SMART RECALC DETECTION — Badge update
@@ -8970,9 +6878,6 @@ function updateDriftBadge(jointId, dof, status, errA, errB) {
     const key = `${jointId}_${dof}`;
     driftStatuses[key] = { status, errA, errB };
 
-    // Refresh the limits panel to show drift info
-    updateTrajectoryLimitsPanel($("#jointSelect").val());
-
     // Also update the recalc badge in setup section (indication only, no auto-action)
     if (status === 'DRIFT') {
         updateRecalcBadge(jointId, dof, 'NEEDED', errA, errB);
@@ -8980,378 +6885,3 @@ function updateDriftBadge(jointId, dof, status, errA, errB) {
 }
 
 
-// =====================================================================
-// Continuous Stream Test
-// =====================================================================
-
-/** Active session id (null when idle). */
-let _streamSessionId = null;
-
-/** Polling interval handle. */
-let _streamPollInterval = null;
-
-/**
- * Populate DOF radio buttons for the stream test panel based on the
- * currently selected joint in #jointSelect.
- */
-function _updateStreamTestDof() {
-    const joint = $('#jointSelect').val();
-    $('#streamTestJointLabel').text(joint || '-');
-    if (!joint || !jointConfigData) return;
-
-    const dofCount = getJointDofCount(joint);
-    const dofLabels = getJointDofLabels(joint);
-    const container = $('#streamTestDofRadios');
-    container.empty();
-
-    for (let i = 0; i < dofCount; i++) {
-        const checked = i === 0 ? 'checked' : '';
-        container.append(
-            `<label class="text-xs bg-white px-2 py-1 rounded border cursor-pointer">
-                <input type="radio" name="streamTestDofRadio" value="${i}" ${checked} class="mr-1">
-                DOF ${i}: ${dofLabels[i]}
-            </label>`
-        );
-    }
-    _updateStreamTestSafeLimits();
-}
-
-/**
- * Show/hide safe limits for the active DOF and gate the Start button.
- */
-function _updateStreamTestSafeLimits() {
-    const joint = $('#jointSelect').val();
-    if (!joint || !jointConfigData || !jointConfigData.joints) return;
-
-    const configKey = joint.toLowerCase();
-    const jointEntry = jointConfigData.joints[configKey];
-    if (!jointEntry) return;
-
-    const jointId = jointEntry.id;
-    const activeDof = parseInt($('input[name="streamTestDofRadio"]:checked').val() || '0');
-    const key = `${jointId}_${activeDof}`;
-    const limits = firmwareSafeLimits[key];
-
-    if (limits) {
-        $('#streamTestSafeMin').text(limits.min.toFixed(1));
-        $('#streamTestSafeMax').text(limits.max.toFixed(1));
-        $('#streamTestSafeDof').text(activeDof);
-        $('#streamTestSafeLimitsInfo').removeClass('hidden');
-        $('#streamTestNoSafeLimits').addClass('hidden');
-        // Only enable Start if no session is active
-        if (!_streamSessionId) {
-            $('#streamTestStartBtn').prop('disabled', false);
-        }
-    } else {
-        $('#streamTestSafeLimitsInfo').addClass('hidden');
-        $('#streamTestNoSafeLimits').removeClass('hidden');
-        // Allow Start even without firmware safe limits (manual range used as override)
-        if (!_streamSessionId) {
-            $('#streamTestStartBtn').prop('disabled', false);
-        }
-    }
-}
-
-/**
- * Build config payload from the UI controls (single-joint, single-DOF).
- */
-function _buildStreamConfig() {
-    const joint = $('#jointSelect').val();
-    const activeDof = parseInt($('input[name="streamTestDofRadio"]:checked').val() || '0');
-    const dofCount = getJointDofCount(joint);
-
-    // Look up firmware safe limits for active DOF
-    let safeLimits = null;
-    if (joint && jointConfigData && jointConfigData.joints) {
-        const jointEntry = jointConfigData.joints[joint.toLowerCase()];
-        if (jointEntry) {
-            const safeKey = `${jointEntry.id}_${activeDof}`;
-            const fw = firmwareSafeLimits[safeKey];
-            if (fw) safeLimits = { min: fw.min, max: fw.max };
-        }
-    }
-
-    return {
-        joint: joint,
-        active_dof: activeDof,
-        n_dof: dofCount,
-        min_deg: parseFloat($('#streamTestMinDeg').val()),
-        max_deg: parseFloat($('#streamTestMaxDeg').val()),
-        start_at: $('#streamTestStartAt').val(),
-        frequency_hz: parseFloat($('#streamTestFreq').val()),
-        rate_hz: parseInt($('#streamTestRate').val(), 10),
-        duration_s: parseInt($('#streamTestDuration').val(), 10),
-        horizon_ms: parseInt($('#streamTestHorizon').val(), 10),
-        buffer_depth_sim: 2,
-        max_inflight_per_joint: 1,
-        fault_profile: { mode: $('#streamTestFault').val() },
-        safe_limits: safeLimits,
-    };
-}
-
-/**
- * POST /stream_test/start — launch a streaming session.
- */
-function startStreamTest() {
-    const config = _buildStreamConfig();
-
-    // Client-side validation
-    if (!config.joint) {
-        alert('Select a joint first.');
-        return;
-    }
-    if (!config.safe_limits) {
-        // No firmware safe limits — use manual min/max as user-trusted range
-        console.warn('[StreamTest] No firmware safe limits — using manual range as override');
-        config.safe_limits = { min: config.min_deg, max: config.max_deg };
-    }
-    if (isNaN(config.min_deg) || isNaN(config.max_deg) || isNaN(config.frequency_hz)) {
-        alert('All numeric fields must be valid numbers.');
-        return;
-    }
-    if (!isFinite(config.min_deg) || !isFinite(config.max_deg) || !isFinite(config.frequency_hz)) {
-        alert('All numeric fields must be finite numbers.');
-        return;
-    }
-    if (config.min_deg >= config.max_deg) {
-        alert('Min must be less than Max.');
-        return;
-    }
-    if (config.min_deg < config.safe_limits.min || config.max_deg > config.safe_limits.max) {
-        alert(`Range [${config.min_deg}, ${config.max_deg}] exceeds safe limits ` +
-              `[${config.safe_limits.min}, ${config.safe_limits.max}].`);
-        return;
-    }
-
-    $('#streamTestStartBtn').prop('disabled', true);
-
-    $.ajax({
-        url: '/stream_test/start',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify(config),
-        success: function(resp) {
-            _streamSessionId = resp.session_id;
-            $('#streamTestStopBtn').prop('disabled', false);
-            $('#streamTestKPI').removeClass('hidden');
-            _updateStreamState(resp.state || 'STARTING');
-            _startStreamPolling();
-        },
-        error: function(xhr) {
-            $('#streamTestStartBtn').prop('disabled', false);
-            const msg = xhr.responseJSON ? xhr.responseJSON.message : xhr.statusText;
-            alert('Stream start failed: ' + msg);
-        },
-    });
-}
-
-/**
- * POST /stream_test/stop — stop the active session.
- */
-function stopStreamTest() {
-    if (!_streamSessionId) return;
-
-    $.ajax({
-        url: '/stream_test/stop',
-        type: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({ session_id: _streamSessionId, reason: 'operator_stop' }),
-        success: function(resp) {
-            _updateStreamState(resp.state || 'STOPPED');
-            _stopStreamPolling();
-        },
-        error: function(xhr) {
-            const msg = xhr.responseJSON ? xhr.responseJSON.message : xhr.statusText;
-            console.error('Stream stop error:', msg);
-        },
-    });
-}
-
-/**
- * Start 1 Hz polling for status + metrics.
- */
-function _startStreamPolling() {
-    _stopStreamPolling();
-    _streamPollInterval = setInterval(function() {
-        _pollStreamStatus();
-        _pollStreamMetrics();
-    }, 1000);
-}
-
-function _stopStreamPolling() {
-    if (_streamPollInterval) {
-        clearInterval(_streamPollInterval);
-        _streamPollInterval = null;
-    }
-}
-
-/**
- * GET /stream_test/status
- */
-function _pollStreamStatus() {
-    $.getJSON('/stream_test/status', function(resp) {
-        const session = resp.session;
-        if (session) {
-            _updateStreamState(session.state);
-            $('#streamKpiUptime').text(
-                session.uptime_s != null ? session.uptime_s.toFixed(1) + 's' : '-'
-            );
-            // Check terminal states
-            if (session.state === 'STOPPED' || session.state === 'FAILED') {
-                _onStreamEnded(session.state);
-            }
-        } else {
-            _updateStreamState(resp.state || 'IDLE');
-        }
-    });
-}
-
-/**
- * GET /stream_test/metrics
- */
-function _pollStreamMetrics() {
-    $.getJSON('/stream_test/metrics', function(resp) {
-        const m = resp.metrics;
-        if (!m || Object.keys(m).length === 0) return;
-        _updateStreamKPI(m);
-    });
-}
-
-/**
- * Update the state badge in the KPI panel.
- */
-function _updateStreamState(state) {
-    const el = $('#streamKpiState');
-    el.text(state);
-    el.removeClass('text-green-600 text-yellow-600 text-red-600 text-gray-500');
-    if (state === 'RUNNING') el.addClass('text-green-600');
-    else if (state === 'STARTING' || state === 'PREPOSITIONING' || state === 'STOPPING') el.addClass('text-yellow-600');
-    else if (state === 'FAILED') el.addClass('text-red-600');
-    else el.addClass('text-gray-500');
-}
-
-/**
- * Populate the KPI panel from a metrics snapshot.
- */
-function _updateStreamKPI(m) {
-    $('#streamKpiTargetHz').text(m.target_rate_hz || '-');
-    $('#streamKpiActualHz').text(
-        m.actual_rate_hz != null ? m.actual_rate_hz.toFixed(1) : '-'
-    );
-    $('#streamKpiDrift').text(
-        m.scheduler_drift_ms_p95 != null ? m.scheduler_drift_ms_p95.toFixed(2) + 'ms' : '-'
-    );
-    $('#streamKpiPartialRatio').text(
-        m.partial_ratio != null ? (m.partial_ratio * 100).toFixed(2) + '%' : '-'
-    );
-    $('#streamKpiLateWp').text(m.waypoints_late || 0);
-    $('#streamKpiLateRatio').text(
-        m.late_ratio != null ? (m.late_ratio * 100).toFixed(4) + '%' : '-'
-    );
-    $('#streamKpiSent').text(m.chunks_sent || 0);
-    $('#streamKpiConfirmed').text(m.chunks_confirmed || 0);
-    $('#streamKpiFailed').text(m.chunks_failed || 0);
-    $('#streamKpiDropped').text(m.chunks_dropped || 0);
-    $('#streamKpiDeferred').text(m.chunks_deferred || 0);
-    $('#streamKpiRetries').text(m.retries || 0);
-
-    // HTTP status codes
-    const sc = m.http_status_counts || {};
-    $('#streamKpi409').text(sc['409'] || sc[409] || 0);
-    const v502 = (sc['502'] || sc[502] || 0) + (sc['503'] || sc[503] || 0);
-    $('#streamKpi502').text(v502);
-    $('#streamKpiSync').text(m.sync_refresh_count || 0);
-
-    // Firmware telemetry
-    $('#streamKpiFwAccepted').text(m.fw_wp_accepted != null ? m.fw_wp_accepted : '-');
-    $('#streamKpiFwDropped').text(m.fw_wp_dropped != null ? m.fw_wp_dropped : '-');
-    $('#streamKpiFwBufFill').text(m.fw_buffer_fill != null ? m.fw_buffer_fill : '-');
-
-    // Queue fill per joint
-    const qf = m.queue_fill_max || {};
-    const capacity = m.max_inflight_per_joint || 1;
-    let qhtml = '';
-    for (const [joint, fill] of Object.entries(qf)) {
-        const pct = Math.min(fill / capacity * 100, 100);
-        qhtml += `<div class="flex justify-between items-center">
-            <span class="text-gray-500">${joint}</span>
-            <div class="flex items-center gap-1">
-                <div class="w-16 h-2 bg-gray-200 rounded overflow-hidden">
-                    <div class="h-full bg-teal-500 rounded" style="width:${pct}%"></div>
-                </div>
-                <span class="w-6 text-right">${fill}/${capacity}</span>
-            </div>
-        </div>`;
-    }
-    $('#streamKpiQueues').html(qhtml);
-
-    // Pass/fail evaluation
-    _evaluateStreamVerdict(m);
-}
-
-/**
- * Evaluate pass/fail against scenario thresholds.
- * Uses S1 criteria for 50 Hz, S2 for 100 Hz.
- */
-function _evaluateStreamVerdict(m) {
-    const el = $('#streamTestVerdict');
-    if (!m.target_rate_hz) { el.addClass('hidden'); return; }
-
-    const is100 = m.target_rate_hz >= 100;
-    const minHz = is100 ? 98.0 : 49.0;
-    const maxPartialRatio = is100 ? 0.003 : 0.001;  // S1: 0.1%, S2: 0.3%
-    const maxLateRatio    = is100 ? 0.003 : 0.001;
-
-    const hzOk      = m.actual_rate_hz != null && m.actual_rate_hz >= minHz;
-    const dropOk    = (m.chunks_dropped || 0) === 0;
-    const partialOk = m.partial_ratio != null && m.partial_ratio <= maxPartialRatio;
-    const lateOk    = m.late_ratio != null && m.late_ratio <= maxLateRatio;
-    const failedOk  = (m.chunks_failed || 0) === 0;
-    const pass = hzOk && dropOk && partialOk && lateOk && failedOk;
-
-    el.removeClass('hidden');
-    if (pass) {
-        el.html('<span class="text-green-600 bg-green-50 px-2 py-1 rounded">&#x2705; Criteria met (S' + (is100 ? '2' : '1') + ')</span>');
-    } else {
-        let reasons = [];
-        if (!hzOk) reasons.push('Hz < ' + minHz);
-        if (!dropOk) reasons.push('drops > 0');
-        if (!partialOk) reasons.push('partial > ' + (maxPartialRatio * 100).toFixed(1) + '%');
-        if (!lateOk) reasons.push('late > ' + (maxLateRatio * 100).toFixed(1) + '%');
-        if (!failedOk) reasons.push('failed chunks: ' + (m.chunks_failed || 0));
-        el.html('<span class="text-red-600 bg-red-50 px-2 py-1 rounded">&#x274C; ' + reasons.join(', ') + '</span>');
-    }
-}
-
-/**
- * Handle stream session end (STOPPED or FAILED).
- */
-function _onStreamEnded(finalState) {
-    _stopStreamPolling();
-    _streamSessionId = null;
-    $('#streamTestStopBtn').prop('disabled', true);
-    _updateStreamState(finalState);
-    // Re-enable Start only if safe limits exist for the current DOF
-    _updateStreamTestSafeLimits();
-}
-
-// --- Event listeners for stream test DOF selector ---
-$('#jointSelect').on('change', function() {
-    _updateStreamTestDof();
-});
-$(document).on('change', 'input[name="streamTestDofRadio"]', function() {
-    _updateStreamTestSafeLimits();
-});
-
-// --- SocketIO listeners for stream test (real-time push, optional) ---
-if (typeof socket !== 'undefined') {
-    socket.on('stream_test_metrics', function(data) {
-        _updateStreamKPI(data);
-    });
-    socket.on('stream_test_state', function(data) {
-        _updateStreamState(data.state);
-        if (data.state === 'STOPPED' || data.state === 'FAILED') {
-            _onStreamEnded(data.state);
-        }
-    });
-}

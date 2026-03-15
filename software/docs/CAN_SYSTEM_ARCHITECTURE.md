@@ -1,9 +1,15 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 2.1
-**Date:** 2026-02-15
+**Document Version:** 2.2
+**Date:** 2026-03-15
 **Status:** Design Specification (Indicative)
 **Authors:** Alia Robotics Team
+
+**Changelog v2.2 (D033):**
+- **Waypoint infrastructure removed**: CAN IDs 0x005, 0x01B, 0x01C, 0x380-0x39F removed from firmware
+- **Waypoint buffer deleted**: No more 2000-waypoint buffer per DOF
+- **Movement control**: Now exclusively via SET_IMPEDANCE (0x01D/0x01E) at 200 Hz
+- **Sections 4.2.5, 4.2.6, 4.2.7, 5, 6 marked as REMOVED** (retained as historical reference)
 
 **Changelog v2.1:**
 - **Re-anchor policy aligned to implementation**:
@@ -47,10 +53,10 @@ This document describes the complete CAN-based communication architecture for th
 - **Multi-Bus Architecture**: Dedicated CAN bus per joint controller (point-to-point, no bus sharing)
 - **Dual CAN per Joint**: Host CAN (commands/telemetry) + Motor CAN (torque/status) — electrically isolated
 - **Protocol**: CAN 2.0 @ 1 Mbps (upgradeable to CAN FD)
-- **Control Frequency**: 500 Hz (motor PID), 50-100 Hz (waypoint streaming)
-- **Latency**: < 1 ms single frame transit; ~50 ms waypoint-to-motion (pre-buffered, see §9.1)
+- **Control Frequency**: 500 Hz (motor PID), 200 Hz (SET_IMPEDANCE)
+- **Latency**: < 1 ms single frame transit
 - **Hardware Platform**: Nvidia Jetson direct CAN + 4x CAN Expansion Boards (8ch each)
-- **Timing**: Batch anchor timing on firmware — immune to sender-side jitter
+- **Timing**: Rolling segment generation on firmware — immune to sender-side jitter
 
 ### v1 Test Baseline (frozen config):
 
@@ -93,7 +99,7 @@ This document describes the complete CAN-based communication architecture for th
   4x Motors 4x Motors 4x Motors 4x Motors 4x Motors 4x Motors
 ```
 
-Each joint controller has a **dedicated CAN channel** on the expansion board (point-to-point, no bus sharing between joints). Communication is unidirectional for waypoints (Host → Controller). The Jetson sends CAN frames directly to joint controllers without intermediate hardware (see Section 7 for rationale).
+Each joint controller has a **dedicated CAN channel** on the expansion board (point-to-point, no bus sharing between joints). Communication is bidirectional: Host → Controller for commands (SET_IMPEDANCE, TimeSync), Controller → Host for telemetry (JOINT_STATE, encoder stream). The Jetson sends CAN frames directly to joint controllers without intermediate hardware (see Section 7 for rationale).
 
 ### 2.2 Key Components
 
@@ -253,9 +259,7 @@ Recommendation: Option A (separate legs)
 - **SPI Isolation**: Core0 owns SPI0 (encoders), Core1 owns SPI1 (CAN). No cross-core SPI access.
 
 **Key Firmware Features:**
-- **Waypoint buffer**: 2000 waypoints per DOF (~20s at 100 Hz)
-- **Batch anchor timing**: Firmware captures `millis()` on first WP, schedules entire batch from that anchor
-- **Consume-side re-anchor**: Periodic drift compensation every N waypoints consumed
+- **Impedance control**: SET_IMPEDANCE rolling target with local linear segment generation
 - **Time synchronization**: NTP-like protocol via CAN
 - **Flash storage**: Encoder offsets, PID parameters, linear equations (with multicore sync)
 
@@ -300,12 +304,13 @@ Recommendation: Option A (separate legs)
 | ID Range | Purpose | Priority | Frequency | Direction |
 |----------|---------|----------|-----------|-----------|
 | 0x000 | Emergency Stop | **Level 0** (Highest) | On-demand | Host → All |
-| 0x002-0x01B | System Control + Commands | **Level 1** (System) | On-demand | Host → Ctrl |
+| 0x002-0x004 | System Control (TimeSync, Encoder, PID Diag) | **Level 1** (System) | On-demand | Host → Ctrl |
+| 0x01D-0x01E | Impedance Commands (SET_IMPEDANCE, IMPEDANCE_CTRL) | **Level 1** (System) | 200 Hz | Host → Ctrl |
 | 0x140-0x280 | Motor Torque Commands | **Level 2** (CRITICAL) | 500 Hz | Ctrl → Motors |
-| 0x380-0x39F | Waypoint Commands | **Level 3** (Trajectory) | 50-100 Hz | Host → Ctrl |
-| 0x400-0x4FF | Status/Feedback | **Level 4** (Lowest) | 10-50 Hz | Ctrl → Host |
+| ~~0x380-0x39F~~ | ~~Waypoint Commands~~ | | | **REMOVED (D033)** |
+| 0x400-0x4FF | Status/Feedback | **Level 3** (Lowest) | 10-50 Hz | Ctrl → Host |
 
-**Key Design**: Motor torque commands (0x140-0x280) have **higher priority** than waypoint commands (0x380-0x39F) to ensure the inner PID loop @ 500 Hz is never starved by trajectory updates.
+**Key Design**: Motor torque commands (0x140-0x280) have **higher priority** than impedance and status commands to ensure the inner PID loop @ 500 Hz is never starved.
 
 ### 4.2 Message Types
 
@@ -321,7 +326,7 @@ struct CanCmd_EmergencyStop {
 ```
 
 **Latency**: < 500 us (highest CAN priority)
-**Action**: All controllers stop motors and clear waypoint buffers
+**Action**: All controllers stop motors immediately
 
 #### 4.2.2 Time Sync (ID: 0x002)
 
@@ -334,7 +339,7 @@ struct CanCmd_TimeSync {
 } __attribute__((packed));   // 8 bytes
 ```
 
-**Frequency**: Sent before each waypoint batch (and periodically at ~10 Hz for clock maintenance)
+**Frequency**: Sent periodically at ~10 Hz for clock maintenance (used by impedance segment evaluation)
 
 **Controller Processing:**
 ```cpp
@@ -406,6 +411,8 @@ Byte 6-7:  int16_t  output_x100
 
 #### 4.2.5 Interpolation Mode (ID: 0x005)
 
+**⚠️ REMOVED (D033, 2026-03-15)** — Waypoint infrastructure removed. Movement now uses SET_IMPEDANCE (0x01D/0x01E) exclusively.
+
 ```
 Byte 0:   uint8_t  mode (0 = LINEAR, 1 = COSINE)
 Byte 1-7: Reserved
@@ -414,6 +421,8 @@ Byte 1-7: Reserved
 Sent once before the first waypoint batch. Determines interpolation curve between consecutive waypoints.
 
 #### 4.2.6 Re-anchor Interval (ID: 0x01B)
+
+**⚠️ REMOVED (D033, 2026-03-15)** — Waypoint infrastructure removed. Movement now uses SET_IMPEDANCE (0x01D/0x01E) exclusively.
 
 ```
 Byte 0-1: uint16_t interval
@@ -432,6 +441,8 @@ Sent before each batch. Controls consume-side drift compensation frequency. See 
 - **Coupling note**: Host constants must stay aligned with firmware `WAYPOINT_BUFFER_DEPTH`
 
 #### 4.2.7 Multi-DOF Waypoint (ID: 0x380-0x39F)
+
+**⚠️ REMOVED (D033, 2026-03-15)** — Waypoint infrastructure removed. Movement now uses SET_IMPEDANCE (0x01D/0x01E) exclusively.
 
 **Purpose**: Stream target positions for all DOFs of a joint in a single frame
 
@@ -519,7 +530,7 @@ Frame 3 (seq=3, optional — feedforward):
 ```
 Byte 0:    uint8_t   joint_id
 Byte 1:    uint8_t   sub_cmd
-             0x00 = disable (all DOFs → MODE_WAYPOINT + HOLDING)
+             0x00 = disable (all DOFs → HOLDING)
              0x01 = enable (informational, actual switch on SET_IMPEDANCE)
              0x02 = set watchdog timeout
 Byte 2-3:  uint16_t  param (e.g. watchdog timeout in ms for sub_cmd=0x02)
@@ -597,7 +608,7 @@ See **Appendix A** for the complete CAN ID allocation table.
 
 Each joint controller has **two physically separate CAN buses** (both via MCP2515 on SPI1, different CS pins):
 
-- **Host CAN** (GP8 CS): Expansion board channel — waypoints, commands, telemetry (Host ↔ Controller)
+- **Host CAN** (GP8 CS): Expansion board channel — impedance commands, telemetry (Host ↔ Controller)
 - **Motor CAN** (GP9 CS): Local to the joint — motor torque commands and status (Controller ↔ Motors)
 
 These buses are electrically isolated. Bandwidth must be analyzed separately.
@@ -607,8 +618,9 @@ These buses are electrically isolated. Bandwidth must be analyzed separately.
 | Message Type | Dir | Freq (Hz) | Frame/s | Bandwidth | Notes |
 |--------------|-----|-----------|---------|-----------|-------|
 | Time Sync | H→C | 10 | 10 | 0.14% | Per-channel fan-out (*) |
-| Multi-DOF Waypoint | H→C | 100 | 100 | 1.4% | All 3 DOFs in 1 frame |
-| Config/Commands | H→C | sporadic | <10 | <0.14% | PID set, interpolation, etc. |
+| SET_IMPEDANCE | H→C | 200 | 200-800 | 2.8-11.4% | 1-4 frames per command |
+| IMPEDANCE_CTRL | H→C | sporadic | <10 | <0.14% | Enable/disable/watchdog |
+| Config/Commands | H→C | sporadic | <10 | <0.14% | PID set, etc. |
 | Encoder Stream | C→H | 100 | 100 | 1.4% | Optional |
 | PID Diagnostics | C→H | 50-100 | 100-200 | 1.4-2.8% | Optional (2-4 frames) |
 | Status/Feedback | C→H | 10 | 10 | 0.14% | Heartbeat |
@@ -631,7 +643,7 @@ These buses are electrically isolated. Bandwidth must be analyzed separately.
 
 #### Jetson SPI Bus Load (aggregate):
 
-Each SPI bus on the Jetson serves one 8-channel expansion board. The Jetson sends waypoints and commands to all joints on that board sequentially via SPI.
+Each SPI bus on the Jetson serves one 8-channel expansion board. The Jetson sends impedance commands to all joints on that board sequentially via SPI.
 
 | SPI Bus | Board | Joints | WP Frames @ 100 Hz | SPI Time/Cycle |
 |---------|-------|--------|---------------------|----------------|
@@ -645,6 +657,8 @@ Each SPI bus on the Jetson serves one 8-channel expansion board. The Jetson send
 ---
 
 ## 5. Waypoint Streaming
+
+**⚠️ REMOVED (D033, 2026-03-15)** — The entire waypoint streaming pipeline has been removed from the firmware. Movement is now handled exclusively via SET_IMPEDANCE (0x01D/0x01E, see Sections 4.2.8/4.2.9). The content below is retained as historical reference only.
 
 This section documents the complete waypoint streaming pipeline — how the host sends batches of waypoints and how the firmware consumes them with deterministic timing.
 
@@ -861,6 +875,8 @@ def stream_trajectory(trajectory_points):
 
 ## 6. Controller-Side Implementation
 
+**⚠️ REMOVED (D033, 2026-03-15)** — Waypoint buffer and waypoint execution logic have been removed from the firmware. Movement is now handled exclusively via SET_IMPEDANCE (0x01D/0x01E, see Sections 4.2.8/4.2.9). The content below is retained as historical reference only.
+
 ### 6.1 Waypoint Buffer
 
 ```cpp
@@ -989,11 +1005,11 @@ Current architecture (2026-02-15): the Jetson drives CAN directly. No intermedia
 
 The Jetson sends CAN frames directly to joint controllers via SPI-connected MCP2515 expansion boards. No intermediate bare-metal MCU is required.
 
-**Rationale**: With **batch anchor timing** (firmware captures `millis()` on the first WP and schedules the entire batch from that anchor) and **consume-side re-anchor** (periodic drift compensation), the firmware is immune to sender-side jitter. Whether the sender is a browser, Python host, or Jetson under GPU load, waypoints are consumed at 500 Hz with deterministic firmware-side timing.
+**Rationale**: The SET_IMPEDANCE rolling-waypoint model (0x01D) is inherently jitter-tolerant — each command specifies a goal position and cruise speed, and the firmware generates smooth local segments at control-loop rate. Whether the sender is a browser, Python host, or Jetson under GPU load, the firmware produces deterministic motion.
 
 A dedicated Pico RP2040 dispatcher would add hardware complexity (board, firmware, power, debug surface) without measurable benefit — determinism is already guaranteed at the receiver.
 
-**Open door**: If empirical Jetson tests reveal scheduling stalls exceeding the buffer lead time (~20s at 100 Hz), or if multi-bus CAN fanout is needed (e.g., >8 joints on one bus), a Pico dispatcher can be reintroduced as a transparent CAN relay without firmware changes.
+**Open door**: If multi-bus CAN fanout is needed (e.g., >8 joints on one bus), a Pico dispatcher can be reintroduced as a transparent CAN relay without firmware changes.
 
 ### 7.2 Jetson Setup (SocketCAN)
 
@@ -1083,11 +1099,14 @@ If the direct Jetson approach proves insufficient under real workloads, a CAN Ga
 
 | Metric | Threshold (go/no-go) | How to Measure |
 |--------|----------------------|----------------|
-| Late WP ratio | > 1% of WPs arrive past scheduled time | Firmware counter: `wp_late_count / wp_consumed_count` |
-| Re-anchor correction magnitude | > 20 ms sustained (>10 consecutive) | Firmware telemetry: `reanchor_correction_ms` |
 | Frame loss rate | > 0.1% (CAN TX errors / total TX) | Host-side `python-can` error counters |
-| Buffer underrun events | > 0 in 60s steady-state streaming | Firmware counter: `buffer_underrun_count` |
-| Batch gap (inter-batch silence) | > 500 ms (buffer drains to <10%) | Firmware: `wp_buffer_fill` telemetry |
+| Impedance command latency | > 10 ms (command → segment start) | Firmware timestamp delta |
+| Control loop overruns | > 0 in 60s steady-state | Firmware counter: `loop_overrun_count` |
+
+> **REMOVED (D033):** Waypoint-specific go/no-go metrics (late WP ratio, re-anchor correction,
+> buffer underrun, batch gap) no longer apply. The SET_IMPEDANCE rolling target model is
+> inherently jitter-tolerant — each command specifies goal + speed, and the firmware
+> generates local segments at 500 Hz.
 
 If **any** metric exceeds its threshold under sustained GPU load (e.g., inference + trajectory planning), the gateway path should be prototyped.
 
@@ -1130,17 +1149,10 @@ void periodic_sync_check() {
 }
 ```
 
-### 8.3 Buffer Overflow
+### 8.3 ~~Buffer Overflow~~ — REMOVED (D033)
 
-```cpp
-if (buffer_full) {
-    LOG_WARN("Buffer full, rejecting waypoint");
-    set_status_flag(STATUS_BUFFER_FULL);
-    notify_host_buffer_full();
-}
-```
-
-Host should throttle waypoint publish rate when `STATUS_BUFFER_FULL` is seen, retry once flag clears, alert operator if flag persists > `COMMAND_TIMEOUT_MS`.
+> **REMOVED (D033):** The waypoint buffer and associated overflow handling have been removed.
+> SET_IMPEDANCE commands overwrite the current target directly — there is no queue to overflow.
 
 ### 8.4 CAN Controller Faults
 
@@ -1156,45 +1168,15 @@ The following telemetry signals form the **minimum observability contract** betw
 
 | Signal | Type | Update Rate | Description |
 |--------|------|-------------|-------------|
-| `wp_buffer_fill` | uint16_t | 10 Hz | Waypoints remaining in buffer (per DOF, worst-case) |
-| `wp_late_count` | uint16_t | per batch | WPs consumed past their scheduled time |
-| `wp_consumed_total` | uint32_t | per batch | Total WPs consumed since last reset |
-| `reanchor_correction_ms` | int16_t | per event | Last re-anchor correction applied (ms) |
-| `buffer_underrun_count` | uint8_t | 1 Hz | Buffer empty events since last reset |
 | `can_tx_error_count` | uint8_t | 1 Hz | Host CAN MCP2515 TX error counter |
 | `can_rx_error_count` | uint8_t | 1 Hz | Host CAN MCP2515 RX error counter |
 | `motor_can_tx_errors` | uint8_t | 1 Hz | Motor CAN MCP2515 TX error counter |
 | `loop_overrun_count` | uint8_t | 1 Hz | Core1 control loops exceeding 2ms deadline |
 
-#### Host → Firmware (global):
-
-| Signal | Type | Description |
-|--------|------|-------------|
-| `batch_seq` | uint16_t | Monotonic batch counter (in time sync, see §5.3) |
-| `telemetry_enable` | uint8_t | Bitmask enabling/disabling telemetry streams |
-
-**CAN IDs**:
-- **Request**: `0x01C` (Host → Controller) — byte 0 = joint_id
-- **Response**: `0x4D0+joint` (Controller → Host) — 8 bytes:
-
-| Bytes | Field | Type |
-|-------|-------|------|
-| 0-1 | wp_accepted | uint16_t LE |
-| 2-3 | wp_dropped_full | uint16_t LE |
-| 4-5 | wp_dropped_guard | uint16_t LE |
-| 6-7 | buffer_fill (min across DOFs) | uint16_t LE |
-
-Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0) to avoid SPI1 bus contention with periodic motor CAN reads.
-
-**Implementation roadmap**:
-
-| Step | Scope | Status |
-|------|-------|--------|
-| 1. Firmware counters | `WaypointTelemetry` struct: accepted, dropped_full, dropped_guard | Done |
-| 2. CAN ID assignment | Request 0x01C, response 0x4D0+joint | Done |
-| 3. Firmware TX path | On-demand response in CAN dispatch (pollHostCan) | Done |
-| 4. Host RX + logging | `can_manager.request_wp_telemetry()` + 0x4D0 handler | Done |
-| 5. Dashboard | FW accepted/dropped/buffer_fill in stream test KPI panel | Done |
+> **REMOVED (D033):** Waypoint-specific telemetry signals (`wp_buffer_fill`, `wp_late_count`,
+> `wp_consumed_total`, `reanchor_correction_ms`, `buffer_underrun_count`) and the
+> WP telemetry CAN request/response pair (`0x01C` / `0x4D0+joint`) have been removed.
+> See D033 in decision-log for rationale.
 
 ---
 
@@ -1209,37 +1191,36 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 | Jetson SPI → MCP2515 | < 50 us | SPI @ 10 MHz |
 | MCP2515 → CAN Bus | < 100 us | 8 bytes @ 1 Mbps |
 | Pico: CAN RX Processing | < 20 us | Interrupt-driven |
-| Pico: Waypoint Buffer Push | < 10 us | Simple FIFO |
-| Pico: Trajectory Interpolation | < 50 us | Linear interpolation |
+| Pico: Impedance Target Update | < 10 us | Direct overwrite |
+| Pico: Segment Generation | < 50 us | Linear rolling segment |
 | Pico: PID Calculation | < 100 us | Cascade control |
 | Pico: Motor CAN TX | < 100 us | 8 bytes @ 1 Mbps |
 | Motor: Command Processing | < 500 us | LKM servo firmware |
 | **TOTAL (single frame transit)** | **< 1 ms** | See note below |
 
-**Latency vs Lead Time**: The < 1 ms figure is the **transit time** for a single CAN frame from host to motor actuation. This is NOT the waypoint-to-motion latency — waypoints are pre-buffered with a configurable initial offset (typically 50 ms, see Section 5.4) to absorb jitter and scheduling variance. The effective command-to-motion latency is `initial_offset + transit` ~ 50 ms for the first waypoint of a batch.
+**Latency vs Lead Time**: The < 1 ms figure is the **transit time** for a single CAN frame from host to motor actuation. With SET_IMPEDANCE, each command updates the target directly and the firmware generates a rolling segment toward the goal at 500 Hz. The effective command-to-motion latency is approximately the transit time plus one control loop cycle (~2 ms).
 
 ### 9.2 Jitter Analysis
 
 **Sources of Jitter:**
-1. Python scheduling: +/- 1-2 ms (Linux non-RT) — **mitigated by batch anchor**
+1. Python scheduling: +/- 1-2 ms (Linux non-RT) — **mitigated by rolling segment model**
 2. CAN arbitration: +/- 50-100 us (bus collisions)
 3. SPI transaction: +/- 10 us (negligible)
 4. Pico interrupt latency: +/- 5 us (negligible)
 
-**Effective jitter at motor level**: +/- 50-100 us (batch anchor eliminates sender jitter)
+**Effective jitter at motor level**: +/- 50-100 us (rolling segment generation at 500 Hz eliminates sender jitter)
 
 **Mitigation (optional):**
 1. RT kernel (PREEMPT_RT) on Jetson — reduces sender jitter further
 2. `SCHED_FIFO` for CAN threads
-3. Pre-buffer waypoints (2000 WP = ~20s ahead)
 
 ### 9.3 Synchronization Accuracy
 
 **Time Sync Protocol:**
-- **Frequency**: Before each batch + periodic 10 Hz
+- **Frequency**: Periodic 10 Hz
 - **Latency**: < 200 us (CAN transmission)
 - **Drift**: < 1 ms per second (RP2350 crystal)
-- **Correction**: Batch anchor resets drift every batch boundary
+- **Correction**: Periodic re-sync maintains accuracy
 
 **Multi-Joint Coordination:**
 - Coordination error: < 2 ms (jitter-limited)
@@ -1334,17 +1315,16 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 - [ ] Power consumption < 500 mA
 
 **Pico Controller:**
-- [ ] CAN reception (Time Sync, Waypoint, E-Stop)
-- [ ] Waypoint buffer (push/pop/peek, depth 2000)
-- [ ] Batch anchor timing accuracy
-- [ ] Re-anchor correction accuracy
+- [ ] CAN reception (Time Sync, Impedance, E-Stop)
+- [ ] Impedance target handling (overwrite, watchdog timeout)
+- [ ] Rolling segment generation accuracy
 - [ ] Motor commands (500 Hz)
 - [ ] Emergency stop (< 1ms response)
 
 **Host Software:**
 - [ ] Multi-bus connection (20 buses)
 - [ ] Time sync fan-out (per-channel)
-- [ ] Waypoint streaming (50-100 Hz)
+- [ ] Impedance command streaming (10-50 Hz)
 - [ ] Emergency stop (all buses)
 
 ### 13.2 Integration Tests
@@ -1352,7 +1332,7 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 - [ ] Single joint: Host → Pico latency < 1ms
 - [ ] Multi-joint (6): coordinated movement, sync < 2ms
 - [ ] Full robot (20): all buses functional, Host CAN < 40%, Motor CAN < 60%
-- [ ] Batch boundary: seamless transition between consecutive batches
+- [ ] Impedance target updates: seamless rolling segment transitions
 - [ ] Long streaming: 30+ seconds continuous, no drift accumulation
 
 ### 13.3 Performance Metrics
@@ -1360,8 +1340,8 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 | Metric | Target | Status |
 |--------|--------|--------|
 | Latency (Host → Pico) | < 1ms | TBD |
-| Jitter (at motor, with batch anchor) | < 100us | TBD |
-| Waypoint frequency | 50-100 Hz | TBD |
+| Jitter (at motor, with rolling segment) | < 100us | TBD |
+| Impedance command rate | 10-50 Hz | TBD |
 | Motor control frequency | 500 Hz | TBD |
 | Time sync accuracy | < 2ms | TBD |
 | Bandwidth: Host CAN per channel | < 40% | TBD |
@@ -1385,9 +1365,8 @@ Uses on-demand request/response pattern (same as encoder offsets 0x00A → 0x4B0
 | Component | File |
 |-----------|------|
 | CAN IDs (definitions) | `firmware/.../src/core1.cpp` |
-| Batch anchor logic | `firmware/.../src/core1.cpp` |
-| Re-anchor consume logic | `firmware/.../src/JointController_Waypoint.cpp` |
-| Waypoint buffer config | `firmware/.../include/waypoint_buffer.h` |
+| Time sync logic | `firmware/.../src/core1.cpp` |
+| Control loop (impedance + holding) | `firmware/.../src/JointController_ControlLoop.cpp` |
 | Host CAN manager | `host/can_manager.py` |
 | Host routes | `host/routes.py` |
 | UI + JS | `host/templates/index.html`, `host/static/js/scripts.js` |
@@ -1420,7 +1399,7 @@ Each joint controller has two physically separate CAN buses:
 | 0x002 | Time Sync | Host → All | High |
 | 0x003 | Encoder Stream Control | Host → Ctrl | High |
 | 0x004 | PID Diag Control | Host → Ctrl | High |
-| 0x005 | Interpolation Mode (linear/cosine) | Host → Ctrl | High |
+| ~~0x005~~ | ~~Interpolation Mode~~ | | **REMOVED (D033)** |
 | 0x006 | Loop Frequency Config (inner/outer) | Host → Ctrl | High |
 | 0x007 | PID Diag Stream Frequency | Host → Ctrl | High |
 | 0x008 | Joint Identify Request (broadcast) | Host → Ctrl | High |
@@ -1442,12 +1421,12 @@ Each joint controller has two physically separate CAN buses:
 | 0x018 | Save Linear Eq to Flash | Host → Ctrl | High |
 | 0x019 | Load Linear Eq from Flash | Host → Ctrl | High |
 | 0x01A | Set Auto-Start on Boot | Host → Ctrl | High |
-| **0x01B** | **Re-anchor Interval** | Host → Ctrl | High |
-| **0x01C** | **WP Telemetry Request** | Host → Ctrl | High |
+| ~~0x01B~~ | ~~Re-anchor Interval~~ | | **REMOVED (D033)** |
+| ~~0x01C~~ | ~~WP Telemetry Request~~ | | **REMOVED (D033)** |
 | **0x01D** | **SET_IMPEDANCE (1-4 frames)** | Host → Ctrl | High |
 | **0x01E** | **IMPEDANCE_CTRL (disable/enable/watchdog)** | Host → Ctrl | High |
 | 0x01F-0x13F | Reserved (Future High Priority) | - | - |
-| 0x380-0x393 | Multi-DOF Waypoint Joint 0-19 | Host → Ctrl | Level 3 |
+| ~~0x380-0x393~~ | ~~Multi-DOF Waypoint Joint 0-19~~ | | **REMOVED (D033)** |
 | 0x400-0x40F | Status/Feedback | Ctrl → Host | Level 4 |
 | 0x410 | Encoder Stream Data | Ctrl → Host | Level 4 |
 | 0x420+joint | PID Diag: Target + Error | Ctrl → Host | Level 4 |
@@ -1460,7 +1439,7 @@ Each joint controller has two physically separate CAN buses:
 | 0x4A0+joint | Joint Announce/Discovery | Ctrl → Host | Level 4 |
 | 0x4B0+joint | Encoder Offsets Response | Ctrl → Host | Level 4 |
 | 0x4C0+joint | Zero Complete Notification | Ctrl → Host | Level 4 |
-| **0x4D0+joint** | **WP Buffer Telemetry** | Ctrl → Host | Level 4 |
+| ~~0x4D0+joint~~ | ~~WP Buffer Telemetry~~ | | **REMOVED (D033)** |
 | **0x4F0+joint** | **JOINT_STATE Broadcast** | Ctrl → Host | Level 4 |
 
 ### Motor CAN IDs
@@ -1503,7 +1482,7 @@ Pin 3: GND (Black)
 - Test with loopback mode
 
 **High jitter (> 5ms at sender):**
-- Verify batch anchor is active (check firmware logs)
+- Verify rolling segment generation is active (check firmware logs)
 - Consider RT kernel (PREEMPT_RT) if needed
 - Reduce system load on Jetson
 
@@ -1513,9 +1492,8 @@ Pin 3: GND (Black)
 - Verify termination resistors (120 ohm at both ends)
 
 **Time sync drift:**
-- Increase sync frequency (send before each batch)
+- Increase sync frequency (currently 10 Hz periodic)
 - Check RP2350 crystal accuracy
-- Verify re-anchor interval is set
 
 ---
 
