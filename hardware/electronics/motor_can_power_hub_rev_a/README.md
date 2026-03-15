@@ -55,7 +55,7 @@ Verified manufacturing BOM:
 
 Included lines:
 1. `J_PWR_IN1` -> `AMASS XT60PW-M` (THT)
-2. `J_CAN_IN1` -> `Phoenix Contact 1725656` (THT)
+2. `J_CAN_IN1` -> `Phoenix Contact 1725669` (THT)
 3. `J_MOTOR1-J_MOTOR5` -> `JST B6B-ZR(LF)(SN)` (THT)
 
 ## Fabrication package
