@@ -139,7 +139,6 @@ def auto_boot_sequence():
             }, namespace='/movement')
         return
     
-    # [Removed] Step 3: Time sync (no longer needed — waypoints removed)
     time.sleep(0.3)  # Brief pause after CAN connection
 
     # Step 4: Discover joints via serial

@@ -718,8 +718,7 @@ $(document).ready(function() {
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
-    // [Removed] Time sync button handler (waypoint infrastructure removed)
-$("#sendCanEmergency").on('click', function() {
+    $("#sendCanEmergency").on('click', function() {
         sendCanEmergencyStop();
         // Also disable impedance and stop oscillation
         stopImpedanceOscillation();
@@ -2500,8 +2499,6 @@ function updateCanStatusUI(state = {}) {
         }
     }
 }
-
-// [Removed] sendCanTimeSyncCommand — time sync no longer needed (waypoint infrastructure removed)
 
 function sendCanEmergencyStop() {
     $.ajax({
@@ -6723,8 +6720,6 @@ function handleAutoStartResponse(message) {
     }
 }
 
-
-// [Removed] Trajectory Limits Panel — panel no longer in template (waypoint cleanup)
 
 // ============================================================================
 // SMART RECALC DETECTION — Badge update
