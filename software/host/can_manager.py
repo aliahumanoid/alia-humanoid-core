@@ -8,9 +8,8 @@ Provides a high-level API for:
 
 CAN ID allocation is documented in docs/CAN_SYSTEM_ARCHITECTURE.md.
 Key ranges:
-- 0x000-0x01A: System control + operational commands (Host → Controller)
+- 0x000-0x01D: System control + operational commands (Host → Controller)
 - 0x140-0x280: Motor commands (Controller → Motors, internal)
-- 0x380-0x39F: Multi-DOF impedance targets (Host → Controller, per joint)
 - 0x400-0x4E0: Status feedback (Controller → Host)
 """
 from __future__ import annotations

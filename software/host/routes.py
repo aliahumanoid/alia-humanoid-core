@@ -803,8 +803,7 @@ def register_routes(
                 "message": f"Unable to fetch status: {exc}"
             }), 500
 
-    # [Removed] Waypoint routes: /can/time_sync, /can/waypoint, /can/waypoint_batch
-    # Replaced by SET_IMPEDANCE via /api/impedance/target (Phase 7)
+    # Movement via SET_IMPEDANCE CAN frames (see /api/impedance/target)
 
     @app.route('/can/emergency_stop', methods=['POST'])
     def send_can_emergency_stop():

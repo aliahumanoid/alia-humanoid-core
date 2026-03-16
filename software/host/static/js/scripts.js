@@ -558,14 +558,6 @@ $(document).ready(function() {
         }
     });
 
-    // Waypoint batch progress tracking (debug, no UI for now)
-    socket.on('batch_progress', function(data) {
-        console.log(`[Batch ${data.batch_id}] ${data.joint}: ${data.sent}/${data.total} sent (${data.elapsed_ms}ms)`);
-    });
-    socket.on('batch_complete', function(data) {
-        console.log(`[Batch ${data.batch_id}] ${data.joint}: ${data.status} — ${data.sent}/${data.total} in ${data.elapsed_ms}ms`);
-    });
-
     // Listener for PID diagnostics data (target/error)
     // Temporary storage for combining pid_diag and pid_torque into single records
     let pendingPidRecord = null;
@@ -6792,7 +6784,7 @@ function updateRecalcBadge(jointId, dof, status, errA, errB) {
 let driftStatuses = {};
 
 /**
- * Update the drift indicator in the trajectory limits panel.
+ * Update the drift indicator badge in the joint panel.
  * Called when firmware sends EVT:OFFSET_DRIFT on HOLDING entry.
  */
 function updateDriftBadge(jointId, dof, status, errA, errB) {
