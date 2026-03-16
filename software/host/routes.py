@@ -843,7 +843,7 @@ def register_routes(
     @app.route('/can/encoder_stream/start', methods=['POST'])
     def start_encoder_stream():
         """
-        Start encoder streaming via CAN at 200Hz.
+        Start encoder streaming via CAN at 50Hz.
         
         The controller will send angle data on 0x410 until stopped.
         Use /can/encoder_stream/data to retrieve buffered data.

@@ -4719,7 +4719,7 @@ function fetchJointPhysicalLimits() {
 
 /**
  * Starts encoder test for specified joint type
- * Uses CAN streaming @ 200Hz when CAN is connected, otherwise uses Serial polling.
+ * Uses CAN streaming @ 50Hz when CAN is connected, otherwise uses Serial polling.
  * @param {string} jointType - KNEE, ANKLE, or HIP
  */
 function startEncoderTest(jointType) {

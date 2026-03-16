@@ -323,7 +323,7 @@ class CanManager:
 
     def start_encoder_stream(self, joint_name: Optional[str] = None) -> Dict[str, Any]:
         """
-        Start encoder streaming via CAN at 200Hz.
+        Start encoder streaming via CAN at 50Hz.
 
         Sends control command (0x003) to enable high-frequency angle data.
         Data arrives on 0x410 and is decoded in _handle_encoder_stream().
