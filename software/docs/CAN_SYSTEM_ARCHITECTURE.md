@@ -467,9 +467,9 @@ Byte 6-7:  uint16_t t_offset_ms (offset from batch anchor, 0-65535 ms)
 
 #### 4.2.8 SET_IMPEDANCE (ID: 0x01D) — Variable-Frame Impedance Target
 
-**Purpose**: Send a rolling-waypoint command (`goal + cruise speed + gains`) with 1-4 CAN frames.
+**Purpose**: Send a reactive impedance command (`goal + cruise speed + gains`) with 1-4 CAN frames.
 
-See also: [SET_IMPEDANCE_ROLLING_WAYPOINT.md](./SET_IMPEDANCE_ROLLING_WAYPOINT.md)
+See also: [SET_IMPEDANCE_OPERATIONAL_GUIDE.md](./SET_IMPEDANCE_OPERATIONAL_GUIDE.md)
 
 **Byte 1 encoding**: `[has_more:1][seq:3][dof:4]`
 - bit 7: `has_more` — 1 = more frames follow, 0 = last frame (triggers apply)
@@ -518,7 +518,7 @@ Frame 3 (seq=3, optional — feedforward):
 - `dq_target` = requested cruise speed magnitude
 - Firmware generates a local linear segment `q_ref, dq_ref` at control-loop rate
 - A new command overwrites the previous segment from the current local reference
-- No waypoint queue is kept in this mode
+- No command queue is kept in this mode
 - Outer and inner loops both use the existing incremental PID controllers
 
 **Safety guards**: `isSystemReadyForMovement()`, `isAngleInLimits()`, `isAngleInMappingLimits()`
@@ -598,7 +598,7 @@ Byte 7:    uint8_t   status bits
 - bit 2: watchdog warning (`1` once elapsed time exceeds 80% of timeout)
 
 This frame is intended for host-side monitoring and UI feedback. It is not required
-for the local rolling-waypoint controller to function.
+for the local rolling-segment controller to function.
 
 ### 4.3 CAN ID Allocation
 
@@ -1005,7 +1005,7 @@ Current architecture (2026-02-15): the Jetson drives CAN directly. No intermedia
 
 The Jetson sends CAN frames directly to joint controllers via SPI-connected MCP2515 expansion boards. No intermediate bare-metal MCU is required.
 
-**Rationale**: The SET_IMPEDANCE rolling-waypoint model (0x01D) is inherently jitter-tolerant — each command specifies a goal position and cruise speed, and the firmware generates smooth local segments at control-loop rate. Whether the sender is a browser, Python host, or Jetson under GPU load, the firmware produces deterministic motion.
+**Rationale**: The SET_IMPEDANCE rolling-segment model (0x01D) is inherently jitter-tolerant — each command specifies a goal position and cruise speed, and the firmware generates smooth local segments at control-loop rate. Whether the sender is a browser, Python host, or Jetson under GPU load, the firmware produces deterministic motion.
 
 A dedicated Pico RP2040 dispatcher would add hardware complexity (board, firmware, power, debug surface) without measurable benefit — determinism is already guaranteed at the receiver.
 
