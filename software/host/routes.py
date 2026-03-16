@@ -1785,9 +1785,6 @@ def register_routes(
                 "message": f"Error saving enriched data: {str(e)}"
             })
 
-    # [Removed] Sequence routes: /sequence/start, /sequence/stop, /sequence/data
-    # [Removed] Stream test routes: /stream_test/start, /stop, /status, /metrics, /events
-
     # ── Impedance API ─────────────────────────────────────────────────
 
     @app.route('/api/impedance/target', methods=['POST'])

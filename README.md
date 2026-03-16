@@ -127,7 +127,7 @@ We document **both successes and failures** transparently.
 - Peak torque matches biomechanics requirements
 - Auto joint mapping with linear equations
 - Simultaneous control of both DOF (coupled plantarflexion/dorsiflexion + inversion/eversion)
-- Waypoint streaming at 50-100 Hz with buffer/interpolation (documented in Joint Design Log #002)
+- Rolling impedance control via CAN with cascade PID (documented in Joint Design Log #002)
 
 ### ⚠️ Still Iterating
 
