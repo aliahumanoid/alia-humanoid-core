@@ -79,7 +79,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_LOAD_PID 0x012             // Load PID from flash (Host → Controller)
 #define CAN_ID_SET_PID 0x013              // Set inner PID params (Host → Controller, multi-frame)
 #define CAN_ID_SET_PID_OUTER 0x014        // Set outer PID params (Host → Controller, multi-frame)
-#define CAN_ID_CASCADE_SPEED_SCALING 0x015 // Set cascade speed scaling (Host → Controller)
+#define CAN_ID_FRICTION_FF 0x015           // Set friction feedforward params (Host → Controller)
 #define CAN_ID_START_AUTO_MAPPING 0x016   // Start auto-mapping (Host → Controller)
 #define CAN_ID_STOP_AUTO_MAPPING 0x017    // Stop auto-mapping (Host → Controller)
 #define CAN_ID_SAVE_LINEAR_EQ 0x018       // Save linear equations to flash (Host → Controller)
@@ -999,36 +999,22 @@ void pollHostCan() {
           }
         }
       }
-    } else if (rx_id == CAN_ID_CASCADE_SPEED_SCALING) {
-      // Cascade speed scaling: per-parameter frames
-      // Frame: [joint_id, param_id, 0, 0, float32_value(4)]
-      // param_id: 0=enabled, 1=min, 2=low, 3=high, 4=ema_en, 5=ema_alpha,
-      //           6=tau_en, 7=tau_high, 8=tau_speed, 9=jema_en, 10=jema_alpha,
-      //           11=jema_speed, 12=fric_en, 13=fric_torque, 14=fric_speed, 0xFF=apply (log)
+    } else if (rx_id == CAN_ID_FRICTION_FF) {
+      // Friction feedforward: per-parameter frames
+      // Frame: [joint_id, param_id, float32_value(4), 0, 0]
+      // param_id: 0=fric_en, 1=fric_torque, 2=fric_speed, 0xFF=apply (log)
       if (len >= 6 && buf[0] == ACTIVE_JOINT) {
         uint8_t param_id = buf[1];
         float val;
         memcpy(&val, &buf[2], sizeof(float));
         switch (param_id) {
-          case 0:  cascade_speed_scaling_enabled = (val != 0.0f); break;
-          case 1:  if (val >= 0.0f && val <= 1.0f) cascade_min_factor = val; break;
-          case 2:  if (val >= 0.0f && val <= 100.0f) cascade_speed_low = val; break;
-          case 3:  if (val >= 0.0f && val <= 100.0f) cascade_speed_high = val; break;
-          case 4:  motor_ema_enabled = (val != 0.0f); break;
-          case 5:  if (val >= 0.05f && val <= 1.0f) motor_ema_alpha = val; break;
-          case 6:  inner_tau_scaling_enabled = (val != 0.0f); break;
-          case 7:  if (val >= 0.005f && val <= 0.2f) inner_tau_high = val; break;
-          case 8:  if (val >= 0.1f && val <= 100.0f) inner_tau_speed_threshold = val; break;
-          case 9:  joint_ema_enabled = (val != 0.0f); break;
-          case 10: if (val >= 0.05f && val <= 1.0f) joint_ema_alpha = val; break;
-          case 11: if (val >= 0.1f && val <= 100.0f) joint_ema_speed_threshold = val; break;
-          case 12: friction_ff_enabled = (val != 0.0f); break;
-          case 13: if (val >= 0.0f && val <= 100.0f) friction_ff_torque = val; break;
-          case 14: if (val >= 0.1f && val <= 50.0f) friction_ff_speed_thresh = val; break;
+          case 0:  friction_ff_enabled = (val != 0.0f); break;
+          case 1:  if (val >= 0.0f && val <= 100.0f) friction_ff_torque = val; break;
+          case 2:  if (val >= 0.1f && val <= 50.0f) friction_ff_speed_thresh = val; break;
           case 0xFF:
-            LOG_C1_INFO("[CAN_HOST] CASCADE_SPEED_SCALING applied: en=" +
-                        String(cascade_speed_scaling_enabled) + " min=" + String(cascade_min_factor, 2) +
-                        " low=" + String(cascade_speed_low, 1) + " high=" + String(cascade_speed_high, 1));
+            LOG_C1_INFO("[CAN_HOST] FRICTION_FF applied: en=" +
+                        String(friction_ff_enabled) + " torque=" + String(friction_ff_torque, 1) +
+                        " speed=" + String(friction_ff_speed_thresh, 1));
             break;
         }
       }

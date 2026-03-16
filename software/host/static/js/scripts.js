@@ -1878,94 +1878,18 @@ function sendCommand(command, additionalData = {}) {
 }
 
 /**
- * Send velocity tuning parameters (stiffness scaling + EMA filter) to firmware.
+ * Send friction feedforward parameters to firmware.
  */
-function sendCascadeSpeedScaling() {
-    const enabled = document.getElementById('cascadeSpeedScalingEnabled').checked ? 1 : 0;
-    const minFactor = parseFloat(document.getElementById('cascadeMinFactor').value) || 0.3;
-    const speedLow = parseFloat(document.getElementById('cascadeSpeedLow').value) || 3.0;
-    const speedHigh = parseFloat(document.getElementById('cascadeSpeedHigh').value) || 15.0;
-    const emaEnabled = document.getElementById('motorEmaEnabled').checked ? 1 : 0;
-    const emaAlpha = parseFloat(document.getElementById('motorEmaAlpha').value) || 0.5;
-    const tauEnabled = document.getElementById('innerTauScalingEnabled').checked ? 1 : 0;
-    const tauHigh = parseFloat(document.getElementById('innerTauHigh').value) || 0.03;
-    const tauSpeed = parseFloat(document.getElementById('innerTauSpeedThreshold').value) || 10.0;
-    const jemaEnabled = document.getElementById('jointEmaEnabled').checked ? 1 : 0;
-    const jemaAlpha = parseFloat(document.getElementById('jointEmaAlpha').value) || 0.5;
-    const jemaSpeed = parseFloat(document.getElementById('jointEmaSpeedThreshold').value) || 15.0;
+function sendFrictionFeedforward() {
     const fricEnabled = document.getElementById('frictionFfEnabled').checked ? 1 : 0;
     const fricTorque = parseFloat(document.getElementById('frictionFfTorque').value) || 30.0;
     const fricSpeed = parseFloat(document.getElementById('frictionFfSpeed').value) || 3.0;
 
-    // Update display labels
-    const lowDisp = document.getElementById('cascadeSpeedLowDisplay');
-    const highDisp = document.getElementById('cascadeSpeedHighDisplay');
-    const minDisp = document.getElementById('cascadeMinFactorDisplay');
-    if (lowDisp) lowDisp.textContent = speedLow.toFixed(1);
-    if (highDisp) highDisp.textContent = speedHigh.toFixed(1);
-    if (minDisp) minDisp.textContent = minFactor.toFixed(2);
-
-    sendCommand('cascade-speed-scaling', {
-        enabled: enabled,
-        min_factor: minFactor,
-        speed_low: speedLow,
-        speed_high: speedHigh,
-        ema_enabled: emaEnabled,
-        ema_alpha: emaAlpha,
-        tau_enabled: tauEnabled,
-        tau_high: tauHigh,
-        tau_speed: tauSpeed,
-        jema_enabled: jemaEnabled,
-        jema_alpha: jemaAlpha,
-        jema_speed: jemaSpeed,
+    sendCommand('friction-feedforward', {
         fric_enabled: fricEnabled,
         fric_torque: fricTorque,
         fric_speed: fricSpeed
     });
-}
-
-/**
- * Update the EMA cutoff frequency display based on current alpha value.
- */
-function updateEmaCutoffDisplay() {
-    const alpha = parseFloat(document.getElementById('motorEmaAlpha').value) || 0.5;
-    const disp = document.getElementById('emaCutoffDisplay');
-    if (!disp) return;
-    if (alpha >= 1.0) {
-        disp.textContent = 'no filter';
-    } else {
-        // Approximate EMA cutoff: fc = alpha / (2*pi*Ts*(1-alpha)), Ts=0.002
-        const fc = alpha / (2 * Math.PI * 0.002 * (1 - alpha));
-        disp.textContent = `≈${Math.round(fc)} Hz cutoff`;
-    }
-}
-
-/**
- * Update the tau cutoff frequency display based on current tau_high value.
- */
-function updateTauCutoffDisplay() {
-    const tau = parseFloat(document.getElementById('innerTauHigh').value) || 0.03;
-    const disp = document.getElementById('tauCutoffDisplay');
-    if (!disp) return;
-    // Approximate cutoff: fc = 1 / (2*pi*tau)
-    const fc = 1.0 / (2 * Math.PI * tau);
-    disp.textContent = `(≈${Math.round(fc)} Hz)`;
-}
-
-/**
- * Update the joint EMA cutoff frequency display based on current alpha value.
- */
-function updateJointEmaCutoffDisplay() {
-    const alpha = parseFloat(document.getElementById('jointEmaAlpha').value) || 0.5;
-    const disp = document.getElementById('jointEmaCutoffDisplay');
-    if (!disp) return;
-    if (alpha >= 1.0) {
-        disp.textContent = '(no filter)';
-    } else {
-        // Approximate EMA cutoff: fc = alpha / (2*pi*Ts*(1-alpha)), Ts=0.002
-        const fc = alpha / (2 * Math.PI * 0.002 * (1 - alpha));
-        disp.textContent = `(≈${Math.round(fc)} Hz)`;
-    }
 }
 
 /**

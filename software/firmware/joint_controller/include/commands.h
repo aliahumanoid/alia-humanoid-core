@@ -168,8 +168,8 @@
 #define CMD_CAN_DIAG 55
 #endif
 
-#ifndef CMD_CASCADE_SPEED_SCALING
-#define CMD_CASCADE_SPEED_SCALING 56  // Set velocity-dependent stiffness scaling params
+#ifndef CMD_FRICTION_FF
+#define CMD_FRICTION_FF 56  // Set friction feedforward compensation params
 #endif
 
 // Reserved: 57-59 for future measurement commands
@@ -273,7 +273,7 @@
 #define SERIAL_CMD_STOP_TEST_ENCODER "STOP_TEST_ENCODER"
 #define SERIAL_CMD_GET_MOVEMENT_DATA "GET_MOVEMENT_DATA"
 #define SERIAL_CMD_CAN_DIAG "CAN_DIAG"
-#define SERIAL_CMD_CASCADE_SPEED_SCALING "CASCADE_SPEED_SCALING"
+#define SERIAL_CMD_FRICTION_FF "FRICTION_FF"
 
 // ============================================================================
 // PARAMETER NAMES
@@ -403,8 +403,8 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_GET_MOVEMENT_DATA;
   } else if (strcmp(cmd_name, SERIAL_CMD_CAN_DIAG) == 0) {
     return CMD_CAN_DIAG;
-  } else if (strcmp(cmd_name, SERIAL_CMD_CASCADE_SPEED_SCALING) == 0) {
-    return CMD_CASCADE_SPEED_SCALING;
+  } else if (strcmp(cmd_name, SERIAL_CMD_FRICTION_FF) == 0) {
+    return CMD_FRICTION_FF;
   }
 
   return CMD_UNKNOWN;

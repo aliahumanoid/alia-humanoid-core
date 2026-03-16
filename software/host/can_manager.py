@@ -692,30 +692,21 @@ class CanManager:
                              context=f"SET_PID_OUTER seq={seq} val={val:.4f}")
         return {"success": True}
 
-    def cascade_speed_scaling_via_can(self, joint_name: str,
-                                       params: Dict[str, float]) -> Dict[str, Any]:
-        """Send CASCADE_SPEED_SCALING parameters via CAN (0x015).
+    def friction_ff_via_can(self, joint_name: str,
+                            params: Dict[str, float]) -> Dict[str, Any]:
+        """Send FRICTION_FF parameters via CAN (0x015).
 
         Each parameter is sent as a separate frame: [joint_id, param_id, float32(4), 0, 0].
         A final frame with param_id=0xFF signals completion.
 
         Args:
             joint_name: Joint name
-            params: Dict of parameter name → value. Known keys:
-                    enabled, min, low, high, ema_en, ema_alpha,
-                    tau_en, tau_high, tau_speed, jema_en, jema_alpha,
-                    jema_speed, fric_en, fric_torque, fric_speed
+            params: Dict of parameter name → value. Keys: fric_en, fric_torque, fric_speed
         """
         self._ensure_connection()
         joint_id = JOINTS[joint_name]["id"]
 
-        param_map = {
-            "enabled": 0, "min": 1, "low": 2, "high": 3,
-            "ema_en": 4, "ema_alpha": 5,
-            "tau_en": 6, "tau_high": 7, "tau_speed": 8,
-            "jema_en": 9, "jema_alpha": 10, "jema_speed": 11,
-            "fric_en": 12, "fric_torque": 13, "fric_speed": 14,
-        }
+        param_map = {"fric_en": 0, "fric_torque": 1, "fric_speed": 2}
 
         first = True
         for name, value in params.items():
@@ -726,12 +717,12 @@ class CanManager:
                 first = False
                 payload = struct.pack("<BBf", joint_id, pid, float(value)) + bytes(2)
                 self._send_frame(0x015, payload,
-                                 context=f"CASCADE param={name} val={value}")
+                                 context=f"FRICTION_FF param={name} val={value}")
 
         # Send apply marker
         time.sleep(self._MULTI_FRAME_DELAY_S)
         payload = struct.pack("<BBf", joint_id, 0xFF, 0.0) + bytes(2)
-        self._send_frame(0x015, payload, context="CASCADE apply")
+        self._send_frame(0x015, payload, context="FRICTION_FF apply")
         return {"success": True}
 
     # ================================================================

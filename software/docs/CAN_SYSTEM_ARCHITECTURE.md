@@ -1415,7 +1415,7 @@ Each joint controller has two physically separate CAN buses:
 | 0x012 | Load PID from Flash | Host → Ctrl | High |
 | 0x013 | Set Inner PID (multi-frame, 4 seq) | Host → Ctrl | High |
 | 0x014 | Set Outer PID (multi-frame, 5 seq) | Host → Ctrl | High |
-| 0x015 | Cascade Speed Scaling | Host → Ctrl | High |
+| 0x015 | Friction Feedforward | Host → Ctrl | High |
 | 0x016 | Start Auto-Mapping (all DOFs) | Host → Ctrl | High |
 | 0x017 | Stop Auto-Mapping | Host → Ctrl | High |
 | 0x018 | Save Linear Eq to Flash | Host → Ctrl | High |

@@ -1549,51 +1549,24 @@ def register_routes(
                 # Query current auto-start setting
                 handler.send_new_command(joint, 'ALL', COMMANDS['GET_AUTO_START'])
                 message = "Auto-start status requested"
-            elif cmd == "cascade-speed-scaling":
-                # Cascade speed scaling is operational → CAN first, serial fallback
-                enabled = int(data.get('enabled', 1))
-                min_factor = float(data.get('min_factor', 0.3))
-                speed_low = float(data.get('speed_low', 3.0))
-                speed_high = float(data.get('speed_high', 15.0))
-                ema_enabled = int(data.get('ema_enabled', 1))
-                ema_alpha = float(data.get('ema_alpha', 0.5))
-                tau_enabled = int(data.get('tau_enabled', 0))
-                tau_high = float(data.get('tau_high', 0.03))
-                tau_speed = float(data.get('tau_speed', 10.0))
-                jema_enabled = int(data.get('jema_enabled', 0))
-                jema_alpha = float(data.get('jema_alpha', 0.5))
-                jema_speed = float(data.get('jema_speed', 15.0))
-                fric_enabled = int(data.get('fric_enabled', 0))
+            elif cmd == "friction-feedforward":
+                # Friction feedforward compensation → CAN first, serial fallback
+                fric_enabled = int(data.get('fric_enabled', 1))
                 fric_torque = float(data.get('fric_torque', 30.0))
                 fric_speed = float(data.get('fric_speed', 3.0))
                 if can_manager and can_manager.is_connected():
-                    css_params = {
-                        'enabled': float(enabled),
-                        'min': min_factor,
-                        'low': speed_low,
-                        'high': speed_high,
-                        'ema_en': float(ema_enabled),
-                        'ema_alpha': ema_alpha,
-                        'tau_en': float(tau_enabled),
-                        'tau_high': tau_high,
-                        'tau_speed': tau_speed,
-                        'jema_en': float(jema_enabled),
-                        'jema_alpha': jema_alpha,
-                        'jema_speed': jema_speed,
+                    fric_params = {
                         'fric_en': float(fric_enabled),
                         'fric_torque': fric_torque,
                         'fric_speed': fric_speed,
                     }
-                    can_manager.cascade_speed_scaling_via_can(joint, css_params)
-                    message = f"Cascade speed scaling set via CAN for {joint}"
+                    can_manager.friction_ff_via_can(joint, fric_params)
+                    message = f"Friction feedforward set via CAN for {joint}"
                 else:
-                    params = (f"{COMMANDS['CASCADE_SPEED_SCALING']}:ENABLED={enabled}:MIN={min_factor}"
-                              f":LOW={speed_low}:HIGH={speed_high}:EMA_EN={ema_enabled}:EMA_ALPHA={ema_alpha}"
-                              f":TAU_EN={tau_enabled}:TAU_HIGH={tau_high}:TAU_SPEED={tau_speed}"
-                              f":JEMA_EN={jema_enabled}:JEMA_ALPHA={jema_alpha}:JEMA_SPEED={jema_speed}"
-                              f":FRIC_EN={fric_enabled}:FRIC_TORQUE={fric_torque}:FRIC_SPEED={fric_speed}")
+                    params = (f"{COMMANDS['FRICTION_FF']}:FRIC_EN={fric_enabled}"
+                              f":FRIC_TORQUE={fric_torque}:FRIC_SPEED={fric_speed}")
                     handler.send_new_command(joint, 'ALL', params)
-                    message = (f"Cascade speed scaling set via serial for {joint}")
+                    message = f"Friction feedforward set via serial for {joint}"
             elif cmd == "select-joint":
                 # When selecting a new joint, set as active and load PIDs
                 joint_id = data.get('joint', 'KNEE_LEFT')

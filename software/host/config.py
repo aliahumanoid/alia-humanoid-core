@@ -132,7 +132,7 @@ COMMANDS = {
     'SET_AUTO_START': 'SET_AUTO_START',      # Enable/disable auto-start on boot
     'GET_AUTO_START': 'GET_AUTO_START',       # Query auto-start setting
     'CHECK_OFFSETS': 'CHECK_OFFSETS',          # Validate saved motor offsets (smart recalc detection)
-    'CASCADE_SPEED_SCALING': 'CASCADE_SPEED_SCALING',  # Velocity-dependent stiffness scaling
+    'FRICTION_FF': 'FRICTION_FF',  # Friction feedforward compensation
     'GET_ENCODER_OFFSETS': 'GET_ENCODER_OFFSETS',      # Query encoder offsets for cross-validation
 }
 

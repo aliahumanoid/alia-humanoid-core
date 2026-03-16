@@ -1208,75 +1208,11 @@ void core0_main_loop() {
                       break;
                     }
 
-                    case CMD_CASCADE_SPEED_SCALING: {
-                      // Set velocity-dependent stiffness scaling parameters
-                      // Format: JOINT:DOF:CASCADE_SPEED_SCALING:ENABLED=1:MIN=0.3:LOW=3.0:HIGH=15.0
+                    case CMD_FRICTION_FF: {
+                      // Set friction feedforward parameters
+                      // Format: JOINT:DOF:FRICTION_FF:FRIC_EN=1:FRIC_TORQUE=30:FRIC_SPEED=3.0
                       const char* cmd_str = parsed_cmd.original_command;
 
-                      char *en_str = strstr(cmd_str, "ENABLED=");
-                      if (en_str != nullptr) {
-                        cascade_speed_scaling_enabled = (atoi(en_str + 8) != 0);
-                      }
-                      char *min_str = strstr(cmd_str, "MIN=");
-                      if (min_str != nullptr) {
-                        float val = atof(min_str + 4);
-                        if (val >= 0.0f && val <= 1.0f) cascade_min_factor = val;
-                      }
-                      char *low_str = strstr(cmd_str, "LOW=");
-                      if (low_str != nullptr) {
-                        float val = atof(low_str + 4);
-                        if (val >= 0.0f && val <= 100.0f) cascade_speed_low = val;
-                      }
-                      char *high_str = strstr(cmd_str, "HIGH=");
-                      if (high_str != nullptr) {
-                        float val = atof(high_str + 5);
-                        if (val >= 0.0f && val <= 100.0f) cascade_speed_high = val;
-                      }
-
-                      // EMA filter parameters (optional, in same command)
-                      char *ema_en_str = strstr(cmd_str, "EMA_EN=");
-                      if (ema_en_str != nullptr) {
-                        motor_ema_enabled = (atoi(ema_en_str + 7) != 0);
-                      }
-                      char *ema_a_str = strstr(cmd_str, "EMA_ALPHA=");
-                      if (ema_a_str != nullptr) {
-                        float val = atof(ema_a_str + 10);
-                        if (val >= 0.05f && val <= 1.0f) motor_ema_alpha = val;
-                      }
-
-                      // Inner PID tau scaling parameters (optional, in same command)
-                      char *tau_en_str = strstr(cmd_str, "TAU_EN=");
-                      if (tau_en_str != nullptr) {
-                        inner_tau_scaling_enabled = (atoi(tau_en_str + 7) != 0);
-                      }
-                      char *tau_h_str = strstr(cmd_str, "TAU_HIGH=");
-                      if (tau_h_str != nullptr) {
-                        float val = atof(tau_h_str + 9);
-                        if (val >= 0.005f && val <= 0.2f) inner_tau_high = val;
-                      }
-                      char *tau_s_str = strstr(cmd_str, "TAU_SPEED=");
-                      if (tau_s_str != nullptr) {
-                        float val = atof(tau_s_str + 10);
-                        if (val >= 0.1f && val <= 100.0f) inner_tau_speed_threshold = val;
-                      }
-
-                      // Joint angle EMA filter parameters (optional, in same command)
-                      char *jema_en_str = strstr(cmd_str, "JEMA_EN=");
-                      if (jema_en_str != nullptr) {
-                        joint_ema_enabled = (atoi(jema_en_str + 8) != 0);
-                      }
-                      char *jema_a_str = strstr(cmd_str, "JEMA_ALPHA=");
-                      if (jema_a_str != nullptr) {
-                        float val = atof(jema_a_str + 11);
-                        if (val >= 0.05f && val <= 1.0f) joint_ema_alpha = val;
-                      }
-                      char *jema_s_str = strstr(cmd_str, "JEMA_SPEED=");
-                      if (jema_s_str != nullptr) {
-                        float val = atof(jema_s_str + 11);
-                        if (val >= 0.1f && val <= 100.0f) joint_ema_speed_threshold = val;
-                      }
-
-                      // Friction feedforward parameters (optional, in same command)
                       char *fric_en_str = strstr(cmd_str, "FRIC_EN=");
                       if (fric_en_str != nullptr) {
                         friction_ff_enabled = (atoi(fric_en_str + 8) != 0);
@@ -1292,37 +1228,13 @@ void core0_main_loop() {
                         if (val >= 0.1f && val <= 50.0f) friction_ff_speed_thresh = val;
                       }
 
-                      SERIAL_COM_LN("RSP:CASCADE_SPEED_SCALING:ENABLED=" +
-                                     String(cascade_speed_scaling_enabled ? 1 : 0) +
-                                     ":MIN=" + String(cascade_min_factor, 2) +
-                                     ":LOW=" + String(cascade_speed_low, 1) +
-                                     ":HIGH=" + String(cascade_speed_high, 1) +
-                                     ":EMA_EN=" + String(motor_ema_enabled ? 1 : 0) +
-                                     ":EMA_ALPHA=" + String(motor_ema_alpha, 2) +
-                                     ":TAU_EN=" + String(inner_tau_scaling_enabled ? 1 : 0) +
-                                     ":TAU_HIGH=" + String(inner_tau_high, 4) +
-                                     ":TAU_SPEED=" + String(inner_tau_speed_threshold, 1) +
-                                     ":JEMA_EN=" + String(joint_ema_enabled ? 1 : 0) +
-                                     ":JEMA_ALPHA=" + String(joint_ema_alpha, 2) +
-                                     ":JEMA_SPEED=" + String(joint_ema_speed_threshold, 1) +
-                                     ":FRIC_EN=" + String(friction_ff_enabled ? 1 : 0) +
+                      SERIAL_COM_LN("RSP:FRICTION_FF:FRIC_EN=" +
+                                     String(friction_ff_enabled ? 1 : 0) +
                                      ":FRIC_TORQUE=" + String(friction_ff_torque, 1) +
                                      ":FRIC_SPEED=" + String(friction_ff_speed_thresh, 1));
-                      LOG_INFO("[CASCADE] Speed scaling: en=" + String(cascade_speed_scaling_enabled) +
-                               " min=" + String(cascade_min_factor, 2) +
-                               " low=" + String(cascade_speed_low, 1) +
-                               " high=" + String(cascade_speed_high, 1) +
-                               " ema_en=" + String(motor_ema_enabled) +
-                               " ema_a=" + String(motor_ema_alpha, 2) +
-                               " tau_en=" + String(inner_tau_scaling_enabled) +
-                               " tau_h=" + String(inner_tau_high, 4) +
-                               " tau_spd=" + String(inner_tau_speed_threshold, 1) +
-                               " jema_en=" + String(joint_ema_enabled) +
-                               " jema_a=" + String(joint_ema_alpha, 2) +
-                               " jema_spd=" + String(joint_ema_speed_threshold, 1) +
-                               " fric_en=" + String(friction_ff_enabled) +
-                               " fric_t=" + String(friction_ff_torque, 1) +
-                               " fric_spd=" + String(friction_ff_speed_thresh, 1));
+                      LOG_INFO("[FRICTION_FF] en=" + String(friction_ff_enabled) +
+                               " torque=" + String(friction_ff_torque, 1) +
+                               " speed=" + String(friction_ff_speed_thresh, 1));
                       handled_on_core0 = true;
                       break;
                     }

@@ -267,26 +267,6 @@ extern volatile uint16_t soft_hold_ramp_down_ms;         // Ramp time entering c
 extern volatile uint16_t soft_hold_ramp_up_ms;           // Ramp time leaving compliance
 extern volatile bool soft_hold_enabled;                  // Enable soft hold
 
-// Velocity-dependent stiffness scaling (reduces co-contraction at low speeds)
-extern volatile bool cascade_speed_scaling_enabled;      // Enable velocity-based stiffness scaling
-extern volatile float cascade_min_factor;                // Minimum stiffness factor at low speed (0.0-1.0)
-extern volatile float cascade_speed_low;                 // Below this speed (deg/s): use min factor
-extern volatile float cascade_speed_high;                // Above this speed (deg/s): full stiffness
-
-// Motor angle EMA filter (smooths encoder noise before inner PID)
-extern volatile bool motor_ema_enabled;                  // Enable EMA filter on motor angles
-extern volatile float motor_ema_alpha;                   // EMA alpha (1.0=no filter, 0.1=heavy filter)
-
-// Inner PID tau scaling (increases D-term filter at low speeds to reduce stick-slip)
-extern volatile bool inner_tau_scaling_enabled;           // Enable velocity-dependent tau
-extern volatile float inner_tau_high;                     // Tau at low speed (seconds, e.g. 0.03)
-extern volatile float inner_tau_speed_threshold;          // Below this speed (deg/s): use tau_high
-
-// Joint angle EMA filter (smooths joint encoder before outer PID at low speeds)
-extern volatile bool joint_ema_enabled;                   // Enable joint angle EMA
-extern volatile float joint_ema_alpha;                    // EMA alpha (1.0=no filter, 0.1=heavy)
-extern volatile float joint_ema_speed_threshold;          // Above this speed (deg/s): passthrough
-
 // Friction feedforward compensation (overcomes static friction at low speeds)
 // At low velocity, tendon systems exhibit stick-slip: the joint stalls until PID
 // accumulates enough error to overcome static friction, then snaps forward.

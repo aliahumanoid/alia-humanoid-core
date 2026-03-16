@@ -134,15 +134,14 @@ units required to initiate motion with no load). Under tendon load, may need hig
 
 ### Runtime Configuration
 
-Parameters are set via the `CMD:CASCADE_SPEED_SCALING` serial command or the
-**Velocity Tuning** panel in the web UI (red "Friction Feedforward" section):
+Parameters are set via the `CMD:FRICTION_FF` serial command or the
+**Friction Feedforward** panel in the web UI:
 
 ```
-CMD:CASCADE_SPEED_SCALING FRIC_EN=1 FRIC_TORQUE=30 FRIC_SPEED=3.0
+CMD:FRICTION_FF FRIC_EN=1 FRIC_TORQUE=30 FRIC_SPEED=3.0
 ```
 
-All three parameters are optional and can be combined with other cascade parameters
-(EMA, TAU, JEMA, etc.) in the same command.
+All three parameters are optional in the same command.
 
 ### Diagnostics
 

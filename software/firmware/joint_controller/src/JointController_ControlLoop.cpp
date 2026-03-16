@@ -41,13 +41,6 @@ static float delta_theta[MAX_DOFS] = {0};           // Current outer PID output 
 static float delta_theta_prev[MAX_DOFS] = {0};      // Previous outer PID output (for interpolation)
 static float velocity_filtered[MAX_DOFS] = {0};     // Filtered joint velocity (deg/s)
 static float expected_velocity_cache[MAX_DOFS] = {0}; // Cached expected velocity for inner loop stiffness scaling
-static float theta_A_ema[MAX_DOFS] = {0};            // EMA-filtered motor A angle
-static float theta_B_ema[MAX_DOFS] = {0};            // EMA-filtered motor B angle
-static bool ema_initialized[MAX_DOFS] = {false};     // EMA initialization flag
-static float inner_tau_default[MAX_DOFS] = {0};       // Original PID tau per DOF (captured at first use)
-static bool inner_tau_default_captured[MAX_DOFS] = {false};
-static float joint_ema_value[MAX_DOFS] = {0};          // EMA-filtered joint angle
-static bool joint_ema_initialized[MAX_DOFS] = {false}; // Joint EMA initialization flag
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
@@ -280,9 +273,6 @@ bool JointController::executeControlLoop() {
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
       expected_velocity_cache[dof] = 0.0f;
-      ema_initialized[dof] = false;
-      inner_tau_default_captured[dof] = false;
-      joint_ema_initialized[dof] = false;
       // Reset shadow mode state
       wp_rev_track_init[dof] = false;
       wp_prev_torque_A[dof] = 0;
@@ -457,26 +447,6 @@ bool JointController::executeControlLoop() {
         velocity_filtered[dof] = (1.0f - alpha) * velocity_filtered[dof] + alpha * actual_velocity;
       }
       // Note: if invalid, velocity_filtered[dof] retains its previous value
-
-      // === JOINT ANGLE EMA FILTER (before outer PID) ===
-      // At low speeds, smooth joint encoder to prevent outer PID from amplifying micro-variations.
-      // Disabled at high speed to preserve tracking responsiveness.
-      if (joint_ema_enabled && joint_ema_alpha < 1.0f) {
-        float speed = fabs(velocity_filtered[dof]);
-        if (speed <= joint_ema_speed_threshold) {
-          if (!joint_ema_initialized[dof]) {
-            joint_ema_value[dof] = q_curr;
-            joint_ema_initialized[dof] = true;
-          } else {
-            float a = joint_ema_alpha;
-            joint_ema_value[dof] = a * q_curr + (1.0f - a) * joint_ema_value[dof];
-          }
-          q_curr = joint_ema_value[dof];
-        } else {
-          // High speed: passthrough, but keep EMA state updated for smooth transition
-          joint_ema_value[dof] = q_curr;
-        }
-      }
 
       bool expected_holding = fabs(expected_velocity_deg_s) <= expected_velocity_deadband_deg_s;
       bool compliance_should_activate = false;
@@ -1073,31 +1043,11 @@ bool JointController::executeControlLoop() {
       delta_theta_smooth = delta_theta_prev[dof] + alpha * (delta_theta[dof] - delta_theta_prev[dof]);
     }
     
-    // === VELOCITY-DEPENDENT STIFFNESS SCALING ===
-    // At low speeds, reduce co-contraction (stiffness) to avoid tendon-fighting oscillations.
-    // delta_theta (tracking) stays at full cascade_influence for position accuracy.
-    // NOTE: In impedance mode, stiffness is set directly by Jetson — skip auto-scaling.
-    float stiffness_eff = stiffness_ref;
-    if (cascade_speed_scaling_enabled) {
-      float speed = fabs(expected_velocity_cache[dof]);
-      float stiffness_factor;
-      if (speed <= cascade_speed_low) {
-        stiffness_factor = cascade_min_factor;
-      } else if (speed >= cascade_speed_high) {
-        stiffness_factor = 1.0f;
-      } else {
-        stiffness_factor = cascade_min_factor + (1.0f - cascade_min_factor) *
-                          (speed - cascade_speed_low) / (cascade_speed_high - cascade_speed_low);
-      }
-      stiffness_eff = stiffness_ref * stiffness_factor;
-    }
-
     // Compute motor references using cascade control formula
-    // delta_theta at full cascade, stiffness scaled by velocity
     float theta_A_ref = theta_0_agonist_motor +
-                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_eff);
+                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref);
     float theta_B_ref = theta_0_antagonist_motor +
-                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_eff);
+                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
 
     // === ANTI-SLACK CLAMP (active during compliance) ===
     if (anti_slack_enabled && compliance_state[dof].compliance_active) {
@@ -1238,41 +1188,9 @@ bool JointController::executeControlLoop() {
     cached_motor_angles.valid[dof] = true;
     cached_motor_angles.last_update_ms = millis();
 
-    // === EMA FILTER ON MOTOR ANGLES ===
-    // Smooth encoder noise before inner PID to reduce derivative-amplified oscillations.
-    // alpha=1.0 → passthrough, alpha=0.5 → moderate, alpha=0.1 → heavy filtering.
+    // Motor angles pass through directly to inner PID (no filtering)
     float theta_A_pid = theta_A_curr;
     float theta_B_pid = theta_B_curr;
-    if (motor_ema_enabled && motor_ema_alpha < 1.0f) {
-      float a = motor_ema_alpha;
-      if (!ema_initialized[dof]) {
-        theta_A_ema[dof] = theta_A_curr;
-        theta_B_ema[dof] = theta_B_curr;
-        ema_initialized[dof] = true;
-      } else {
-        theta_A_ema[dof] = a * theta_A_curr + (1.0f - a) * theta_A_ema[dof];
-        theta_B_ema[dof] = a * theta_B_curr + (1.0f - a) * theta_B_ema[dof];
-      }
-      theta_A_pid = theta_A_ema[dof];
-      theta_B_pid = theta_B_ema[dof];
-    }
-
-    // === VELOCITY-DEPENDENT TAU SCALING ===
-    // At low speeds, increase D-term filter tau to reduce stick-slip oscillations.
-    // The filter adapts smoothly (no state reset) via PID::setTau().
-    if (inner_tau_scaling_enabled) {
-      // Capture original tau on first use (from PID config / flash)
-      if (!inner_tau_default_captured[dof]) {
-        inner_tau_default[dof] = pid_agonist->getTau();
-        inner_tau_default_captured[dof] = true;
-      }
-      float speed = fabs(expected_velocity_cache[dof]);
-      float tau_target = (speed <= inner_tau_speed_threshold) ? inner_tau_high : inner_tau_default[dof];
-      if (tau_target != pid_agonist->getTau()) {
-        pid_agonist->setTau(tau_target);
-        pid_antagonist->setTau(tau_target);
-      }
-    }
 
     // === BUMPLESS TRANSFER for inner PIDs on IDLE → MOVING ===
     // Initialize inner PID state at current motor positions so the first control()
