@@ -186,7 +186,7 @@ volatile bool metrics_tracking_enabled = true;  // Enable by default
 // Global variable for auto‑mapping state
 AutoMappingState_t auto_mapping_state = {0};
 
-// DOF control state (replaces waypoint_buffer state machine)
+// DOF control state
 volatile DofState dof_state[MAX_DOFS] = {DofState::IDLE, DofState::IDLE, DofState::IDLE};
 volatile float dof_hold_angle[MAX_DOFS] = {0};
 volatile uint32_t dof_hold_time[MAX_DOFS] = {0};

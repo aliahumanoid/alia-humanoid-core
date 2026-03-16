@@ -115,7 +115,7 @@ static void applyImpedanceInnerOverrides(uint8_t dof, PID *pid_agonist, PID *pid
 // by discontinuous reference changes while maintaining cascade control benefits.
 
 #if CONTROLLER_DEBUG
-struct WaypointMicroProfile {
+struct LoopMicroProfile {
   uint32_t accum_dof_us = 0;
   uint32_t accum_outer_us = 0;
   uint32_t accum_eq_us = 0;
@@ -134,9 +134,9 @@ struct WaypointMicroProfile {
   uint32_t safety_samples = 0;
   uint32_t last_log_ms = 0;
 };
-static WaypointMicroProfile wp_micro_profile;
-static const uint32_t WP_MICRO_LOG_INTERVAL_MS = 2000;
-static const uint16_t WP_MICRO_MIN_SAMPLES = 50;
+static LoopMicroProfile loop_micro_profile;
+static const uint32_t LOOP_MICRO_LOG_INTERVAL_MS = 2000;
+static const uint16_t LOOP_MICRO_MIN_SAMPLES = 50;
 #endif
 
 // Safety check counter (for periodic motor checks in HOLDING mode)
@@ -216,7 +216,7 @@ static uint32_t profiling_start_us = 0;       // Start timestamp for current cyc
  * @param avg_us Output: average cycle time in µs
  * @param max_us Output: max cycle time since last reset in µs
  */
-void getWaypointProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& max_us) {
+void getLoopProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& max_us) {
   last_us = cycle_time_us_last;
   avg_us = cycle_time_us_avg;
   max_us = cycle_time_us_max;
@@ -534,7 +534,7 @@ bool JointController::executeControlLoop() {
                      " STALL->HOLDING: trajectory aborted, holding at " + String(q_curr, 2) + "deg");
             
             // Notify host that trajectory was aborted due to stall
-            // Host should stop sending waypoints and handle the situation
+            // Host should stop sending targets and handle the situation
             SERIAL_C1_COM_LN("EVT:STALL_ABORT:DOF=" + String(dof) + ":ANGLE=" + String(q_curr, 2));
           }
         }
@@ -701,7 +701,7 @@ bool JointController::executeControlLoop() {
       // - MOVING mode: check every outer loop cycle (default 500 Hz)
       // - HOLDING mode: check immediately on transition, then every 10 cycles (period depends on outer loop rate)
       
-      // Determine current state based on waypoint buffer
+      // Determine current state based on impedance target
       bool is_holding = !is_moving;
       
       // Detect MOVING → HOLDING transition by comparing with previous cycle's state
@@ -796,17 +796,17 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
         {
           uint32_t safety_dt = time_us_32() - safety_start_us;
-          wp_micro_profile.accum_safety_us += safety_dt;
-          wp_micro_profile.safety_samples++;
-          if (safety_dt > wp_micro_profile.max_safety_us) {
-            wp_micro_profile.max_safety_us = safety_dt;
+          loop_micro_profile.accum_safety_us += safety_dt;
+          loop_micro_profile.safety_samples++;
+          if (safety_dt > loop_micro_profile.max_safety_us) {
+            loop_micro_profile.max_safety_us = safety_dt;
           }
         }
 #endif
         if (!safety_ok) {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
-          LOG_C1_ERROR("[Waypoint Safety] MOVEMENT STOPPED: " + safety_message);
+          LOG_C1_ERROR("[Safety] MOVEMENT STOPPED: " + safety_message);
 
           float hold_ref = dof_data.valid[dof] ? q_curr : getImpedanceHoldReference(dof);
           if (impedance_active) {
@@ -866,7 +866,7 @@ bool JointController::executeControlLoop() {
         uint32_t now = millis();
         
         // Only update metrics after movement has actually started
-        // (movement_start_ms is the first waypoint's t_arrival, which may be in the future)
+        // (movement_start_ms is the first target's t_arrival, which may be in the future)
         if (now >= mt.movement_start_ms) {
           float abs_error = fabs(error);
           uint32_t elapsed_ms = now - mt.movement_start_ms;
@@ -928,9 +928,9 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
       {
         uint32_t outer_dt = time_us_32() - outer_start_us;
-        wp_micro_profile.accum_outer_us += outer_dt;
-        if (outer_dt > wp_micro_profile.max_outer_us) {
-          wp_micro_profile.max_outer_us = outer_dt;
+        loop_micro_profile.accum_outer_us += outer_dt;
+        if (outer_dt > loop_micro_profile.max_outer_us) {
+          loop_micro_profile.max_outer_us = outer_dt;
         }
       }
 #endif
@@ -1002,9 +1002,9 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
     {
       uint32_t eq_dt = time_us_32() - eq_start_us;
-      wp_micro_profile.accum_eq_us += eq_dt;
-      if (eq_dt > wp_micro_profile.max_eq_us) {
-        wp_micro_profile.max_eq_us = eq_dt;
+      loop_micro_profile.accum_eq_us += eq_dt;
+      if (eq_dt > loop_micro_profile.max_eq_us) {
+        loop_micro_profile.max_eq_us = eq_dt;
       }
     }
 #endif
@@ -1104,9 +1104,9 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
     {
       uint32_t can_dt = time_us_32() - can_start_us;
-      wp_micro_profile.accum_can_us += can_dt;
-      if (can_dt > wp_micro_profile.max_can_us) {
-        wp_micro_profile.max_can_us = can_dt;
+      loop_micro_profile.accum_can_us += can_dt;
+      if (can_dt > loop_micro_profile.max_can_us) {
+        loop_micro_profile.max_can_us = can_dt;
       }
     }
 #endif
@@ -1133,7 +1133,7 @@ bool JointController::executeControlLoop() {
     // Check for sudden large jumps in motor angle (possible CAN corruption)
     // Uses time-window based detection via shared CANErrorTracker (main_common.h)
     // Variables are at file scope (wp_last_theta_A/B, wp_first_read, wp_canErrorTracker)
-    // so they can be reset when a new waypoint sequence starts
+    // so they can be reset when a new impedance sequence starts
 
     if (!wp_first_read[dof]) {
       float jump_A = fabs(theta_A_curr - wp_last_theta_A[dof]);
@@ -1144,7 +1144,7 @@ bool JointController::executeControlLoop() {
         wp_canErrorTracker.recordError(dof);
         uint8_t recent_errors = wp_canErrorTracker.countRecentErrors(dof);
 
-        LOG_C1_ERROR("[Waypoint DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
+        LOG_C1_ERROR("[DIAG] DOF " + String(dof) + " MOTOR ANGLE JUMP (" +
                   String(recent_errors) + " errors in " + String(can_error_window_ms) + "ms)!");
         LOG_C1_ERROR("  Agonist: " + String(wp_last_theta_A[dof], 2) + " → " + String(theta_A_curr, 2) +
                   " (jump=" + String(jump_A, 2) + "°)");
@@ -1254,7 +1254,7 @@ bool JointController::executeControlLoop() {
       uff_B -= tau_ff;
     }
 
-    // === INNER LOOP: incremental PID in both waypoint and impedance modes ===
+    // === INNER LOOP: incremental PID for impedance control ===
 #if CONTROLLER_DEBUG
     uint32_t pid_start_us = time_us_32();
 #endif
@@ -1279,9 +1279,9 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
     {
       uint32_t pid_dt = time_us_32() - pid_start_us;
-      wp_micro_profile.accum_pid_us += pid_dt;
-      if (pid_dt > wp_micro_profile.max_pid_us) {
-        wp_micro_profile.max_pid_us = pid_dt;
+      loop_micro_profile.accum_pid_us += pid_dt;
+      if (pid_dt > loop_micro_profile.max_pid_us) {
+        loop_micro_profile.max_pid_us = pid_dt;
       }
     }
 #endif
@@ -1380,7 +1380,7 @@ bool JointController::executeControlLoop() {
         fabs(command_B) >= max_torque_B_effective * 0.95f) {
       static uint32_t last_torque_warn = 0;
       if (millis() - last_torque_warn > 500) { // Log max every 500ms
-        LOG_C1_WARN("[Waypoint DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
+        LOG_C1_WARN("[DIAG] DOF " + String(dof) + " HIGH TORQUE: A=" + String(command_A, 0) + 
                  " B=" + String(command_B, 0) + " (max=" + String(max_torque_A_effective, 0) + ")");
         LOG_C1_WARN("  refs: A=" + String(theta_A_ref, 2) + " B=" + String(theta_B_ref, 2));
         LOG_C1_WARN("  curr: A=" + String(theta_A_curr, 2) + " B=" + String(theta_B_curr, 2));
@@ -1445,9 +1445,9 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
     {
       uint32_t torque_dt = time_us_32() - torque_start_us;
-      wp_micro_profile.accum_torque_us += torque_dt;
-      if (torque_dt > wp_micro_profile.max_torque_us) {
-        wp_micro_profile.max_torque_us = torque_dt;
+      loop_micro_profile.accum_torque_us += torque_dt;
+      if (torque_dt > loop_micro_profile.max_torque_us) {
+        loop_micro_profile.max_torque_us = torque_dt;
       }
     }
 #endif
@@ -1483,11 +1483,11 @@ bool JointController::executeControlLoop() {
 #if CONTROLLER_DEBUG
     {
       uint32_t dof_dt = time_us_32() - dof_start_us;
-      wp_micro_profile.accum_dof_us += dof_dt;
-      if (dof_dt > wp_micro_profile.max_dof_us) {
-        wp_micro_profile.max_dof_us = dof_dt;
+      loop_micro_profile.accum_dof_us += dof_dt;
+      if (dof_dt > loop_micro_profile.max_dof_us) {
+        loop_micro_profile.max_dof_us = dof_dt;
       }
-      wp_micro_profile.samples++;
+      loop_micro_profile.samples++;
     }
 #endif
   }
@@ -1537,50 +1537,50 @@ bool JointController::executeControlLoop() {
   }
   
 #if CONTROLLER_DEBUG
-  if (wp_micro_profile.samples >= WP_MICRO_MIN_SAMPLES) {
+  if (loop_micro_profile.samples >= LOOP_MICRO_MIN_SAMPLES) {
     uint32_t now_ms = millis();
-    if (wp_micro_profile.last_log_ms == 0) {
-      wp_micro_profile.last_log_ms = now_ms;
+    if (loop_micro_profile.last_log_ms == 0) {
+      loop_micro_profile.last_log_ms = now_ms;
     }
-    if (now_ms - wp_micro_profile.last_log_ms >= WP_MICRO_LOG_INTERVAL_MS) {
+    if (now_ms - loop_micro_profile.last_log_ms >= LOOP_MICRO_LOG_INTERVAL_MS) {
       // Pre-compute averages as integers (avoids snprintf %f which uses ~1KB stack on ARM)
-      uint32_t n = wp_micro_profile.samples;
-      uint32_t sn = wp_micro_profile.safety_samples;
-      uint32_t avg_dof = wp_micro_profile.accum_dof_us / n;
-      uint32_t avg_outer = wp_micro_profile.accum_outer_us / n;
-      uint32_t avg_eq = wp_micro_profile.accum_eq_us / n;
-      uint32_t avg_can = wp_micro_profile.accum_can_us / n;
-      uint32_t avg_pid = wp_micro_profile.accum_pid_us / n;
-      uint32_t avg_torque = wp_micro_profile.accum_torque_us / n;
-      uint32_t avg_safety = (sn > 0) ? wp_micro_profile.accum_safety_us / sn : 0;
+      uint32_t n = loop_micro_profile.samples;
+      uint32_t sn = loop_micro_profile.safety_samples;
+      uint32_t avg_dof = loop_micro_profile.accum_dof_us / n;
+      uint32_t avg_outer = loop_micro_profile.accum_outer_us / n;
+      uint32_t avg_eq = loop_micro_profile.accum_eq_us / n;
+      uint32_t avg_can = loop_micro_profile.accum_can_us / n;
+      uint32_t avg_pid = loop_micro_profile.accum_pid_us / n;
+      uint32_t avg_torque = loop_micro_profile.accum_torque_us / n;
+      uint32_t avg_safety = (sn > 0) ? loop_micro_profile.accum_safety_us / sn : 0;
       // Split into 2 messages to keep buffer small
       LOG_C1_INFO_F("[WP PROF] avg_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu torq=%lu safety=%lu",
                  avg_dof, avg_outer, avg_eq, avg_can, avg_pid, avg_torque, avg_safety);
       LOG_C1_INFO_F("[WP PROF] max_us dof=%lu outer=%lu eq=%lu can=%lu pid=%lu torq=%lu safety=%lu",
-                 (unsigned long)wp_micro_profile.max_dof_us,
-                 (unsigned long)wp_micro_profile.max_outer_us,
-                 (unsigned long)wp_micro_profile.max_eq_us,
-                 (unsigned long)wp_micro_profile.max_can_us,
-                 (unsigned long)wp_micro_profile.max_pid_us,
-                 (unsigned long)wp_micro_profile.max_torque_us,
-                 (unsigned long)wp_micro_profile.max_safety_us);
-      wp_micro_profile.accum_dof_us = 0;
-      wp_micro_profile.accum_outer_us = 0;
-      wp_micro_profile.accum_eq_us = 0;
-      wp_micro_profile.accum_can_us = 0;
-      wp_micro_profile.accum_pid_us = 0;
-      wp_micro_profile.accum_torque_us = 0;
-      wp_micro_profile.accum_safety_us = 0;
-      wp_micro_profile.max_dof_us = 0;
-      wp_micro_profile.max_outer_us = 0;
-      wp_micro_profile.max_eq_us = 0;
-      wp_micro_profile.max_can_us = 0;
-      wp_micro_profile.max_pid_us = 0;
-      wp_micro_profile.max_torque_us = 0;
-      wp_micro_profile.max_safety_us = 0;
-      wp_micro_profile.samples = 0;
-      wp_micro_profile.safety_samples = 0;
-      wp_micro_profile.last_log_ms = now_ms;
+                 (unsigned long)loop_micro_profile.max_dof_us,
+                 (unsigned long)loop_micro_profile.max_outer_us,
+                 (unsigned long)loop_micro_profile.max_eq_us,
+                 (unsigned long)loop_micro_profile.max_can_us,
+                 (unsigned long)loop_micro_profile.max_pid_us,
+                 (unsigned long)loop_micro_profile.max_torque_us,
+                 (unsigned long)loop_micro_profile.max_safety_us);
+      loop_micro_profile.accum_dof_us = 0;
+      loop_micro_profile.accum_outer_us = 0;
+      loop_micro_profile.accum_eq_us = 0;
+      loop_micro_profile.accum_can_us = 0;
+      loop_micro_profile.accum_pid_us = 0;
+      loop_micro_profile.accum_torque_us = 0;
+      loop_micro_profile.accum_safety_us = 0;
+      loop_micro_profile.max_dof_us = 0;
+      loop_micro_profile.max_outer_us = 0;
+      loop_micro_profile.max_eq_us = 0;
+      loop_micro_profile.max_can_us = 0;
+      loop_micro_profile.max_pid_us = 0;
+      loop_micro_profile.max_torque_us = 0;
+      loop_micro_profile.max_safety_us = 0;
+      loop_micro_profile.samples = 0;
+      loop_micro_profile.safety_samples = 0;
+      loop_micro_profile.last_log_ms = now_ms;
     }
   }
 #endif

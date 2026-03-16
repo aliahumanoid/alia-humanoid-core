@@ -28,7 +28,7 @@ This firmware implements the control system for a tendon‑driven robotic joint 
 - **Motors**: Up to 4x LKM motors (Motor CAN bus)
 - **Joint Encoders**: Up to 3x MT6835 magnetic encoders via SPI0 (direct reading, one per DOF)
 - **Communication**:
-   - **Host CAN** (MCP2515, GP08 CS): Waypoints, commands, telemetry (Host/Jetson ↔ Controller)
+   - **Host CAN** (MCP2515, GP08 CS): Impedance targets, commands, telemetry (Host/Jetson ↔ Controller)
    - **Motor CAN** (MCP2515, GP09 CS): Torque commands, status (Controller ↔ Motors)
    - **SPI0**: Direct encoder reading (MT6835)
    - **Serial** (USB CDC): Diagnostics only (disconnected in production)
@@ -55,10 +55,10 @@ Implements the relation between joint angle and motor angles:
 - Flash save/load of compact linear equations and limits
 
 #### 4) Motion control
-- Trajectory generators: Linear, Trigonometric, Quadratic
-- PID tracking with configurable tunings
+- Rolling-impedance targets via CAN (SET_IMPEDANCE frames)
+- Cascade PID: outer position loop + inner torque loop
 - Tendon pretensioning and safety supervision
-- Performance monitoring
+- Performance monitoring (movement metrics, smoothness)
 
 ### Key Features
 
@@ -74,15 +74,14 @@ Implements the relation between joint angle and motor angles:
    - Validation and flash storage (compact equations)
 
 #### Motion
-1. **Single‑point motion**
-   - Trajectory generation
-   - PID tracking
-   - Final position holding
+1. **Impedance control**
+   - Rolling impedance targets via CAN (position + stiffness + damping)
+   - Cascade PID tracking (outer position, inner torque)
+   - Indefinite position holding after target reached
 
-2. **Continuous motion**
-   - Sequences of points
-   - Smooth transitions between points
-   - Dynamic buffer for new points
+2. **Compliance**
+   - Configurable soft-hold with torque ramp-down
+   - Passive compliance detection (force-assisted release)
 
 #### Safety
 - Tendon tension and stability monitoring
@@ -92,7 +91,7 @@ Implements the relation between joint angle and motor angles:
 
 ### Communication Protocol
 The system accepts serial commands from a host (PC/Raspberry Pi). See `src/commands.h` for the authoritative list. Examples:
-- `STOP`, `MOVE`, `PRETENSION`, `RELEASE`
+- `STOP`, `PRETENSION`, `RELEASE`, `STARTUP_SEQUENCE`
 - `SET_ZERO_CURRENT_POS`, `RECALC_OFFSET`
 - `SET_PID`, `GET_PID`, `SET_PID_OUTER`, `GET_PID_OUTER`
 Notes:
@@ -120,10 +119,10 @@ Notes:
    SET_ZERO_CURRENT_POS
    ```
 
-2. **Motion**
+2. **Motion** (via CAN impedance targets)
    ```
    PRETENSION
-   MOVE {angle_deg} {speed} {accel}
+   # Then send SET_IMPEDANCE frames via CAN (position, stiffness, damping)
    ```
 
 3. **Recalculate Offsets**

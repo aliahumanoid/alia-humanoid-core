@@ -67,7 +67,7 @@
 // Reserved: 14-19 for future motor control commands
 
 // --- Movement Commands (20-29) ---
-// Reserved: 20-29 (CMD_MOVE_MULTI_DOF removed — use CAN waypoints)
+// Reserved: 20-29 (CMD_MOVE_MULTI_DOF removed — use CAN SET_IMPEDANCE)
 
 // --- Calibration & Mapping Commands (30-39) ---
 #ifndef CMD_SET_ZERO_CURRENT_POS

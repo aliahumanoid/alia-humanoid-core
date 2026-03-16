@@ -577,7 +577,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
  * @brief Update shared DOF angles from encoders (called every Core0 cycle)
  * 
  * This function provides a single point of encoder reading for the entire system.
- * All components (Core1 waypoint control, UI encoder display, etc.) should read
+ * All components (Core1 impedance control, UI encoder display, etc.) should read
  * from shared_dof_angles instead of calling encoder functions directly.
  * 
  * Benefits:

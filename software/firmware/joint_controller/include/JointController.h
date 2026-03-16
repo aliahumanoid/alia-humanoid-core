@@ -25,13 +25,13 @@
  * 4. Auto-mapping: Automatic calibration of motor-joint relationships
  * 
  * MOVEMENT COMMAND BEHAVIOR:
- * Waypoint-based control with open-ended PID:
- * - Phase 1: Waypoint interpolation towards target positions
+ * Rolling-impedance control with open-ended PID:
+ * - Phase 1: Interpolation towards impedance target (position + stiffness + damping)
  * - Phase 2: INDEFINITE holding at last target with PID engaged
- * 
+ *
  * The system leaves the holding phase ONLY when:
  * - STOP / Emergency Stop command is received
- * - New waypoints arrive via CAN
+ * - New impedance targets arrive via CAN (SET_IMPEDANCE frames)
  * - Joint control commands (CMD_PRETENSION, CMD_RELEASE, etc.)
  * - Safety error (angle limits, invalid encoder, etc.)
  * 

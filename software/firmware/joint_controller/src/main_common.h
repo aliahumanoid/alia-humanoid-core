@@ -434,7 +434,7 @@ extern volatile bool pid_diag_terms_enabled;   // Cross-core: enable P/I/D break
 /**
  * @brief Cached motor angles from the control loop
  * 
- * Written AND read exclusively on Core1 (waypoint execution + safety checks).
+ * Written AND read exclusively on Core1 (impedance control + safety checks).
  * No cross-core access — volatile not needed.
  * Eliminates ~2ms CAN read delay per motor during safety checks.
  */
@@ -500,7 +500,7 @@ struct MovementMetrics {
 struct MetricsTracker {
   // State
   bool tracking_active;           // Currently tracking a movement
-  uint32_t movement_start_ms;     // When movement actually starts (first waypoint t_arrival)
+  uint32_t movement_start_ms;     // When movement actually starts (first target t_arrival)
   uint32_t tracking_init_ms;      // When tracking was initialized (for timeout detection)
   float start_angle_deg;          // Angle at movement start
   float target_angle_deg;         // Target angle to reach
@@ -542,11 +542,11 @@ struct MetricsTracker {
   uint32_t torque_integral;       // Accumulated |torque|
   
   // Reset for new movement
-  // t_arrival_ms: when the first waypoint will be executed (actual movement start)
+  // t_arrival_ms: when the first target will be executed (actual movement start)
   void reset(float start, float target, uint32_t t_arrival_ms = 0) {
     tracking_active = true;
     tracking_init_ms = millis();
-    // Use the first waypoint's arrival time as movement start, not when waypoint was received
+    // Use the first target's arrival time as movement start, not when target was received
     movement_start_ms = (t_arrival_ms > 0) ? t_arrival_ms : millis();
     start_angle_deg = start;
     target_angle_deg = target;
@@ -812,15 +812,14 @@ void core0_main_loop();  // Core0 loop - serial communication (implemented in co
 void core1_loop();       // Core1 loop - hardware operations (implemented in core1.cpp)
 
 // ============================================================================
-// DOF CONTROL STATE (replaces waypoint_buffer state machine)
+// DOF CONTROL STATE
 // ============================================================================
 
 /**
  * @brief Per-DOF control state
  *
  * Tracks whether each DOF is idle, actively moving (impedance segment),
- * or holding position. Previously part of waypoint_buffer; now standalone
- * since waypoint infrastructure has been removed.
+ * or holding position. Standalone per-DOF state for the impedance controller.
  *
  * Cross-core contract: Core0 writes during startup sequence (motors stopped,
  * control loop not active for this DOF). Core1 writes during normal operation
@@ -874,7 +873,7 @@ struct ImpedanceTarget {
  * Instead of tracking the raw q_target as an immediate step, the firmware
  * generates a single overwrite-only local segment. Each new command starts a
  * new segment from the current q_ref and reaches q_goal at the requested
- * cruise speed. This mirrors the waypoint interpolator without maintaining a
+ * cruise speed. This provides smooth interpolation without maintaining a
  * queue.
  */
 struct ImpedanceRollingSegment {
@@ -938,7 +937,7 @@ extern ImpedanceRollingSegment impedance_segment[MAX_DOFS];
 // Configurable via IMPEDANCE_CTRL (0x01E) sub_cmd=0x02.
 extern volatile uint32_t impedance_watchdog_ms;
 
-// Rolling-waypoint helper API shared by CAN handling and the control loop.
+// Rolling-impedance helper API shared by CAN handling and the control loop.
 void resetImpedanceSegment(uint8_t dof);
 bool evaluateImpedanceSegment(uint8_t dof, uint32_t now_ms, float &q_ref_deg, float &dq_ref_deg_s);
 float getImpedanceHoldReference(uint8_t dof);

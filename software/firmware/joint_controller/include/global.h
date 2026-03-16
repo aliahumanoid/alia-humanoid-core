@@ -276,7 +276,7 @@ struct LinearEquationsDeviceData {
  * 3. Waits for encoder data to stabilize (safety check)
  * 4. Runs recalc_offset for all DOFs (pretensions tendons)
  * 5. Transitions to HOLDING state on current position
- * 6. System is ready for waypoint commands immediately
+ * 6. System is ready for impedance commands immediately
  */
 struct SystemSettingsData {
   uint32_t magic_number;          // Magic number (0xABCD1234) for validation

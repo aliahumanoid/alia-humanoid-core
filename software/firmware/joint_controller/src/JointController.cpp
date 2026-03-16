@@ -1134,7 +1134,7 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   LOG_C1_DEBUG("Method: LINEAR EQUATIONS (direct computation)");
 
   // NOTE: Motors NOT stopped here — pretension torque is maintained.
-  // Core0 will inject HOLDING waypoints immediately after all DOFs complete,
+  // Core0 will inject HOLDING targets immediately after all DOFs complete,
   // and the PID bumpless transfer (initializeState) will take over seamlessly.
   // This eliminates the torque gap where gravity could move the joint.
 

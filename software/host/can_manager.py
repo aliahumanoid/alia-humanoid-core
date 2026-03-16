@@ -3,59 +3,15 @@ CAN bus manager for host ↔ joint-controller communication.
 
 Provides a high-level API for:
 - Connecting/disconnecting to a python-can interface
-- Sending protocol-defined frames (time sync, waypoint, emergency stop)
+- Sending protocol-defined frames (impedance targets, commands, emergency stop)
 - Receiving status telemetry and exposing it to the Flask app/UI
 
-CAN ID Allocation (Priority-Optimized):
-Priority Level 0 (Emergency):
-- 0x000: Emergency Stop (broadcast)
-Priority Level 1 (System Control + Operational Commands):
-- 0x002: Time Sync (broadcast)
-- 0x003: Encoder Stream Control (start/stop)
-- 0x004: PID Diagnostics Stream Control
-- 0x005: Interpolation Mode (linear/smooth)
-- 0x006: Loop Frequency Config (inner/outer)
-- 0x007: PID Diagnostics Stream Frequency
-- 0x008: Joint Identification Request (broadcast)
-- 0x009: Startup Sequence (recalc + HOLDING)
-- 0x00A: Get Encoder Offsets (query → response on 0x4B0+joint)
-- 0x00B: Set Zero (→ notification on 0x4C0+joint)
-- 0x00C: Pretension single DOF
-- 0x00D: Pretension all DOFs
-- 0x00E: Release single DOF
-- 0x00F: Release all DOFs
-- 0x010: Recalculate Motor Offsets
-- 0x011: Save PID to Flash
-- 0x012: Load PID from Flash
-- 0x013: Set Inner PID Parameters (multi-frame, 4 seq)
-- 0x014: Set Outer PID Parameters (multi-frame, 5 seq)
-- 0x015: Cascade Speed Scaling (per-param + 0xFF apply)
-- 0x016: Start Auto-Mapping (all DOFs)
-- 0x017: Stop Auto-Mapping
-- 0x018: Save Linear Equations to Flash
-- 0x019: Load Linear Equations from Flash
-- 0x01A: Set Auto-Start on Boot
-Priority Level 2 (Motor Control - CRITICAL @ 500 Hz):
-- 0x140-0x280: Motor Commands (Ctrl → Motors via LKM_Motor)
-Priority Level 3 (Trajectory - 50-100 Hz):
-- 0x380-0x39F: Multi-DOF Waypoint Commands (Host → Ctrl, per joint)
-Priority Level 4 (Status Feedback - Lowest):
-- 0x400+joint: Status/Feedback
-- 0x410+joint: Encoder Stream Data (@ 50 Hz)
-- 0x420+joint: PID Diagnostics - Target + Error
-- 0x430+joint: PID Diagnostics - Torque A + B
-- 0x440+joint*3+dof: Movement Metrics
-- 0x460+joint*3+dof: Smoothness Metrics
-- 0x470+joint: PID Inner Terms (P/I/D/FF, optional)
-- 0x480+joint: PID Outer Terms (P/I/D/output, optional)
-- 0x490+joint: Startup Status Events
-- 0x4A0+joint: Joint Announce/Discovery
-- 0x4B0+joint: Encoder Offsets Response
-- 0x4C0+joint: Zero Complete Notification
-- 0x4D0+joint: Waypoint Buffer Telemetry (on-demand)
-- 0x4E0+joint: Safe Limits per DOF (on encoder stream start)
-
-Note: Motor commands have higher priority than waypoints to ensure PID loop stability.
+CAN ID allocation is documented in docs/CAN_SYSTEM_ARCHITECTURE.md.
+Key ranges:
+- 0x000-0x01A: System control + operational commands (Host → Controller)
+- 0x140-0x280: Motor commands (Controller → Motors, internal)
+- 0x380-0x39F: Multi-DOF impedance targets (Host → Controller, per joint)
+- 0x400-0x4E0: Status feedback (Controller → Host)
 """
 from __future__ import annotations
 

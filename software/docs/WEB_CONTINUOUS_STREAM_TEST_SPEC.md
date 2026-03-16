@@ -1,8 +1,13 @@
 # Web Continuous Waypoint Streaming - Technical Specification
 
-**Version**: 1.0  
-**Date**: 2026-02-13  
-**Status**: Proposed (ready to implement)
+> **⚠️ ARCHIVED (D033)** — This spec describes the old waypoint-streaming
+> architecture which was removed in D033. The firmware now uses rolling
+> SET_IMPEDANCE frames instead of waypoint batches. Kept for historical
+> reference only; do not implement.
+
+**Version**: 1.0
+**Date**: 2026-02-13
+**Status**: ARCHIVED (superseded by SET_IMPEDANCE architecture, D033)
 
 ---
 
