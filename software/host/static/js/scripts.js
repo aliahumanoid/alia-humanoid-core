@@ -27,7 +27,7 @@ let encoderTestData = {
 // Impedance Move state
 let impedanceGainsInitialized = {};  // per-DOF: { 0: true, 1: true }
 let impedanceOscInterval = null;
-let impedanceLastKnownPos = {};  // { dofIndex: angleDeg }
+
 let impedanceStateRateCount = 0;
 let impedanceStateRateStart = 0;
 let impedanceStagedTarget = null;  // { dofs: [{ dof, angle }] } — staged when auto-send OFF
@@ -111,7 +111,7 @@ const DEFAULT_PARAMS = {
     // Parameters are now managed internally by Pico
 };
 
-// Safety limit for waypoint velocity (must match firmware ABSOLUTE_MAX_VELOCITY_DEG_S)
+// Safety limit for movement velocity (must match firmware ABSOLUTE_MAX_VELOCITY_DEG_S)
 const MAX_SAFE_VELOCITY_DEG_S = 150;
 
 // Encoder freshness tracking: { "joint_dof": timestamp_ms }
@@ -374,8 +374,6 @@ $(document).ready(function() {
         if (data.joint_name && data.joint_name !== currentJoint) return;
 
         const dof = data.dof !== undefined ? data.dof : 0;
-        impedanceLastKnownPos[dof] = data.q_deg;
-
         // Update position display (show DOF0 by default)
         if (dof === 0) {
             const posText = Number.isFinite(data.q_deg) ? data.q_deg.toFixed(1) + '°' : '—';
@@ -750,7 +748,7 @@ $("#sendCanEmergency").on('click', function() {
         updateSerialPortSelectUI(joint);
         
         // Clear stale mapping data from previous joint immediately
-        // Prevents smart waypoint buttons from showing previous joint's data
+        // Prevents quick-angle buttons from showing previous joint's data
         automaticMappingData = null;
         
         // Update Impedance Move panel (joint label + reset state)
@@ -3263,7 +3261,7 @@ function refreshMappingDataForCurrentJoint() {
  * If sequence mode is active, adds step to sequence instead
  */
 // NOTE: setMultiDofQuickAngles — serial MOVE_MULTI_DOF removed.
-// Kept as stub for any remaining generated buttons; use CAN waypoint buttons instead.
+// Kept as stub for any remaining generated buttons; use impedance buttons instead.
 function setMultiDofQuickAngles(angle0, angle1) {
     appendStatusMessage(`⚠️ Serial MOVE_MULTI_DOF deprecated. Use impedance buttons instead.`);
 }
@@ -3524,7 +3522,6 @@ function updateImpedanceMoveJoint() {
 
     // Reset impedance state
     impedanceGainsInitialized = {};
-    impedanceLastKnownPos = {};
     impedanceStagedTarget = null;
     stopImpedanceOscillation();
 
@@ -3635,8 +3632,8 @@ function sendImpedanceInitGains(dof) {
     if (!joint) return $.Deferred().reject('no joint').promise();
 
     // Get current position from live encoder — no fallback to stale data.
-    // After disable/startup/E-Stop, JOINT_STATE stops broadcasting and
-    // impedanceLastKnownPos may be arbitrarily old, so we require a live reading.
+    // After disable/startup/E-Stop, JOINT_STATE stops broadcasting,
+    // so we require a live encoder reading.
     const currentPos = getCurrentEncoderAngle(joint, dof);
     if (currentPos === null || currentPos === undefined) {
         appendStatusMessage('⚠️ No live encoder data — cannot init impedance (start encoder streaming first)');
@@ -5462,8 +5459,8 @@ function oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs) {
     
     updateOscTestStatus(`Rep ${oscTestCurrentRep + 1}/${oscTestTotalReps} ${direction} (${targetAngle}°)`);
     
-    // Send waypoint
-    sendOscTestWaypoint(dof, targetAngle, moveTimeMs);
+    // Send impedance target
+    sendOscTestTarget(dof, targetAngle, moveTimeMs);
     
     // Schedule next movement after pause
     const totalWait = moveTimeMs + pauseMs;
@@ -5486,7 +5483,7 @@ function oscTestLoop(dof, pointA, pointB, pauseMs, moveTimeMs) {
  * Derives dq_cruise from the full A↔B distance and moveTimeMs so the
  * actual movement duration matches the UI setting.
  */
-function sendOscTestWaypoint(dof, angle, moveTimeMs) {
+function sendOscTestTarget(dof, angle, moveTimeMs) {
     const pid = getImpedancePidFromTuningSection(dof);
 
     // Compute cruise speed from the declared move time and full swing
@@ -5551,7 +5548,7 @@ function resetOscillationTest() {
     const center = (pointA + pointB) / 2;
     const dof = parseInt($('#oscTestDof').val());
     
-    sendOscTestWaypoint(dof, center, 500);
+    sendOscTestTarget(dof, center, 500);
     appendStatusMessage(`🔄 Reset to center: ${center}°`);
 }
 

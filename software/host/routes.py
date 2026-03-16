@@ -922,8 +922,8 @@ def register_routes(
         """
         Get the last known encoder angles (persists even when streaming is stopped).
         
-        This is useful for on-demand position queries before sending waypoints,
-        without requiring continuous encoder streaming.
+        This is useful for on-demand position queries before sending impedance
+        commands, without requiring continuous encoder streaming.
         
         Query params:
             joint: Optional joint name (e.g., KNEE_RIGHT). If omitted, returns all joints.
@@ -1820,7 +1820,7 @@ def register_routes(
 
     @app.route('/api/impedance/target', methods=['POST'])
     def impedance_target():
-        """Send SET_IMPEDANCE rolling-waypoint command to firmware.
+        """Send SET_IMPEDANCE command to firmware.
 
         Required: joint_name, dof_index, q_target, dq_target, stiffness
         Optional: kp, ki, kd, tau_ff, kp_inner, ki_inner, kd_inner

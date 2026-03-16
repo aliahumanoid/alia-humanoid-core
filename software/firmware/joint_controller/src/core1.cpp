@@ -100,7 +100,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define PID_DIAG_DEFAULT_INTERVAL_US 50000    // 50ms = 20Hz (normal monitoring)
 volatile uint32_t pid_diag_interval_us = PID_DIAG_DEFAULT_INTERVAL_US;
 
-// Sentinel value for unused DOF in Multi-DOF waypoint
+// Sentinel value for unused DOF in Multi-DOF encoder frame
 #define MULTI_DOF_UNUSED 0x7FFF
 
 // Time synchronization state
@@ -322,7 +322,7 @@ static float getImpedanceMaxJointSpeedDegS(uint8_t dof, JointController *jc) {
 /**
  * @brief Send encoder data via CAN for high-frequency streaming
  * 
- * Sends all DOF angles in a single CAN frame (same format as Multi-DOF Waypoint).
+ * Sends all DOF angles in a single CAN frame (Multi-DOF packed format).
  * Called from core1_loop() at ~200Hz when streaming is active.
  * 
  * Frame format (8 bytes):
@@ -346,7 +346,7 @@ void sendEncoderStreamData() {
   
   extern MCP_CAN CAN_HOST;
   
-  // Build encoder data frame (same format as Multi-DOF Waypoint for consistency)
+  // Build encoder data frame (Multi-DOF packed format: 3× int16 + uint16 timestamp)
   struct __attribute__((packed)) {
     int16_t dof0_angle;
     int16_t dof1_angle;
@@ -358,7 +358,7 @@ void sendEncoderStreamData() {
   // NOTE: shared_dof_angles.angles[] are ALREADY in degrees (from DirectEncoders)
   for (uint8_t dof = 0; dof < 3; dof++) {
     if (dof < MAX_DOFS && shared_dof_angles.valid[dof]) {
-      // Convert to 0.01° resolution (same as waypoint format)
+      // Convert to 0.01° resolution (standard CAN encoding)
       float angle_deg = shared_dof_angles.angles[dof];  // Already in degrees
       int16_t angle_int = (int16_t)(angle_deg * 100.0f);
       
@@ -673,7 +673,7 @@ void checkAndSendMetrics() {
  * 
  * This function polls the dedicated Host CAN bus (J5 CAN_Controller) for:
  * - Time Sync commands
- * - Waypoint commands
+ * - SET_IMPEDANCE commands
  * - Emergency Stop commands
  * 
  * The Motor CAN bus (J4 CAN_Servo) is handled separately by LKM_Motor.
@@ -707,7 +707,7 @@ void pollHostCan() {
 
   // Process up to 3 messages per poll to limit jitter on the control loop.
   // At 500Hz loop rate, 3 msgs/cycle = 1500 msgs/s throughput (well above
-  // the ~300 msgs/s needed for 100Hz waypoints × 3 DOFs).
+  // the ~600 msgs/s needed for 200Hz impedance × 3 DOFs).
   // Remaining messages are picked up in the next cycle (2ms later).
   uint8_t msg_count = 0;
   while (CAN_HOST.checkReceive() == CAN_MSGAVAIL && msg_count < 3) {
@@ -1105,7 +1105,7 @@ void pollHostCan() {
       // Parameters not sent in this command retain their previous values.
       // This preserves the 200 Hz fast path (1 frame) with occasional full gain updates.
       if (len >= 8 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
-        // SAFETY: Reject impedance commands if system not ready (same guard as waypoint path)
+        // SAFETY: Reject impedance commands if system not ready
         if (!active_joint_controller->isSystemReadyForMovement()) {
           LOG_C1_ERROR("[CAN_HOST] SET_IMPEDANCE REJECTED: System not ready");
           break;
@@ -1200,7 +1200,7 @@ void pollHostCan() {
             float kd_inner = constrain((float)acc.stg_kd_inner_x100 / 100.0f, 0.0f, 20.0f);
 
             // Validate and clamp q_target against mapping-safe range
-            // (same check as waypoint path — physical + mapping limits)
+            // Validate against physical + mapping limits
             if (!active_joint_controller->isAngleInLimits(dof, q_deg) ||
                 !active_joint_controller->isAngleInMappingLimits(dof, q_deg)) {
               DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
@@ -1273,7 +1273,7 @@ void pollHostCan() {
             impedance_target[dof].valid = true;
 
             // Overwrite-only local segment: start from the current q_ref and
-            // let the existing waypoint PID chase a linearly moving reference.
+            // let the cascade PID chase a linearly moving reference.
             ImpedanceRollingSegment &seg = impedance_segment[dof];
             seg.q_goal_deg = q_deg;
             seg.q_start_deg = q_ref_now;
@@ -1405,9 +1405,9 @@ void core1_loop() {
   // with core1 startup. Flash operations now use a simpler approach:
   // Core0 waits for Core1 to be in a safe state before flash write.
   
-  // Timing for waypoint control (configurable via inner_loop_period_us)
+  // Timing for control loop (configurable via inner_loop_period_us)
   // Default: 2000µs = 500Hz
-  uint64_t next_time = 0; // Will be initialized on first waypoint
+  uint64_t next_time = 0; // Will be initialized on first control cycle
   bool timing_initialized = false;
 
   while (true) {
@@ -1419,7 +1419,7 @@ void core1_loop() {
     }
     
     // === POLL HOST CAN BUS ===
-    // Poll dedicated Host CAN (J5) for TimeSync, Waypoints, Emergency Stop
+    // Poll dedicated Host CAN (J5) for SET_IMPEDANCE, TimeSync, Emergency Stop
     // Motor CAN (J4) is handled by LKM_Motor during motor operations
     pollHostCan();
 
@@ -1550,7 +1550,7 @@ void core1_loop() {
       }
     }
 
-    // === WAYPOINT-BASED MOVEMENT ===
+    // === IMPEDANCE-BASED MOVEMENT ===
     // Execute cascade control loop for all DOFs (impedance + holding)
     // This runs @ 500 Hz with precise timing (outer loop every outer_loop_divisor cycles)
     bool control_active = false;
@@ -1798,7 +1798,7 @@ void core1_loop() {
                   ? command_data_ext.recalc_offset_duration
                   : controller->getConfig().dofs[dof_index].zero_mapping.recalc_offset_duration)) {
         // Motors intentionally NOT stopped — pretension torque maintained to prevent
-        // gravity-induced movement gap. Core0 injects HOLDING waypoints immediately
+        // gravity-induced movement gap. Core0 injects HOLDING targets immediately
         // after all DOFs complete, and PID bumpless transfer takes over seamlessly.
         if (shared_data_ext.flag == 0) {
           strcpy(shared_data_ext.message, "Offsets recalculated successfully");

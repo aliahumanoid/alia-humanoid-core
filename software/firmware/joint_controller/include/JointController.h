@@ -384,25 +384,6 @@ public:
   }
 
   /**
-   * @brief Check if a waypoint is safe for execution
-   * 
-   * Performs comprehensive safety checks before accepting a waypoint:
-   * 1. Velocity check: requested velocity must be within safe limits
-   * 2. Angle check: target angle must be within joint limits
-   * 3. Time check: arrival time must be in the future
-   * 
-   * @param dof_index DOF index
-   * @param current_angle Current joint angle (degrees)
-   * @param target_angle Target joint angle (degrees)
-   * @param t_arrival_ms Absolute arrival time (ms)
-   * @param t_now Current absolute time (ms)
-   * @param violation_message Output: detailed error message if check fails
-   * @return true if waypoint is safe, false otherwise
-   */
-  bool checkWaypointSafety(uint8_t dof_index, float current_angle, float target_angle,
-                           uint32_t t_arrival_ms, uint32_t t_now, String &violation_message);
-
-  /**
    * @brief Check if an angle is within safe limits derived from auto‑mapping
    * @param dof_index DOF index
    * @param angle Angle to verify
