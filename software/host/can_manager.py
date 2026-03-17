@@ -1907,7 +1907,7 @@ class CanManager:
         # Joint state broadcast (0x4F0-0x4FF) — impedance mode feedback
         if 0x4F0 <= arb_id <= 0x4FF and len(data) >= 8:
             joint_id = arb_id - 0x4F0
-            self._handle_joint_state(data, timestamp, joint_id)
+            self._handle_joint_state(data, message.timestamp, joint_id)
             return
 
         # Debug: log any received CAN frame (throttled)

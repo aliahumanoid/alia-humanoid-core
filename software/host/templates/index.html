@@ -263,7 +263,7 @@
 
 <body class="bg-gray-100">
 
-    <script src="{{ url_for('static', filename='js/scripts.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/scripts.js') }}?v={{ range(100000) | random }}"></script>
 
     <script>
         // Remove trailing margins to prevent scroll overflow

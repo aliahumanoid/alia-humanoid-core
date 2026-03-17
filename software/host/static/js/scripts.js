@@ -31,6 +31,8 @@ let impedanceOscInterval = null;
 let impedanceStateRateCount = 0;
 let impedanceStateRateStart = 0;
 let impedanceStagedTarget = null;  // { dofs: [{ dof, angle }] } — staged when auto-send OFF
+let impedanceMoveStream = null;    // setInterval handle for 50Hz move keepalive
+let impedanceMoveHolding = {};     // per-DOF holding flag from JOINT_STATE
 
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
@@ -380,6 +382,9 @@ $(document).ready(function() {
             $('#impedanceCurrentPos').text(posText);
         }
 
+        // Track per-DOF holding state (used by move stream to detect arrival)
+        impedanceMoveHolding[dof] = !!data.holding;
+
         // Update status dots
         $('#impedanceDotValid').css('background-color', data.valid ? '#22c55e' : '#d1d5db');
         $('#impedanceDotHolding').css('background-color', data.holding ? '#eab308' : '#d1d5db');
@@ -720,7 +725,8 @@ $(document).ready(function() {
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
     $("#sendCanEmergency").on('click', function() {
         sendCanEmergencyStop();
-        // Also disable impedance and stop oscillation
+        // Also disable impedance and stop all streams
+        stopImpedanceMoveStream();
         stopImpedanceOscillation();
         impedanceGainsInitialized = {};
         impedanceStagedTarget = null;
@@ -3434,6 +3440,7 @@ function updateImpedanceMoveJoint() {
     if (label.length) label.text(joint);
 
     // Reset impedance state
+    stopImpedanceMoveStream();
     impedanceGainsInitialized = {};
     impedanceStagedTarget = null;
     stopImpedanceOscillation();
@@ -3612,12 +3619,87 @@ function sendImpedanceFastTarget(dof, qTarget, dqCruise, stiffness) {
 }
 
 /**
+ * Relax impedance watchdog for webapp streaming (HTTP has more jitter than direct CAN).
+ * Restores to firmware default when streaming stops.
+ */
+const WATCHDOG_STREAM_MS = 500;   // relaxed for webapp (HTTP jitter)
+const WATCHDOG_DEFAULT_MS = 100;  // firmware default (tight, for Jetson direct CAN)
+
+function setImpedanceWatchdog(ms) {
+    const joint = $("#jointSelect").val();
+    if (!joint) return $.Deferred().reject().promise();
+    return postImpedanceCtrl(joint, 0x02, ms);
+}
+
+/**
+ * Stop any running impedance move stream (50Hz keepalive).
+ * @param {boolean} restoreWatchdog - restore tight watchdog (default true).
+ *        Pass false when transitioning to another stream (e.g. oscillation).
+ */
+function stopImpedanceMoveStream(restoreWatchdog) {
+    if (impedanceMoveStream) {
+        clearInterval(impedanceMoveStream);
+        impedanceMoveStream = null;
+    }
+    if (restoreWatchdog !== false) {
+        setImpedanceWatchdog(WATCHDOG_DEFAULT_MS);
+    }
+}
+
+/**
+ * Start a 50Hz move stream that re-sends fast targets until all DOFs reach HOLDING.
+ * Each new call cancels any previous stream (last-command-wins).
+ *
+ * @param {Array} dofs - [{ dof, angle, stiffness }]
+ * @param {number} dqCruise - cruise speed deg/s
+ */
+function startImpedanceMoveStream(dofs, dqCruise) {
+    stopImpedanceMoveStream();
+
+    // Clear holding flags so we don't stop immediately from stale state
+    dofs.forEach(d => { impedanceMoveHolding[d.dof] = false; });
+
+    // Relax watchdog for webapp HTTP jitter
+    setImpedanceWatchdog(WATCHDOG_STREAM_MS);
+
+    const tickMs = 20;  // 50 Hz
+    const maxDurationMs = 30000;  // safety: auto-stop after 30s
+    const startTime = Date.now();
+
+    // Send first frame immediately
+    dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
+
+    impedanceMoveStream = setInterval(() => {
+        // Safety timeout
+        if (Date.now() - startTime > maxDurationMs) {
+            stopImpedanceMoveStream();
+            appendStatusMessage('⏹️ Move stream auto-stopped (30s timeout)');
+            return;
+        }
+
+        // Check if all target DOFs are holding (= arrived)
+        const allHolding = dofs.every(d => impedanceMoveHolding[d.dof]);
+        if (allHolding) {
+            // Don't restore watchdog if oscillation is about to take over
+            const oscActive = !!impedanceOscInterval;
+            stopImpedanceMoveStream(oscActive ? false : true);
+            const desc = dofs.map(d => `DOF${d.dof}=${d.angle}°`).join(', ');
+            appendStatusMessage(`✅ Arrived: ${desc}`);
+            return;
+        }
+
+        // Re-send targets to keep watchdog alive
+        dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
+    }, tickMs);
+}
+
+/**
  * Handle click on 1DOF impedance grid button.
+ * Starts a 50Hz move stream that keeps the watchdog alive until arrival.
  */
 function setImpedanceQuickAngle(dofIndex, angle) {
     const autoSend = $("#autoImpedanceSendToggle").is(":checked");
     if (!autoSend) {
-        // Staged mode: store target for later
         impedanceStagedTarget = { dofs: [{ dof: dofIndex, angle: angle }] };
         appendStatusMessage(`🎯 Target staged: DOF${dofIndex} = ${angle}° — toggle auto-send or click again`);
         return;
@@ -3625,30 +3707,26 @@ function setImpedanceQuickAngle(dofIndex, angle) {
 
     const pid = getImpedancePidFromTuningSection(dofIndex);
     const dqCruise = parseFloat($('#impedanceDqCruise').val()) || 20;
+    const dofs = [{ dof: dofIndex, angle: angle, stiffness: pid.stiffness }];
 
     if (!impedanceGainsInitialized[dofIndex]) {
-        // First click for this DOF: full init, then fast target (promise chain)
         sendImpedanceInitGains(dofIndex).then(() => {
-            return sendImpedanceFastTarget(dofIndex, angle, dqCruise, pid.stiffness);
-        }).done(() => {
-            appendStatusMessage(`⚡ Impedance: DOF${dofIndex} → ${angle}° [init + 1f]`);
+            startImpedanceMoveStream(dofs, dqCruise);
+            appendStatusMessage(`⚡ Impedance: DOF${dofIndex} → ${angle}° [init + stream]`);
         });
     } else {
-        sendImpedanceFastTarget(dofIndex, angle, dqCruise, pid.stiffness).done(() => {
-            appendStatusMessage(`⚡ Impedance: DOF${dofIndex} → ${angle}° [1f]`);
-        });
+        startImpedanceMoveStream(dofs, dqCruise);
+        appendStatusMessage(`⚡ Impedance: DOF${dofIndex} → ${angle}° [stream]`);
     }
 }
 
 /**
  * Handle click on 2DOF impedance grid button.
- * Sends init for DOF0+DOF1 if needed, then fast targets for both DOFs.
- * Uses promise chains — no timers.
+ * Starts a 50Hz move stream for both DOFs.
  */
 function setImpedanceQuickAngles(angle0, angle1) {
     const autoSend = $("#autoImpedanceSendToggle").is(":checked");
     if (!autoSend) {
-        // Staged mode: store target for later
         impedanceStagedTarget = { dofs: [{ dof: 0, angle: angle0 }, { dof: 1, angle: angle1 }] };
         appendStatusMessage(`🎯 Target staged: DOF0=${angle0}°, DOF1=${angle1}° — toggle auto-send or click again`);
         return;
@@ -3657,35 +3735,25 @@ function setImpedanceQuickAngles(angle0, angle1) {
     const pid0 = getImpedancePidFromTuningSection(0);
     const pid1 = getImpedancePidFromTuningSection(1);
     const dqCruise = parseFloat($('#impedanceDqCruise').val()) || 20;
-
-    const sendBothTargets = () => {
-        return $.when(
-            sendImpedanceFastTarget(0, angle0, dqCruise, pid0.stiffness),
-            sendImpedanceFastTarget(1, angle1, dqCruise, pid1.stiffness)
-        ).done(() => {
-            appendStatusMessage(`⚡ Impedance: DOF0=${angle0}°, DOF1=${angle1}° [2f]`);
-        });
-    };
+    const dofs = [
+        { dof: 0, angle: angle0, stiffness: pid0.stiffness },
+        { dof: 1, angle: angle1, stiffness: pid1.stiffness }
+    ];
 
     const needInit0 = !impedanceGainsInitialized[0];
     const needInit1 = !impedanceGainsInitialized[1];
 
     if (needInit0 || needInit1) {
-        // Init only DOFs that need it, sequentially, then send targets
         let chain = $.Deferred().resolve().promise();
-        if (needInit0) {
-            chain = chain.then(() => sendImpedanceInitGains(0));
-        }
-        if (needInit1) {
-            chain = chain.then(() => sendImpedanceInitGains(1));
-        }
+        if (needInit0) chain = chain.then(() => sendImpedanceInitGains(0));
+        if (needInit1) chain = chain.then(() => sendImpedanceInitGains(1));
         chain.then(() => {
-            return sendBothTargets();
-        }).done(() => {
-            appendStatusMessage(`⚡ Impedance: DOF0=${angle0}°, DOF1=${angle1}° [init + 2f]`);
+            startImpedanceMoveStream(dofs, dqCruise);
+            appendStatusMessage(`⚡ Impedance: DOF0=${angle0}°, DOF1=${angle1}° [init + stream]`);
         });
     } else {
-        sendBothTargets();
+        startImpedanceMoveStream(dofs, dqCruise);
+        appendStatusMessage(`⚡ Impedance: DOF0=${angle0}°, DOF1=${angle1}° [stream]`);
     }
 }
 
@@ -3979,6 +4047,7 @@ function startImpedanceOscillation() {
         appendStatusMessage('⚠️ Oscillation already running');
         return;
     }
+    stopImpedanceMoveStream(false);  // cancel move stream, don't restore watchdog (we'll set our own)
 
     const joint = $("#jointSelect").val();
     if (!joint) return;
@@ -4029,38 +4098,47 @@ function startImpedanceOscillation() {
     $('#impedanceOscCenter').text(center.toFixed(1));
     $('#impedanceOscDuration').text(totalDuration.toFixed(1));
 
-    // Start oscillation loop — chained on init if needed
-    const beginLoop = () => {
+    // Relax watchdog, init if needed, then start loop — no promise chains.
+    // Use setTimeout to let the watchdog command reach firmware first.
+    setImpedanceWatchdog(WATCHDOG_STREAM_MS);
+
+    const startLoop = () => {
         const tickMs = 20;  // 50 Hz
         const startTime = Date.now();
 
-        appendStatusMessage(`🔄 Oscillation: center=${center.toFixed(1)}° A=${amplitude}° f=${frequency}Hz ×${cycles} (${totalDuration.toFixed(1)}s)`);
+        appendStatusMessage(`🔄 OSC LOOP STARTED: center=${center.toFixed(1)}° A=${amplitude}° f=${frequency}Hz ×${cycles} (${totalDuration.toFixed(1)}s)`);
 
         impedanceOscInterval = setInterval(() => {
             const elapsed = (Date.now() - startTime) / 1000;
 
             if (elapsed >= totalDuration) {
                 stopImpedanceOscillation();
-                // Hold at center
                 sendImpedanceFastTarget(0, center, dqCruise, pid.stiffness);
                 appendStatusMessage('✅ Oscillation complete — holding at center');
                 return;
             }
 
-            const q = center + amplitude * Math.sin(2 * Math.PI * frequency * elapsed);
-            sendImpedanceFastTarget(0, q, dqCruise, pid.stiffness);
+            const phase = 2 * Math.PI * frequency * elapsed;
+            // Smooth envelope: ramps amplitude from 0→full over the first cycle
+            const rampPeriod = 1.0 / frequency;
+            const envelope = elapsed < rampPeriod
+                ? 0.5 * (1 - Math.cos(Math.PI * elapsed / rampPeriod))
+                : 1.0;
+            const q = center + amplitude * envelope * Math.sin(phase);
+            const dqSin = Math.abs(amplitude * envelope * 2 * Math.PI * frequency * Math.cos(phase));
+            const dq = Math.max(dqSin, dqCruise);
+            sendImpedanceFastTarget(0, q, dq, pid.stiffness);
         }, tickMs);
     };
 
     if (!impedanceGainsInitialized[0]) {
-        // Wait for init to fully complete before starting loop
-        sendImpedanceInitGains(0).then(() => {
-            beginLoop();
+        sendImpedanceInitGains(0).done(() => {
+            setTimeout(startLoop, 100);  // let watchdog settle
         }).fail(() => {
             appendStatusMessage('❌ Cannot start oscillation — init failed');
         });
     } else {
-        beginLoop();
+        setTimeout(startLoop, 100);  // let watchdog settle
     }
 }
 
@@ -4071,6 +4149,7 @@ function stopImpedanceOscillation() {
     if (impedanceOscInterval) {
         clearInterval(impedanceOscInterval);
         impedanceOscInterval = null;
+        setImpedanceWatchdog(WATCHDOG_DEFAULT_MS);
         appendStatusMessage('⏹️ Oscillation stopped');
         $('#impedanceOscCenter').text('—');
         $('#impedanceOscDuration').text('—');

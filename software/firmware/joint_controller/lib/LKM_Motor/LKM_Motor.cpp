@@ -100,13 +100,19 @@ void LKM_Motor::initRevTracking(int64_t absMotorAngle_centideg, uint16_t current
   _prevEncoder = currentEncoder;
   _revTrackInit = true;
 
-  // Verify consistency
+  // Verify consistency (rate-limited: log at most once per 2s per motor)
   double trackedAngle = (double)_revolutions * 360.0 + encoderAngle_deg;
   double error = fabs(trackedAngle - motorAngle_deg);
   if (error > 5.0) {
-    LOG_C1_WARN("[RevTrack] Motor " + String(_motorID) + " init discrepancy: " +
-                String(error, 2) + "° (0x92=" + String(motorAngle_deg, 2) +
-                " tracked=" + String(trackedAngle, 2) + ")");
+    static uint32_t lastLogMs[4] = {};  // up to 4 motors
+    uint8_t idx = _motorID < 4 ? _motorID : 0;
+    uint32_t now = millis();
+    if (now - lastLogMs[idx] > 2000) {
+      LOG_C1_WARN("[RevTrack] Motor " + String(_motorID) + " init discrepancy: " +
+                  String(error, 2) + "° (0x92=" + String(motorAngle_deg, 2) +
+                  " tracked=" + String(trackedAngle, 2) + ")");
+      lastLogMs[idx] = now;
+    }
   }
 }
 
