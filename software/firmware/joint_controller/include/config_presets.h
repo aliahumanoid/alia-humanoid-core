@@ -56,8 +56,8 @@ const JointConfig KNEE_LEFT_CONFIG = {
           .limits = {.min_angle = -2.0f, .max_angle = 112.0f, .operating_min = 0.0f, .operating_max = 110.0f}, // physical [-2,112] allows overshoot, operating [0,110] for commands
           .zero_mapping =
               {
-                  .recalc_offset_torque           = 50,
-                  .recalc_offset_duration         = 200,
+                  .recalc_offset_torque           = 70,
+                  .recalc_offset_duration         = 400,
                   .zero_angle_offset              = 0.0f,
                   .pretension_torque              = -35.0f,
                   .pretension_timeout             = 100,
@@ -121,8 +121,8 @@ const JointConfig KNEE_RIGHT_CONFIG = {
           .limits = {.min_angle = -2.0f, .max_angle = 112.0f, .operating_min = 0.0f, .operating_max = 110.0f}, // physical [-2,112] allows overshoot, operating [0,110] for commands
           .zero_mapping =
               {
-                  .recalc_offset_torque           = 50,
-                  .recalc_offset_duration         = 200,
+                  .recalc_offset_torque           = 70,
+                  .recalc_offset_duration         = 400,
                   .zero_angle_offset              = 0.0f,
                   .pretension_torque              = -35,
                   .pretension_timeout             = 100,
@@ -186,8 +186,8 @@ const JointConfig ANKLE_LEFT_CONFIG = {
           .limits = {.min_angle = -50.0f, .max_angle = 25.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
           .zero_mapping =
               {
-                  .recalc_offset_torque           = 50,
-                  .recalc_offset_duration         = 200,
+                  .recalc_offset_torque           = 70,
+                  .recalc_offset_duration         = 400,
                   .zero_angle_offset              = -50.0f,
                   .pretension_torque              = -35.0f,
                   .pretension_timeout             = 100,
@@ -221,8 +221,8 @@ const JointConfig ANKLE_LEFT_CONFIG = {
               },
           .zero_mapping =
               {
-                  .recalc_offset_torque           = 50,
-                  .recalc_offset_duration         = 200,
+                  .recalc_offset_torque           = 70,
+                  .recalc_offset_duration         = 400,
                   .zero_angle_offset              = -25.0f,
                   .pretension_torque              = -35.0f,
                   .pretension_timeout             = 100,
@@ -311,8 +311,8 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
           .limits = {.min_angle = -50.0f, .max_angle = 25.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
           .zero_mapping =
               {
-                  .recalc_offset_torque           = 50,
-                  .recalc_offset_duration         = 200,
+                  .recalc_offset_torque           = 70,
+                  .recalc_offset_duration         = 400,
                   .zero_angle_offset              = -50.0f,
                   .pretension_torque              = -35.0f,
                   .pretension_timeout             = 100,
@@ -346,8 +346,8 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
               },
           .zero_mapping =
               {
-                  .recalc_offset_torque           = 50,
-                  .recalc_offset_duration         = 200,
+                  .recalc_offset_torque           = 70,
+                  .recalc_offset_duration         = 400,
                   .zero_angle_offset              = -25.0f,
                   .pretension_torque              = -35.0f,
                   .pretension_timeout             = 100,
@@ -436,8 +436,8 @@ const JointConfig HIP_LEFT_CONFIG = {
            .limits = {.min_angle = -30.0f, .max_angle = 120.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 55,
-                   .recalc_offset_duration         = 220,
+                   .recalc_offset_torque           = 70,
+                   .recalc_offset_duration         = 400,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = -35.0f,
                    .pretension_timeout             = 100,
@@ -469,8 +469,8 @@ const JointConfig HIP_LEFT_CONFIG = {
            .limits = {.min_angle = -45.0f, .max_angle = 45.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 50,
-                   .recalc_offset_duration         = 200,
+                   .recalc_offset_torque           = 70,
+                   .recalc_offset_duration         = 400,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = -35.0f,
                    .pretension_timeout             = 100,
@@ -503,8 +503,8 @@ const JointConfig HIP_LEFT_CONFIG = {
            .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 45,
-                   .recalc_offset_duration         = 190,
+                   .recalc_offset_torque           = 65,
+                   .recalc_offset_duration         = 380,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = -35.0f,
                    .pretension_timeout             = 100,
@@ -620,8 +620,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
            .limits = {.min_angle = -30.0f, .max_angle = 120.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 55,
-                   .recalc_offset_duration         = 220,
+                   .recalc_offset_torque           = 70,
+                   .recalc_offset_duration         = 400,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = -35.0f,
                    .pretension_timeout             = 100,
@@ -654,8 +654,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
            .limits = {.min_angle = -45.0f, .max_angle = 45.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 50,
-                   .recalc_offset_duration         = 200,
+                   .recalc_offset_torque           = 70,
+                   .recalc_offset_duration         = 400,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = -35.0f,
                    .pretension_timeout             = 100,
@@ -688,8 +688,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
            .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 45,
-                   .recalc_offset_duration         = 190,
+                   .recalc_offset_torque           = 65,
+                   .recalc_offset_duration         = 380,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = -35.0f,
                    .pretension_timeout             = 100,

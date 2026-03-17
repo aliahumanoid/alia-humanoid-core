@@ -3637,11 +3637,13 @@ function setImpedanceWatchdog(ms) {
  *        Pass false when transitioning to another stream (e.g. oscillation).
  */
 function stopImpedanceMoveStream(restoreWatchdog) {
+    const wasActive = !!impedanceMoveStream;
     if (impedanceMoveStream) {
         clearInterval(impedanceMoveStream);
         impedanceMoveStream = null;
     }
-    if (restoreWatchdog !== false) {
+    // Only restore tight watchdog if a stream was actually running
+    if (wasActive && restoreWatchdog !== false) {
         setImpedanceWatchdog(WATCHDOG_DEFAULT_MS);
     }
 }
@@ -3665,16 +3667,32 @@ function startImpedanceMoveStream(dofs, dqCruise) {
     const tickMs = 20;  // 50 Hz
     const maxDurationMs = 30000;  // safety: auto-stop after 30s
     const startTime = Date.now();
+    let graceExpired = false;  // ignore stale HOLDING for first 200ms
 
     // Send first frame immediately
     dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
 
     impedanceMoveStream = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+
         // Safety timeout
-        if (Date.now() - startTime > maxDurationMs) {
+        if (elapsed > maxDurationMs) {
             stopImpedanceMoveStream();
             appendStatusMessage('⏹️ Move stream auto-stopped (30s timeout)');
             return;
+        }
+
+        // Grace period: ignore stale HOLDING flags for the first 200ms
+        // (firmware needs time to transition from HOLDING → MOVING for new target)
+        if (!graceExpired) {
+            if (elapsed < 200) {
+                // Keep sending targets but don't check holding yet
+                dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
+                return;
+            }
+            // Grace expired — re-clear holding flags to discard stale state
+            dofs.forEach(d => { impedanceMoveHolding[d.dof] = false; });
+            graceExpired = true;
         }
 
         // Check if all target DOFs are holding (= arrived)

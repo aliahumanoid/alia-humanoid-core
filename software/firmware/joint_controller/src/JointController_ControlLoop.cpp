@@ -1049,6 +1049,22 @@ bool JointController::executeControlLoop() {
     float theta_B_ref = theta_0_antagonist_motor +
                         cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
 
+    // DEBUG: log stiffness application during HOLDING (rate-limited, DOF 0 only)
+    if (dof == 0 && dof_state[dof] == DofState::HOLDING) {
+      static uint32_t last_stiff_log_ms = 0;
+      if (t_now - last_stiff_log_ms > 2000) {
+        LOG_C1_INFO("[DBG_STIFF] HOLDING DOF0: stiff=" + String(stiffness_ref, 1) +
+                    " infl=" + String(cascade_influence, 2) +
+                    " dtheta=" + String(delta_theta_smooth, 2) +
+                    " q0=" + String(theta_0_joint, 1) +
+                    " Aref=" + String(theta_A_ref, 1) +
+                    " Bref=" + String(theta_B_ref, 1) +
+                    " A0=" + String(theta_0_agonist_motor, 1) +
+                    " B0=" + String(theta_0_antagonist_motor, 1));
+        last_stiff_log_ms = t_now;
+      }
+    }
+
     // === ANTI-SLACK CLAMP (active during compliance) ===
     if (anti_slack_enabled && compliance_state[dof].compliance_active) {
       float theta_A_ref_before = theta_A_ref;
