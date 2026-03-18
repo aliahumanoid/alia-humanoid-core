@@ -154,6 +154,17 @@ The ankle is a **2-DOF joint** using **antagonistic tendon-driven actuation** wi
 
 > **Future upgrade**: Current oilless bronze bushings have limited lifespan — the impregnated lubricant depletes over time under sustained use. Drop-in replacement with IGUS iglide polymer bushings (same 4×6×6 mm form factor) would provide longer service life through solid self-lubricating material that does not deplete. Signs of bushing wear: increased radial play, squeaking, higher motion resistance.
 
+#### Bushing Lifespan Comparison
+
+| Property | Bronze oilless | IGUS iglide |
+|----------|---------------|-------------|
+| Lubrication mechanism | Oil impregnated in sintered pores (finite reservoir) | Solid self-lubricating polymer (material IS the lubricant) |
+| End-of-life behavior | Sudden — oil depletes, friction spikes | Gradual — consistent performance until physically worn through |
+| Estimated life (low load) | ~1,000–3,000 hours | ~5,000–15,000 hours |
+| Improvement factor | baseline | 3–5× longer |
+
+> **Note**: At current prototype usage levels (low load, low speed, intermittent operation), bronze oilless bushings are adequate. IGUS upgrade becomes relevant when Alia reaches sustained continuous operation.
+
 ---
 
 ## 8) Control Architecture
