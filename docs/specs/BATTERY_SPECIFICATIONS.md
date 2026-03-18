@@ -68,6 +68,8 @@ Antagonistic tendon-driven joints use 2 motors per DOF. Efficiency depends on co
 
 > **Recommended target**: 100–150 Wh (~1–1.5 hours walking). This keeps battery weight under 4% of total robot weight while providing meaningful operational time.
 
+> **Space planning**: Current estimates cover lower body only (16+ motors). The full robot with upper limbs (arms, hands, neck) will roughly double the motor count and power draw. The torso battery compartment should be sized for **~200–300 Wh** to accommodate full-body operation without redesigning the frame.
+
 ### LiPo Configuration (24V bus)
 
 | Configuration | Nominal Voltage | Capacity for ~100 Wh | Capacity for ~150 Wh |
