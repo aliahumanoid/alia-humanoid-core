@@ -1086,31 +1086,8 @@ bool JointController::executeControlLoop() {
         }
         holding_ema_samples[dof]++;
 
-        // Log bias + motor residuals every 3s (only after warm-up: 500 samples ≈ 1s)
-        if (holding_ema_samples[dof] > 500 &&
-            t_now - last_holding_bias_log[dof] > 3000) {
-
-          // Motor residual: actual calibrated motor angle vs expected from equations.
-          // Uses cached_motor_angles (live CAN readings with offset applied) as the
-          // "actual" signal — this is the correct motor-space geometric residual
-          // per SLACK_DETECTION_AND_TENSION_TRIM.md §C.
-          float expected_A_res = 0.0f, expected_B_res = 0.0f;
-          float residual_A = 0.0f, residual_B = 0.0f;
-          float q_joint = dof_data.angles[dof];
-          if (cached_motor_angles.valid[dof] &&
-              calculateMotorAnglesWithEquations(dof, q_joint, q_joint, expected_A_res, expected_B_res)) {
-            residual_A = cached_motor_angles.agonist[dof] - expected_A_res;
-            residual_B = cached_motor_angles.antagonist[dof] - expected_B_res;
-          }
-
-          LOG_C1_INFO("[BIAS] DOF" + String(dof) +
-                      " ema=" + String(holding_dtheta_ema[dof], 2) +
-                      " resA=" + String(residual_A, 2) +
-                      " resB=" + String(residual_B, 2) +
-                      " stiff=" + String(stiffness_ref, 1) +
-                      " n=" + String(holding_ema_samples[dof]));
-          last_holding_bias_log[dof] = t_now;
-        }
+        // Note: unified [DIAG_HOLD] log is emitted after the slack detector block,
+        // where trResp (Iq data) is also available.
       } else if (dof < MAX_DOFS) {
         // Any gate failed — reset accumulator so bias starts clean next time
         if (holding_ema_samples[dof] > 0) {
@@ -1567,6 +1544,46 @@ bool JointController::executeControlLoop() {
         // Gate failed — reset so persistence requires continuous clean holding
         slack_count[dof] = 0;
       }
+    }
+
+    // === UNIFIED DIAGNOSTIC LOG ===
+    // All Phase 1 signals in one parsable line, emitted every 3s during gated HOLDING.
+    // Placed here so trResp (Iq), holding_dtheta_ema, and cached_motor_angles are all available.
+    if (dof < 3 && holding_ema_samples[dof] > 500 &&
+        t_now - last_holding_bias_log[dof] > 3000) {
+      // Motor residual: actual calibrated motor angle vs expected from equations.
+      // Uses cached_motor_angles (live CAN with offset applied) — correct motor-space
+      // geometric residual per SLACK_DETECTION_AND_TENSION_TRIM.md §C.
+      float expected_A_res = 0.0f, expected_B_res = 0.0f;
+      float residual_A = 0.0f, residual_B = 0.0f;
+      float q_joint = dof_data.angles[dof];
+      if (cached_motor_angles.valid[dof] &&
+          calculateMotorAnglesWithEquations(dof, q_joint, q_joint, expected_A_res, expected_B_res)) {
+        residual_A = cached_motor_angles.agonist[dof] - expected_A_res;
+        residual_B = cached_motor_angles.antagonist[dof] - expected_B_res;
+      }
+
+      // Iq data (use trResp if valid, flag for offline parsing)
+      bool iq_valid = trResp.dataA.valid && trResp.dataB.valid;
+      int16_t iq_A_diag = iq_valid ? trResp.dataA.torqueCurrent : 0;
+      int16_t iq_B_diag = iq_valid ? trResp.dataB.torqueCurrent : 0;
+      int16_t iq_abs_max = max(abs(iq_A_diag), abs(iq_B_diag));
+      float iq_ratio = iq_valid && iq_abs_max > 0
+          ? (float)min(abs(iq_A_diag), abs(iq_B_diag)) / (float)iq_abs_max
+          : -1.0f;  // sentinel: invalid
+
+      LOG_C1_INFO("[DIAG_HOLD] DOF" + String(dof) +
+                  " q=" + String(q_joint, 1) +
+                  " ema=" + String(holding_dtheta_ema[dof], 2) +
+                  " resA=" + String(residual_A, 2) +
+                  " resB=" + String(residual_B, 2) +
+                  " iqA=" + String(iq_A_diag) +
+                  " iqB=" + String(iq_B_diag) +
+                  " iqR=" + String(iq_ratio, 2) +
+                  " iqV=" + String(iq_valid ? 1 : 0) +
+                  " stiff=" + String(stiffness_ref, 1) +
+                  " n=" + String(holding_ema_samples[dof]));
+      last_holding_bias_log[dof] = t_now;
     }
 
 #if CONTROLLER_DEBUG
