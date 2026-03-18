@@ -307,6 +307,52 @@ Goal:
 
 No automatic correction yet.
 
+**Implementation status:**
+
+- [x] slack warning based on motor current ratio (`[SLACK]` log, event-driven)
+- [x] `delta_theta` bias monitor with EMA (`holding_dtheta_ema`)
+- [x] motor residual check from `cached_motor_angles` vs equations
+- [x] unified `[DIAG_HOLD]` log every 3s with all signals
+- [x] full gating: HOLDING + stiffness + no compliance + no tau_ff + low velocity + no recent transition + valid encoder
+- [x] CAN streaming to host via `0x4D0+joint` (2 frames, sequence counter sync)
+- [x] webapp UI: per-DOF cards + timeline chart with DOF selector
+
+### Phase 1.5 — Proposed trim dry-run
+
+Intermediate step before Phase 2: compute what a `tension_trim_deg` would
+be, but do **not** apply it to the control law.
+
+Purpose:
+
+- validate the trim algorithm against real data before activation
+- visualize the proposed correction in the webapp alongside the other signals
+- verify sign conventions and convergence behavior
+
+Current implementation:
+
+- `proposed_trim_deg` per DOF, session-local, reset on IDLE / disable / watchdog / E-Stop
+- direction from torque ratio slack side (low-Iq motor gets more preload)
+- gated by: `iq_ratio < 0.30` AND `|ema| > 0.30`
+- decay toward zero when `iq_ratio > 0.50` (balanced)
+- frozen implicitly when gating conditions fail (block not entered)
+- micro-step: 0.05° per update (~every 3s), clamp ±2.0°
+- motor residual concordance: not yet used for direction, reserved as confidence flag
+- transmitted via CAN `0x4D0` frame 2 as signed `int8 × 10`
+- displayed in webapp with explicit **DRY-RUN** label
+
+Not yet validated:
+
+- sign convention correctness across different joints and DOFs
+- residual concordance as confidence or direction input
+- behavior under gravity-varying postures
+- false positive / oscillation resistance
+
+Promotion to Phase 2 requires:
+
+- hardware validation campaign confirming trim direction is correct
+- residual concordance data supporting the torque-ratio-based sign
+- no oscillation or false triggering observed across postures
+
 ### Phase 2 — Session-local trim
 
 Introduce a new per-DOF runtime quantity, for example:
@@ -437,12 +483,23 @@ Not approved at this stage:
 
 ## Minimal Next Step
 
-Before implementing correction logic:
+Phase 1 diagnostics and Phase 1.5 dry-run are implemented. Next:
 
-1. keep the current slack warning
-2. log `holding_dtheta_ema`
-3. log motor residuals during stable holds
-4. log `tension_trim_deg` once the runtime trim is introduced
-5. collect data across several postures and loads
-
-Then decide whether a runtime `tension_trim_deg` is justified.
+1. run hardware validation campaign:
+   - hold stabile in 3-5 posture diverse, senza contatto esterno
+   - stesse posture con stiffness bassa, media, alta
+   - ripetizione con carico/gravità diversa se possibile
+   - un paio di casi provocati di squilibrio/slack noto
+2. for each hold, collect from `[DIAG_HOLD]` log or CAN stream:
+   - `q`, `ema`, `resA`, `resB`, `iqA`, `iqB`, `iqR`, `iqV`, `stiff`, `trim`
+3. verify:
+   - do `delta_theta` and Iq ratio move together?
+   - do `resA`/`resB` stay stable when only load changes?
+   - is there a robust correlation between slack side and residual sign?
+   - are signals repeatable between holds?
+   - does `proposed_trim_deg` converge sensibly without oscillation?
+4. decide Phase 2 promotion based on:
+   - repeatable correlation across postures
+   - few false positives under normal load
+   - residuals coherent when the problem is truly geometric
+   - slack ratio coherent when the problem is truly tensional
