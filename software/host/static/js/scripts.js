@@ -720,6 +720,20 @@ $(document).ready(function() {
         }
     });
 
+    // === HOLDING DIAGNOSTICS (Phase 1) ===
+    $('#diagHoldDofSelect').on('change', function() {
+        const dof = parseInt(this.value);
+        if (diagHoldHistory[dof]) updateDiagHoldChart(dof);
+    });
+
+    socket.on('diag_hold', function(data) {
+        // data: { joint_name, dof, ema, residual_A, residual_B,
+        //         iq_A, iq_B, iq_ratio, iq_valid, stiffness, tension_trim, timestamp }
+        const currentJoint = $("#jointSelect").val();
+        if (data.joint_name && data.joint_name !== currentJoint) return;
+        updateDiagHoldUI(data);
+    });
+
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
@@ -6890,3 +6904,155 @@ function updateDriftBadge(jointId, dof, status, errA, errB) {
 }
 
 
+// =============================================================================
+// HOLDING DIAGNOSTICS (Phase 1 — Slack / Bias Monitor)
+// =============================================================================
+
+// Timeline buffer: keeps last 60 data points per DOF (~3 min at 3s interval)
+let diagHoldHistory = {};   // { dof: [ {t, ema, resA, resB, iqR, trim} ] }
+let diagHoldChart = null;   // Chart.js instance
+
+function initDiagHoldChart() {
+    const ctx = document.getElementById('diagHoldChart');
+    if (!ctx) return;
+    if (diagHoldChart) return;  // already init
+
+    diagHoldChart = new Chart(ctx.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                { label: 'EMA (bias °)', data: [], borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 2, fill: false },
+                { label: 'Res A (°)', data: [], borderColor: '#ef4444', borderWidth: 1, pointRadius: 1.5, fill: false },
+                { label: 'Res B (°)', data: [], borderColor: '#22c55e', borderWidth: 1, pointRadius: 1.5, fill: false },
+                { label: 'Iq Ratio', data: [], borderColor: '#a855f7', borderWidth: 1, pointRadius: 1.5, fill: false, yAxisID: 'y1' },
+                { label: 'Trim (°)', data: [], borderColor: '#f97316', borderWidth: 2, pointRadius: 2, fill: false, borderDash: [4, 2] },
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { display: true, ticks: { font: { size: 9 }, maxTicksLimit: 8 } },
+                y: { position: 'left', title: { display: true, text: '°', font: { size: 10 } }, ticks: { font: { size: 9 } } },
+                y1: { position: 'right', min: 0, max: 1.1, title: { display: true, text: 'ratio', font: { size: 10 } }, ticks: { font: { size: 9 } }, grid: { drawOnChartArea: false } }
+            }
+        }
+    });
+}
+
+function updateDiagHoldUI(data) {
+    // Initialize chart if needed
+    if (!diagHoldChart) initDiagHoldChart();
+
+    const dof = data.dof;
+    const now = new Date();
+    const timeLabel = now.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    // Buffer history
+    if (!diagHoldHistory[dof]) diagHoldHistory[dof] = [];
+    diagHoldHistory[dof].push({
+        t: timeLabel,
+        ema: data.ema,
+        resA: data.residual_A,
+        resB: data.residual_B,
+        iqR: data.iq_valid ? data.iq_ratio : null,
+        trim: data.tension_trim || 0,
+        iqA: data.iq_A,
+        iqB: data.iq_B,
+        stiff: data.stiffness,
+        iqValid: data.iq_valid
+    });
+    if (diagHoldHistory[dof].length > 60) diagHoldHistory[dof].shift();
+
+    // Ensure DOF is in selector
+    const sel = document.getElementById('diagHoldDofSelect');
+    if (sel && !sel.querySelector(`option[value="${dof}"]`)) {
+        const opt = document.createElement('option');
+        opt.value = dof;
+        opt.textContent = `DOF ${dof}`;
+        sel.appendChild(opt);
+    }
+
+    // Update cards
+    updateDiagHoldCards(data);
+
+    // Update chart only for the selected DOF
+    const selectedDof = sel ? parseInt(sel.value) : 0;
+    if (dof === selectedDof) {
+        updateDiagHoldChart(dof);
+    }
+}
+
+function updateDiagHoldCards(data) {
+    const container = document.getElementById('diagHoldCards');
+    if (!container) return;
+
+    let card = document.getElementById(`diagCard_${data.dof}`);
+    if (!card) {
+        // Create card for this DOF
+        card = document.createElement('div');
+        card.id = `diagCard_${data.dof}`;
+        card.className = 'bg-white rounded border p-2 text-xs';
+
+        // Clear "waiting" placeholder on first data
+        if (container.querySelector('p.italic')) {
+            container.innerHTML = '';
+        }
+        container.appendChild(card);
+    }
+
+    const iqRatioColor = !data.iq_valid ? 'text-gray-400' :
+                         data.iq_ratio < 0.1 ? 'text-red-600 font-bold' :
+                         data.iq_ratio < 0.3 ? 'text-amber-600' : 'text-green-600';
+
+    const emaColor = Math.abs(data.ema) > 1.0 ? 'text-red-600 font-bold' :
+                     Math.abs(data.ema) > 0.5 ? 'text-amber-600' : 'text-green-600';
+
+    card.innerHTML = `
+        <div class="flex items-center justify-between mb-1">
+            <span class="font-semibold text-gray-700">DOF ${data.dof}</span>
+            <span class="text-gray-400">stiff=${data.stiffness.toFixed(0)}°</span>
+        </div>
+        <div class="grid grid-cols-4 gap-1">
+            <div class="text-center">
+                <div class="text-gray-400 uppercase" style="font-size:9px">Bias</div>
+                <div class="${emaColor}">${data.ema.toFixed(2)}°</div>
+            </div>
+            <div class="text-center">
+                <div class="text-gray-400 uppercase" style="font-size:9px">Iq Ratio</div>
+                <div class="${iqRatioColor}">${data.iq_valid ? data.iq_ratio.toFixed(2) : 'N/A'}</div>
+            </div>
+            <div class="text-center">
+                <div class="text-gray-400 uppercase" style="font-size:9px">Res A</div>
+                <div class="text-gray-700">${data.residual_A.toFixed(2)}°</div>
+            </div>
+            <div class="text-center">
+                <div class="text-gray-400 uppercase" style="font-size:9px">Res B</div>
+                <div class="text-gray-700">${data.residual_B.toFixed(2)}°</div>
+            </div>
+        </div>
+        <div class="flex justify-between mt-1 text-gray-400">
+            <span>iqA=${data.iq_A} iqB=${data.iq_B}</span>
+            <span class="${Math.abs(data.tension_trim || 0) > 0.01 ? 'text-orange-500 font-semibold' : ''}">
+                trim=${(data.tension_trim || 0).toFixed(2)}°
+                <span class="text-gray-300 text-[9px] ml-1">DRY-RUN</span>
+            </span>
+        </div>
+    `;
+}
+
+function updateDiagHoldChart(dof) {
+    if (!diagHoldChart || !diagHoldHistory[dof]) return;
+
+    const hist = diagHoldHistory[dof];
+    diagHoldChart.data.labels = hist.map(h => h.t);
+    diagHoldChart.data.datasets[0].data = hist.map(h => h.ema);
+    diagHoldChart.data.datasets[1].data = hist.map(h => h.resA);
+    diagHoldChart.data.datasets[2].data = hist.map(h => h.resB);
+    diagHoldChart.data.datasets[3].data = hist.map(h => h.iqR);
+    diagHoldChart.data.datasets[4].data = hist.map(h => h.trim);
+    diagHoldChart.update();
+}

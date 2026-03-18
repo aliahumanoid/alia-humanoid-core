@@ -1904,6 +1904,12 @@ class CanManager:
                 )
             return
 
+        # Holding diagnostics (0x4D0-0x4DF) — Phase 1 slack/bias data
+        if 0x4D0 <= arb_id <= 0x4DF and len(data) >= 8:
+            joint_id = arb_id - 0x4D0
+            self._handle_diag_hold(data, message.timestamp, joint_id)
+            return
+
         # Joint state broadcast (0x4F0-0x4FF) — impedance mode feedback
         if 0x4F0 <= arb_id <= 0x4FF and len(data) >= 8:
             joint_id = arb_id - 0x4F0
@@ -2389,6 +2395,64 @@ class CanManager:
                 self.socketio.emit("joint_state", data_point, namespace="/movement")
             except Exception:
                 pass  # Don't let socket errors break streaming
+
+    def _handle_diag_hold(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode DIAG_HOLD frames from CAN (0x4D0 + joint_id).
+        Two frames per DOF, distinguished by bit7 of byte 0:
+          Frame 1 (dof & 0x7F): ema, resA, resB, flags
+          Frame 2 (dof | 0x80): iqA, iqB, stiffness, trim
+        Accumulates both frames, emits socket event when frame 2 arrives.
+        """
+        dof_byte = data[0]
+        is_frame2 = bool(dof_byte & 0x80)
+        dof = dof_byte & 0x7F
+
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+
+        if not hasattr(self, "_diag_hold_pending"):
+            self._diag_hold_pending = {}
+
+        key = (joint_id, dof)
+
+        if not is_frame2:
+            # Frame 1: dof(u8), ema(i16), resA(i16), resB(i16), flags(u8)
+            ema_x100, res_a_x100, res_b_x100 = struct.unpack_from("<hhh", data, 1)
+            flags = data[7]
+            self._diag_hold_pending[key] = {
+                "type": "diag_hold",
+                "joint_id": joint_id,
+                "joint_name": joint_name,
+                "dof": dof,
+                "ema": ema_x100 / 100.0,
+                "residual_A": res_a_x100 / 100.0,
+                "residual_B": res_b_x100 / 100.0,
+                "iq_valid": bool(flags & 0x01),
+                "timestamp": timestamp,
+            }
+        else:
+            # Frame 2: dof|0x80(u8), iqA(i16), iqB(i16), stiff_x10(i16), trim_x10(i8 signed)
+            iq_a, iq_b, stiff_x10 = struct.unpack_from("<hhh", data, 1)
+            trim_x10 = struct.unpack_from("<b", data, 7)[0]  # signed int8
+
+            if key in self._diag_hold_pending:
+                entry = self._diag_hold_pending.pop(key)
+                entry["iq_A"] = iq_a
+                entry["iq_B"] = iq_b
+                iq_abs_max = max(abs(iq_a), abs(iq_b))
+                entry["iq_ratio"] = (
+                    min(abs(iq_a), abs(iq_b)) / iq_abs_max
+                    if entry["iq_valid"] and iq_abs_max > 0
+                    else -1.0
+                )
+                entry["stiffness"] = stiff_x10 / 10.0
+                entry["tension_trim"] = trim_x10 / 10.0  # Phase 2
+
+                if self.socketio:
+                    try:
+                        self.socketio.emit("diag_hold", entry, namespace="/movement")
+                    except Exception:
+                        pass
 
     def get_joint_state(self) -> Dict[str, Any]:
         """Return current joint state data for all joints/DOFs in impedance mode."""

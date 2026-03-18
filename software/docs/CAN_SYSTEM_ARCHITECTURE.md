@@ -1175,8 +1175,44 @@ The following telemetry signals form the **minimum observability contract** betw
 
 > **REMOVED (D033):** Waypoint-specific telemetry signals (`wp_buffer_fill`, `wp_late_count`,
 > `wp_consumed_total`, `reanchor_correction_ms`, `buffer_underrun_count`) and the
-> WP telemetry CAN request/response pair (`0x01C` / `0x4D0+joint`) have been removed.
-> See D033 in decision-log for rationale.
+> WP telemetry CAN request (`0x01C`) have been removed. See D033 in decision-log for rationale.
+>
+> **REUSED:** `0x4D0+joint` is now used for **DIAG_HOLD** (Holding Diagnostics), see below.
+
+#### 6.8.1 Holding Diagnostics (0x4D0+joint) — Phase 1
+
+Emitted every ~3 seconds during gated HOLDING. Two 8-byte frames per DOF,
+distinguished by bit 7 of byte 0.
+
+**Frame 1** (bias + motor residuals):
+
+| Byte | Field | Type | Unit | Description |
+|------|-------|------|------|-------------|
+| 0 | dof_index | uint8 | — | DOF index (0-2) |
+| 1-2 | ema_x100 | int16 LE | °×100 | delta_theta EMA (outer-loop bias) |
+| 3-4 | residual_A_x100 | int16 LE | °×100 | Motor residual agonist (calibrated − expected) |
+| 5-6 | residual_B_x100 | int16 LE | °×100 | Motor residual antagonist (calibrated − expected) |
+| 7 | flags | uint8 | — | bit0: iq_valid |
+
+**Frame 2** (torque + stiffness + trim):
+
+| Byte | Field | Type | Unit | Description |
+|------|-------|------|------|-------------|
+| 0 | dof_marker | uint8 | — | dof_index \| 0x80 (frame 2 marker) |
+| 1-2 | iq_A | int16 LE | raw | Torque current agonist |
+| 3-4 | iq_B | int16 LE | raw | Torque current antagonist |
+| 5-6 | stiffness_x10 | int16 LE | °×10 | Stiffness reference |
+| 7 | tension_trim_x10 | int8 | °×10 | Proposed tension trim (signed, dry-run) |
+
+**Cross-core sync:** Uses sequence counter in shared struct. Core0 increments
+to odd before writing, to even after. Core1 reads seq, snapshots, re-reads —
+skips if mismatch.
+
+**Gating conditions** (all must be true for data to be emitted):
+HOLDING, stiffness > 1°, no compliance, tau_ff = 0, velocity < 0.5°/s,
+no recent state transition, valid encoder.
+
+See `SLACK_DETECTION_AND_TENSION_TRIM.md` for design rationale.
 
 ---
 
@@ -1439,7 +1475,7 @@ Each joint controller has two physically separate CAN buses:
 | 0x4A0+joint | Joint Announce/Discovery | Ctrl → Host | Level 4 |
 | 0x4B0+joint | Encoder Offsets Response | Ctrl → Host | Level 4 |
 | 0x4C0+joint | Zero Complete Notification | Ctrl → Host | Level 4 |
-| ~~0x4D0+joint~~ | ~~WP Buffer Telemetry~~ | | **REMOVED (D033)** |
+| 0x4D0+joint | DIAG_HOLD (Holding Diagnostics) | Ctrl → Host | Level 4, ~0.3 Hz |
 | **0x4F0+joint** | **JOINT_STATE Broadcast** | Ctrl → Host | Level 4 |
 
 ### Motor CAN IDs

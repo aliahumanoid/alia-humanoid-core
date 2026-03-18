@@ -2002,6 +2002,38 @@
                     </div>
                 </div>
 
+                <!-- Holding Diagnostics (Phase 1 — Slack/Bias Monitor) -->
+                <div class="bg-gradient-to-r from-amber-50 to-orange-50 rounded-lg shadow-md p-6 mb-8 border border-amber-200">
+                    <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('diagHoldContent')">
+                        <span><i class="fas fa-heartbeat mr-2 text-amber-600"></i>Tendon Diagnostics <span class="text-xs font-normal text-gray-400 ml-1">(Phase 1)</span></span>
+                        <i class="fas fa-chevron-up chevron-icon"></i>
+                    </h2>
+                    <div id="diagHoldContent" class="section-content space-y-3">
+                        <!-- Per-DOF diagnostic cards -->
+                        <div id="diagHoldCards" class="grid grid-cols-1 gap-2">
+                            <p class="text-xs text-gray-400 italic">Waiting for HOLDING data...</p>
+                        </div>
+                        <!-- Timeline chart with DOF selector -->
+                        <div class="bg-white rounded border p-2">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="text-xs text-gray-500 font-semibold">Timeline</span>
+                                <select id="diagHoldDofSelect" class="text-xs border rounded px-1 py-0.5">
+                                    <option value="0">DOF 0</option>
+                                </select>
+                            </div>
+                            <canvas id="diagHoldChart" height="120"></canvas>
+                        </div>
+                        <!-- Legend -->
+                        <div class="flex flex-wrap gap-3 text-xs text-gray-500">
+                            <span><span class="inline-block w-3 h-3 rounded-full bg-blue-500 mr-1"></span>EMA (bias)</span>
+                            <span><span class="inline-block w-3 h-3 rounded-full bg-red-500 mr-1"></span>Res A</span>
+                            <span><span class="inline-block w-3 h-3 rounded-full bg-green-500 mr-1"></span>Res B</span>
+                            <span><span class="inline-block w-3 h-3 rounded-full bg-purple-500 mr-1"></span>Iq Ratio</span>
+                            <span><span class="inline-block w-3 h-3 rounded-full bg-orange-500 mr-1"></span>Trim (Phase 2)</span>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Direct Movement section removed — use CAN impedance targets. -->
 
                 </div>

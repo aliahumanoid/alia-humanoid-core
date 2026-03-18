@@ -428,6 +428,33 @@ extern volatile bool pid_diag_stream_active;   // Cross-core: CAN sets, Core1 re
 extern volatile bool pid_diag_terms_enabled;   // Cross-core: enable P/I/D breakdown streaming
 
 // ============================================================================
+// HOLDING DIAGNOSTICS (Phase 1 slack/bias data for UI streaming)
+// ============================================================================
+
+/**
+ * @brief Diagnostic data captured during gated HOLDING, streamed via CAN to host.
+ *
+ * Written by Core0 (control loop) every 3s during clean HOLDING.
+ * Read by Core1 and sent as CAN frame 0x4D0+joint_id.
+ * All signals per SLACK_DETECTION_AND_TENSION_TRIM.md Phase 1.
+ */
+struct DiagHoldData {
+    int16_t ema_x100;           // delta_theta EMA (°×100)
+    int16_t residual_A_x100;    // motor residual agonist (°×100)
+    int16_t residual_B_x100;    // motor residual antagonist (°×100)
+    int16_t iq_A;               // torque current agonist (raw)
+    int16_t iq_B;               // torque current antagonist (raw)
+    int16_t stiffness_x10;      // stiffness_ref (°×10)
+    int16_t tension_trim_x100;  // tension_trim_deg (°×100) — Phase 2, signed
+    uint8_t dof;                // DOF index
+    uint8_t flags;              // bit0=iq_valid, bit1-7=reserved
+    volatile uint32_t seq;      // sequence counter: Core0 increments before+after write
+                                // Core1 reads seq, copies, reads seq again — retry if mismatch
+};
+
+extern DiagHoldData diag_hold_data[MAX_DOFS];
+
+// ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)
 // ============================================================================
 

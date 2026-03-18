@@ -54,6 +54,19 @@ static uint32_t holding_ema_samples[MAX_DOFS] = {0}; // samples accumulated (for
 static uint32_t last_holding_bias_log[MAX_DOFS] = {0}; // rate-limit log
 static const float HOLDING_EMA_ALPHA = 0.005f;       // ~200 samples window at 500Hz ≈ 0.4s
 
+// === PROPOSED TRIM (dry-run, not applied to control) ===
+// Computed during gated HOLDING, transmitted to UI for visualization.
+// Positive → would increase agonist-side preload.
+// Negative → would increase antagonist-side preload.
+// See SLACK_DETECTION_AND_TENSION_TRIM.md §D.
+static float proposed_trim_deg[MAX_DOFS] = {0};
+static const float TRIM_STEP_DEG = 0.05f;             // micro-step per update (~every 3s)
+static const float TRIM_MAX_DEG = 2.0f;               // absolute clamp
+static const float TRIM_DECAY = 0.99f;                // slow decay when balanced
+static const float TRIM_SLACK_RATIO_TH = 0.30f;       // iq ratio below this → slack detected
+static const float TRIM_BALANCED_RATIO_TH = 0.50f;    // iq ratio above this → balanced
+static const float TRIM_BIAS_TH = 0.30f;              // |ema| above this → bias present
+
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
   restoreInnerPidGains(dof, jc);
   restoreOuterLoopParameters(dof, jc);
@@ -1572,6 +1585,34 @@ bool JointController::executeControlLoop() {
           ? (float)min(abs(iq_A_diag), abs(iq_B_diag)) / (float)iq_abs_max
           : -1.0f;  // sentinel: invalid
 
+      // === PROPOSED TRIM DRY-RUN ===
+      // Computes what a tension trim would do, but does NOT apply it.
+      // Direction from torque ratio (slack side), gated by bias persistence.
+      // Residual concordance used as confidence flag, not direction source.
+      if (dof < MAX_DOFS && iq_valid && iq_abs_max > 30) {
+        bool slack_detected = (iq_ratio >= 0 && iq_ratio < TRIM_SLACK_RATIO_TH);
+        bool bias_present = (fabs(holding_dtheta_ema[dof]) > TRIM_BIAS_TH);
+        bool balanced = (iq_ratio >= TRIM_BALANCED_RATIO_TH);
+
+        // Residual concordance: do both residuals have same sign as the slack side?
+        // For now just flag it, don't use for direction.
+        // bool residual_concordant = ...;  // Phase 2 refinement
+
+        if (slack_detected && bias_present) {
+          // Slack side from torque ratio: low Iq side needs more preload
+          float slack_sign = (abs(iq_A_diag) < abs(iq_B_diag)) ? 1.0f : -1.0f;
+          proposed_trim_deg[dof] += slack_sign * TRIM_STEP_DEG;
+          proposed_trim_deg[dof] = constrain(proposed_trim_deg[dof], -TRIM_MAX_DEG, TRIM_MAX_DEG);
+        } else if (balanced) {
+          // Tendons balanced — slow decay toward zero
+          proposed_trim_deg[dof] *= TRIM_DECAY;
+          if (fabs(proposed_trim_deg[dof]) < 0.01f) proposed_trim_deg[dof] = 0;
+        }
+        // else: gates valid but ambiguous — freeze trim (no update)
+      }
+      // Note: if gates fall, the DIAG_HOLD block is not entered at all,
+      // so proposed_trim_deg is implicitly frozen.
+
       LOG_C1_INFO("[DIAG_HOLD] DOF" + String(dof) +
                   " q=" + String(q_joint, 1) +
                   " ema=" + String(holding_dtheta_ema[dof], 2) +
@@ -1582,7 +1623,26 @@ bool JointController::executeControlLoop() {
                   " iqR=" + String(iq_ratio, 2) +
                   " iqV=" + String(iq_valid ? 1 : 0) +
                   " stiff=" + String(stiffness_ref, 1) +
+                  " trim=" + String(proposed_trim_deg[dof], 3) +
                   " n=" + String(holding_ema_samples[dof]));
+
+      // Populate shared struct for CAN streaming to host UI.
+      // Sequence counter protocol: Core0 increments seq to odd before writing,
+      // then to even after. Core1 retries if seq is odd or changed during read.
+      if (dof < MAX_DOFS) {
+        __atomic_add_fetch(&diag_hold_data[dof].seq, 1, __ATOMIC_RELEASE);  // odd = writing
+        diag_hold_data[dof].dof = dof;
+        diag_hold_data[dof].ema_x100 = (int16_t)(holding_dtheta_ema[dof] * 100.0f);
+        diag_hold_data[dof].residual_A_x100 = (int16_t)(residual_A * 100.0f);
+        diag_hold_data[dof].residual_B_x100 = (int16_t)(residual_B * 100.0f);
+        diag_hold_data[dof].iq_A = iq_A_diag;
+        diag_hold_data[dof].iq_B = iq_B_diag;
+        diag_hold_data[dof].stiffness_x10 = (int16_t)(stiffness_ref * 10.0f);
+        diag_hold_data[dof].tension_trim_x100 = (int16_t)(proposed_trim_deg[dof] * 100.0f);
+        diag_hold_data[dof].flags = iq_valid ? 0x01 : 0x00;
+        __atomic_add_fetch(&diag_hold_data[dof].seq, 1, __ATOMIC_RELEASE);  // even = done
+      }
+
       last_holding_bias_log[dof] = t_now;
     }
 

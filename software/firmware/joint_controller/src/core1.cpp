@@ -89,6 +89,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_IMPEDANCE_CTRL   0x01E     // Impedance control command (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
+#define CAN_ID_DIAG_HOLD_DATA    0x4D0   // Holding diagnostics (Controller → Host, + joint_id)
 #define CAN_ID_SAFE_LIMITS_DATA  0x4E0   // Safe limits per DOF (Controller → Host, + joint_id)
 #define CAN_ID_JOINT_STATE_BASE  0x4F0   // Joint state broadcast (Controller → Host, + joint_id)
 
@@ -571,6 +572,79 @@ void sendJointStateData() {
     }
 
     CAN_HOST.sendMsgBuf(CAN_ID_JOINT_STATE_BASE + ACTIVE_JOINT, 0, sizeof(frame), (uint8_t*)&frame);
+  }
+}
+
+/**
+ * @brief Send holding diagnostics via CAN when new data is pending
+ *
+ * Checks diag_hold_data[].pending (set by Core0 control loop every 3s during
+ * gated HOLDING). Sends two 8-byte CAN frames per DOF:
+ *   Frame 1 (0x4D0+joint_id): dof, ema, resA, resB, flags
+ *   Frame 2 (0x4D0+joint_id): dof|0x80, iqA, iqB, stiff, trim
+ *
+ * The second frame uses dof|0x80 as marker so Python can distinguish them.
+ */
+void sendDiagHoldData() {
+  if (suspend_host_can_polling) return;
+
+  extern MCP_CAN CAN_HOST;
+  uint8_t dof_count = active_joint_controller ? active_joint_controller->getConfig().dof_count : 0;
+
+  for (uint8_t d = 0; d < dof_count && d < MAX_DOFS; d++) {
+    // Snapshot with sequence counter: retry if Core0 was mid-write.
+    // Core0 increments seq to odd before writing, even after.
+    // If seq is odd or changed during our read, the data is inconsistent.
+    DiagHoldData snapshot;
+    uint32_t seq1 = __atomic_load_n(&diag_hold_data[d].seq, __ATOMIC_ACQUIRE);
+    if (seq1 & 1) continue;  // Core0 is mid-write, skip this cycle
+    if (seq1 == 0) continue;  // No data written yet
+
+    // Take snapshot of all fields
+    snapshot = diag_hold_data[d];
+
+    uint32_t seq2 = __atomic_load_n(&diag_hold_data[d].seq, __ATOMIC_ACQUIRE);
+    if (seq1 != seq2) continue;  // Data changed during read, skip
+
+    // Check if this is new data (seq changed since last send)
+    static uint32_t last_sent_seq[MAX_DOFS] = {};
+    if (seq1 == last_sent_seq[d]) continue;  // Already sent this snapshot
+
+    // Frame 1: bias + residuals
+    struct __attribute__((packed)) {
+      uint8_t dof_index;           // DOF
+      int16_t ema_x100;            // delta_theta EMA (°×100)
+      int16_t residual_A_x100;     // motor residual A (°×100)
+      int16_t residual_B_x100;     // motor residual B (°×100)
+      uint8_t flags;               // bit0=iq_valid
+    } frame1;
+
+    frame1.dof_index = d;
+    frame1.ema_x100 = snapshot.ema_x100;
+    frame1.residual_A_x100 = snapshot.residual_A_x100;
+    frame1.residual_B_x100 = snapshot.residual_B_x100;
+    frame1.flags = snapshot.flags;
+
+    CAN_HOST.sendMsgBuf(CAN_ID_DIAG_HOLD_DATA + ACTIVE_JOINT, 0, sizeof(frame1), (uint8_t*)&frame1);
+
+    // Frame 2: Iq + stiffness + trim (signed int16, ×100)
+    struct __attribute__((packed)) {
+      uint8_t dof_marker;          // dof | 0x80 (frame 2 marker)
+      int16_t iq_A;                // torque current agonist (raw)
+      int16_t iq_B;                // torque current antagonist (raw)
+      int16_t stiffness_x10;       // stiffness (°×10)
+      int8_t  tension_trim_x10;    // trim (°×10, signed) — Phase 2
+    } frame2;
+
+    frame2.dof_marker = d | 0x80;
+    frame2.iq_A = snapshot.iq_A;
+    frame2.iq_B = snapshot.iq_B;
+    frame2.stiffness_x10 = snapshot.stiffness_x10;
+    frame2.tension_trim_x10 = (int8_t)constrain(snapshot.tension_trim_x100 / 10, -127, 127);
+
+    CAN_HOST.sendMsgBuf(CAN_ID_DIAG_HOLD_DATA + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t*)&frame2);
+
+    last_sent_seq[d] = seq1;
   }
 }
 
@@ -1463,6 +1537,10 @@ void core1_loop() {
     // === JOINT STATE BROADCAST VIA CAN ===
     // Send joint state feedback for impedance mode (50Hz, only when active)
     sendJointStateData();
+
+    // === HOLDING DIAGNOSTICS VIA CAN ===
+    // Send Phase 1 diagnostic data when pending (every ~3s during gated HOLDING)
+    sendDiagHoldData();
 
     // === ENCODER OFFSET NOTIFICATION VIA CAN ===
     // Core0 sets this flag after zero (saveOffsetsToFlash) or boot (loadOffsetsFromFlash)

@@ -168,6 +168,9 @@ PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
 volatile bool pid_diag_terms_enabled = false;  // OFF by default — P/I/D breakdown
 
+// Holding diagnostics (Phase 1 — written by core0, read by core1 for CAN send)
+DiagHoldData diag_hold_data[MAX_DOFS] = {};
+
 // Cached motor angles (for safety checks without redundant CAN reads)
 // This eliminates the ~2ms delay per motor during periodic safety checks
 CachedMotorAngles cached_motor_angles = {
