@@ -152,6 +152,8 @@ The ankle is a **2-DOF joint** using **antagonistic tendon-driven actuation** wi
 
 > **Note**: PTFE thrust washers sit free-floating on the pin between the two PA12 lateral faces. They reduce surface friction from ~0.35 (PA12-on-PA12) to ~0.05–0.10 (PA12-on-PTFE) without adhesive or structural modifications.
 
+> **Future upgrade**: Current oilless bronze bushings have limited lifespan — the impregnated lubricant depletes over time under sustained use. Drop-in replacement with IGUS iglide polymer bushings (same 4×6×6 mm form factor) would provide longer service life through solid self-lubricating material that does not deplete. Signs of bushing wear: increased radial play, squeaking, higher motion resistance.
+
 ---
 
 ## 8) Control Architecture
