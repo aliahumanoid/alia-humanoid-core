@@ -147,7 +147,10 @@ The ankle is a **2-DOF joint** using **antagonistic tendon-driven actuation** wi
 | Type | Pin-and-bushing (NOT ball bearings) |
 | Pin Material | Stainless steel |
 | Bushing Material | Bronze / PTFE-filled nylon |
+| Thrust Washers | PTFE 0.5 mm between mating PA12 faces (M4×8 for 4 mm pins, M5×10 for 5 mm pins) |
 | Rationale | Lighter, simpler, serviceable, gradual wear |
+
+> **Note**: PTFE thrust washers sit free-floating on the pin between the two PA12 lateral faces. They reduce surface friction from ~0.35 (PA12-on-PA12) to ~0.05–0.10 (PA12-on-PTFE) without adhesive or structural modifications.
 
 ---
 
