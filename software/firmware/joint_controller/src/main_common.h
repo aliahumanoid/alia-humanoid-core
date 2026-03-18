@@ -454,6 +454,10 @@ struct DiagHoldData {
 
 extern DiagHoldData diag_hold_data[MAX_DOFS];
 
+// Reset session-local diagnostics (proposed_trim, EMA, samples) for a DOF.
+// Defined in JointController_ControlLoop.cpp, callable from core1 E-Stop path.
+void resetDiagHoldState(uint8_t dof);
+
 // ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)
 // ============================================================================

@@ -576,10 +576,10 @@ void sendJointStateData() {
 }
 
 /**
- * @brief Send holding diagnostics via CAN when new data is pending
+ * @brief Send holding diagnostics via CAN when new data is available
  *
- * Checks diag_hold_data[].pending (set by Core0 control loop every 3s during
- * gated HOLDING). Sends two 8-byte CAN frames per DOF:
+ * Uses sequence counter snapshot to read diag_hold_data[] consistently
+ * (Core0 writes every 3s during gated HOLDING). Sends two 8-byte CAN frames per DOF:
  *   Frame 1 (0x4D0+joint_id): dof, ema, resA, resB, flags
  *   Frame 2 (0x4D0+joint_id): dof|0x80, iqA, iqB, stiff, trim
  *
@@ -1506,6 +1506,8 @@ void core1_loop() {
           // Reset tau_ff accumulator so next session starts clean
           imp_acc[dof].tau_ff = 0;
           imp_acc[dof].stg_tau_ff = 0;
+          // Reset session-local diagnostics (trim dry-run, bias EMA)
+          resetDiagHoldState(dof);
         }
         LOG_C1_INFO("Core1: DOF states reset, impedance mode cleared");
       }

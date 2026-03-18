@@ -67,18 +67,22 @@ static const float TRIM_SLACK_RATIO_TH = 0.30f;       // iq ratio below this →
 static const float TRIM_BALANCED_RATIO_TH = 0.50f;    // iq ratio above this → balanced
 static const float TRIM_BIAS_TH = 0.30f;              // |ema| above this → bias present
 
+// Reset session-local diagnostics for a DOF.
+// Called from clearImpedanceControlState(), IDLE path, and E-Stop (via core1).
+void resetDiagHoldState(uint8_t dof) {
+  if (dof >= MAX_DOFS) return;
+  proposed_trim_deg[dof] = 0;
+  holding_ema_samples[dof] = 0;
+  holding_dtheta_ema[dof] = 0;
+}
+
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
   restoreInnerPidGains(dof, jc);
   restoreOuterLoopParameters(dof, jc);
   resetImpedanceSegment(dof);
   impedance_target[dof].valid = false;
   inner_pid_reinit_after_impedance[dof] = true;
-  // Reset session-local diagnostics (per SLACK_DETECTION doc: reset on disable/watchdog/e-stop)
-  if (dof < MAX_DOFS) {
-    proposed_trim_deg[dof] = 0;
-    holding_ema_samples[dof] = 0;
-    holding_dtheta_ema[dof] = 0;
-  }
+  resetDiagHoldState(dof);
 }
 
 static void applyImpedanceOuterOverrides(uint8_t dof, JointController *jc) {
@@ -302,12 +306,7 @@ bool JointController::executeControlLoop() {
       prev_dof_state[dof] = DofState::IDLE;
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
-      // Reset session-local diagnostics on IDLE
-      if (dof < MAX_DOFS) {
-        proposed_trim_deg[dof] = 0;
-        holding_ema_samples[dof] = 0;
-        holding_dtheta_ema[dof] = 0;
-      }
+      resetDiagHoldState(dof);
       expected_velocity_cache[dof] = 0.0f;
       // Reset shadow mode state
       wp_rev_track_init[dof] = false;
