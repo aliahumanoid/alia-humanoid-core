@@ -43,6 +43,17 @@ static float velocity_filtered[MAX_DOFS] = {0};     // Filtered joint velocity (
 static float expected_velocity_cache[MAX_DOFS] = {0}; // Cached expected velocity for inner loop stiffness scaling
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 
+// === SLACK MONITOR: delta_theta bias tracking during HOLDING ===
+// Exponential moving average of delta_theta while in HOLDING state.
+// A persistent non-zero bias indicates the outer PID is doing static compensation
+// work. This is a joint-space symptom — it does NOT directly identify which motor
+// offset is wrong (see SLACK_DETECTION_AND_TENSION_TRIM.md for rationale).
+// Used as a diagnostic/gating signal, not as a direct correction source.
+static float holding_dtheta_ema[MAX_DOFS] = {0};     // EMA of delta_theta during HOLDING
+static uint32_t holding_ema_samples[MAX_DOFS] = {0}; // samples accumulated (for warm-up)
+static uint32_t last_holding_bias_log[MAX_DOFS] = {0}; // rate-limit log
+static const float HOLDING_EMA_ALPHA = 0.005f;       // ~200 samples window at 500Hz ≈ 0.4s
+
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
   restoreInnerPidGains(dof, jc);
   restoreOuterLoopParameters(dof, jc);
@@ -1049,19 +1060,63 @@ bool JointController::executeControlLoop() {
     float theta_B_ref = theta_0_antagonist_motor +
                         cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
 
-    // DEBUG: log stiffness application during HOLDING (rate-limited, DOF 0 only)
-    if (dof == 0 && dof_state[dof] == DofState::HOLDING) {
-      static uint32_t last_stiff_log_ms = 0;
-      if (t_now - last_stiff_log_ms > 2000) {
-        LOG_C1_INFO("[DBG_STIFF] HOLDING DOF0: stiff=" + String(stiffness_ref, 1) +
-                    " infl=" + String(cascade_influence, 2) +
-                    " dtheta=" + String(delta_theta_smooth, 2) +
-                    " q0=" + String(theta_0_joint, 1) +
-                    " Aref=" + String(theta_A_ref, 1) +
-                    " Bref=" + String(theta_B_ref, 1) +
-                    " A0=" + String(theta_0_agonist_motor, 1) +
-                    " B0=" + String(theta_0_antagonist_motor, 1));
-        last_stiff_log_ms = t_now;
+    // === HOLDING BIAS TRACKER ===
+    // Track EMA of delta_theta during HOLDING to detect persistent outer-loop
+    // compensation. Gated per SLACK_DETECTION_AND_TENSION_TRIM.md §Gating.
+    // Reset when ANY gate condition falls (bias is only meaningful in clean steady state).
+    {
+      bool gate_holding      = (dof < MAX_DOFS && dof_state[dof] == DofState::HOLDING);
+      bool gate_stiffness    = (stiffness_ref > 1.0f);
+      bool gate_no_compliance = !compliance_state[dof].compliance_active;
+      bool gate_no_tau_ff    = (!impedance_active || impedance_target[dof].tau_ff == 0);
+      bool gate_low_velocity = (fabs(velocity_filtered[dof]) < 0.5f);  // near-zero motion
+      bool gate_no_transition = (prev_dof_state[dof] == DofState::HOLDING);  // not just entered
+      bool gate_valid_encoder = dof_data.valid[dof];
+
+      bool all_gates = gate_holding && gate_stiffness && gate_no_compliance &&
+                       gate_no_tau_ff && gate_low_velocity && gate_no_transition &&
+                       gate_valid_encoder;
+
+      if (all_gates) {
+        if (holding_ema_samples[dof] == 0) {
+          // First sample after all gates pass — seed EMA
+          holding_dtheta_ema[dof] = delta_theta_smooth;
+        } else {
+          holding_dtheta_ema[dof] += HOLDING_EMA_ALPHA * (delta_theta_smooth - holding_dtheta_ema[dof]);
+        }
+        holding_ema_samples[dof]++;
+
+        // Log bias + motor residuals every 3s (only after warm-up: 500 samples ≈ 1s)
+        if (holding_ema_samples[dof] > 500 &&
+            t_now - last_holding_bias_log[dof] > 3000) {
+
+          // Motor residual: actual calibrated motor angle vs expected from equations.
+          // Uses cached_motor_angles (live CAN readings with offset applied) as the
+          // "actual" signal — this is the correct motor-space geometric residual
+          // per SLACK_DETECTION_AND_TENSION_TRIM.md §C.
+          float expected_A_res = 0.0f, expected_B_res = 0.0f;
+          float residual_A = 0.0f, residual_B = 0.0f;
+          float q_joint = dof_data.angles[dof];
+          if (cached_motor_angles.valid[dof] &&
+              calculateMotorAnglesWithEquations(dof, q_joint, q_joint, expected_A_res, expected_B_res)) {
+            residual_A = cached_motor_angles.agonist[dof] - expected_A_res;
+            residual_B = cached_motor_angles.antagonist[dof] - expected_B_res;
+          }
+
+          LOG_C1_INFO("[BIAS] DOF" + String(dof) +
+                      " ema=" + String(holding_dtheta_ema[dof], 2) +
+                      " resA=" + String(residual_A, 2) +
+                      " resB=" + String(residual_B, 2) +
+                      " stiff=" + String(stiffness_ref, 1) +
+                      " n=" + String(holding_ema_samples[dof]));
+          last_holding_bias_log[dof] = t_now;
+        }
+      } else if (dof < MAX_DOFS) {
+        // Any gate failed — reset accumulator so bias starts clean next time
+        if (holding_ema_samples[dof] > 0) {
+          holding_ema_samples[dof] = 0;
+          holding_dtheta_ema[dof] = 0;
+        }
       }
     }
 
@@ -1458,6 +1513,62 @@ bool JointController::executeControlLoop() {
         }
       }
     }
+
+    // === SLACK TENDON DETECTION ===
+    // In clean HOLDING with stiffness > 0, both motors must pull (non-zero Iq).
+    // If one motor's |Iq| is much smaller than the other's, the tendon is likely slack.
+    // Gravity shifts the ratio but never zeroes one side completely.
+    // Gated per SLACK_DETECTION_AND_TENSION_TRIM.md §Gating to avoid false positives.
+    {
+      static uint8_t slack_count[3] = {};       // consecutive low-ratio samples per DOF
+      static uint32_t last_slack_warn[3] = {};   // rate-limit warnings
+      const uint8_t SLACK_THRESHOLD_COUNT = 50;  // ~100ms at 500Hz before alarm
+      const float   SLACK_RATIO_THRESHOLD = 0.05f; // 5% ratio = nearly zero on one side
+      const int16_t SLACK_MIN_IQ = 30;           // ignore when both motors are near-idle
+
+      bool slack_gated = trResp.dataA.valid && trResp.dataB.valid &&
+                         dof_state[dof] == DofState::HOLDING && stiffness_ref > 1.0f &&
+                         !compliance_state[dof].compliance_active &&
+                         (!impedance_active || impedance_target[dof].tau_ff == 0) &&
+                         fabs(velocity_filtered[dof]) < 0.5f &&
+                         prev_dof_state[dof] == DofState::HOLDING &&
+                         dof_data.valid[dof];
+
+      if (slack_gated) {
+        int16_t iq_A = abs(trResp.dataA.torqueCurrent);
+        int16_t iq_B = abs(trResp.dataB.torqueCurrent);
+        int16_t iq_max = max(iq_A, iq_B);
+        int16_t iq_min = min(iq_A, iq_B);
+
+        if (dof < 3) {
+          if (iq_max > SLACK_MIN_IQ) {
+            float ratio = (float)iq_min / (float)iq_max;
+            if (ratio < SLACK_RATIO_THRESHOLD) {
+              slack_count[dof]++;
+              if (slack_count[dof] >= SLACK_THRESHOLD_COUNT &&
+                  t_now - last_slack_warn[dof] > 3000) {
+                const char* side = (iq_A < iq_B) ? "AGONIST" : "ANTAGONIST";
+                LOG_C1_WARN("⚠️ [SLACK] DOF " + String(dof) + " " + side +
+                            " tendon slack! iqA=" + String(trResp.dataA.torqueCurrent) +
+                            " iqB=" + String(trResp.dataB.torqueCurrent) +
+                            " ratio=" + String(ratio, 3) +
+                            " stiff=" + String(stiffness_ref, 1));
+                last_slack_warn[dof] = t_now;
+                slack_count[dof] = 0;  // reset after warning
+              }
+            } else {
+              slack_count[dof] = 0;  // reset on healthy sample
+            }
+          } else {
+            slack_count[dof] = 0;  // near-idle: non-informative, reset persistence
+          }
+        }
+      } else if (dof < 3) {
+        // Gate failed — reset so persistence requires continuous clean holding
+        slack_count[dof] = 0;
+      }
+    }
+
 #if CONTROLLER_DEBUG
     {
       uint32_t torque_dt = time_us_32() - torque_start_us;
@@ -1467,7 +1578,7 @@ bool JointController::executeControlLoop() {
       }
     }
 #endif
-    
+
     // === UPDATE PID DIAGNOSTICS for CAN streaming ===
     // Store values for diagnostic stream (read by sendPIDDiagStreamData in core1.cpp)
     // Use theta_0_joint (target from interpolation) and snapshot angle (current reading)

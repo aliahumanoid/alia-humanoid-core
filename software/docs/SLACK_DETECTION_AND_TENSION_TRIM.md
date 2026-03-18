@@ -1,0 +1,448 @@
+# Slack Detection and Tension Trim
+
+## Status
+
+Working document for the tendon-slack / bias problem.
+
+Intended use:
+
+- initial design trace while the logic is being defined
+- later final documentation for the chosen approach
+
+This document describes the current reasoning for:
+
+- slack detection during `HOLDING`
+- interpretation of persistent outer-loop bias
+- why offset auto-correction is risky
+- a safer alternative based on session-local tension trim
+
+## Problem Statement
+
+In a tendon-driven agonist/antagonist joint, a static holding posture can hide two
+different problems:
+
+1. the **geometric calibration** is wrong
+2. the **tension distribution** is wrong
+
+These are not the same failure mode.
+
+Examples:
+
+- motor offsets are wrong, so the calibrated motor angles do not match the joint angle
+- offsets are correct, but one tendon has become slack
+- offsets are correct, but gravity/load requires a persistent joint-space correction
+- offsets are correct, but the linear equations are imperfect in that region
+
+The control stack already contains signals that expose these effects:
+
+- outer-loop correction `delta_theta`
+- motor current / torque current ratio between agonist and antagonist
+- expected-vs-actual motor angle residuals from the linear equations
+
+The key design question is:
+
+> Can persistent outer-loop bias during `HOLDING` be used to automatically
+> correct saved motor offsets?
+
+Current conclusion: **not directly**.
+
+## Current Control Context
+
+The firmware computes motor references from two conceptually different terms:
+
+- a **joint-space correction** term `delta_theta`
+- a **co-contraction / tension separation** term `stiffness`
+
+Current formula in the control loop:
+
+```text
+theta_A_ref = theta0_A + cascade * 0.5 * (delta_theta + stiffness)
+theta_B_ref = theta0_B + cascade * 0.5 * (delta_theta - stiffness)
+```
+
+Interpretation:
+
+- `delta_theta` is the outer-loop response to joint-space error
+- `stiffness` separates agonist and antagonist references to keep both tendons loaded
+
+Therefore `delta_theta` does **not** directly identify which motor offset is wrong.
+
+## Why `delta_theta` Is Useful
+
+`delta_theta` is still valuable as a **bias indicator**.
+
+If the joint is in stable `HOLDING` and:
+
+- the target is fixed
+- the encoder is valid
+- no collision/contact is occurring
+- no large disturbance is present
+
+then a persistent non-zero `delta_theta` means:
+
+> the outer loop is doing static compensation work that ideally should be smaller
+
+This is a good diagnostic symptom.
+
+Examples of what it may indicate:
+
+- tension asymmetry
+- offset mismatch
+- local modeling error in the linear equations
+- gravity/load bias
+- static friction / deadband effects
+
+So:
+
+- **good use**: detect persistent bias
+- **bad use**: directly map sign/magnitude to saved motor offset correction
+
+## Why `delta_theta` Alone Is Not a Valid Offset Estimator
+
+### 1. It is joint-space, not motor-space
+
+The outer loop acts on the joint error, not on per-motor calibration residuals.
+
+A positive `delta_theta` only says:
+
+> to hold the joint angle, the controller needs a positive joint-space correction
+
+It does **not** uniquely say:
+
+- agonist offset too low
+- antagonist offset too high
+- both slightly wrong
+- equation slope/intercept wrong
+- external load present
+
+### 2. It is contaminated by load
+
+A perfect calibration can still require non-zero static `delta_theta`.
+
+Example:
+
+- joint offsets are perfect
+- knee is holding under gravity
+- no slack exists
+- the outer loop still needs a steady correction to keep angle
+
+If that bias were copied into saved offsets, calibration would absorb load compensation.
+
+### 3. It depends on control parameters
+
+The observed `delta_theta` bias changes with:
+
+- `stiffness`
+- outer `Kp/Ki/Kd`
+- cascade influence
+- compliance / soft-hold state
+- friction feedforward and contact state
+
+A true motor offset should not depend strongly on these runtime parameters.
+
+### 4. It can learn disturbances
+
+If the joint is pushed externally during `HOLDING`, `delta_theta` becomes biased.
+
+If offsets are updated from that bias, the system would "learn" an external disturbance
+as if it were a geometric calibration error.
+
+## What the Saved Offsets Represent Today
+
+The saved motor offsets are currently validated against the linear equations using:
+
+- current joint angle from the absolute encoder
+- expected motor angles computed from the joint angle
+- actual calibrated motor angles
+
+This makes them a **motor-space geometric calibration quantity**.
+
+That is the right layer for persistent offset storage.
+
+Any new logic should preserve this distinction:
+
+- **offsets** = geometric alignment
+- **tension trim** = runtime load/tension balancing
+
+## Proposed Separation of Responsibilities
+
+### A. Slack detector
+
+Primary purpose:
+
+- detect that one side is not carrying load as expected
+
+Candidate signals:
+
+- agonist vs antagonist `|Iq|` ratio
+- only in `HOLDING`
+- only when stiffness is above a minimum threshold
+- with persistence over time
+
+This is already the right direction for a warning-level detector.
+
+### B. Outer bias monitor
+
+Primary purpose:
+
+- detect persistent joint-space compensation in `HOLDING`
+
+Candidate signal:
+
+- EMA of `delta_theta` during stable `HOLDING`
+
+Interpretation:
+
+- diagnostic only
+- secondary confidence input
+- not a direct actuator-side correction command
+
+### C. Motor residual check
+
+Primary purpose:
+
+- detect whether a geometric calibration residual is actually present
+
+Candidate signal:
+
+- difference between expected motor angles (from equations) and actual calibrated motor angles
+
+For each DOF:
+
+```text
+residual_agonist    = actual_calibrated_agonist    - expected_agonist
+residual_antagonist = actual_calibrated_antagonist - expected_antagonist
+```
+
+Interpretation:
+
+- this is a motor-space residual, not a joint-space control residual
+- it should be the primary signal for any future decision to touch saved offsets
+- it should be logged together with slack ratio and `holding_dtheta_ema`
+
+This is the correct signal to justify touching saved offsets.
+
+### D. Session-local tension trim
+
+Primary purpose:
+
+- compensate slack / tension imbalance without corrupting calibration
+
+This trim should be:
+
+- per DOF
+- small
+- session-local
+- reversible
+- applied on top of the normal control references or hold references
+
+Recommended representation:
+
+- `tension_trim_deg`
+- signed differential preload correction
+- tracked explicitly for debug and validation
+
+Recommended application in the control law:
+
+```text
+theta_A_ref = theta0_A + cascade * 0.5 * (delta_theta + stiffness + tension_trim_deg)
+theta_B_ref = theta0_B + cascade * 0.5 * (delta_theta - stiffness - tension_trim_deg)
+```
+
+Interpretation:
+
+- `tension_trim_deg > 0` increases agonist-side preload and unloads the antagonist side less
+- `tension_trim_deg < 0` increases antagonist-side preload and unloads the agonist side less
+- this is a differential tension correction, not a geometric calibration correction
+
+Recommended discrete micro-update:
+
+```text
+tension_trim_next = clamp(
+    tension_trim_deg + step_sign * step_deg,
+    -trim_max_deg,
+    +trim_max_deg
+)
+```
+
+with:
+
+- `step_deg` very small, for example `0.02 .. 0.10 deg`
+- `trim_max_deg` bounded, for example `1.0 .. 2.0 deg`
+- `step_sign` chosen from slack-side evidence plus motor residual agreement
+- `delta_theta` used only as a confidence/gating signal, not as the direct sign source
+
+Recommended debug observability:
+
+- current `tension_trim_deg`
+- trim saturation state
+- last trim update reason
+- slack side estimate
+- `holding_dtheta_ema`
+- `residual_agonist`
+- `residual_antagonist`
+
+This makes the runtime adaptation visible before any decision about persistence.
+
+This is the preferred first implementation path.
+
+## Proposed Strategy
+
+### Phase 1 — Diagnostics only
+
+Implement and validate:
+
+1. slack warning based on motor current ratio
+2. `delta_theta` bias monitor during `HOLDING`
+3. motor residual check:
+   - expected motor angle from linear equations
+   - actual calibrated motor angle from live data
+   - per-motor residual for agonist and antagonist
+4. logging and correlation of all three signals together
+
+Goal:
+
+- understand whether the three indicators correlate in real hardware
+- understand dependence on posture, gravity and stiffness
+
+No automatic correction yet.
+
+### Phase 2 — Session-local trim
+
+Introduce a new per-DOF runtime quantity, for example:
+
+- `tension_trim_deg`
+
+Concept:
+
+- small signed correction applied only during `HOLDING` or low-speed regimes
+- not written into saved motor offsets
+- reset on reboot / disable / startup unless explicitly retained
+
+Possible behavior:
+
+- if slack ratio indicates one side is unloaded
+- and `delta_theta` bias is persistent
+- and motor-angle residuals agree on the same side / direction
+- and motor-angle residuals do not indicate a hard calibration fault
+- then apply a very small trim in the direction that restores balanced tension
+
+This should be:
+
+- rate limited
+- bounded
+- frozen under contact / motion / compliance
+- logged on every update for debug
+
+Important:
+
+- the trim should be the first automatic correction layer
+- saved offsets should stay unchanged during this phase
+- if the trim behaves badly, it must be easy to reset to zero immediately
+
+### Phase 3 — Optional calibration promotion
+
+Only after enough evidence:
+
+- repeated convergence to the same trim
+- no external contact
+- consistent result across multiple holding poses
+- motor residuals agree with the correction
+
+then consider promoting a learned trim into a persistent calibration update.
+
+This must be a deliberate, gated action. It should not happen opportunistically at every hold.
+
+## Gating Requirements for Any Automatic Correction
+
+Any automatic trim or correction should be blocked unless all of the following are true:
+
+1. DOF is in `HOLDING`
+2. encoder is valid
+3. no compliance event is active
+4. no recent watchdog / startup / impedance mode transition
+5. no external collision/contact is suspected
+6. `tau_ff == 0`
+7. motion commands are effectively zero
+8. stiffness is within a trusted range
+9. signal persists for a long enough window
+
+Recommended additional guard:
+
+- require agreement between at least two independent indicators
+
+Example:
+
+- low torque ratio
+- persistent `delta_theta` bias
+- matching motor residual sign
+
+## Signals and Their Roles
+
+| Signal | Layer | Role | Safe to use for persistent offset update? |
+| --- | --- | --- | --- |
+| `delta_theta` bias | joint-space | bias symptom | No |
+| agonist/antagonist `Iq` ratio | motor loading | slack symptom | No |
+| expected vs actual calibrated motor angle residual | motor-space geometry | offset evidence | Yes, with strong gating |
+| session-local trim convergence | runtime adaptation | supporting evidence / preload correction | Not by itself |
+
+## Practical Example
+
+Suppose:
+
+- DOF is holding at `70°`
+- stiffness is non-zero
+- `Iq_A` is near zero while `Iq_B` is high
+- `delta_theta` EMA is persistently positive
+
+What can be concluded safely?
+
+- there is likely a tension imbalance
+- the outer loop is compensating a bias
+
+What cannot be concluded safely from those two facts alone?
+
+- that the antagonist offset is definitively wrong
+- that the saved offset should be updated now
+
+Safer response:
+
+1. raise diagnostic warning
+2. compare expected vs actual motor residuals
+3. if stable over many holds, apply a tiny runtime trim
+4. only later evaluate whether calibration should change
+
+## Current Recommendation
+
+Approved direction:
+
+- use `delta_theta` bias as a diagnostic symptom
+- use torque/current ratio as a slack symptom
+- use motor residuals as the only legitimate signal for any future persistent offset decision
+- combine all three in logs and monitoring
+- introduce a separate session-local `tension_trim_deg` as the first automatic mitigation layer
+
+Not approved at this stage:
+
+- directly writing recalc/saved offsets from the sign or magnitude of `delta_theta`
+- directly writing recalc/saved offsets from trim updates during the same session
+
+## Open Questions
+
+1. Should trim act on `theta_0` directly or on the effective hold reference?
+2. Should trim stay symmetric (`+x/-x`) or ever become one-sided on the suspected slack side only?
+3. What is the right persistence window for reliable detection under gravity?
+4. Should trim be active only in `HOLDING`, or also in very-low-speed motion?
+5. What signal best distinguishes true slack from legitimate load asymmetry?
+
+## Minimal Next Step
+
+Before implementing correction logic:
+
+1. keep the current slack warning
+2. log `holding_dtheta_ema`
+3. log motor residuals during stable holds
+4. log `tension_trim_deg` once the runtime trim is introduced
+5. collect data across several postures and loads
+
+Then decide whether a runtime `tension_trim_deg` is justified.
