@@ -178,6 +178,7 @@ static uint16_t safety_check_counter = 0;
 
 // Track previous state to detect MOVING → HOLDING transitions
 static DofState prev_dof_state[MAX_DOFS] = {DofState::IDLE};
+static DofState prev_state_before_update[MAX_DOFS] = {DofState::IDLE}; // snapshot for bias/slack gate
 
 // Track if PID state needs reset when transitioning IDLE/HOLDING → MOVING
 static bool pid_reset_needed[MAX_DOFS] = {true, true, true};
@@ -859,6 +860,9 @@ bool JointController::executeControlLoop() {
         }
       }
       
+      // Snapshot previous state BEFORE updating — used by bias/slack gate_no_transition
+      // Uses file-scope array declared near prev_dof_state.
+      prev_state_before_update[dof] = prev_dof_state[dof];
       // Update previous state for next cycle (use updated dof_state)
       prev_dof_state[dof] = is_holding ? DofState::HOLDING : DofState::MOVING;
 
@@ -1094,7 +1098,7 @@ bool JointController::executeControlLoop() {
       bool gate_no_compliance = !compliance_state[dof].compliance_active;
       bool gate_no_tau_ff    = (!impedance_active || impedance_target[dof].tau_ff == 0);
       bool gate_low_velocity = (fabs(velocity_filtered[dof]) < 0.5f);  // near-zero motion
-      bool gate_no_transition = (prev_dof_state[dof] == DofState::HOLDING);  // not just entered
+      bool gate_no_transition = (prev_state_before_update[dof] == DofState::HOLDING);  // not just entered
       bool gate_valid_encoder = dof_data.valid[dof];
 
       bool all_gates = gate_holding && gate_stiffness && gate_no_compliance &&
@@ -1532,7 +1536,7 @@ bool JointController::executeControlLoop() {
                          !compliance_state[dof].compliance_active &&
                          (!impedance_active || impedance_target[dof].tau_ff == 0) &&
                          fabs(velocity_filtered[dof]) < 0.5f &&
-                         prev_dof_state[dof] == DofState::HOLDING &&
+                         prev_state_before_update[dof] == DofState::HOLDING &&
                          dof_data.valid[dof];
 
       if (slack_gated) {

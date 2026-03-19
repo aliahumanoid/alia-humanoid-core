@@ -504,7 +504,7 @@ Phase 1 diagnostics and Phase 1.5 dry-run are implemented. Next:
    - residuals coherent when the problem is truly geometric
    - slack ratio coherent when the problem is truly tensional
 
-## F — First Hardware Campaign Results (2026-03-19)
+## F — Hardware Campaign Results (2026-03-19)
 
 ### Setup
 
@@ -512,67 +512,93 @@ Phase 1 diagnostics and Phase 1.5 dry-run are implemented. Next:
 - Configuration: leg hanging vertically, 0° = extended, 90° = flexed
 - Gravity: lower leg weight pulls toward extension at higher angles
 - Stiffness: 25° (nominal default)
-- Warm-up at time of test: 500 samples (~1s) — later raised to 7500 (~15s)
 
-### Raw Data (stabilized samples per posture)
+### Campaign 1: Warm-up 1s (serial_communication_20260319_142855.log)
 
-| q°  | ema    | resA  | resB   | iqA  | iqB | iqR  |
-|-----|--------|-------|--------|------|-----|------|
-| 0   | -10.7  | -2.9  | -2.4   | -98  | 169 | 0.58 |
-| 10  | -2.8   | +9.8  | -15.1  | -234 | 217 | 0.93 |
-| 30  | +12.6  | +2.6  | +0.7   | -147 | 67  | 0.46 |
-| 40  | +19.7  | +3.2  | +1.9   | -138 | 33  | 0.24 |
-| 50  | +4.0   | +4.6  | -3.6   | -161 | 135 | 0.84 |
-| 60  | +8.9   | +4.0  | -1.6   | -163 | 82  | 0.50 |
-| 70  | -0.7   | +3.2  | -5.7   | -273 | 150 | 0.55 |
-| 80  | +1.8   | +1.4  | -3.6   | -275 | 154 | 0.56 |
-| 90  | +18.8  | -3.6  | +4.7   | -257 | 76  | 0.30 |
+Source: `[DIAG_HOLD]` entries from serial log, warm-up threshold 500 samples.
 
-Note: q=30° and q=90° rows were captured shortly after arrival (not fully
-stabilized). The ema and iqR values for those rows are dominated by the
-outer-loop transient, not steady-state.
+**This dataset is unreliable** due to insufficient warm-up: iqR and ema include
+post-movement transients (outer PID settling). Samples at 30° and 90° were
+captured within seconds of arrival. The ema values appearing in this run
+reflected transient behavior, not steady-state bias.
+
+Result: warm-up raised to 7500 samples (~15s at 500Hz).
+
+### Campaign 2: Warm-up 15s (serial_communication_20260319_144236.log)
+
+Source: `[DIAG_HOLD]` entries from serial log after warm-up fix.
+
+**Known issue**: `ema` was frozen at 0.77° across all postures due to a bug —
+`gate_no_transition` used `prev_dof_state[dof]` which was already updated to
+HOLDING before the gate check, so the EMA never reset between movements.
+The ema column is **not usable** from this dataset. Fixed post-campaign.
+
+#### Ascent (0° → 80°), stabilized samples only
+
+| q°  | resA  | resB  | iqA  | iqB | iqR  |
+|-----|-------|-------|------|-----|------|
+| 0   | -2.8  | +1.4  | -158 | 186 | 0.85 |
+| 19  | +0.6  | +1.6  | -184 | 167 | 0.91 |
+| 39  | +1.3  | +1.6  | -192 | 115 | 0.60 |
+| 59  | +1.9  | +2.2  | -195 | 96  | 0.49 |
+| 80  | -0.3  | -0.4  | -293 | 152 | 0.52 |
+
+#### Descent (50° → 0°), stabilized samples only
+
+| q°  | resA  | resB  | iqA  | iqB | iqR  |
+|-----|-------|-------|------|-----|------|
+| 50  | +2.9  | +3.8  | -177 | 49  | 0.28 |
+| 29  | +0.2  | +6.7  | -156 | 102 | 0.65 |
+| 10  | -0.4  | +3.3  | -198 | 186 | 0.94 |
+| 0   | -1.5  | +3.3  | -196 | 231 | 0.85 |
+
+Note: the log also contains continuous RevTrack and Shadow RESYNC warnings
+(motor init discrepancy ~8° on both motors). These do not invalidate the
+[DIAG_HOLD] data (which uses cached_motor_angles), but indicate persistent
+encoder tracker issues in the background.
 
 ### Observations
 
-1. **iqR drops sharply right after every movement** (0.24 at 40°, 0.30 at 90°)
-   and recovers over ~10-15s. The gating condition `prev_state == HOLDING` is
-   necessary but not sufficient — a warm-up of ~15s is needed before trusting
-   the ratio.
+1. **iqR follows gravity**: ~0.85-0.94 at low angles (small lever arm),
+   ~0.49-0.60 at 40-60° (maximum gravitational torque on lower leg),
+   recovering to ~0.52 at 80°.
 
-2. **ema is strongly posture-dependent**: ranges from -10.7° at 0° to +22.9° at
-   50°. It changes sign across postures. This is dominated by the gravitational
-   load on the lower leg, not by calibration error.
+2. **Descent hysteresis**: iqR at 50° in descent (0.28) is much lower than at
+   59° in ascent (0.49). The antagonist motor (B) retains less preload after
+   coming from a higher angle, likely due to static friction or tendon
+   hysteresis.
 
-3. **Residuals (resA, resB) also change with posture**: they invert sign between
-   10° (+9.8, -15.1) and 90° (-3.6, +4.7). They are influenced by tendon
-   elasticity under load, not purely by geometric offset error.
+3. **Residuals are small and stable** after 15s warm-up: ±3° range vs ±15°
+   with 1s warm-up. They change sign between 0° and 80° (gravity-induced).
 
-4. **Stabilized iqR at higher angles** (50-80°) settles around 0.55-0.84 — this
-   is a normal gravity-induced asymmetry, not slack.
+4. **Slack alarm threshold 0.05 appears safe**: no false positives, even
+   the lowest iqR (0.28 at 50° descent) is well above 0.05.
+
+5. **ema data is invalid** in this campaign (frozen at 0.77°, bug identified
+   and fixed: `prev_dof_state` was updated before the gate check).
 
 ### Conclusions
 
-- The 0.05 slack ratio threshold appears safe: no false positives even with
-  significant gravitational asymmetry.
-- **ema cannot be used as an offset-error indicator** without gravity
-  compensation. At 50° the ema reads +22.9° — this is entirely load, not drift.
-- **Residuals are not purely geometric** in this configuration. Tendon
-  elasticity under gravity shifts them significantly.
-- **proposed_trim_deg** would chase gravity if allowed to run — the dry-run
-  confirmed this is not yet promotable to Phase 2 without posture-awareness.
+- **iqR alone cannot distinguish slack from gravity** at mid-range angles
+  (40-60°). iqR=0.28 at 50° is gravity + hysteresis, not slack.
+- **Residuals are posture-dependent**, not purely geometric. Cannot be used
+  as a standalone calibration-error signal without gravity compensation.
+- **ema needs re-validation** after the gate_no_transition bug fix.
+- **Phase 2 trim requires gravity compensation** — without it, the trim
+  would chase gravitational load.
 
-### Changes Made
+### Bug Fixes Applied
 
-- Warm-up raised from 500 to 7500 samples (~15s) for both DIAG_HOLD emission
-  and SLACK alarm persistence.
-- `slack_count` type changed from `uint8_t` to `uint16_t` to accommodate the
-  higher threshold.
+- `gate_no_transition` now uses `prev_state_snapshot` captured before the
+  `prev_dof_state` update, ensuring the EMA resets on MOVING→HOLDING transition.
+- Same fix applied to slack detector gating.
 
 ### Open Questions for Phase 2
 
 - Can we compensate gravity using the known joint angle and a simple
-  gravity-torque model (single-link pendulum)?
+  gravity-torque model (single-link pendulum: τ = K·sin(q))?
 - Should the trim algorithm only run when the robot is in a known
   low-gravity configuration (e.g. horizontal torso)?
 - Is there a posture-invariant signal combination that isolates true
   calibration error from load effects?
+- Should descent hysteresis be accounted for (direction-dependent baseline)?
