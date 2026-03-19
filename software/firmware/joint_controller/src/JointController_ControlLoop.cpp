@@ -1521,9 +1521,9 @@ bool JointController::executeControlLoop() {
     // Gravity shifts the ratio but never zeroes one side completely.
     // Gated per SLACK_DETECTION_AND_TENSION_TRIM.md §Gating to avoid false positives.
     {
-      static uint8_t slack_count[3] = {};       // consecutive low-ratio samples per DOF
+      static uint16_t slack_count[3] = {};       // consecutive low-ratio samples per DOF
       static uint32_t last_slack_warn[3] = {};   // rate-limit warnings
-      const uint8_t SLACK_THRESHOLD_COUNT = 50;  // ~100ms at 500Hz before alarm
+      const uint16_t SLACK_THRESHOLD_COUNT = 7500;  // ~15s at 500Hz before alarm (let gravity/transient settle)
       const float   SLACK_RATIO_THRESHOLD = 0.05f; // 5% ratio = nearly zero on one side
       const int16_t SLACK_MIN_IQ = 30;           // ignore when both motors are near-idle
 
@@ -1573,7 +1573,7 @@ bool JointController::executeControlLoop() {
     // === UNIFIED DIAGNOSTIC LOG ===
     // All Phase 1 signals in one parsable line, emitted every 3s during gated HOLDING.
     // Placed here so trResp (Iq), holding_dtheta_ema, and cached_motor_angles are all available.
-    if (dof < 3 && holding_ema_samples[dof] > 500 &&
+    if (dof < 3 && holding_ema_samples[dof] > 7500 &&
         t_now - last_holding_bias_log[dof] > 3000) {
       // Motor residual: actual calibrated motor angle vs expected from equations.
       // Uses cached_motor_angles (live CAN with offset applied) — correct motor-space
