@@ -36,7 +36,7 @@ struct TorqueResponseData {
   int16_t torqueCurrent;    // Iq current feedback (raw, -2048 to 2048)
   int16_t motorSpeed;       // Motor speed in dps (raw motor shaft)
   int8_t temperature;       // Motor temperature in °C
-  uint16_t encoder;         // Raw motor-side encoder value (range depends on resolution, 0-65535 for 18-bit)
+  uint16_t encoder;         // Raw 0xA1 encoder field (single-turn output/actuator position, resolution depends on firmware)
   bool valid;               // True if response was received and parsed
 };
 

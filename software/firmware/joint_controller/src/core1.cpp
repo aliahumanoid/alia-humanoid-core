@@ -1418,8 +1418,8 @@ void pollHostCan() {
             if (len >= 4) {
               uint16_t timeout_ms;
               memcpy(&timeout_ms, &buf[2], sizeof(uint16_t));
-              if (timeout_ms < 10) timeout_ms = 10;       // Minimum 10ms
-              if (timeout_ms > 5000) timeout_ms = 5000;    // Maximum 5s
+              if (timeout_ms < 10) timeout_ms = 10;         // Minimum 10ms
+              if (timeout_ms > 60000) timeout_ms = 60000;   // Maximum 60s
               impedance_watchdog_ms = timeout_ms;
               LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: watchdog=" + String(timeout_ms) + "ms");
             }

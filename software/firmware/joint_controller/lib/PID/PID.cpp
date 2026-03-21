@@ -53,7 +53,7 @@ PID::PID(float Ts, float kp, float ki, float kd, float umax, float umin, float t
  * - x: current measured value
  * - uff: feedforward control term
  */
-float PID::control(float xsp, float x, float uff) {
+float PID::control(float xsp, float x, float uff, float ki_scale, bool freeze_integrator) {
   // Step 1: Calculate error
   float e = xsp - x;
 
@@ -62,10 +62,10 @@ float PID::control(float xsp, float x, float uff) {
   float up = kp * (e - eprev[0]);
 
   // Step 3: Integral term with anti-windup
-  float ui = ki * Ts * e;
+  float ui = ki * ki_scale * Ts * e;
   // Anti-windup: disable integration when output is saturated
   // This prevents integral windup during saturation
-  if (uprev + uff >= umax || uprev + uff <= umin) {
+  if (freeze_integrator || uprev + uff >= umax || uprev + uff <= umin) {
     ui = 0;
   }
 

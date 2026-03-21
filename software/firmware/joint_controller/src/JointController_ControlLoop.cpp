@@ -52,6 +52,7 @@ static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 static float holding_dtheta_ema[MAX_DOFS] = {0};     // EMA of delta_theta during HOLDING
 static uint32_t holding_ema_samples[MAX_DOFS] = {0}; // samples accumulated (for warm-up)
 static uint32_t last_holding_bias_log[MAX_DOFS] = {0}; // rate-limit log
+static uint32_t last_trim_dry_run_update[MAX_DOFS] = {0}; // separate cadence from DIAG_HOLD telemetry
 static const float HOLDING_EMA_ALPHA = 0.005f;       // ~200 samples window at 500Hz ≈ 0.4s
 
 // === PROPOSED TRIM (dry-run, not applied to control) ===
@@ -74,6 +75,8 @@ void resetDiagHoldState(uint8_t dof) {
   proposed_trim_deg[dof] = 0;
   holding_ema_samples[dof] = 0;
   holding_dtheta_ema[dof] = 0;
+  last_holding_bias_log[dof] = 0;
+  last_trim_dry_run_update[dof] = 0;
 }
 
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
@@ -885,7 +888,19 @@ bool JointController::executeControlLoop() {
         // Cache expected velocity for inner loop stiffness scaling
         expected_velocity_cache[dof] = expected_velocity_deg_s;
 
-        delta_theta[dof] = outer_pid->control(q_des, q_curr);
+        bool outer_holding_mode = !is_moving;
+        float outer_ki_scale = outer_holding_mode ? outer_hold_ki_scale : 1.0f;
+        bool freeze_outer_integrator =
+            outer_holding_mode &&
+            abs_error <= outer_hold_integral_freeze_error_deg &&
+            fabs(velocity_filtered[dof]) <= outer_hold_integral_freeze_velocity_deg_s;
+
+        // In HOLDING, static friction can turn tiny residual errors into stick-slip:
+        // the outer integrator keeps charging, the joint breaks free, overshoots,
+        // then repeats. Reduce Ki in HOLDING and freeze the integral entirely once
+        // the joint is already near target and nearly still.
+        delta_theta[dof] = outer_pid->control(q_des, q_curr, 0.0f, outer_ki_scale,
+                                              freeze_outer_integrator);
 
         // Store outer PID term breakdown for diagnostics (DOF 0 only)
         if (dof == 0 && pid_diag_terms_enabled) {
@@ -1575,10 +1590,12 @@ bool JointController::executeControlLoop() {
     }
 
     // === UNIFIED DIAGNOSTIC LOG ===
-    // All Phase 1 signals in one parsable line, emitted every 3s during gated HOLDING.
-    // Placed here so trResp (Iq), holding_dtheta_ema, and cached_motor_angles are all available.
-    if (dof < 3 && holding_ema_samples[dof] > 7500 &&
-        t_now - last_holding_bias_log[dof] > 3000) {
+    // All Phase 1 signals in one parsable line. Emission cadence is intentionally
+    // independent from the slow trim dry-run cadence: we want fast telemetry from
+    // the first gated samples to study short transients and external perturbations,
+    // without making proposed_trim evolve too quickly.
+    if (dof < 3 && holding_ema_samples[dof] >= diag_hold_min_samples &&
+        t_now - last_holding_bias_log[dof] > diag_hold_period_ms) {
       // Motor residual: actual calibrated motor angle vs expected from equations.
       // Uses cached_motor_angles (live CAN with offset applied) — correct motor-space
       // geometric residual per SLACK_DETECTION_AND_TENSION_TRIM.md §C.
@@ -1602,9 +1619,13 @@ bool JointController::executeControlLoop() {
 
       // === PROPOSED TRIM DRY-RUN ===
       // Computes what a tension trim would do, but does NOT apply it.
-      // Direction from torque ratio (slack side), gated by bias persistence.
-      // Residual concordance used as confidence flag, not direction source.
-      if (dof < MAX_DOFS && iq_valid && iq_abs_max > 30) {
+      // Keep this conservative and slow even if DIAG_HOLD telemetry is emitted
+      // immediately and frequently.
+      bool trim_update_due =
+          holding_ema_samples[dof] >= trim_dry_run_min_samples &&
+          t_now - last_trim_dry_run_update[dof] > trim_dry_run_period_ms;
+
+      if (trim_update_due && dof < MAX_DOFS && iq_valid && iq_abs_max > 30) {
         bool slack_detected = (iq_ratio >= 0 && iq_ratio < TRIM_SLACK_RATIO_TH);
         bool bias_present = (fabs(holding_dtheta_ema[dof]) > TRIM_BIAS_TH);
         bool balanced = (iq_ratio >= TRIM_BALANCED_RATIO_TH);
@@ -1624,6 +1645,7 @@ bool JointController::executeControlLoop() {
           if (fabs(proposed_trim_deg[dof]) < 0.01f) proposed_trim_deg[dof] = 0;
         }
         // else: gates valid but ambiguous — freeze trim (no update)
+        last_trim_dry_run_update[dof] = t_now;
       }
       // Note: if gates fall, the DIAG_HOLD block is not entered at all,
       // so proposed_trim_deg is implicitly frozen.
@@ -1806,4 +1828,3 @@ bool JointController::executeControlLoop() {
   
   return any_movement;
 }
-

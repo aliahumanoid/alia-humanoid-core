@@ -298,6 +298,7 @@
         "stopAtEnd",
         "motorOnBefore",
         "powerOffAtEnd",
+        "extraRaw",
         "extraSingle",
         "extraMulti",
     ];
@@ -414,7 +415,7 @@
             return;
         }
         selectedPresetId = preset.id;
-        Object.entries(preset.values).forEach(([id, value]) => {
+        Object.entries({ extraRaw: false, ...preset.values }).forEach(([id, value]) => {
             setFieldValue(sweepFields[id], value);
         });
         setFieldValue(sweepFields.sweepLabel, preset.suggestedLabel);
@@ -602,6 +603,9 @@
 
     async function runSweep() {
         const extraCommands = [];
+        if (document.getElementById("extraRaw").checked) {
+            extraCommands.push("raw");
+        }
         if (document.getElementById("extraSingle").checked) {
             extraCommands.push("single");
         }

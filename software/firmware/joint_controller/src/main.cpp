@@ -74,6 +74,13 @@ volatile float osc_min_amplitude_deg = 3.0f;         // Min oscillation amplitud
 volatile float osc_min_error_to_check = 1.0f;        // Don't check oscillation if error below this (°)
 // Compliance control (deflection/stall, anti-slack, soft hold)
 volatile float expected_velocity_deadband_deg_s = 1.0f;
+volatile float outer_hold_ki_scale = 0.0f;
+volatile float outer_hold_integral_freeze_error_deg = 0.25f;
+volatile float outer_hold_integral_freeze_velocity_deg_s = 0.5f;
+volatile uint16_t diag_hold_min_samples = 1;
+volatile uint16_t diag_hold_period_ms = 500;
+volatile uint16_t trim_dry_run_min_samples = 7500;
+volatile uint16_t trim_dry_run_period_ms = 3000;
 volatile float hold_error_threshold_deg = 6.0f;
 volatile uint16_t hold_time_threshold_ms = 120;
 volatile float hold_release_threshold_deg = 2.0f;

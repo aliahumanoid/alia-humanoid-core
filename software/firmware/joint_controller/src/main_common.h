@@ -239,6 +239,13 @@ enum ComplianceRecoveryPolicy : uint8_t {
 
 // Expected velocity from current movement segment (deg/s)
 extern volatile float expected_velocity_deadband_deg_s;  // <= this => treat as holding
+extern volatile float outer_hold_ki_scale;               // Scale outer Ki in HOLDING
+extern volatile float outer_hold_integral_freeze_error_deg;      // Freeze I if |error| below this in HOLDING
+extern volatile float outer_hold_integral_freeze_velocity_deg_s; // Freeze I if |velocity| below this in HOLDING
+extern volatile uint16_t diag_hold_min_samples;          // Minimum gated samples before DIAG_HOLD emission
+extern volatile uint16_t diag_hold_period_ms;            // Period of DIAG_HOLD emission while gated
+extern volatile uint16_t trim_dry_run_min_samples;       // Minimum gated samples before proposed trim updates
+extern volatile uint16_t trim_dry_run_period_ms;         // Minimum time between proposed trim updates
 
 // HOLDING deflection detection (expected velocity ~ 0)
 extern volatile float hold_error_threshold_deg;          // |error| > this

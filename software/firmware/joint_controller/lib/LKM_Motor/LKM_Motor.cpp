@@ -86,30 +86,34 @@ void LKM_Motor::setEncoderCountsPerRev(uint32_t counts) {
 /**
  * Initialize revolution tracking from absolute 0x92 reading + 0xA1 encoder.
  *
- * Uses round() to compute the integer revolution count that's consistent
- * with both the absolute angle (from 0x92) and the current encoder position
- * (from 0xA1). Safe even if motor moved slightly between the two reads,
- * as long as it didn't move more than ±180° motor shaft.
+ * Revolution tracking works in actuator/output-space:
+ * - 0x92 provides a multi-turn motor-side angle in 0.01°
+ * - 0xA1 encoder provides the single-turn actuator/output position
+ *
+ * We first convert the 0x92 angle into actuator degrees using the reduction gear,
+ * then compute the full actuator revolutions consistent with the current encoder
+ * position. Safe even if the motor moved slightly between the two reads, as long
+ * as the actuator itself did not move more than ±180° between them.
  */
 void LKM_Motor::initRevTracking(int64_t absMotorAngle_centideg, uint16_t currentEncoder) {
-  double motorAngle_deg = absMotorAngle_centideg / 100.0;
+  double actuatorAngle_deg = (absMotorAngle_centideg / 100.0) / (double)_reductionGear;
   double encoderAngle_deg = (double)currentEncoder / (double)_encoderCountsPerRev * 360.0;
 
-  // Compute revolution count consistent with both readings
-  _revolutions = (int32_t)round((motorAngle_deg - encoderAngle_deg) / 360.0);
+  // Compute actuator revolution count consistent with both readings
+  _revolutions = (int32_t)round((actuatorAngle_deg - encoderAngle_deg) / 360.0);
   _prevEncoder = currentEncoder;
   _revTrackInit = true;
 
   // Verify consistency (rate-limited: log at most once per 2s per motor)
   double trackedAngle = (double)_revolutions * 360.0 + encoderAngle_deg;
-  double error = fabs(trackedAngle - motorAngle_deg);
+  double error = fabs(trackedAngle - actuatorAngle_deg);
   if (error > 5.0) {
     static uint32_t lastLogMs[4] = {};  // up to 4 motors
     uint8_t idx = _motorID < 4 ? _motorID : 0;
     uint32_t now = millis();
     if (now - lastLogMs[idx] > 2000) {
       LOG_C1_WARN("[RevTrack] Motor " + String(_motorID) + " init discrepancy: " +
-                  String(error, 2) + "° (0x92=" + String(motorAngle_deg, 2) +
+                  String(error, 2) + "° (0x92=" + String(actuatorAngle_deg, 2) +
                   " tracked=" + String(trackedAngle, 2) + ")");
       lastLogMs[idx] = now;
     }
@@ -120,8 +124,8 @@ void LKM_Motor::initRevTracking(int64_t absMotorAngle_centideg, uint16_t current
  * Update tracked angle from new 0xA1 encoder reading.
  *
  * Detects wrap-arounds by checking if the encoder delta exceeds half
- * the encoder range. At 500Hz, even at maximum motor speed (~5000 rpm),
- * the motor can only rotate ~7° per cycle — well within the ±180° threshold.
+ * the encoder range. The tracked revolutions are actuator/output revolutions,
+ * matching the single-turn actuator position encoded in the 0xA1 response.
  */
 void LKM_Motor::updateRevTracking(uint16_t currentEncoder) {
   if (!_revTrackInit) return;
@@ -142,13 +146,12 @@ void LKM_Motor::updateRevTracking(uint16_t currentEncoder) {
 /**
  * Get tracked angle in output degrees (same coordinate system as getMultiAngleSync).
  *
- * Combines revolution count with current encoder position,
- * applies reduction gear, offset, and inversion.
+ * Combines actuator/output revolution count with the current single-turn
+ * actuator position from 0xA1, then applies offset and inversion.
  */
 float LKM_Motor::getTrackedAngle() const {
-  float motorAngle_deg = (float)_revolutions * 360.0f +
-                         (float)_prevEncoder / (float)_encoderCountsPerRev * 360.0f;
-  float outputAngle = motorAngle_deg / _reductionGear;
+  float outputAngle = (float)_revolutions * 360.0f +
+                      (float)_prevEncoder / (float)_encoderCountsPerRev * 360.0f;
   outputAngle = (outputAngle - offsetEncoder) * (invertEncoder ? -1.0f : 1.0f);
   return outputAngle;
 }

@@ -20,6 +20,7 @@ DEFAULT_OUTPUT_RATIO = 10.0
 READ_COMMANDS = {
     "pid": 0x30,
     "acceleration": 0x33,
+    "raw": 0x90,
     "state2": 0x9C,
     "single": 0x94,
     "multi": 0x92,
@@ -98,6 +99,18 @@ def decode_feedback_frame(data: bytes, *, output_ratio: float = DEFAULT_OUTPUT_R
     }
 
 
+def decode_raw_frame(data: bytes, *, output_ratio: float = DEFAULT_OUTPUT_RATIO) -> dict[str, float | int]:
+    if len(data) != 8 or data[0] != READ_COMMANDS["raw"]:
+        raise ValueError("Invalid raw-encoder response frame")
+    encoder_raw = parse_u16(data, 2)
+    actuator_abs_deg = encoder_raw * 360.0 / 16384.0
+    return {
+        "raw_encoder_count": encoder_raw,
+        "actuator_abs_from_raw_deg": actuator_abs_deg,
+        "motor_single_from_raw_deg": actuator_abs_deg * output_ratio,
+    }
+
+
 def decode_single_frame(data: bytes, *, output_ratio: float = DEFAULT_OUTPUT_RATIO) -> dict[str, float | int]:
     if len(data) != 8 or data[0] != READ_COMMANDS["single"]:
         raise ValueError("Invalid single-angle response frame")
@@ -156,8 +169,8 @@ def parse_extra_commands(raw: str | Iterable[str] | None) -> list[str]:
     else:
         items = [str(item).strip().lower() for item in raw if str(item).strip()]
     for item in items:
-        if item not in ("single", "multi"):
-            raise ValueError("Extra commands valid values: none, single, multi")
+        if item not in ("raw", "single", "multi"):
+            raise ValueError("Extra commands valid values: none, raw, single, multi")
     return items
 
 
@@ -224,6 +237,8 @@ def csv_fieldnames(extra_commands: Iterable[str]) -> list[str]:
         "motor_single_from_feedback_deg",
     ]
     extras = list(extra_commands)
+    if "raw" in extras:
+        fieldnames.extend(["raw_encoder_count", "actuator_abs_from_raw_deg", "motor_single_from_raw_deg"])
     if "single" in extras:
         fieldnames.extend(["single_angle_centideg", "single_angle_deg", "actuator_abs_from_single_deg"])
     if "multi" in extras:

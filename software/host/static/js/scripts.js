@@ -3634,10 +3634,20 @@ function sendImpedanceFastTarget(dof, qTarget, dqCruise, stiffness) {
 
 /**
  * Relax impedance watchdog for webapp streaming (HTTP has more jitter than direct CAN).
- * Restores to firmware default when streaming stops.
+ * Restores to configured hold watchdog when streaming stops.
  */
 const WATCHDOG_STREAM_MS = 500;   // relaxed for webapp (HTTP jitter)
 const WATCHDOG_DEFAULT_MS = 100;  // firmware default (tight, for Jetson direct CAN)
+
+function getImpedanceHoldWatchdogMs() {
+    const raw = parseInt($('#impedanceHoldWatchdogMs').val(), 10);
+    if (!Number.isFinite(raw)) return WATCHDOG_DEFAULT_MS;
+    const ms = Math.max(100, Math.min(60000, raw));
+    if (ms !== raw) {
+        $('#impedanceHoldWatchdogMs').val(ms);
+    }
+    return ms;
+}
 
 function setImpedanceWatchdog(ms) {
     const joint = $("#jointSelect").val();
@@ -3645,9 +3655,16 @@ function setImpedanceWatchdog(ms) {
     return postImpedanceCtrl(joint, 0x02, ms);
 }
 
+function applyImpedanceHoldWatchdog() {
+    const ms = getImpedanceHoldWatchdogMs();
+    return setImpedanceWatchdog(ms)
+        .done(() => appendStatusMessage(`🛡️ Hold watchdog set to ${ms}ms`))
+        .fail(() => appendStatusMessage('❌ Failed to set hold watchdog', 'error'));
+}
+
 /**
  * Stop any running impedance move stream (50Hz keepalive).
- * @param {boolean} restoreWatchdog - restore tight watchdog (default true).
+ * @param {boolean} restoreWatchdog - restore configured hold watchdog (default true).
  *        Pass false when transitioning to another stream (e.g. oscillation).
  */
 function stopImpedanceMoveStream(restoreWatchdog) {
@@ -3656,9 +3673,9 @@ function stopImpedanceMoveStream(restoreWatchdog) {
         clearInterval(impedanceMoveStream);
         impedanceMoveStream = null;
     }
-    // Only restore tight watchdog if a stream was actually running
+    // Only restore configured hold watchdog if a stream was actually running
     if (wasActive && restoreWatchdog !== false) {
-        setImpedanceWatchdog(WATCHDOG_DEFAULT_MS);
+        setImpedanceWatchdog(getImpedanceHoldWatchdogMs());
     }
 }
 
@@ -4181,7 +4198,7 @@ function stopImpedanceOscillation() {
     if (impedanceOscInterval) {
         clearInterval(impedanceOscInterval);
         impedanceOscInterval = null;
-        setImpedanceWatchdog(WATCHDOG_DEFAULT_MS);
+        setImpedanceWatchdog(getImpedanceHoldWatchdogMs());
         appendStatusMessage('⏹️ Oscillation stopped');
         $('#impedanceOscCenter').text('—');
         $('#impedanceOscDuration').text('—');

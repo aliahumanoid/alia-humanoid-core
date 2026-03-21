@@ -474,22 +474,22 @@ public:
   /**
    * @brief Initialize revolution tracking from absolute position
    * @param absMotorAngle_centideg Absolute motor angle from 0x92 in 0.01° units (motor shaft)
-   * @param currentEncoder Current motor-side encoder value from 0xA1 response (0-65535 for 18-bit)
+   * @param currentEncoder Current single-turn encoder value from 0xA1 response
    *
    * Must be called once (typically on IDLE→MOVING transition) before
    * setTorquePairPipelined() can return valid tracked angles.
-   * Uses the absolute 0x92 reading to determine the revolution count,
-   * and the 0xA1 encoder for sub-revolution position.
+   * Uses the absolute 0x92 reading to determine the actuator/output
+   * revolution count, and the 0xA1 encoder for sub-revolution actuator
+   * position.
    */
   void initRevTracking(int64_t absMotorAngle_centideg, uint16_t currentEncoder);
 
   /**
    * @brief Update tracked angle from new 0xA1 encoder reading
-   * @param currentEncoder New motor-side encoder value from 0xA1 response (0-65535 for 18-bit)
+   * @param currentEncoder New single-turn encoder value from 0xA1 response
    *
    * Detects encoder wrap-arounds (crossing 0/max boundary) and updates
-   * the revolution counter accordingly. Safe at 500Hz — motor can't rotate
-   * more than ~7° between cycles even at maximum speed.
+   * the actuator/output revolution counter accordingly.
    */
   void updateRevTracking(uint16_t currentEncoder);
 
@@ -497,8 +497,8 @@ public:
    * @brief Get the tracked multi-turn angle in output degrees
    * @return Angle with offset and inversion applied (same as getMultiAngleSync)
    *
-   * Combines revolution count with current encoder position, applies
-   * reduction gear, offset, and inversion — identical output to 0x92 reading.
+   * Combines actuator/output revolution count with current encoder position,
+   * then applies offset and inversion — identical output to 0x92 reading.
    */
   float getTrackedAngle() const;
 
@@ -645,8 +645,8 @@ private:
   // REVOLUTION TRACKING STATE
   // ---------------------------------------------------------------
 
-  uint32_t _encoderCountsPerRev; ///< Encoder counts per motor revolution (65536 for 18-bit, 32768 for 15-bit, 16384 for 14-bit)
-  int32_t _revolutions;          ///< Tracked full motor revolutions
+  uint32_t _encoderCountsPerRev; ///< Encoder counts per encoder/output revolution (65536 for 18-bit field, 32768 for 15-bit, 16384 for 14-bit)
+  int32_t _revolutions;          ///< Tracked full actuator/output revolutions
   uint16_t _prevEncoder;         ///< Previous encoder reading from 0xA1 response
   bool _revTrackInit;            ///< Whether revolution tracking has been initialized
 };

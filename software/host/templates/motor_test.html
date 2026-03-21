@@ -180,7 +180,8 @@
                     <button data-action="off" class="btn btn-danger motor-action">Motor Off</button>
                 </div>
 
-                <div class="grid gap-4 mt-4 md:grid-cols-3">
+                <div class="grid gap-4 mt-4 md:grid-cols-4">
+                    <button data-action="raw" class="btn btn-secondary motor-action">Read Raw</button>
                     <button data-action="state2" class="btn btn-secondary motor-action">Read State2</button>
                     <button data-action="single" class="btn btn-secondary motor-action">Read Single</button>
                     <button data-action="multi" class="btn btn-secondary motor-action">Read Multi</button>
@@ -312,6 +313,10 @@
                     <label class="flex items-center gap-3 text-sm text-slate-300">
                         <input id="powerOffAtEnd" type="checkbox">
                         Power off at end
+                    </label>
+                    <label class="flex items-center gap-3 text-sm text-slate-300">
+                        <input id="extraRaw" type="checkbox">
+                        Extra raw read
                     </label>
                     <label class="flex items-center gap-3 text-sm text-slate-300">
                         <input id="extraSingle" type="checkbox">

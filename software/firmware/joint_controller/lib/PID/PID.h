@@ -100,11 +100,14 @@ public:
    * @param xsp Setpoint (desired value)
    * @param x Current process variable (measurement)
    * @param uff Feedforward control term (default: 0)
+   * @param ki_scale Per-call integral gain scaling (default: 1)
+   * @param freeze_integrator When true, skip only the integral increment for this call
    * @return Saturated control output in range [umin, umax]
    *
    * @note Call this method at regular intervals matching the sampling period Ts
    */
-  float control(float xsp, float x, float uff = 0);
+  float control(float xsp, float x, float uff = 0, float ki_scale = 1.0f,
+                bool freeze_integrator = false);
   
   /**
    * @brief Reset PID internal state to zero

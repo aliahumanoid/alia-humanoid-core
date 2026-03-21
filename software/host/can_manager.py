@@ -36,6 +36,7 @@ from motor_can_bench import (
     bytes_hex,
     csv_fieldnames,
     decode_feedback_frame,
+    decode_raw_frame,
     decode_multi_frame,
     decode_pid_frame,
     decode_single_frame,
@@ -1127,6 +1128,7 @@ class CanManager:
         state = self.get_connection_state()
         recent: Dict[str, Any] = {}
         with self._motor_response_condition:
+            recent_raw = self._motor_recent_frames.get((motor_id, READ_COMMANDS["raw"]))
             recent_state2 = self._motor_recent_frames.get((motor_id, READ_COMMANDS["state2"]))
             recent_single = self._motor_recent_frames.get((motor_id, READ_COMMANDS["single"]))
             recent_multi = self._motor_recent_frames.get((motor_id, READ_COMMANDS["multi"]))
@@ -1137,6 +1139,7 @@ class CanManager:
             recent_off = self._motor_recent_frames.get((motor_id, CONTROL_COMMANDS["off"]))
 
         recent.update({
+            "raw": self._decode_motor_response(recent_raw["data"], output_ratio=output_ratio) if recent_raw else None,
             "state2": self._decode_motor_response(recent_state2["data"], output_ratio=output_ratio) if recent_state2 else None,
             "single": self._decode_motor_response(recent_single["data"], output_ratio=output_ratio) if recent_single else None,
             "multi": self._decode_motor_response(recent_multi["data"], output_ratio=output_ratio) if recent_multi else None,
@@ -1167,6 +1170,7 @@ class CanManager:
         with self._motor_response_condition:
             recent_pid = self._motor_recent_frames.get((motor_id, READ_COMMANDS["pid"]))
             recent_accel = self._motor_recent_frames.get((motor_id, READ_COMMANDS["acceleration"]))
+            recent_raw = self._motor_recent_frames.get((motor_id, READ_COMMANDS["raw"]))
             recent_state2 = self._motor_recent_frames.get((motor_id, READ_COMMANDS["state2"]))
             recent_single = self._motor_recent_frames.get((motor_id, READ_COMMANDS["single"]))
             recent_multi = self._motor_recent_frames.get((motor_id, READ_COMMANDS["multi"]))
@@ -1177,6 +1181,7 @@ class CanManager:
             "recent": {
                 "pid": self._decode_motor_response(recent_pid["data"], output_ratio=output_ratio) if recent_pid else None,
                 "acceleration": self._decode_motor_response(recent_accel["data"], output_ratio=output_ratio) if recent_accel else None,
+                "raw": self._decode_motor_response(recent_raw["data"], output_ratio=output_ratio) if recent_raw else None,
                 "state2": self._decode_motor_response(recent_state2["data"], output_ratio=output_ratio) if recent_state2 else None,
                 "single": self._decode_motor_response(recent_single["data"], output_ratio=output_ratio) if recent_single else None,
                 "multi": self._decode_motor_response(recent_multi["data"], output_ratio=output_ratio) if recent_multi else None,
@@ -1191,7 +1196,7 @@ class CanManager:
         timeout_s: float = 0.2,
         output_ratio: float = DEFAULT_OUTPUT_RATIO,
     ) -> Dict[str, Any]:
-        allowed = {"pid", "acceleration", "state2", "single", "multi"}
+        allowed = {"pid", "acceleration", "raw", "state2", "single", "multi"}
         if action not in allowed:
             raise ValueError(f"Unsupported tuning read action: {action}")
         return self.motor_test_command(
@@ -2126,6 +2131,8 @@ class CanManager:
             return decode_pid_frame(data)
         if command == READ_COMMANDS["acceleration"]:
             return decode_acceleration_frame(data)
+        if command == READ_COMMANDS["raw"]:
+            return decode_raw_frame(data, output_ratio=output_ratio)
         if command == READ_COMMANDS["single"]:
             return decode_single_frame(data, output_ratio=output_ratio)
         if command == READ_COMMANDS["multi"]:
