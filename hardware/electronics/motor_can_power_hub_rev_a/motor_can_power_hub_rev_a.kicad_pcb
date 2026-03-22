@@ -578,7 +578,8 @@
 			(uuid "66d38c4c-b983-4879-a500-252343ffe803")
 		)
 		(embedded_fonts no)
-		(model "${ALIA_3DMODEL_DIR}/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
+		(model "${KIPRJMOD}/3dmodels/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
+			(hide yes)
 			(offset
 				(xyz 0 0 0)
 			)
@@ -1514,7 +1515,7 @@
 			(uuid "af1d1dff-25fc-441b-a718-304329b0c077")
 		)
 		(embedded_fonts no)
-		(model "${ALIA_3DMODEL_DIR}/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
+		(model "${KIPRJMOD}/3dmodels/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2017,7 +2018,7 @@
 			(uuid "5f929f35-19b0-4d6d-86fc-6b4c0fe61ef6")
 		)
 		(embedded_fonts no)
-		(model "${ALIA_3DMODEL_DIR}/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
+		(model "${KIPRJMOD}/3dmodels/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2520,7 +2521,7 @@
 			(uuid "781ef9cb-3541-4e6f-b005-f33c6fc4caac")
 		)
 		(embedded_fonts no)
-		(model "${ALIA_3DMODEL_DIR}/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
+		(model "${KIPRJMOD}/3dmodels/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2819,7 +2820,7 @@
 			(uuid "3fc01393-c079-43b4-80c4-be0508ee5b5d")
 		)
 		(embedded_fonts no)
-		(model "${ALIA_3DMODEL_DIR}/Connector_AMASS.3dshapes/AMASS_XT60PW-M_1x02_P7.20mm_Horizontal.step"
+		(model "${KIPRJMOD}/3dmodels/Connector_AMASS.3dshapes/AMASS_XT60PW-M_1x02_P7.20mm_Horizontal.step"
 			(offset
 				(xyz 0 0 4)
 			)
@@ -3322,7 +3323,7 @@
 			(uuid "f3606207-0df5-46ac-b81c-2e5f800d2e02")
 		)
 		(embedded_fonts no)
-		(model "${ALIA_3DMODEL_DIR}/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
+		(model "${KIPRJMOD}/3dmodels/Connector_JST.3dshapes/JST_ZH_B6B-ZR_1x06_P1.50mm_Vertical.step"
 			(offset
 				(xyz 0 0 0)
 			)
