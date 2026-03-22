@@ -239,9 +239,17 @@ enum ComplianceRecoveryPolicy : uint8_t {
 
 // Expected velocity from current movement segment (deg/s)
 extern volatile float expected_velocity_deadband_deg_s;  // <= this => treat as holding
-extern volatile float outer_hold_ki_scale;               // Scale outer Ki in HOLDING
+extern volatile float outer_hold_ki_scale;               // Final Ki scale after HOLDING ramp
+extern volatile uint16_t outer_hold_ki_ramp_ms;         // Ramp Ki scale from 1.0 → outer_hold_ki_scale
 extern volatile float outer_hold_integral_freeze_error_deg;      // Freeze I if |error| below this in HOLDING
 extern volatile float outer_hold_integral_freeze_velocity_deg_s; // Freeze I if |velocity| below this in HOLDING
+extern volatile bool retension_probe_enabled;            // Periodic local re-tension probe during clean HOLDING
+extern volatile float retension_probe_boost_deg;         // Temporary boost added to stiffness_ref during probe
+extern volatile uint16_t retension_probe_pulse_ms;       // Probe pulse duration
+extern volatile uint16_t retension_probe_start_delay_ms; // Delay after entering HOLDING before probe
+extern volatile uint16_t retension_probe_post_ms;        // Post-pulse observation window
+extern volatile uint16_t retension_probe_repeat_ms;      // Periodic re-arm interval while HOLDING stays clean
+extern volatile float retension_probe_min_hold_q_deg;    // Minimum |joint angle| to probe (0 = any pose)
 extern volatile uint16_t diag_hold_min_samples;          // Minimum gated samples before DIAG_HOLD emission
 extern volatile uint16_t diag_hold_period_ms;            // Period of DIAG_HOLD emission while gated
 extern volatile uint16_t trim_dry_run_min_samples;       // Minimum gated samples before proposed trim updates
@@ -441,7 +449,7 @@ extern volatile bool pid_diag_terms_enabled;   // Cross-core: enable P/I/D break
 /**
  * @brief Diagnostic data captured during gated HOLDING, streamed via CAN to host.
  *
- * Written by Core0 (control loop) every 3s during clean HOLDING.
+ * Written by Core0 (control loop) at diag_hold_period_ms cadence during clean HOLDING.
  * Read by Core1 and sent as CAN frame 0x4D0+joint_id.
  * All signals per SLACK_DETECTION_AND_TENSION_TRIM.md Phase 1.
  */
@@ -460,6 +468,36 @@ struct DiagHoldData {
 };
 
 extern DiagHoldData diag_hold_data[MAX_DOFS];
+
+// ============================================================================
+// RETENSION PROBE RESULT (generic active-sensing output for host policy)
+// ============================================================================
+
+/**
+ * @brief Probe summary captured after an active stiffness pulse during HOLDING.
+ *
+ * Written by Core0 when a probe window completes. Read by Core1 and sent as a
+ * small CAN telemetry burst so the host can log and interpret it generically,
+ * without baking joint-specific trim policy into firmware.
+ */
+struct RetensionProbeResultData {
+    int16_t q_x100;               // Joint angle at probe (°×100)
+    int16_t base_stiffness_x10;   // Baseline stiffness before temporary probe boost (°×10)
+    int16_t pre_ratio_x1000;      // iq ratio before pulse (×1000)
+    int16_t dur_ratio_x1000;      // iq ratio during pulse (×1000)
+    int16_t delta_ratio_x1000;    // dur_ratio - pre_ratio (×1000)
+    int16_t recruit_norm_x1000;   // Weak-side recruitment normalized by baseline max (×1000)
+    uint16_t effort_pre;          // Baseline total |Iq| effort (raw)
+    int16_t boost_x10;            // Probe boost amplitude (°×10)
+    uint16_t pulse_ms;            // Probe pulse duration (ms)
+    uint8_t dof;                  // DOF index
+    uint8_t flags;                // bit0=weak_side_is_B, bit1-7 reserved
+    uint8_t class_code;           // Heuristic classification (host may ignore)
+    uint8_t min_samples;          // Minimum samples collected across pre/during/post windows
+    volatile uint32_t seq;        // Sequence counter for cross-core consistent snapshot
+};
+
+extern RetensionProbeResultData retension_probe_result_data[MAX_DOFS];
 
 // Reset session-local diagnostics (proposed_trim, EMA, samples) for a DOF.
 // Defined in JointController_ControlLoop.cpp, callable from core1 E-Stop path.
@@ -903,6 +941,7 @@ struct ImpedanceTarget {
   int16_t tau_ff;          // Feedforward torque (raw motor units)
   uint32_t last_update_ms; // Timestamp of last SET_IMPEDANCE (for watchdog)
   bool valid;              // True after first complete SET_IMPEDANCE received
+  bool watchdog_timed_out; // Host stream timed out; firmware is holding locally
 };
 
 /**

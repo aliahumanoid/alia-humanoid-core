@@ -92,6 +92,7 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_DIAG_HOLD_DATA    0x4D0   // Holding diagnostics (Controller → Host, + joint_id)
 #define CAN_ID_SAFE_LIMITS_DATA  0x4E0   // Safe limits per DOF (Controller → Host, + joint_id)
 #define CAN_ID_JOINT_STATE_BASE  0x4F0   // Joint state broadcast (Controller → Host, + joint_id)
+#define CAN_ID_RETENSION_PROBE_RESULT 0x500 // Probe summary result (Controller → Host, + joint_id)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -563,8 +564,10 @@ void sendJointStateData() {
     frame.status = 0;
     if (shared_dof_angles.valid[d]) frame.status |= 0x01;  // bit0: valid
     if (!impedance_segment[d].active) frame.status |= 0x02;  // bit1: holding (local segment inactive)
-    // Watchdog warning: > 80% of timeout elapsed
-    if (impedance_target[d].valid) {
+    // Watchdog warning: > 80% of timeout elapsed while host stream is still armed.
+    // Once the timeout has been latched into LOCAL HOLD, we suppress this bit to
+    // avoid flagging a false warning on a perfectly valid local hold.
+    if (impedance_target[d].valid && !impedance_target[d].watchdog_timed_out) {
       uint32_t elapsed = millis() - impedance_target[d].last_update_ms;
       if (elapsed > impedance_watchdog_ms * 4 / 5) {
         frame.status |= 0x04;  // bit2: watchdog warning
@@ -579,7 +582,8 @@ void sendJointStateData() {
  * @brief Send holding diagnostics via CAN when new data is available
  *
  * Uses sequence counter snapshot to read diag_hold_data[] consistently
- * (Core0 writes every 3s during gated HOLDING). Sends two 8-byte CAN frames per DOF:
+ * (Core0 writes at diag_hold_period_ms cadence during gated HOLDING). Sends two
+ * 8-byte CAN frames per DOF:
  *   Frame 1 (0x4D0+joint_id): dof, ema, resA, resB, flags
  *   Frame 2 (0x4D0+joint_id): dof|0x80, iqA, iqB, stiff, trim
  *
@@ -643,6 +647,82 @@ void sendDiagHoldData() {
     frame2.tension_trim_x10 = (int8_t)constrain(snapshot.tension_trim_x100 / 10, -127, 127);
 
     CAN_HOST.sendMsgBuf(CAN_ID_DIAG_HOLD_DATA + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t*)&frame2);
+
+    last_sent_seq[d] = seq1;
+  }
+}
+
+/**
+ * @brief Send retension-probe summary via CAN when a new probe result is available.
+ *
+ * Three 8-byte frames per DOF:
+ *   Frame 1 (0x500+joint_id): dof, q, baseline stiffness, pre_ratio, flags
+ *   Frame 2 (0x500+joint_id): dof|0x40, during_ratio, delta_ratio, recruit_norm, class
+ *   Frame 3 (0x500+joint_id): dof|0x80, pre_effort, boost, pulse_ms, min_samples
+ */
+void sendRetensionProbeResultData() {
+  if (suspend_host_can_polling) return;
+
+  extern MCP_CAN CAN_HOST;
+  uint8_t dof_count = active_joint_controller ? active_joint_controller->getConfig().dof_count : 0;
+
+  for (uint8_t d = 0; d < dof_count && d < MAX_DOFS; d++) {
+    RetensionProbeResultData snapshot;
+    uint32_t seq1 = __atomic_load_n(&retension_probe_result_data[d].seq, __ATOMIC_ACQUIRE);
+    if (seq1 & 1) continue;
+    if (seq1 == 0) continue;
+
+    snapshot = retension_probe_result_data[d];
+    uint32_t seq2 = __atomic_load_n(&retension_probe_result_data[d].seq, __ATOMIC_ACQUIRE);
+    if (seq1 != seq2) continue;
+
+    static uint32_t last_sent_seq[MAX_DOFS] = {};
+    if (seq1 == last_sent_seq[d]) continue;
+
+    struct __attribute__((packed)) {
+      uint8_t dof_index;
+      int16_t q_x100;
+      int16_t base_stiffness_x10;
+      int16_t pre_ratio_x1000;
+      uint8_t flags;
+    } frame1;
+
+    frame1.dof_index = d;
+    frame1.q_x100 = snapshot.q_x100;
+    frame1.base_stiffness_x10 = snapshot.base_stiffness_x10;
+    frame1.pre_ratio_x1000 = snapshot.pre_ratio_x1000;
+    frame1.flags = snapshot.flags;
+    CAN_HOST.sendMsgBuf(CAN_ID_RETENSION_PROBE_RESULT + ACTIVE_JOINT, 0, sizeof(frame1), (uint8_t*)&frame1);
+
+    struct __attribute__((packed)) {
+      uint8_t dof_marker;
+      int16_t dur_ratio_x1000;
+      int16_t delta_ratio_x1000;
+      int16_t recruit_norm_x1000;
+      uint8_t class_code;
+    } frame2;
+
+    frame2.dof_marker = d | 0x40;
+    frame2.dur_ratio_x1000 = snapshot.dur_ratio_x1000;
+    frame2.delta_ratio_x1000 = snapshot.delta_ratio_x1000;
+    frame2.recruit_norm_x1000 = snapshot.recruit_norm_x1000;
+    frame2.class_code = snapshot.class_code;
+    CAN_HOST.sendMsgBuf(CAN_ID_RETENSION_PROBE_RESULT + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t*)&frame2);
+
+    struct __attribute__((packed)) {
+      uint8_t dof_marker;
+      uint16_t effort_pre;
+      int16_t boost_x10;
+      uint16_t pulse_ms;
+      uint8_t min_samples;
+    } frame3;
+
+    frame3.dof_marker = d | 0x80;
+    frame3.effort_pre = snapshot.effort_pre;
+    frame3.boost_x10 = snapshot.boost_x10;
+    frame3.pulse_ms = snapshot.pulse_ms;
+    frame3.min_samples = snapshot.min_samples;
+    CAN_HOST.sendMsgBuf(CAN_ID_RETENSION_PROBE_RESULT + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t*)&frame3);
 
     last_sent_seq[d] = seq1;
   }
@@ -1330,6 +1410,7 @@ void pollHostCan() {
             impedance_target[dof].kd_inner = kd_inner;
             impedance_target[dof].tau_ff = acc.tau_ff;
             impedance_target[dof].last_update_ms = now_ms;
+            impedance_target[dof].watchdog_timed_out = false;
             impedance_target[dof].valid = true;
 
             // Overwrite-only local segment: start from the current q_ref and
@@ -1391,6 +1472,7 @@ void pollHostCan() {
               if (impedance_target[d].valid) {
                 restoreInnerPidGains(d, active_joint_controller);
                 restoreOuterLoopParameters(d, active_joint_controller);
+                impedance_target[d].watchdog_timed_out = false;
                 impedance_target[d].valid = false;
 
                 // Set hold reference to current position.
@@ -1501,6 +1583,7 @@ void core1_loop() {
           dof_state[dof] = DofState::IDLE;
           restoreInnerPidGains(dof, active_joint_controller);
           restoreOuterLoopParameters(dof, active_joint_controller);
+          impedance_target[dof].watchdog_timed_out = false;
           impedance_target[dof].valid = false;
           resetImpedanceSegment(dof);
           // Reset tau_ff accumulator so next session starts clean
@@ -1543,6 +1626,10 @@ void core1_loop() {
     // === HOLDING DIAGNOSTICS VIA CAN ===
     // Send Phase 1 diagnostic data when pending (every ~3s during gated HOLDING)
     sendDiagHoldData();
+
+    // === RETENSION PROBE SUMMARY VIA CAN ===
+    // Send generic probe metrics for host-side longitudinal logging/policy.
+    sendRetensionProbeResultData();
 
     // === ENCODER OFFSET NOTIFICATION VIA CAN ===
     // Core0 sets this flag after zero (saveOffsetsToFlash) or boot (loadOffsetsFromFlash)

@@ -18,6 +18,7 @@ Feedback (controller → host):
   0x490+joint  Startup Status
   0x4A0+joint  Joint Announce
   0x4F0+joint  Joint State (impedance feedback, 50 Hz)
+  0x500+joint  Retension Probe Result
 """
 from __future__ import annotations
 
@@ -43,6 +44,7 @@ CAN_ID_ENCODER_STREAM_DATA = 0x410
 CAN_ID_STARTUP_STATUS = 0x490
 CAN_ID_JOINT_ANNOUNCE = 0x4A0
 CAN_ID_JOINT_STATE = 0x4F0
+CAN_ID_RETENSION_PROBE_RESULT = 0x500
 
 # Sentinel for unused DOF slots
 UNUSED_DOF = 0x7FFF
@@ -113,6 +115,25 @@ class JointState:
     valid: bool               # encoder/joint state valid
     holding: bool             # no active rolling segment
     watchdog_warning: bool    # >80% watchdog timeout elapsed
+
+
+@dataclass
+class RetensionProbeResult:
+    joint_id: int
+    dof_index: int
+    q_deg: float
+    baseline_stiffness_deg: float
+    pre_ratio: float
+    dur_ratio: float
+    delta_ratio: float
+    recruit_norm: float
+    effort_pre: int
+    probe_boost_deg: float
+    probe_pulse_ms: int
+    weak_side: str
+    class_code: int
+    classification: str
+    min_samples: int
 
 
 @dataclass

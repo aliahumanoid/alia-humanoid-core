@@ -52,8 +52,59 @@ static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 static float holding_dtheta_ema[MAX_DOFS] = {0};     // EMA of delta_theta during HOLDING
 static uint32_t holding_ema_samples[MAX_DOFS] = {0}; // samples accumulated (for warm-up)
 static uint32_t last_holding_bias_log[MAX_DOFS] = {0}; // rate-limit log
+static uint32_t hold_ki_ramp_start_ms[MAX_DOFS] = {0}; // HOLDING entry timestamp for Ki ramp-down
 static uint32_t last_trim_dry_run_update[MAX_DOFS] = {0}; // separate cadence from DIAG_HOLD telemetry
 static const float HOLDING_EMA_ALPHA = 0.005f;       // ~200 samples window at 500Hz ≈ 0.4s
+static float last_hold_event_q[MAX_DOFS] = {0};      // previous q sample while in HOLDING
+static bool hold_event_q_valid[MAX_DOFS] = {false};  // previous q is initialized
+static uint32_t last_hold_event_log_ms[MAX_DOFS] = {0}; // rate-limit [HOLD_EVT] logging
+static float last_outer_ki_scale_dbg[MAX_DOFS] = {1.0f}; // last applied outer Ki scale
+static bool last_outer_i_freeze_dbg[MAX_DOFS] = {false}; // last applied outer I freeze state
+static float last_retension_boost_dbg[MAX_DOFS] = {0.0f}; // last applied probe boost
+static const float HOLD_EVENT_Q_STEP_TH_DEG = 0.10f; // log when HOLDING q jumps by >= 0.10°
+static const float HOLD_EVENT_VEL_TH_DEG_S = 1.00f; // or when HOLDING velocity exceeds 1 deg/s
+static const uint16_t HOLD_EVENT_MIN_INTERVAL_MS = 50; // high-rate but not every cycle
+static const uint16_t RETN_PROBE_HOLD_EVT_BLOCK_MS = 500; // don't probe right after a HOLD_EVT
+
+enum RetensionProbeClassCode : uint8_t {
+  RPROBE_CLASS_UNKNOWN = 0,
+  RPROBE_CLASS_LOW_EFFORT = 1,
+  RPROBE_CLASS_NO_CORRECTION = 2,
+  RPROBE_CLASS_NO_EFFECT = 3,
+  RPROBE_CLASS_SLACK_LIKELY = 4
+};
+
+enum class RetensionProbePhase : uint8_t {
+  IDLE = 0,
+  ARMED = 1,
+  ACTIVE = 2,
+  POST = 3,
+  DONE = 4
+};
+
+struct RetensionProbeState {
+  RetensionProbePhase phase;
+  uint32_t scheduled_start_ms;
+  uint32_t active_until_ms;
+  uint32_t post_until_ms;
+  float pre_abs_iq_a_sum;
+  float pre_abs_iq_b_sum;
+  float pre_q_sum;
+  float pre_ema_sum;
+  uint16_t pre_count;
+  float during_abs_iq_a_sum;
+  float during_abs_iq_b_sum;
+  float during_q_sum;
+  float during_ema_sum;
+  uint16_t during_count;
+  float post_abs_iq_a_sum;
+  float post_abs_iq_b_sum;
+  float post_q_sum;
+  float post_ema_sum;
+  uint16_t post_count;
+};
+
+static RetensionProbeState retension_probe_state[MAX_DOFS] = {};
 
 // === PROPOSED TRIM (dry-run, not applied to control) ===
 // Computed during gated HOLDING, transmitted to UI for visualization.
@@ -68,6 +119,31 @@ static const float TRIM_SLACK_RATIO_TH = 0.30f;       // iq ratio below this →
 static const float TRIM_BALANCED_RATIO_TH = 0.50f;    // iq ratio above this → balanced
 static const float TRIM_BIAS_TH = 0.30f;              // |ema| above this → bias present
 
+static void resetRetensionProbeState(uint8_t dof) {
+  if (dof >= MAX_DOFS) return;
+  retension_probe_state[dof] = {};
+  retension_probe_state[dof].phase = RetensionProbePhase::IDLE;
+  last_retension_boost_dbg[dof] = 0.0f;
+}
+
+static void clearRetensionProbeWindows(RetensionProbeState &rps) {
+  rps.pre_abs_iq_a_sum = 0.0f;
+  rps.pre_abs_iq_b_sum = 0.0f;
+  rps.pre_q_sum = 0.0f;
+  rps.pre_ema_sum = 0.0f;
+  rps.pre_count = 0;
+  rps.during_abs_iq_a_sum = 0.0f;
+  rps.during_abs_iq_b_sum = 0.0f;
+  rps.during_q_sum = 0.0f;
+  rps.during_ema_sum = 0.0f;
+  rps.during_count = 0;
+  rps.post_abs_iq_a_sum = 0.0f;
+  rps.post_abs_iq_b_sum = 0.0f;
+  rps.post_q_sum = 0.0f;
+  rps.post_ema_sum = 0.0f;
+  rps.post_count = 0;
+}
+
 // Reset session-local diagnostics for a DOF.
 // Called from clearImpedanceControlState(), IDLE path, and E-Stop (via core1).
 void resetDiagHoldState(uint8_t dof) {
@@ -76,16 +152,49 @@ void resetDiagHoldState(uint8_t dof) {
   holding_ema_samples[dof] = 0;
   holding_dtheta_ema[dof] = 0;
   last_holding_bias_log[dof] = 0;
+  hold_ki_ramp_start_ms[dof] = 0;
   last_trim_dry_run_update[dof] = 0;
+  last_hold_event_q[dof] = 0;
+  hold_event_q_valid[dof] = false;
+  last_hold_event_log_ms[dof] = 0;
+  last_outer_ki_scale_dbg[dof] = 1.0f;
+  last_outer_i_freeze_dbg[dof] = false;
+  resetRetensionProbeState(dof);
 }
 
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
   restoreInnerPidGains(dof, jc);
   restoreOuterLoopParameters(dof, jc);
   resetImpedanceSegment(dof);
+  impedance_target[dof].watchdog_timed_out = false;
   impedance_target[dof].valid = false;
   inner_pid_reinit_after_impedance[dof] = true;
   resetDiagHoldState(dof);
+}
+
+static void freezeImpedanceToLocalHold(uint8_t dof, float q_hold_deg, uint32_t now_ms,
+                                       bool latch_watchdog_timeout) {
+  if (dof >= MAX_DOFS) return;
+
+  ImpedanceRollingSegment &seg = impedance_segment[dof];
+  seg.q_goal_deg = q_hold_deg;
+  seg.q_start_deg = q_hold_deg;
+  seg.q_ref_deg = q_hold_deg;
+  seg.dq_ref_deg_s = 0.0f;
+  seg.speed_abs_deg_s = 0.0f;
+  seg.t_start_ms = now_ms;
+  seg.t_arrival_ms = now_ms;
+  seg.active = false;
+  seg.initialized = true;
+
+  impedance_target[dof].q_target_deg = q_hold_deg;
+  impedance_target[dof].dq_target_deg_s = 0.0f;
+  impedance_target[dof].last_update_ms = now_ms;
+  impedance_target[dof].watchdog_timed_out = latch_watchdog_timeout;
+
+  dof_hold_angle[dof] = q_hold_deg;
+  dof_hold_time[dof] = now_ms;
+  dof_state[dof] = DofState::HOLDING;
 }
 
 static void applyImpedanceOuterOverrides(uint8_t dof, JointController *jc) {
@@ -401,19 +510,31 @@ bool JointController::executeControlLoop() {
     
     // === IMPEDANCE MODE: Watchdog and PID init ===
     // Check impedance watchdog BEFORE outer loop so timeout transitions happen promptly
-    if (impedance_target[dof].valid) {
+    if (impedance_target[dof].valid && !impedance_target[dof].watchdog_timed_out) {
       uint32_t elapsed = t_now - impedance_target[dof].last_update_ms;
       if (elapsed > impedance_watchdog_ms) {
-        // Watchdog timeout -> hold at current position.
+        // Host stream timed out. Freeze the current joint position as a local
+        // impedance hold and keep the impedance controller active.
+        //
+        // Why:
+        // - A stable HOLDING state should not be torn down just because the host
+        //   stops sending keepalives.
+        // - Teardown/restoration of PID gains was causing an artificial "kick"
+        //   unrelated to the real joint mechanics.
+        //
+        // New policy:
+        // - Stop chasing host updates
+        // - Latch the current pose as a firmware-local hold
+        // - Keep outer/inner overrides active until an explicit disable/E-stop
+        //   or a new SET_IMPEDANCE command arrives
         float q_curr_wd = dof_data.valid[dof] ? dof_data.angles[dof]
                                               : getImpedanceHoldReference(dof);
-        clearImpedanceControlState(dof, this);
-        dof_hold_angle[dof] = q_curr_wd;
-        dof_hold_time[dof] = t_now;
-        dof_state[dof] = DofState::HOLDING;
+        freezeImpedanceToLocalHold(dof, q_curr_wd, t_now, true);
+        cur_dof_state = DofState::HOLDING;
         LOG_C1_WARN("[IMPEDANCE] DOF" + String(dof) + " watchdog timeout (" +
                     String(elapsed) + "ms > " + String((uint32_t)impedance_watchdog_ms) +
-                    "ms) → HOLDING at " + String(q_curr_wd, 2) + "°");
+                    "ms) → LOCAL HOLD at " + String(q_curr_wd, 2) +
+                    "° (impedance preserved)");
       }
 
       // Bumpless init on first impedance entry (from IDLE)
@@ -757,6 +878,9 @@ bool JointController::executeControlLoop() {
         cur_dof_state = DofState::HOLDING;
 
         if (just_entered_holding) {
+          hold_ki_ramp_start_ms[dof] = t_now;
+          last_hold_event_q[dof] = q_curr;
+          hold_event_q_valid[dof] = true;
           // Get the holding target for this DOF
           float holding_target = dof_hold_angle[dof];
           LOG_C1_DEBUG("[Control] DOF " + String(dof) + " transitioned MOVING → HOLDING");
@@ -764,10 +888,29 @@ bool JointController::executeControlLoop() {
           // Send structured message for UI display
           SERIAL_C1_COM_LN("EVT:HOLDING_TARGET:DOF=" + String(dof) + ":ANGLE=" + String(holding_target, 2));
 
-          // DO NOT reset PID integral here - we need it to maintain position
-          // against static loads (gravity, friction). The integral was compensating
-          // for steady-state error, and resetting it would cause drift.
-          // PID will be reset only when a new sequence starts from IDLE.
+          // Rebase the outer PID at HOLDING entry.
+          //
+          // Why:
+          // - During MOVING the outer incremental PID may accumulate a large bias
+          //   (uprev / delta_theta) to push through friction and track the segment.
+          // - Carrying that bias into HOLDING can keep driving the joint even after
+          //   the segment has ended, producing the observed drift past target.
+          //
+          // Strategy:
+          // - Initialize the PID around the CURRENT joint angle, not the hold target.
+          // - Start from zero output. This discards the movement bias but keeps the
+          //   transfer bumpless: on the same cycle the controller sees the actual
+          //   HOLDING error (holding_target - q_curr) as a fresh P-only correction.
+          //
+          // Result:
+          // - No large carry-over from MOVING
+          // - Still allows small HOLDING corrections if q_curr != holding_target
+          PID *outer_pid_hold = getOuterPID(dof);
+          if (outer_pid_hold) {
+            outer_pid_hold->initializeState(q_curr, q_curr, 0.0f);
+          }
+          delta_theta[dof] = 0.0f;
+          delta_theta_prev[dof] = 0.0f;
           
           // === METRICS: Finalize movement metrics ===
           if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
@@ -889,16 +1032,31 @@ bool JointController::executeControlLoop() {
         expected_velocity_cache[dof] = expected_velocity_deg_s;
 
         bool outer_holding_mode = !is_moving;
-        float outer_ki_scale = outer_holding_mode ? outer_hold_ki_scale : 1.0f;
+        float outer_ki_scale = 1.0f;
+        if (outer_holding_mode) {
+          if (hold_ki_ramp_start_ms[dof] == 0) {
+            hold_ki_ramp_start_ms[dof] = t_now;
+          }
+          if (outer_hold_ki_ramp_ms == 0) {
+            outer_ki_scale = outer_hold_ki_scale;
+          } else {
+            float ramp_alpha =
+                (float)(t_now - hold_ki_ramp_start_ms[dof]) / (float)outer_hold_ki_ramp_ms;
+            ramp_alpha = constrain(ramp_alpha, 0.0f, 1.0f);
+            outer_ki_scale = 1.0f + (outer_hold_ki_scale - 1.0f) * ramp_alpha;
+          }
+        }
         bool freeze_outer_integrator =
             outer_holding_mode &&
             abs_error <= outer_hold_integral_freeze_error_deg &&
             fabs(velocity_filtered[dof]) <= outer_hold_integral_freeze_velocity_deg_s;
+        last_outer_ki_scale_dbg[dof] = outer_ki_scale;
+        last_outer_i_freeze_dbg[dof] = freeze_outer_integrator;
 
-        // In HOLDING, static friction can turn tiny residual errors into stick-slip:
-        // the outer integrator keeps charging, the joint breaks free, overshoots,
-        // then repeats. Reduce Ki in HOLDING and freeze the integral entirely once
-        // the joint is already near target and nearly still.
+        // In HOLDING, static friction can turn tiny residual errors into stick-slip.
+        // Keep Ki high for the first ~1 s to finish settling under load, then ramp
+        // it down to a smaller steady-state value and freeze the integral entirely
+        // once the joint is already near target and nearly still.
         delta_theta[dof] = outer_pid->control(q_des, q_curr, 0.0f, outer_ki_scale,
                                               freeze_outer_integrator);
 
@@ -1079,6 +1237,85 @@ bool JointController::executeControlLoop() {
       stiffness_ref = DEFAULT_STIFFNESS_REF_DEG;
       cascade_influence = DEFAULT_CASCADE_INFLUENCE;
     }
+    float q_retension = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
+
+    // === RETENSION PROBE (periodic active sensing, host-driven policy) ===
+    // Use the antagonistic actuation as an active probe: apply a short,
+    // symmetric co-contraction pulse during clean HOLDING and measure whether
+    // the weak side gets "recruited". Firmware only measures and reports the
+    // result; host-side policy decides whether to react or learn over time.
+    float stiffness_ref_effective = stiffness_ref;
+    if (dof < MAX_DOFS) {
+      RetensionProbeState &rps = retension_probe_state[dof];
+      bool recent_hold_event =
+          (last_hold_event_log_ms[dof] != 0) &&
+          ((t_now - last_hold_event_log_ms[dof]) < RETN_PROBE_HOLD_EVT_BLOCK_MS);
+      bool hard_probe_context =
+          retension_probe_enabled &&
+          impedance_active &&
+          dof_state[dof] == DofState::HOLDING &&
+          retension_probe_boost_deg > 0.0f &&
+          fabs(q_retension) >= retension_probe_min_hold_q_deg &&
+          !compliance_state[dof].compliance_active &&
+          impedance_target[dof].tau_ff == 0 &&
+          dof_data.valid[dof];
+      bool soft_probe_ready =
+          fabs(velocity_filtered[dof]) < 1.0f &&
+          prev_state_before_update[dof] == DofState::HOLDING &&
+          !recent_hold_event;
+
+      if (!hard_probe_context) {
+        resetRetensionProbeState(dof);
+      } else {
+        if (rps.phase == RetensionProbePhase::IDLE) {
+          rps.phase = RetensionProbePhase::ARMED;
+          rps.scheduled_start_ms = t_now + retension_probe_start_delay_ms;
+          clearRetensionProbeWindows(rps);
+        }
+
+        if (rps.phase == RetensionProbePhase::DONE &&
+            retension_probe_repeat_ms > 0 &&
+            t_now >= rps.scheduled_start_ms) {
+          rps.phase = RetensionProbePhase::ARMED;
+          rps.scheduled_start_ms = t_now + retension_probe_start_delay_ms;
+          clearRetensionProbeWindows(rps);
+        }
+
+        if (rps.phase == RetensionProbePhase::ARMED && !soft_probe_ready) {
+          rps.scheduled_start_ms = t_now + retension_probe_start_delay_ms;
+          clearRetensionProbeWindows(rps);
+        }
+
+        if (rps.phase == RetensionProbePhase::ARMED &&
+            soft_probe_ready &&
+            t_now >= rps.scheduled_start_ms &&
+            retension_probe_pulse_ms > 0) {
+          rps.phase = RetensionProbePhase::ACTIVE;
+          rps.active_until_ms = t_now + retension_probe_pulse_ms;
+          LOG_C1_INFO("[RPROBE] DOF" + String(dof) +
+                      " start q=" + String(q_retension, 2) +
+                      " stiff=" + String(stiffness_ref, 1) + "->" +
+                      String(stiffness_ref + retension_probe_boost_deg, 1) +
+                      " age=" + String(t_now - dof_hold_time[dof]) + "ms" +
+                      " dur=" + String(retension_probe_pulse_ms) + "ms");
+        }
+
+        if (rps.phase == RetensionProbePhase::ACTIVE && t_now >= rps.active_until_ms) {
+          rps.phase = RetensionProbePhase::POST;
+          rps.post_until_ms = t_now + retension_probe_post_ms;
+          LOG_C1_INFO("[RPROBE] DOF" + String(dof) +
+                      " end q=" + String(q_retension, 2) +
+                      " age=" + String(t_now - dof_hold_time[dof]) + "ms");
+        }
+
+        if (rps.phase == RetensionProbePhase::ACTIVE) {
+          stiffness_ref_effective += retension_probe_boost_deg;
+          last_retension_boost_dbg[dof] = retension_probe_boost_deg;
+        } else {
+          last_retension_boost_dbg[dof] = 0.0f;
+        }
+      }
+    }
     
     // === DELTA_THETA INTERPOLATION ===
     // When outer_loop_divisor > 1, delta_theta updates every N cycles creating "steps".
@@ -1099,9 +1336,9 @@ bool JointController::executeControlLoop() {
     
     // Compute motor references using cascade control formula
     float theta_A_ref = theta_0_agonist_motor +
-                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref);
+                        cascade_influence * (0.5f * delta_theta_smooth + 0.5f * stiffness_ref_effective);
     float theta_B_ref = theta_0_antagonist_motor +
-                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref);
+                        cascade_influence * (0.5f * delta_theta_smooth - 0.5f * stiffness_ref_effective);
 
     // === HOLDING BIAS TRACKER ===
     // Track EMA of delta_theta during HOLDING to detect persistent outer-loop
@@ -1109,7 +1346,7 @@ bool JointController::executeControlLoop() {
     // Reset when ANY gate condition falls (bias is only meaningful in clean steady state).
     {
       bool gate_holding      = (dof < MAX_DOFS && dof_state[dof] == DofState::HOLDING);
-      bool gate_stiffness    = (stiffness_ref > 1.0f);
+      bool gate_stiffness    = (stiffness_ref_effective > 1.0f);
       bool gate_no_compliance = !compliance_state[dof].compliance_active;
       bool gate_no_tau_ff    = (!impedance_active || impedance_target[dof].tau_ff == 0);
       bool gate_low_velocity = (fabs(velocity_filtered[dof]) < 0.5f);  // near-zero motion
@@ -1589,6 +1826,194 @@ bool JointController::executeControlLoop() {
       }
     }
 
+    // === HOLDING EVENT LOGGER (high-rate trigger) ===
+    // Purpose: catch the exact instant a "mysterious" HOLDING jump happens and
+    // tell whether it was preceded by a command change or by a mechanical release.
+    // Trigger on either:
+    // - sudden q jump between consecutive HOLDING samples
+    // - non-trivial velocity while already in HOLDING
+    {
+      bool holding_event_gated = (dof < MAX_DOFS) &&
+                                 (dof_state[dof] == DofState::HOLDING) &&
+                                 dof_data.valid[dof];
+      if (holding_event_gated) {
+        float q_curr_hold_evt = dof_data.angles[dof];
+        float q_des_hold_evt = impedance_active ? getImpedanceHoldReference(dof)
+                                                : dof_hold_angle[dof];
+        float error_hold_evt = q_des_hold_evt - q_curr_hold_evt;
+        if (!hold_event_q_valid[dof]) {
+          last_hold_event_q[dof] = q_curr_hold_evt;
+          hold_event_q_valid[dof] = true;
+        } else {
+          float q_prev_hold = last_hold_event_q[dof];
+          float q_step_hold = fabs(q_curr_hold_evt - q_prev_hold);
+          float vel_hold = fabs(velocity_filtered[dof]);
+          bool hold_jump = (q_step_hold >= HOLD_EVENT_Q_STEP_TH_DEG);
+          bool hold_motion = (vel_hold >= HOLD_EVENT_VEL_TH_DEG_S);
+
+          if ((hold_jump || hold_motion) &&
+              (t_now - last_hold_event_log_ms[dof] >= HOLD_EVENT_MIN_INTERVAL_MS)) {
+            bool iq_valid_evt = trResp.dataA.valid && trResp.dataB.valid;
+            int16_t iq_A_evt = iq_valid_evt ? trResp.dataA.torqueCurrent : 0;
+            int16_t iq_B_evt = iq_valid_evt ? trResp.dataB.torqueCurrent : 0;
+            int16_t iq_abs_max_evt = max(abs(iq_A_evt), abs(iq_B_evt));
+            float iq_ratio_evt = (iq_valid_evt && iq_abs_max_evt > 0)
+                ? (float)min(abs(iq_A_evt), abs(iq_B_evt)) / (float)iq_abs_max_evt
+                : -1.0f;
+
+            LOG_C1_WARN("[HOLD_EVT] DOF" + String(dof) +
+                        " qPrev=" + String(q_prev_hold, 3) +
+                        " q=" + String(q_curr_hold_evt, 3) +
+                        " qDes=" + String(q_des_hold_evt, 3) +
+                        " err=" + String(error_hold_evt, 3) +
+                        " dq=" + String(q_curr_hold_evt - q_prev_hold, 3) +
+                        " vel=" + String(velocity_filtered[dof], 3) +
+                        " dth=" + String(delta_theta_smooth, 3) +
+                        " kiS=" + String(last_outer_ki_scale_dbg[dof], 3) +
+                        " frz=" + String(last_outer_i_freeze_dbg[dof] ? 1 : 0) +
+                        " rt=" + String(last_retension_boost_dbg[dof], 2) +
+                        " Aref=" + String(theta_A_ref, 3) +
+                        " Bref=" + String(theta_B_ref, 3) +
+                        " cmdA=" + String(command_A, 1) +
+                        " cmdB=" + String(command_B, 1) +
+                        " iqA=" + String(iq_A_evt) +
+                        " iqB=" + String(iq_B_evt) +
+                        " iqR=" + String(iq_ratio_evt, 3));
+            last_hold_event_log_ms[dof] = t_now;
+          }
+
+          last_hold_event_q[dof] = q_curr_hold_evt;
+        }
+      } else if (dof < MAX_DOFS) {
+        hold_event_q_valid[dof] = false;
+      }
+    }
+
+    // === RETENSION PROBE METRICS (per-cycle, independent from DIAG_HOLD cadence) ===
+    if (dof < MAX_DOFS && trResp.dataA.valid && trResp.dataB.valid) {
+      RetensionProbeState &rps = retension_probe_state[dof];
+      float abs_iq_a = (float)abs(trResp.dataA.torqueCurrent);
+      float abs_iq_b = (float)abs(trResp.dataB.torqueCurrent);
+      float ema_probe = holding_dtheta_ema[dof];
+      float q_probe = dof_data.angles[dof];
+
+      if (rps.phase == RetensionProbePhase::ARMED) {
+        rps.pre_abs_iq_a_sum += abs_iq_a;
+        rps.pre_abs_iq_b_sum += abs_iq_b;
+        rps.pre_q_sum += q_probe;
+        rps.pre_ema_sum += ema_probe;
+        rps.pre_count++;
+      } else if (rps.phase == RetensionProbePhase::ACTIVE) {
+        rps.during_abs_iq_a_sum += abs_iq_a;
+        rps.during_abs_iq_b_sum += abs_iq_b;
+        rps.during_q_sum += q_probe;
+        rps.during_ema_sum += ema_probe;
+        rps.during_count++;
+      }
+
+      if (rps.phase == RetensionProbePhase::POST) {
+        rps.post_abs_iq_a_sum += abs_iq_a;
+        rps.post_abs_iq_b_sum += abs_iq_b;
+        rps.post_q_sum += q_probe;
+        rps.post_ema_sum += ema_probe;
+        rps.post_count++;
+      }
+
+      if (rps.phase == RetensionProbePhase::POST && t_now >= rps.post_until_ms) {
+        if (rps.pre_count > 0 && rps.during_count > 0 && rps.post_count > 0) {
+          float pre_a = rps.pre_abs_iq_a_sum / (float)rps.pre_count;
+          float pre_b = rps.pre_abs_iq_b_sum / (float)rps.pre_count;
+          float pre_q = rps.pre_q_sum / (float)rps.pre_count;
+          float pre_ema = rps.pre_ema_sum / (float)rps.pre_count;
+          float dur_a = rps.during_abs_iq_a_sum / (float)rps.during_count;
+          float dur_b = rps.during_abs_iq_b_sum / (float)rps.during_count;
+          float dur_q = rps.during_q_sum / (float)rps.during_count;
+          float dur_ema = rps.during_ema_sum / (float)rps.during_count;
+          float post_a = rps.post_abs_iq_a_sum / (float)rps.post_count;
+          float post_b = rps.post_abs_iq_b_sum / (float)rps.post_count;
+          float post_q = rps.post_q_sum / (float)rps.post_count;
+          float post_ema = rps.post_ema_sum / (float)rps.post_count;
+
+          float pre_min = min(pre_a, pre_b);
+          float pre_max = max(pre_a, pre_b);
+          float dur_min = min(dur_a, dur_b);
+          float dur_max = max(dur_a, dur_b);
+          float pre_ratio = (pre_max > 0.0f) ? (pre_min / pre_max) : -1.0f;
+          float dur_ratio = (dur_max > 0.0f) ? (dur_min / dur_max) : -1.0f;
+          float delta_ratio = (pre_ratio >= 0.0f && dur_ratio >= 0.0f)
+              ? (dur_ratio - pre_ratio)
+              : 0.0f;
+          float recruit_norm = (pre_max > 0.0f)
+              ? ((dur_min - pre_min) / pre_max)
+              : 0.0f;
+          float effort_pre = pre_a + pre_b;
+          const char* weak_side = (pre_a <= pre_b) ? "A" : "B";
+          uint8_t class_code = RPROBE_CLASS_NO_EFFECT;
+          const char* classification = "NO_EFFECT";
+          if (effort_pre < 120.0f) {
+            class_code = RPROBE_CLASS_LOW_EFFORT;
+            classification = "LOW_EFFORT";
+          } else if (pre_ratio >= 0.0f && pre_ratio < 0.65f &&
+                     delta_ratio > 0.08f && recruit_norm > 0.12f) {
+            class_code = RPROBE_CLASS_SLACK_LIKELY;
+            classification = "SLACK_LIKELY";
+          } else if (pre_ratio >= 0.80f || fabs(delta_ratio) < 0.03f) {
+            class_code = RPROBE_CLASS_NO_CORRECTION;
+            classification = "NO_CORRECTION";
+          }
+
+          if (dof < MAX_DOFS) {
+            uint16_t min_samples_u16 = rps.pre_count;
+            if (rps.during_count < min_samples_u16) min_samples_u16 = rps.during_count;
+            if (rps.post_count < min_samples_u16) min_samples_u16 = rps.post_count;
+            if (min_samples_u16 > 255) min_samples_u16 = 255;
+            uint8_t min_samples = (uint8_t)min_samples_u16;
+            __atomic_add_fetch(&retension_probe_result_data[dof].seq, 1, __ATOMIC_RELEASE);
+            retension_probe_result_data[dof].dof = dof;
+            retension_probe_result_data[dof].q_x100 = (int16_t)(pre_q * 100.0f);
+            retension_probe_result_data[dof].base_stiffness_x10 = (int16_t)(stiffness_ref * 10.0f);
+            retension_probe_result_data[dof].pre_ratio_x1000 = (int16_t)(pre_ratio * 1000.0f);
+            retension_probe_result_data[dof].dur_ratio_x1000 = (int16_t)(dur_ratio * 1000.0f);
+            retension_probe_result_data[dof].delta_ratio_x1000 = (int16_t)(delta_ratio * 1000.0f);
+            retension_probe_result_data[dof].recruit_norm_x1000 = (int16_t)(recruit_norm * 1000.0f);
+            retension_probe_result_data[dof].effort_pre = (uint16_t)constrain((int)lroundf(effort_pre), 0, 65535);
+            retension_probe_result_data[dof].boost_x10 = (int16_t)(retension_probe_boost_deg * 10.0f);
+            retension_probe_result_data[dof].pulse_ms = retension_probe_pulse_ms;
+            retension_probe_result_data[dof].flags = (pre_a <= pre_b) ? 0x00 : 0x01;
+            retension_probe_result_data[dof].class_code = class_code;
+            retension_probe_result_data[dof].min_samples = min_samples;
+            __atomic_add_fetch(&retension_probe_result_data[dof].seq, 1, __ATOMIC_RELEASE);
+          }
+
+          LOG_C1_INFO("[RPROBE] DOF" + String(dof) +
+                      " result weak=" + String(weak_side) +
+                      " cls=" + String(classification) +
+                      " preR=" + String(pre_ratio, 3) +
+                      " durR=" + String(dur_ratio, 3) +
+                      " dR=" + String(delta_ratio, 3) +
+                      " dMinN=" + String(recruit_norm, 3) +
+                      " preEff=" + String(effort_pre, 1) +
+                      " dqD=" + String(dur_q - pre_q, 3) +
+                      " dqP=" + String(post_q - pre_q, 3) +
+                      " dEmaD=" + String(dur_ema - pre_ema, 3) +
+                      " dEmaP=" + String(post_ema - pre_ema, 3) +
+                      " preA=" + String(pre_a, 1) +
+                      " preB=" + String(pre_b, 1) +
+                      " durA=" + String(dur_a, 1) +
+                      " durB=" + String(dur_b, 1) +
+                      " postA=" + String(post_a, 1) +
+                      " postB=" + String(post_b, 1));
+        } else {
+          LOG_C1_WARN("[RPROBE] DOF" + String(dof) +
+                      " incomplete pre=" + String(rps.pre_count) +
+                      " dur=" + String(rps.during_count) +
+                      " post=" + String(rps.post_count));
+        }
+        rps.phase = RetensionProbePhase::DONE;
+        rps.scheduled_start_ms = t_now + retension_probe_repeat_ms;
+      }
+    }
+
     // === UNIFIED DIAGNOSTIC LOG ===
     // All Phase 1 signals in one parsable line. Emission cadence is intentionally
     // independent from the slow trim dry-run cadence: we want fast telemetry from
@@ -1659,7 +2084,8 @@ bool JointController::executeControlLoop() {
                   " iqB=" + String(iq_B_diag) +
                   " iqR=" + String(iq_ratio, 2) +
                   " iqV=" + String(iq_valid ? 1 : 0) +
-                  " stiff=" + String(stiffness_ref, 1) +
+                  " stiff=" + String(stiffness_ref_effective, 1) +
+                  " rt=" + String(last_retension_boost_dbg[dof], 2) +
                   " trim=" + String(proposed_trim_deg[dof], 3) +
                   " n=" + String(holding_ema_samples[dof]));
 
@@ -1674,7 +2100,7 @@ bool JointController::executeControlLoop() {
         diag_hold_data[dof].residual_B_x100 = (int16_t)(residual_B * 100.0f);
         diag_hold_data[dof].iq_A = iq_A_diag;
         diag_hold_data[dof].iq_B = iq_B_diag;
-        diag_hold_data[dof].stiffness_x10 = (int16_t)(stiffness_ref * 10.0f);
+        diag_hold_data[dof].stiffness_x10 = (int16_t)(stiffness_ref_effective * 10.0f);
         diag_hold_data[dof].tension_trim_x100 = (int16_t)(proposed_trim_deg[dof] * 100.0f);
         diag_hold_data[dof].flags = iq_valid ? 0x01 : 0x00;
         __atomic_add_fetch(&diag_hold_data[dof].seq, 1, __ATOMIC_RELEASE);  // even = done

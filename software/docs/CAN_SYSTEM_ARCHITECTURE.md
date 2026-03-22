@@ -541,8 +541,20 @@ Byte 4-7:  padding
 rolling segment, sets hold reference to current encoder position, and invalidates
 the active impedance target.
 
-**Watchdog (0x02)**: Range 10-5000 ms. On timeout, firmware auto-disables impedance,
-clears the rolling segment, and transitions to HOLDING at current position.
+**Watchdog (0x02)**: Range 10-60000 ms.
+
+On timeout, firmware does **not** tear down the impedance controller anymore.
+Instead it:
+
+- freezes the current joint position as a firmware-local hold reference
+- stops trusting host keepalives for the current session
+- preserves the active outer/inner impedance overrides
+- keeps the DOF in local HOLDING until:
+  - a new `SET_IMPEDANCE` arrives, or
+  - an explicit disable / E-Stop / startup reset occurs
+
+This avoids the artificial kick that was previously caused by restoring the
+saved PID parameters exactly when the watchdog expired.
 
 #### 4.2.10 Motor Commands (ID: 0x140-0x1FF) — Motor CAN Bus
 
@@ -595,7 +607,11 @@ Byte 7:    uint8_t   status bits
 **Status bits**:
 - bit 0: encoder/joint state valid
 - bit 1: holding (`1` = no active local rolling segment for this DOF)
-- bit 2: watchdog warning (`1` once elapsed time exceeds 80% of timeout)
+- bit 2: watchdog warning (`1` once elapsed time exceeds 80% of timeout while host stream is still armed)
+
+After watchdog timeout has been latched into firmware-local hold, bit 2 is
+suppressed again. This distinguishes "host keepalive is about to expire" from
+"host already timed out, but local hold is now stable and expected".
 
 This frame is intended for host-side monitoring and UI feedback. It is not required
 for the local rolling-segment controller to function.
@@ -1181,7 +1197,8 @@ The following telemetry signals form the **minimum observability contract** betw
 
 #### 6.8.1 Holding Diagnostics (0x4D0+joint) — Phase 1
 
-Emitted every ~3 seconds during gated HOLDING. Two 8-byte frames per DOF,
+Emitted at the configured `diag_hold_period_ms` cadence during gated HOLDING
+(default debug setting: `500 ms`). Two 8-byte frames per DOF,
 distinguished by bit 7 of byte 0.
 
 **Frame 1** (bias + motor residuals):
@@ -1213,6 +1230,62 @@ HOLDING, stiffness > 1°, no compliance, tau_ff = 0, velocity < 0.5°/s,
 no recent state transition, valid encoder.
 
 See `SLACK_DETECTION_AND_TENSION_TRIM.md` for design rationale.
+
+#### 6.8.2 Retension Probe Result (0x500+joint)
+
+Emitted when the firmware completes a local retension probe during clean
+`HOLDING`. The firmware does **not** apply trim or persistent correction from
+this result. It only reports generic metrics so the host can:
+
+- keep longitudinal history per joint / position
+- compare healthy vs degraded behavior over time
+- decide later whether to trigger retension, trim, or only warn
+
+Three 8-byte frames per DOF:
+
+**Frame 1** (baseline context):
+
+| Byte | Field | Type | Unit | Description |
+|------|-------|------|------|-------------|
+| 0 | dof_index | uint8 | — | DOF index (0-2) |
+| 1-2 | q_x100 | int16 LE | °×100 | Joint angle at probe baseline |
+| 3-4 | base_stiffness_x10 | int16 LE | °×10 | Baseline stiffness before temporary probe boost |
+| 5-6 | pre_ratio_x1000 | int16 LE | ×1000 | Baseline `iqR` |
+| 7 | flags | uint8 | — | bit0: weak side is B, else A |
+
+**Frame 2** (response metrics):
+
+| Byte | Field | Type | Unit | Description |
+|------|-------|------|------|-------------|
+| 0 | dof_marker | uint8 | — | dof_index \| 0x40 |
+| 1-2 | dur_ratio_x1000 | int16 LE | ×1000 | `iqR` during probe pulse |
+| 3-4 | delta_ratio_x1000 | int16 LE | ×1000 | `dur_ratio - pre_ratio` |
+| 5-6 | recruit_norm_x1000 | int16 LE | ×1000 | Weak-side recruitment normalized by baseline max current |
+| 7 | class_code | uint8 | — | Heuristic class code from firmware |
+
+**Frame 3** (probe parameters):
+
+| Byte | Field | Type | Unit | Description |
+|------|-------|------|------|-------------|
+| 0 | dof_marker | uint8 | — | dof_index \| 0x80 |
+| 1-2 | effort_pre | uint16 LE | raw | Baseline total effort `|iqA| + |iqB|` |
+| 3-4 | boost_x10 | int16 LE | °×10 | Temporary stiffness boost used for the probe |
+| 5-6 | pulse_ms | uint16 LE | ms | Probe pulse duration |
+| 7 | min_samples | uint8 | samples | Minimum collected samples across pre/during/post windows |
+
+**Class codes**:
+
+- `0` = `UNKNOWN`
+- `1` = `LOW_EFFORT`
+- `2` = `NO_CORRECTION`
+- `3` = `NO_EFFECT`
+- `4` = `SLACK_LIKELY`
+
+**Host contract**:
+
+- Flask and Jetson decode the same CAN payload.
+- Each host app persists one JSONL file per joint with host timestamp in `software/host/logs/probe_history/`.
+- Host policy is free to ignore `class_code` and use raw metrics only.
 
 ---
 
@@ -1475,8 +1548,9 @@ Each joint controller has two physically separate CAN buses:
 | 0x4A0+joint | Joint Announce/Discovery | Ctrl → Host | Level 4 |
 | 0x4B0+joint | Encoder Offsets Response | Ctrl → Host | Level 4 |
 | 0x4C0+joint | Zero Complete Notification | Ctrl → Host | Level 4 |
-| 0x4D0+joint | DIAG_HOLD (Holding Diagnostics) | Ctrl → Host | Level 4, ~0.3 Hz |
+| 0x4D0+joint | DIAG_HOLD (Holding Diagnostics) | Ctrl → Host | Level 4, configurable cadence (default 500 ms) |
 | **0x4F0+joint** | **JOINT_STATE Broadcast** | Ctrl → Host | Level 4 |
+| **0x500+joint** | **RPROBE_RESULT (Retension Probe Result)** | Ctrl → Host | Level 4, on probe completion |
 
 ### Motor CAN IDs
 

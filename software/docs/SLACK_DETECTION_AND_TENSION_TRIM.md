@@ -286,6 +286,28 @@ This makes the runtime adaptation visible before any decision about persistence.
 
 This is the preferred first implementation path.
 
+### E. Generic host-driven retension probe
+
+Current architecture decision:
+
+- the firmware may run a small symmetric retension probe during clean `HOLDING`
+- the firmware reports the result generically
+- the firmware does **not** apply persistent trim from that result
+- host software (`Flask` app or Jetson runtime) owns:
+  - history persistence
+  - JSONL storage in `software/host/logs/probe_history/<joint>.jsonl`
+  - longitudinal analysis by joint / pose / date
+  - any future decision to warn, re-probe, retension, or apply trim
+
+The probe result should be interpreted as:
+
+- `pre_ratio` = primary under-tension / suspect signal
+- `delta_ratio`, `recruit_norm` = confirmation signals from active sensing
+- `classification` = heuristic only; host policy may ignore it
+
+This split keeps the firmware generic across joints while allowing the host to
+learn joint-specific baselines and long-term drift.
+
 ## Proposed Strategy
 
 ### Phase 1 — Diagnostics only
@@ -312,10 +334,12 @@ No automatic correction yet.
 - [x] slack warning based on motor current ratio (`[SLACK]` log, event-driven)
 - [x] `delta_theta` bias monitor with EMA (`holding_dtheta_ema`)
 - [x] motor residual check from `cached_motor_angles` vs equations
-- [x] unified `[DIAG_HOLD]` log every 3s with all signals
+- [x] unified `[DIAG_HOLD]` log at configurable cadence (current debug default: `500 ms`)
 - [x] full gating: HOLDING + stiffness + no compliance + no tau_ff + low velocity + no recent transition + valid encoder
 - [x] CAN streaming to host via `0x4D0+joint` (2 frames, sequence counter sync)
 - [x] webapp UI: per-DOF cards + timeline chart with DOF selector
+- [x] periodic active `RPROBE` result via CAN (`0x500+joint`) with raw metrics for host-side policy
+- [x] host persistence: one JSONL file per joint with host timestamped probe history
 
 ### Phase 1.5 — Proposed trim dry-run
 
@@ -330,7 +354,10 @@ Purpose:
 
 Current implementation:
 
-- `proposed_trim_deg` per DOF, session-local, reset on IDLE / disable / watchdog / E-Stop
+- `proposed_trim_deg` per DOF, session-local
+- reset on IDLE / explicit impedance disable / E-Stop
+- preserved across watchdog timeout, because timeout now latches a `LOCAL HOLD`
+  instead of tearing down the impedance session
 - direction from torque ratio slack side (low-Iq motor gets more preload)
 - gated by: `iq_ratio < 0.30` AND `|ema| > 0.30`
 - decay toward zero when `iq_ratio > 0.50` (balanced)
@@ -602,3 +629,94 @@ encoder tracker issues in the background.
 - Is there a posture-invariant signal combination that isolates true
   calibration error from load effects?
 - Should descent hysteresis be accounted for (direction-dependent baseline)?
+
+## G — Hold Event Investigation (2026-03-21)
+
+### Purpose
+
+Investigate the residual "kick" observed at high knee flexion during long
+HOLDING, after the RevTrack fix and after restoring a non-zero outer loop.
+
+### Instrumentation
+
+- Added high-rate `[HOLD_EVT]` logging in HOLDING.
+- Trigger condition:
+  - `|q_curr - q_prev_hold| >= 0.10°`, or
+  - `|velocity_filtered| >= 1.0°/s`
+- Logged fields:
+  - `qPrev`, `q`, `qDes`, `err`, `dq`, `vel`
+  - `dth` (`delta_theta_smooth`)
+  - `kiS`, `frz`
+  - `Aref`, `Bref`, `cmdA`, `cmdB`
+  - `iqA`, `iqB`, `iqR`
+
+### Important Host-Side Finding
+
+During investigation, some trials were invalid because the webapp had
+previously sent `SET_PID_OUTER` with all outer gains and cascade influence set
+to zero. `Load Outer PID` was correctly showing the firmware state; the zero
+values were real, not a UI parsing bug.
+
+Host-side mitigation was added:
+
+- when `Init Gains + Hold` sees outer `Kp/Ki/Kd = 0` in the UI, it first
+  auto-loads the current firmware outer PID before synchronizing impedance
+- move-stream startup now sends the first target before lowering the watchdog
+  to `500 ms`, preventing immediate retroactive watchdog timeouts when starting
+  a new move after a long hold
+
+### Final Watchdog Policy (validated 2026-03-22)
+
+The original watchdog behavior was too aggressive for a stable impedance hold:
+when the host keepalive expired, firmware restored the saved PID parameters,
+invalidated the impedance session, and introduced an artificial kick.
+
+Final policy:
+
+- watchdog timeout no longer tears down impedance control
+- timeout freezes the current pose as `LOCAL HOLD`
+- outer/inner impedance overrides remain active
+- a new `SET_IMPEDANCE` re-arms the session and clears the timeout latch
+
+Validated long-hold result at `70°`:
+
+- watchdog timeout occurs once after `60000 ms`
+- firmware logs `LOCAL HOLD`
+- no discrete kick is observed at timeout
+- post-timeout behavior remains continuous, confirming that the previous
+  timeout-induced jump was a software artifact now removed
+
+### Result With Outer Active Again
+
+Validated run: `Kp=8`, `Ki=8`, `Kd=0.08`, `stiffness=25°`, `cascade=1.0`.
+
+At `70°`:
+
+- the joint stabilizes around `70.2°`
+- a later upward step to about `70.5°` can still happen
+- at the instant of the step, `dth` is **negative**, while `q` is increasing
+
+Interpretation:
+
+- the outer loop is commanding a correction **opposite** to the direction of
+  the observed jump
+- therefore the jump is **not initiated by the outer PID**
+- the event is consistent with delayed mechanical settling under load:
+  static friction release, tendon redistribution, or preload equalization
+
+### Decision
+
+For this knee/hanging-leg setup, the residual delayed jump at high flexion is
+currently treated as a **mechanical settling phenomenon**, not as a software
+instability of the outer loop.
+
+Implications:
+
+- do not use a single delayed `q` jump as evidence that the outer loop is
+  unstable
+- do not use such an event alone to infer tendon slack
+- if slack mitigation is added, it should treat these jumps as possible
+  mechanical releases and rely on current imbalance / persistence rather than
+  on the jump itself
+- when reasoning about watchdog transitions, treat `LOCAL HOLD` as the same
+  control session, not as a full reset of diagnostic state

@@ -10,7 +10,7 @@ CAN ID allocation is documented in docs/CAN_SYSTEM_ARCHITECTURE.md.
 Key ranges:
 - 0x000-0x01D: System control + operational commands (Host → Controller)
 - 0x140-0x280: Motor commands (Controller → Motors, internal)
-- 0x400-0x4E0: Status feedback (Controller → Host)
+- 0x400-0x500: Status feedback (Controller → Host)
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from config import JOINTS
+from config import CAN_ID_RETENSION_PROBE_RESULT, JOINTS
 from motor_can_bench import (
     CONTROL_COMMANDS,
     DEFAULT_MOTOR_ID,
@@ -46,6 +46,7 @@ from motor_can_bench import (
     parse_extra_commands,
     write_csv_rows,
 )
+from probe_history import ProbeHistoryWriter
 from serial_logger import SerialLogger
 
 try:
@@ -60,6 +61,7 @@ class CanManager:
     DEFAULT_BITRATE = 1_000_000  # 1 Mbps (maximum speed test)
     MOTOR_ID_BASE = 0x140
     MOTOR_TEST_LOG_DIR = Path(__file__).resolve().parent / "logs" / "motor_can_bench"
+    PROBE_HISTORY_DIR = Path(__file__).resolve().parent / "logs" / "probe_history"
 
     def __init__(self, socketio=None, comm_logger: Optional[SerialLogger] = None) -> None:
         if can is None:
@@ -120,6 +122,9 @@ class CanManager:
         # Format: {joint_name: {dof: {"q_deg": float, "dq_deg_s": float,
         #          "tau_a": int, "tau_b": int, "status": int, "timestamp": float}}}
         self._joint_state: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self._retension_probe_state: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self._retension_probe_pending: Dict[tuple[int, int], Dict[str, Any]] = {}
+        self._probe_history = ProbeHistoryWriter(self.PROBE_HISTORY_DIR, source="flask_can_manager")
 
         # Configuration persistence
         self._config_file = "can_config.json"
@@ -598,7 +603,7 @@ class CanManager:
     _MULTI_FRAME_DELAY_S = 0.003  # 3 ms — ~1.5 control-loop iterations
     _IMPEDANCE_DEFAULTS = {
         "kp": 8.0,
-        "ki": 1.0,
+        "ki": 8.0,
         "kd": 0.08,
         "tau_ff": 0,
         "kp_inner": 10.0,
@@ -1921,6 +1926,12 @@ class CanManager:
             self._handle_joint_state(data, message.timestamp, joint_id)
             return
 
+        # Retension probe summary (0x500-0x50F) — host-side probe policy input
+        if CAN_ID_RETENSION_PROBE_RESULT <= arb_id <= CAN_ID_RETENSION_PROBE_RESULT + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_RETENSION_PROBE_RESULT
+            self._handle_retension_probe_result(data, message.timestamp, joint_id)
+            return
+
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -2461,13 +2472,89 @@ class CanManager:
                     except Exception:
                         pass
 
+    def _handle_retension_probe_result(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        """
+        Decode retension-probe result frames from CAN (0x500 + joint_id).
+
+        Three frames per DOF:
+          Frame 1: dof, q, base stiffness, pre_ratio, flags
+          Frame 2: dof|0x40, dur_ratio, delta_ratio, recruit_norm, class
+          Frame 3: dof|0x80, effort_pre, boost, pulse_ms, min_samples
+        """
+        marker = data[0]
+        frame_kind = marker & 0xC0
+        dof = marker & 0x3F
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+        key = (joint_id, dof)
+        class_names = {
+            0: "UNKNOWN",
+            1: "LOW_EFFORT",
+            2: "NO_CORRECTION",
+            3: "NO_EFFECT",
+            4: "SLACK_LIKELY",
+        }
+
+        if frame_kind == 0x00:
+            q_x100, base_stiff_x10, pre_ratio_x1000 = struct.unpack_from("<hhh", data, 1)
+            flags = data[7]
+            self._retension_probe_pending[key] = {
+                "type": "retension_probe",
+                "joint_id": joint_id,
+                "joint_name": joint_name,
+                "dof": dof,
+                "q_deg": q_x100 / 100.0,
+                "baseline_stiffness_deg": base_stiff_x10 / 10.0,
+                "pre_ratio": pre_ratio_x1000 / 1000.0,
+                "weak_side": "B" if (flags & 0x01) else "A",
+                "timestamp": timestamp,
+            }
+            return
+
+        entry = self._retension_probe_pending.get(key)
+        if entry is None:
+            return
+
+        if frame_kind == 0x40:
+            dur_ratio_x1000, delta_ratio_x1000, recruit_norm_x1000 = struct.unpack_from("<hhh", data, 1)
+            class_code = data[7]
+            entry["dur_ratio"] = dur_ratio_x1000 / 1000.0
+            entry["delta_ratio"] = delta_ratio_x1000 / 1000.0
+            entry["recruit_norm"] = recruit_norm_x1000 / 1000.0
+            entry["class_code"] = class_code
+            entry["classification"] = class_names.get(class_code, f"CODE_{class_code}")
+            return
+
+        if frame_kind == 0x80:
+            effort_pre, boost_x10, pulse_ms = struct.unpack_from("<HhH", data, 1)
+            min_samples = data[7]
+            entry["effort_pre"] = int(effort_pre)
+            entry["probe_boost_deg"] = boost_x10 / 10.0
+            entry["probe_pulse_ms"] = int(pulse_ms)
+            entry["min_samples"] = int(min_samples)
+            with self._lock:
+                self._retension_probe_state.setdefault(joint_name, {})[dof] = dict(entry)
+            self._probe_history.append(entry)
+            self._retension_probe_pending.pop(key, None)
+            if self.socketio:
+                try:
+                    self.socketio.emit("retension_probe", entry, namespace="/movement")
+                except Exception:
+                    pass
+
     def get_joint_state(self) -> Dict[str, Any]:
         """Return current joint state data for all joints/DOFs in impedance mode."""
         with self._lock:
             # Deep copy to avoid race conditions
             return {
                 joint_name: {
-                    str(dof): dict(state)
+                    str(dof): {
+                        **dict(state),
+                        **(
+                            {"retension_probe": dict(self._retension_probe_state.get(joint_name, {}).get(dof, {}))}
+                            if self._retension_probe_state.get(joint_name, {}).get(dof)
+                            else {}
+                        ),
+                    }
                     for dof, state in dofs.items()
                 }
                 for joint_name, dofs in self._joint_state.items()

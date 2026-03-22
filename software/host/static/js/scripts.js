@@ -26,6 +26,7 @@ let encoderTestData = {
 
 // Impedance Move state
 let impedanceGainsInitialized = {};  // per-DOF: { 0: true, 1: true }
+let pendingOuterPidRequests = {};    // per-DOF async GET_PID_OUTER requests
 let impedanceOscInterval = null;
 
 let impedanceStateRateCount = 0;
@@ -215,6 +216,8 @@ function getCurrentEncoderAngle(joint, dofIndex) {
 }
     // Main function executed when DOM is ready
 $(document).ready(function() {
+    initImpedanceHoldWatchdogField();
+
     // Socket.IO initialization
     const socket = io.connect('http://' + document.domain + ':' + location.port + '/movement');
 
@@ -367,6 +370,13 @@ $(document).ready(function() {
 
         // Invalidate impedance gains for this DOF when PID values change from firmware
         impedanceGainsInitialized[dof] = false;
+
+        const pending = pendingOuterPidRequests[dof];
+        if (pending && pending.joint === selectedJoint) {
+            clearTimeout(pending.timeoutId);
+            delete pendingOuterPidRequests[dof];
+            pending.deferred.resolve(values);
+        }
     });
 
     // Listener for JOINT_STATE broadcast from firmware (impedance status)
@@ -789,9 +799,17 @@ $(document).ready(function() {
         
         // Send command to select joint and load PIDs
         sendCommand('select-joint', { joint: joint });
+        setTimeout(() => {
+            requestOuterPidForDof(0);
+        }, 150);
         
         // Show expected mapping grid for new joint
         showExpectedMappingGrid(joint);
+    });
+
+    $('#impedanceHoldWatchdogMs').on('change blur', function() {
+        const raw = parseInt($(this).val(), 10);
+        setImpedanceHoldWatchdogValue(raw);
     });
 
     // DOF selection removed - now per-DOF controls handle specific DOF operations
@@ -2921,6 +2939,28 @@ function requestOuterPidForDof(dof) {
     sendCommand('get-pid-outer', { dof: dof });
 }
 
+function requestOuterPidForDofAsync(dof, timeoutMs = 1500) {
+    const joint = $("#jointSelect").val();
+    if (!joint) return $.Deferred().reject('no joint').promise();
+
+    const existing = pendingOuterPidRequests[dof];
+    if (existing && existing.joint === joint) {
+        return existing.deferred.promise();
+    }
+
+    const deferred = $.Deferred();
+    const timeoutId = setTimeout(() => {
+        if (pendingOuterPidRequests[dof]?.deferred === deferred) {
+            delete pendingOuterPidRequests[dof];
+        }
+        deferred.reject('outer pid timeout');
+    }, timeoutMs);
+
+    pendingOuterPidRequests[dof] = { joint, deferred, timeoutId };
+    requestOuterPidForDof(dof);
+    return deferred.promise();
+}
+
 // Function to show PID tab for specific DOF
 function showPidTab(dofIndex) {
     // Hide all tabs
@@ -3448,6 +3488,7 @@ function generateIntelligentQuickButtons(ranges, container) {
  */
 function updateImpedanceMoveJoint() {
     const joint = $("#jointSelect").val();
+    initImpedanceHoldWatchdogField();
 
     // Update label
     const label = $("#impedanceJointLabel");
@@ -3490,16 +3531,21 @@ function updateImpedanceStiffnessDisplay() {
  * @returns {object} { kp, ki, kd, stiffness, cascade, kp_inner, ki_inner, kd_inner }
  */
 function getImpedancePidFromTuningSection(dof) {
+    const stiffnessRaw = parseFloat($(`#outerPidDof${dof}Stiffness`).val());
     return {
         kp:       parseFloat($(`#outerPidDof${dof}Kp`).val()) || 0,
         ki:       parseFloat($(`#outerPidDof${dof}Ki`).val()) || 0,
         kd:       parseFloat($(`#outerPidDof${dof}Kd`).val()) || 0,
-        stiffness: parseFloat($(`#outerPidDof${dof}Stiffness`).val()) || 25,
+        stiffness: Number.isFinite(stiffnessRaw) ? stiffnessRaw : 25,
         cascade:  parseFloat($(`#outerPidDof${dof}Cascade`).val()) || 0,
         kp_inner: parseFloat($(`#agonistPidDof${dof}Kp`).val()) || 0,
         ki_inner: parseFloat($(`#agonistPidDof${dof}Ki`).val()) || 0,
         kd_inner: parseFloat($(`#agonistPidDof${dof}Kd`).val()) || 0,
     };
+}
+
+function outerPidLooksZeroed(pid) {
+    return pid.kp === 0 && pid.ki === 0 && pid.kd === 0;
 }
 
 /**
@@ -3539,21 +3585,37 @@ function syncOuterLoopForImpedance(dof) {
     const joint = $("#jointSelect").val();
     if (!joint) return $.Deferred().reject().promise();
 
+    const doSync = () => {
+        const pid = getImpedancePidFromTuningSection(dof);
+        return $.ajax({
+            url: '/api/impedance/sync_outer',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                joint_name: joint,
+                dof_index: dof,
+                kp: pid.kp,
+                ki: pid.ki,
+                kd: pid.kd,
+                stiffness: pid.stiffness,
+                cascade: pid.cascade
+            })
+        });
+    };
+
     const pid = getImpedancePidFromTuningSection(dof);
-    return $.ajax({
-        url: '/api/impedance/sync_outer',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({
-            joint_name: joint,
-            dof_index: dof,
-            kp: pid.kp,
-            ki: pid.ki,
-            kd: pid.kd,
-            stiffness: pid.stiffness,
-            cascade: pid.cascade
-        })
-    });
+    if (outerPidLooksZeroed(pid)) {
+        appendStatusMessage(`⚠️ DOF ${dof} outer PID is zeroed in UI — auto-loading firmware values`);
+        return requestOuterPidForDofAsync(dof).then(
+            () => doSync(),
+            () => {
+                appendStatusMessage(`⚠️ Failed to auto-load outer PID for DOF ${dof}`);
+                return $.Deferred().reject('outer pid auto-load failed').promise();
+            }
+        );
+    }
+
+    return doSync();
 }
 
 /**
@@ -3637,16 +3699,45 @@ function sendImpedanceFastTarget(dof, qTarget, dqCruise, stiffness) {
  * Restores to configured hold watchdog when streaming stops.
  */
 const WATCHDOG_STREAM_MS = 500;   // relaxed for webapp (HTTP jitter)
-const WATCHDOG_DEFAULT_MS = 100;  // firmware default (tight, for Jetson direct CAN)
+const WATCHDOG_DEFAULT_MS = 60000;  // webapp default hold watchdog
+const HOLD_WATCHDOG_STORAGE_KEY = 'impedanceHoldWatchdogMs';
+
+function clampImpedanceHoldWatchdogMs(raw) {
+    if (!Number.isFinite(raw)) return WATCHDOG_DEFAULT_MS;
+    return Math.max(100, Math.min(60000, raw));
+}
+
+function setImpedanceHoldWatchdogValue(ms, persist = true) {
+    const clamped = clampImpedanceHoldWatchdogMs(ms);
+    $('#impedanceHoldWatchdogMs').val(clamped);
+    if (persist) {
+        try {
+            window.localStorage.setItem(HOLD_WATCHDOG_STORAGE_KEY, String(clamped));
+        } catch (_) {
+            // Ignore storage failures (private mode / disabled storage)
+        }
+    }
+    return clamped;
+}
 
 function getImpedanceHoldWatchdogMs() {
     const raw = parseInt($('#impedanceHoldWatchdogMs').val(), 10);
-    if (!Number.isFinite(raw)) return WATCHDOG_DEFAULT_MS;
-    const ms = Math.max(100, Math.min(60000, raw));
-    if (ms !== raw) {
-        $('#impedanceHoldWatchdogMs').val(ms);
+    if (Number.isFinite(raw)) {
+        return setImpedanceHoldWatchdogValue(raw);
     }
-    return ms;
+    try {
+        const stored = parseInt(window.localStorage.getItem(HOLD_WATCHDOG_STORAGE_KEY), 10);
+        if (Number.isFinite(stored)) {
+            return setImpedanceHoldWatchdogValue(stored, false);
+        }
+    } catch (_) {
+        // Ignore storage failures
+    }
+    return setImpedanceHoldWatchdogValue(WATCHDOG_DEFAULT_MS, false);
+}
+
+function initImpedanceHoldWatchdogField() {
+    getImpedanceHoldWatchdogMs();
 }
 
 function setImpedanceWatchdog(ms) {
@@ -3692,16 +3783,23 @@ function startImpedanceMoveStream(dofs, dqCruise) {
     // Clear holding flags so we don't stop immediately from stale state
     dofs.forEach(d => { impedanceMoveHolding[d.dof] = false; });
 
-    // Relax watchdog for webapp HTTP jitter
-    setImpedanceWatchdog(WATCHDOG_STREAM_MS);
-
     const tickMs = 20;  // 50 Hz
     const maxDurationMs = 30000;  // safety: auto-stop after 30s
     const startTime = Date.now();
     let graceExpired = false;  // ignore stale HOLDING for first 200ms
 
-    // Send first frame immediately
-    dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
+    // Send the first target(s) before shortening the watchdog.
+    // Otherwise, if the joint has been idle for a long time, dropping directly
+    // from a long hold watchdog to 500 ms can trigger an immediate retroactive
+    // timeout on the firmware before the new target refresh lands.
+    const initialRequests = dofs
+        .map(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness))
+        .filter(Boolean);
+    if (initialRequests.length > 0) {
+        $.when.apply($, initialRequests).always(() => setImpedanceWatchdog(WATCHDOG_STREAM_MS));
+    } else {
+        setImpedanceWatchdog(WATCHDOG_STREAM_MS);
+    }
 
     impedanceMoveStream = setInterval(() => {
         const elapsed = Date.now() - startTime;

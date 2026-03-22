@@ -26,7 +26,7 @@ nudge:
 joints:
   knee_right:
     gains:
-      outer: { kp: 8.0, ki: 1.0, kd: 0.08 }
+      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
     home_position_deg:
@@ -34,7 +34,7 @@ joints:
 
   # ankle_right:                # uncomment when ready to test
   #   gains:
-  #     outer: { kp: 8.0, ki: 1.0, kd: 0.08 }
+  #     outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
   #     inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
   #   stiffness_deg: 25.0
   #   home_position_deg:

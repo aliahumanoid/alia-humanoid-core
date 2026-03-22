@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+from probe_history import ProbeHistoryWriter
 
 from .can_bus import CanBus
 from .config import ControllerConfig
@@ -18,8 +22,10 @@ from .protocol import (
     CAN_ID_ENCODER_STREAM_DATA,
     CAN_ID_JOINT_ANNOUNCE,
     CAN_ID_JOINT_STATE,
+    CAN_ID_RETENSION_PROBE_RESULT,
     CAN_ID_STARTUP_STATUS,
     JointAnnounce,
+    RetensionProbeResult,
     StartupStatus,
     decode_encoder_stream,
     decode_joint_announce,
@@ -38,6 +44,7 @@ class JointState:
     torques_agonist: dict[int, int] = field(default_factory=dict)
     torques_antagonist: dict[int, int] = field(default_factory=dict)
     holding: dict[int, bool] = field(default_factory=dict)
+    probe_results: dict[int, RetensionProbeResult] = field(default_factory=dict)
     last_update: float = 0.0           # time.monotonic()
     is_online: bool = False
     announce: Optional[JointAnnounce] = None
@@ -66,6 +73,11 @@ class TelemetryManager:
             self.startup_events[jcfg.joint_id] = asyncio.Event()
 
         self._running = False
+        self._retension_probe_pending: dict[tuple[int, int], dict[str, object]] = {}
+        self._probe_history = ProbeHistoryWriter(
+            Path(__file__).resolve().parent.parent / "logs" / "probe_history",
+            source="jetson_telemetry",
+        )
 
     async def listen(self, can_bus: CanBus) -> None:
         """Main telemetry loop — consume CAN messages and dispatch.
@@ -119,6 +131,12 @@ class TelemetryManager:
             self._handle_joint_state(data, joint_id)
             return
 
+        # Retension probe result (0x500-0x50F)
+        if CAN_ID_RETENSION_PROBE_RESULT <= arb_id <= CAN_ID_RETENSION_PROBE_RESULT + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_RETENSION_PROBE_RESULT
+            self._handle_retension_probe(data, joint_id, timestamp)
+            return
+
     def _handle_joint_state(self, data: bytes, joint_id: int) -> None:
         js = decode_joint_state(data, joint_id)
         key = self._config._id_to_key.get(joint_id)
@@ -138,6 +156,103 @@ class TelemetryManager:
         state.last_update = time.monotonic()
         state.is_online = True
         state.rx_count += 1
+
+    def _handle_retension_probe(self, data: bytes, joint_id: int, timestamp: float) -> None:
+        marker = data[0]
+        frame_kind = marker & 0xC0
+        dof = marker & 0x3F
+        key = self._config._id_to_key.get(joint_id)
+        if key is None:
+            return
+
+        pending_key = (joint_id, dof)
+        class_names = {
+            0: "UNKNOWN",
+            1: "LOW_EFFORT",
+            2: "NO_CORRECTION",
+            3: "NO_EFFECT",
+            4: "SLACK_LIKELY",
+        }
+
+        if frame_kind == 0x00:
+            q_x100, base_stiff_x10, pre_ratio_x1000 = struct.unpack_from("<hhh", data, 1)
+            flags = data[7]
+            self._retension_probe_pending[pending_key] = {
+                "q_deg": q_x100 / 100.0,
+                "baseline_stiffness_deg": base_stiff_x10 / 10.0,
+                "pre_ratio": pre_ratio_x1000 / 1000.0,
+                "weak_side": "B" if (flags & 0x01) else "A",
+                "timestamp": timestamp,
+            }
+            return
+
+        pending = self._retension_probe_pending.get(pending_key)
+        if pending is None:
+            return
+
+        if frame_kind == 0x40:
+            dur_ratio_x1000, delta_ratio_x1000, recruit_norm_x1000 = struct.unpack_from("<hhh", data, 1)
+            class_code = data[7]
+            pending["dur_ratio"] = dur_ratio_x1000 / 1000.0
+            pending["delta_ratio"] = delta_ratio_x1000 / 1000.0
+            pending["recruit_norm"] = recruit_norm_x1000 / 1000.0
+            pending["class_code"] = class_code
+            pending["classification"] = class_names.get(class_code, f"CODE_{class_code}")
+            return
+
+        if frame_kind != 0x80:
+            return
+
+        effort_pre, boost_x10, pulse_ms = struct.unpack_from("<HhH", data, 1)
+        min_samples = data[7]
+        result = RetensionProbeResult(
+            joint_id=joint_id,
+            dof_index=dof,
+            q_deg=float(pending["q_deg"]),
+            baseline_stiffness_deg=float(pending["baseline_stiffness_deg"]),
+            pre_ratio=float(pending["pre_ratio"]),
+            dur_ratio=float(pending.get("dur_ratio", -1.0)),
+            delta_ratio=float(pending.get("delta_ratio", 0.0)),
+            recruit_norm=float(pending.get("recruit_norm", 0.0)),
+            effort_pre=int(effort_pre),
+            probe_boost_deg=boost_x10 / 10.0,
+            probe_pulse_ms=int(pulse_ms),
+            weak_side=str(pending["weak_side"]),
+            class_code=int(pending.get("class_code", 0)),
+            classification=str(pending.get("classification", "UNKNOWN")),
+            min_samples=int(min_samples),
+        )
+
+        state = self.states.get(key)
+        if state is not None:
+            state.probe_results[dof] = result
+
+        self._probe_history.append(
+            {
+                "joint_id": joint_id,
+                "joint_name": key,
+                "dof": dof,
+                "q_deg": result.q_deg,
+                "baseline_stiffness_deg": result.baseline_stiffness_deg,
+                "pre_ratio": result.pre_ratio,
+                "dur_ratio": result.dur_ratio,
+                "delta_ratio": result.delta_ratio,
+                "recruit_norm": result.recruit_norm,
+                "effort_pre": result.effort_pre,
+                "probe_boost_deg": result.probe_boost_deg,
+                "probe_pulse_ms": result.probe_pulse_ms,
+                "weak_side": result.weak_side,
+                "class_code": result.class_code,
+                "classification": result.classification,
+                "min_samples": result.min_samples,
+            }
+        )
+        logger.info(
+            f"RPROBE [{key}] DOF={dof} cls={result.classification} "
+            f"q={result.q_deg:.1f} preR={result.pre_ratio:.3f} "
+            f"dR={result.delta_ratio:.3f} dMinN={result.recruit_norm:.3f}"
+        )
+        self._retension_probe_pending.pop(pending_key, None)
 
     def _handle_encoder(self, data: bytes, joint_id: int) -> None:
         enc = decode_encoder_stream(data, joint_id)

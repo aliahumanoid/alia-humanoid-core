@@ -501,6 +501,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   for (uint8_t dof = 0; dof < dof_count_hold; dof++) {
     // Step 2: Invalidate impedance data (safe — Core1 is skipping IDLE DOFs)
     if (impedance_target[dof].valid) {
+      impedance_target[dof].watchdog_timed_out = false;
       impedance_target[dof].valid = false;
       LOG_INFO("DOF " + String(dof) + " impedance invalidated on startup");
     }
@@ -1648,4 +1649,3 @@ void core0_main_loop() {
   }
 #pragma endregion
 }
-

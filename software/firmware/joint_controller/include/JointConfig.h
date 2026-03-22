@@ -41,7 +41,7 @@ constexpr float PID_DEFAULT_INNER_KD = 0.25f;
 // These control the joint position using the cascade architecture
 // Tuned 2026-01-10: Kp reduced for smoother response, Kd for damping
 constexpr float PID_DEFAULT_OUTER_KP = 8.0f;
-constexpr float PID_DEFAULT_OUTER_KI = 1.0f;
+constexpr float PID_DEFAULT_OUTER_KI = 8.0f;
 constexpr float PID_DEFAULT_OUTER_KD = 0.08f;
 
 // Default tendon control parameters

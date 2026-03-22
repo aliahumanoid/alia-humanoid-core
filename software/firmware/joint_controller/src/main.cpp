@@ -74,9 +74,17 @@ volatile float osc_min_amplitude_deg = 3.0f;         // Min oscillation amplitud
 volatile float osc_min_error_to_check = 1.0f;        // Don't check oscillation if error below this (°)
 // Compliance control (deflection/stall, anti-slack, soft hold)
 volatile float expected_velocity_deadband_deg_s = 1.0f;
-volatile float outer_hold_ki_scale = 0.0f;
+volatile float outer_hold_ki_scale = 0.10f;
+volatile uint16_t outer_hold_ki_ramp_ms = 1000;
 volatile float outer_hold_integral_freeze_error_deg = 0.25f;
 volatile float outer_hold_integral_freeze_velocity_deg_s = 0.5f;
+volatile bool retension_probe_enabled = true;
+volatile float retension_probe_boost_deg = 3.0f;
+volatile uint16_t retension_probe_pulse_ms = 250;
+volatile uint16_t retension_probe_start_delay_ms = 2000;
+volatile uint16_t retension_probe_post_ms = 800;
+volatile uint16_t retension_probe_repeat_ms = 30000;
+volatile float retension_probe_min_hold_q_deg = 0.0f;
 volatile uint16_t diag_hold_min_samples = 1;
 volatile uint16_t diag_hold_period_ms = 500;
 volatile uint16_t trim_dry_run_min_samples = 7500;
@@ -177,6 +185,7 @@ volatile bool pid_diag_terms_enabled = false;  // OFF by default — P/I/D break
 
 // Holding diagnostics (Phase 1 — written by core0, read by core1 for CAN send)
 DiagHoldData diag_hold_data[MAX_DOFS] = {};
+RetensionProbeResultData retension_probe_result_data[MAX_DOFS] = {};
 
 // Cached motor angles (for safety checks without redundant CAN reads)
 // This eliminates the ~2ms delay per motor during periodic safety checks
