@@ -308,6 +308,26 @@ The probe result should be interpreted as:
 This split keeps the firmware generic across joints while allowing the host to
 learn joint-specific baselines and long-term drift.
 
+Operational note:
+
+- offline analysis should stay in Python on the host side, not in the web page
+- shared logic lives in:
+  - `software/host/probe_analysis.py`
+  - `software/host/tools/analyze_probe_history.py`
+- this keeps one source of truth for:
+  - JSONL parsing
+  - pose binning
+  - day-by-day drift summaries
+  - future API/web views
+
+Example usage:
+
+```bash
+cd software/host
+./.venv/bin/python tools/analyze_probe_history.py --joint KNEE_RIGHT --bin-deg 10
+./.venv/bin/python tools/analyze_probe_history.py --joint KNEE_RIGHT --source jetson_telemetry --json
+```
+
 ## Proposed Strategy
 
 ### Phase 1 — Diagnostics only
