@@ -251,6 +251,7 @@ extern volatile uint16_t retension_probe_post_ms;        // Post-pulse observati
 extern volatile uint16_t retension_probe_repeat_ms;      // Periodic re-arm interval while HOLDING stays clean
 extern volatile float retension_probe_min_hold_q_deg;    // Minimum |joint angle| to probe (0 = any pose)
 extern volatile uint16_t diag_hold_min_samples;          // Minimum gated samples before DIAG_HOLD emission
+extern volatile uint16_t diag_hold_ema_settled_samples;  // Minimum gated samples before EMA is considered settled
 extern volatile uint16_t diag_hold_period_ms;            // Period of DIAG_HOLD emission while gated
 extern volatile uint16_t trim_dry_run_min_samples;       // Minimum gated samples before proposed trim updates
 extern volatile uint16_t trim_dry_run_period_ms;         // Minimum time between proposed trim updates
@@ -462,7 +463,7 @@ struct DiagHoldData {
     int16_t stiffness_x10;      // stiffness_ref (°×10)
     int16_t tension_trim_x100;  // tension_trim_deg (°×100) — Phase 2, signed
     uint8_t dof;                // DOF index
-    uint8_t flags;              // bit0=iq_valid, bit1-7=reserved
+    uint8_t flags;              // bit0=iq_valid, bit1=ema_settled, bit2-7=reserved
     volatile uint32_t seq;      // sequence counter: Core0 increments before+after write
                                 // Core1 reads seq, copies, reads seq again — retry if mismatch
 };

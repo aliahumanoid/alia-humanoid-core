@@ -210,8 +210,8 @@ Candidate signal:
 For each DOF:
 
 ```text
-residual_agonist    = actual_calibrated_agonist    - expected_agonist
-residual_antagonist = actual_calibrated_antagonist - expected_antagonist
+residual_A = actual_calibrated_agonist    - expected_agonist
+residual_B = actual_calibrated_antagonist - expected_antagonist
 ```
 
 Interpretation:
@@ -219,6 +219,11 @@ Interpretation:
 - this is a motor-space residual, not a joint-space control residual
 - it should be the primary signal for any future decision to touch saved offsets
 - it should be logged together with slack ratio and `holding_dtheta_ema`
+- canonical naming:
+  - `residual_A` = agonist-side residual
+  - `residual_B` = antagonist-side residual
+  - serial/UI shorthand `resA` / `resB` is acceptable, but documentation should
+    prefer `residual_A` / `residual_B`
 
 This is the correct signal to justify touching saved offsets.
 
@@ -279,8 +284,8 @@ Recommended debug observability:
 - last trim update reason
 - slack side estimate
 - `holding_dtheta_ema`
-- `residual_agonist`
-- `residual_antagonist`
+- `residual_A`
+- `residual_B`
 
 This makes the runtime adaptation visible before any decision about persistence.
 
@@ -355,6 +360,7 @@ No automatic correction yet.
 - [x] `delta_theta` bias monitor with EMA (`holding_dtheta_ema`)
 - [x] motor residual check from `cached_motor_angles` vs equations
 - [x] unified `[DIAG_HOLD]` log at configurable cadence (current debug default: `500 ms`)
+- [x] `ema_settled` flag exported in `DIAG_HOLD` payload so host/UI can mark early warm-up EMA as provisional
 - [x] full gating: HOLDING + stiffness + no compliance + no tau_ff + low velocity + no recent transition + valid encoder
 - [x] CAN streaming to host via `0x4D0+joint` (2 frames, sequence counter sync)
 - [x] webapp UI: per-DOF cards + timeline chart with DOF selector
@@ -630,7 +636,9 @@ encoder tracker issues in the background.
   (40-60°). iqR=0.28 at 50° is gravity + hysteresis, not slack.
 - **Residuals are posture-dependent**, not purely geometric. Cannot be used
   as a standalone calibration-error signal without gravity compensation.
-- **ema needs re-validation** after the gate_no_transition bug fix.
+- **Historical ema values before the gate fix are invalid**. Post-fix `ema`
+  is no longer structurally frozen, but should be interpreted only after EMA
+  warm-up / `ema_settled`.
 - **Phase 2 trim requires gravity compensation** — without it, the trim
   would chase gravitational load.
 

@@ -86,6 +86,7 @@ volatile uint16_t retension_probe_post_ms = 800;
 volatile uint16_t retension_probe_repeat_ms = 30000;
 volatile float retension_probe_min_hold_q_deg = 0.0f;
 volatile uint16_t diag_hold_min_samples = 1;
+volatile uint16_t diag_hold_ema_settled_samples = 500;
 volatile uint16_t diag_hold_period_ms = 500;
 volatile uint16_t trim_dry_run_min_samples = 7500;
 volatile uint16_t trim_dry_run_period_ms = 3000;

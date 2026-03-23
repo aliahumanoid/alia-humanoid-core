@@ -2446,6 +2446,7 @@ class CanManager:
                 "residual_A": res_a_x100 / 100.0,
                 "residual_B": res_b_x100 / 100.0,
                 "iq_valid": bool(flags & 0x01),
+                "ema_settled": bool(flags & 0x02),
                 "timestamp": timestamp,
             }
         else:

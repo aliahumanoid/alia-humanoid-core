@@ -620,7 +620,7 @@ void sendDiagHoldData() {
       int16_t ema_x100;            // delta_theta EMA (°×100)
       int16_t residual_A_x100;     // motor residual A (°×100)
       int16_t residual_B_x100;     // motor residual B (°×100)
-      uint8_t flags;               // bit0=iq_valid
+      uint8_t flags;               // bit0=iq_valid, bit1=ema_settled
     } frame1;
 
     frame1.dof_index = d;

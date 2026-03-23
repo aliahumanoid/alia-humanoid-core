@@ -738,7 +738,8 @@ $(document).ready(function() {
 
     socket.on('diag_hold', function(data) {
         // data: { joint_name, dof, ema, residual_A, residual_B,
-        //         iq_A, iq_B, iq_ratio, iq_valid, stiffness, tension_trim, timestamp }
+        //         iq_A, iq_B, iq_ratio, iq_valid, ema_settled,
+        //         stiffness, tension_trim, timestamp }
         const currentJoint = $("#jointSelect").val();
         if (data.joint_name && data.joint_name !== currentJoint) return;
         updateDiagHoldUI(data);
@@ -7071,6 +7072,7 @@ function updateDiagHoldUI(data) {
     diagHoldHistory[dof].push({
         t: timeLabel,
         ema: data.ema,
+        emaSettled: !!data.ema_settled,
         resA: data.residual_A,
         resB: data.residual_B,
         iqR: data.iq_valid ? data.iq_ratio : null,
@@ -7123,8 +7125,11 @@ function updateDiagHoldCards(data) {
                          data.iq_ratio < 0.1 ? 'text-red-600 font-bold' :
                          data.iq_ratio < 0.3 ? 'text-amber-600' : 'text-green-600';
 
-    const emaColor = Math.abs(data.ema) > 1.0 ? 'text-red-600 font-bold' :
+    const emaColor = !data.ema_settled ? 'text-gray-400 italic' :
+                     Math.abs(data.ema) > 1.0 ? 'text-red-600 font-bold' :
                      Math.abs(data.ema) > 0.5 ? 'text-amber-600' : 'text-green-600';
+    const emaLabel = data.ema_settled ? 'Bias' : 'Bias*';
+    const emaSuffix = data.ema_settled ? '' : '<span class="text-[9px] text-gray-400 ml-1">warming</span>';
 
     card.innerHTML = `
         <div class="flex items-center justify-between mb-1">
@@ -7133,8 +7138,8 @@ function updateDiagHoldCards(data) {
         </div>
         <div class="grid grid-cols-4 gap-1">
             <div class="text-center">
-                <div class="text-gray-400 uppercase" style="font-size:9px">Bias</div>
-                <div class="${emaColor}">${data.ema.toFixed(2)}°</div>
+                <div class="text-gray-400 uppercase" style="font-size:9px">${emaLabel}</div>
+                <div class="${emaColor}">${data.ema.toFixed(2)}° ${emaSuffix}</div>
             </div>
             <div class="text-center">
                 <div class="text-gray-400 uppercase" style="font-size:9px">Iq Ratio</div>

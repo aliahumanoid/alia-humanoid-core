@@ -2102,7 +2102,10 @@ bool JointController::executeControlLoop() {
         diag_hold_data[dof].iq_B = iq_B_diag;
         diag_hold_data[dof].stiffness_x10 = (int16_t)(stiffness_ref_effective * 10.0f);
         diag_hold_data[dof].tension_trim_x100 = (int16_t)(proposed_trim_deg[dof] * 100.0f);
-        diag_hold_data[dof].flags = iq_valid ? 0x01 : 0x00;
+        uint8_t diag_flags = 0;
+        if (iq_valid) diag_flags |= 0x01;
+        if (holding_ema_samples[dof] >= diag_hold_ema_settled_samples) diag_flags |= 0x02;
+        diag_hold_data[dof].flags = diag_flags;
         __atomic_add_fetch(&diag_hold_data[dof].seq, 1, __ATOMIC_RELEASE);  // even = done
       }
 
