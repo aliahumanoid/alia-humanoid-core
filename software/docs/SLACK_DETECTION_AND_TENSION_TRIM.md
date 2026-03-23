@@ -361,7 +361,7 @@ No automatic correction yet.
 - [x] motor residual check from `cached_motor_angles` vs equations
 - [x] unified `[DIAG_HOLD]` log at configurable cadence (current debug default: `500 ms`)
 - [x] `ema_settled` flag exported in `DIAG_HOLD` payload so host/UI can mark early warm-up EMA as provisional
-- [x] full gating: HOLDING + stiffness + no compliance + no tau_ff + low velocity + no recent transition + valid encoder
+- [x] full gating: HOLDING + baseline stiffness + no compliance + no tau_ff + low velocity + no recent transition + valid encoder
 - [x] CAN streaming to host via `0x4D0+joint` (2 frames, sequence counter sync)
 - [x] webapp UI: per-DOF cards + timeline chart with DOF selector
 - [x] periodic active `RPROBE` result via CAN (`0x500+joint`) with raw metrics for host-side policy

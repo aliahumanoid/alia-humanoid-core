@@ -7168,8 +7168,16 @@ function updateDiagHoldChart(dof) {
     if (!diagHoldChart || !diagHoldHistory[dof]) return;
 
     const hist = diagHoldHistory[dof];
+    const emaPointColor = hist.map(h => h.emaSettled ? '#3b82f6' : '#9ca3af');
+    const emaPointRadius = hist.map(h => h.emaSettled ? 2 : 3);
+    const emaPointStyle = hist.map(h => h.emaSettled ? 'circle' : 'triangle');
     diagHoldChart.data.labels = hist.map(h => h.t);
     diagHoldChart.data.datasets[0].data = hist.map(h => h.ema);
+    diagHoldChart.data.datasets[0].pointBackgroundColor = emaPointColor;
+    diagHoldChart.data.datasets[0].pointBorderColor = emaPointColor;
+    diagHoldChart.data.datasets[0].pointRadius = emaPointRadius;
+    diagHoldChart.data.datasets[0].pointHoverRadius = emaPointRadius.map(r => r + 1);
+    diagHoldChart.data.datasets[0].pointStyle = emaPointStyle;
     diagHoldChart.data.datasets[1].data = hist.map(h => h.resA);
     diagHoldChart.data.datasets[2].data = hist.map(h => h.resB);
     diagHoldChart.data.datasets[3].data = hist.map(h => h.iqR);

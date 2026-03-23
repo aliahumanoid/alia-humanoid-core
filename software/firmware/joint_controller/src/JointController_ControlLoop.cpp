@@ -1346,7 +1346,10 @@ bool JointController::executeControlLoop() {
     // Reset when ANY gate condition falls (bias is only meaningful in clean steady state).
     {
       bool gate_holding      = (dof < MAX_DOFS && dof_state[dof] == DofState::HOLDING);
-      bool gate_stiffness    = (stiffness_ref_effective > 1.0f);
+      // Gate on baseline stiffness, not probe/effective stiffness, so
+      // diagnostics stay comparable and probe boosts do not change the
+      // nominal "is this a stiff hold?" context.
+      bool gate_stiffness    = (stiffness_ref > 1.0f);
       bool gate_no_compliance = !compliance_state[dof].compliance_active;
       bool gate_no_tau_ff    = (!impedance_active || impedance_target[dof].tau_ff == 0);
       bool gate_low_velocity = (fabs(velocity_filtered[dof]) < 0.5f);  // near-zero motion
@@ -1777,8 +1780,8 @@ bool JointController::executeControlLoop() {
     // Gravity shifts the ratio but never zeroes one side completely.
     // Gated per SLACK_DETECTION_AND_TENSION_TRIM.md §Gating to avoid false positives.
     {
-      static uint16_t slack_count[3] = {};       // consecutive low-ratio samples per DOF
-      static uint32_t last_slack_warn[3] = {};   // rate-limit warnings
+      static uint16_t slack_count[MAX_DOFS] = {};       // consecutive low-ratio samples per DOF
+      static uint32_t last_slack_warn[MAX_DOFS] = {};   // rate-limit warnings
       const uint16_t SLACK_THRESHOLD_COUNT = 7500;  // ~15s at 500Hz before alarm (let gravity/transient settle)
       const float   SLACK_RATIO_THRESHOLD = 0.05f; // 5% ratio = nearly zero on one side
       const int16_t SLACK_MIN_IQ = 30;           // ignore when both motors are near-idle
@@ -1797,7 +1800,7 @@ bool JointController::executeControlLoop() {
         int16_t iq_max = max(iq_A, iq_B);
         int16_t iq_min = min(iq_A, iq_B);
 
-        if (dof < 3) {
+        if (dof < MAX_DOFS) {
           if (iq_max > SLACK_MIN_IQ) {
             float ratio = (float)iq_min / (float)iq_max;
             if (ratio < SLACK_RATIO_THRESHOLD) {
@@ -1809,7 +1812,8 @@ bool JointController::executeControlLoop() {
                             " tendon slack! iqA=" + String(trResp.dataA.torqueCurrent) +
                             " iqB=" + String(trResp.dataB.torqueCurrent) +
                             " ratio=" + String(ratio, 3) +
-                            " stiff=" + String(stiffness_ref, 1));
+                            " stiffBase=" + String(stiffness_ref, 1) +
+                            " stiffEff=" + String(stiffness_ref_effective, 1));
                 last_slack_warn[dof] = t_now;
                 slack_count[dof] = 0;  // reset after warning
               }
@@ -2084,7 +2088,8 @@ bool JointController::executeControlLoop() {
                   " iqB=" + String(iq_B_diag) +
                   " iqR=" + String(iq_ratio, 2) +
                   " iqV=" + String(iq_valid ? 1 : 0) +
-                  " stiff=" + String(stiffness_ref_effective, 1) +
+                  " stiffBase=" + String(stiffness_ref, 1) +
+                  " stiffEff=" + String(stiffness_ref_effective, 1) +
                   " rt=" + String(last_retension_boost_dbg[dof], 2) +
                   " trim=" + String(proposed_trim_deg[dof], 3) +
                   " n=" + String(holding_ema_samples[dof]));

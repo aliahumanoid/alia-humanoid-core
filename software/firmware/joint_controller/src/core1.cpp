@@ -644,7 +644,10 @@ void sendDiagHoldData() {
     frame2.iq_A = snapshot.iq_A;
     frame2.iq_B = snapshot.iq_B;
     frame2.stiffness_x10 = snapshot.stiffness_x10;
-    frame2.tension_trim_x10 = (int8_t)constrain(snapshot.tension_trim_x100 / 10, -127, 127);
+    int16_t trim_x100 = snapshot.tension_trim_x100;
+    frame2.tension_trim_x10 = (int8_t)constrain(
+        (trim_x100 + (trim_x100 >= 0 ? 5 : -5)) / 10,
+        -127, 127);
 
     CAN_HOST.sendMsgBuf(CAN_ID_DIAG_HOLD_DATA + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t*)&frame2);
 

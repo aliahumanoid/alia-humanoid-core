@@ -1209,7 +1209,7 @@ distinguished by bit 7 of byte 0.
 | 1-2 | ema_x100 | int16 LE | °×100 | delta_theta EMA (outer-loop bias) |
 | 3-4 | residual_A_x100 | int16 LE | °×100 | Motor residual agonist (calibrated − expected) |
 | 5-6 | residual_B_x100 | int16 LE | °×100 | Motor residual antagonist (calibrated − expected) |
-| 7 | flags | uint8 | — | bit0: iq_valid |
+| 7 | flags | uint8 | — | bit0: iq_valid, bit1: ema_settled |
 
 **Frame 2** (torque + stiffness + trim):
 
@@ -1218,7 +1218,7 @@ distinguished by bit 7 of byte 0.
 | 0 | dof_marker | uint8 | — | dof_index \| 0x80 (frame 2 marker) |
 | 1-2 | iq_A | int16 LE | raw | Torque current agonist |
 | 3-4 | iq_B | int16 LE | raw | Torque current antagonist |
-| 5-6 | stiffness_x10 | int16 LE | °×10 | Stiffness reference |
+| 5-6 | stiffness_x10 | int16 LE | °×10 | Effective stiffness applied during HOLD/probe |
 | 7 | tension_trim_x10 | int8 | °×10 | Proposed tension trim (signed, dry-run) |
 
 **Cross-core sync:** Uses sequence counter in shared struct. Core0 increments
