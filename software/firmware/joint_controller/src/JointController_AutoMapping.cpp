@@ -155,8 +155,10 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
     }
 
     // Calculate number of points for this DOF
-    int dof_points = ceil((auto_mapping_state.max_angles[i] - auto_mapping_state.min_angles[i]) /
-                          auto_mapping_state.step_sizes[i]) +
+    // Must match the actual iteration: start at min, increment by step, stop when > max.
+    // floor() ensures the count matches the loop behavior (ceil caused overcounting).
+    int dof_points = (int)floor((auto_mapping_state.max_angles[i] - auto_mapping_state.min_angles[i]) /
+                                auto_mapping_state.step_sizes[i]) +
                      1;
 
     // Update total points (cartesian product)

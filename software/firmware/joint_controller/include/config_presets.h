@@ -229,14 +229,12 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                   .tensioning_torque              = -50.0f,
                   .auto_mapping_step              = 10.0f,
                   .auto_mapping_settle_time       = 200,
-                  .auto_mapping_speed             = -6.0f,
+                  .auto_mapping_speed             = -10.0f,
                   .auto_mapping_resistance_torque = -20.0f,
                   .position_threshold             = 0.25f,
-                  .auto_mapping_min_angle =
-                      -20.0f, // More conservative range for auto-mapping (vs -25.0f limit)
-                  .auto_mapping_max_angle =
-                      20.0f, // More conservative range for auto-mapping (vs 25.0f limit)
-                  .auto_mapping_invert_direction = false // Default behavior
+                  .auto_mapping_min_angle         = -23.0f,
+                  .auto_mapping_max_angle         = 23.0f,
+                  .auto_mapping_invert_direction  = false // Default behavior
 
               }}},
     .motors = {{                     // Motor 0: plantar flexion (agonist for DOF 0)
@@ -319,11 +317,11 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                   .tensioning_torque              = -50.0f,
                   .auto_mapping_step              = 10.0f,
                   .auto_mapping_settle_time       = 400,
-                  .auto_mapping_speed             = -6.0f,
+                  .auto_mapping_speed             = -10.0f,
                   .auto_mapping_resistance_torque = -10.0f,
                   .position_threshold             = 0.1f,
-                  .auto_mapping_min_angle         = -20.0f,
-                  .auto_mapping_max_angle         = 20.0f,
+                  .auto_mapping_min_angle         = -48.0f,
+                  .auto_mapping_max_angle         = 23.0f,
                   .auto_mapping_invert_direction  = false // Default behavior
 
               }},
@@ -354,14 +352,12 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                   .tensioning_torque              = -50.0f,
                   .auto_mapping_step              = 10.0f,
                   .auto_mapping_settle_time       = 200,
-                  .auto_mapping_speed             = -6.0f,
+                  .auto_mapping_speed             = -10.0f,
                   .auto_mapping_resistance_torque = -20.0f,
                   .position_threshold             = 0.25f,
-                  .auto_mapping_min_angle =
-                      -20.0f, // More conservative range for auto-mapping (vs -25.0f limit)
-                  .auto_mapping_max_angle =
-                      20.0f, // More conservative range for auto-mapping (vs 25.0f limit)
-                  .auto_mapping_invert_direction = false // Default behavior
+                  .auto_mapping_min_angle         = -23.0f,
+                  .auto_mapping_max_angle         = 23.0f,
+                  .auto_mapping_invert_direction  = false // Default behavior
 
               }}},
     .motors = {{                     // Motor 0: plantar flexion (agonist for DOF 0)
