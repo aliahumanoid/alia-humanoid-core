@@ -74,7 +74,10 @@ def register_routes(
         return None
 
     def load_mapping_from_file(joint_name: str):
-        filename = f"mapping_data/{joint_name.lower()}_mapping.json"
+        # Try enriched data first (has interpolation/extrapolation), then raw
+        enriched = f"mapping_data/{joint_name.lower()}_enriched_mapping.json"
+        raw = f"mapping_data/{joint_name.lower()}_mapping.json"
+        filename = enriched if os.path.exists(enriched) else raw
         if not os.path.exists(filename):
             return None
 
