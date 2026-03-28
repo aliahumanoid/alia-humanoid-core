@@ -906,7 +906,10 @@ $(document).ready(function() {
     
     // Initialize smart buttons on load
     setTimeout(generateSmartQuickButtons, 250);
-    setTimeout(generateSmartImpedanceButtons, 350);
+    // Load saved mapping data first, then generate impedance grid with correct ranges.
+    // fetchMappingChartData sets automaticMappingData and calls generateSmartImpedanceButtons.
+    // Fallback: if no saved data, generateSmartImpedanceButtons is called with defaults.
+    setTimeout(fetchMappingChartData, 350);
     
     // DOF-specific buttons are now initialized in fetchJointPhysicalLimits().done() callback
     
@@ -2632,6 +2635,9 @@ function fetchMappingChartData() {
                 const timestamp = response.file_timestamp ? new Date(response.file_timestamp).toLocaleString() : 'N/A';
                 appendStatusMessage(`Loaded saved data for ${selectedJoint}: ${totalPoints} points, ${dofCount} DOF (${timestamp})`);
                 updateMappingDataInfo(`${selectedJoint}: ${totalPoints} points, ${dofCount} DOF - Saved: ${timestamp}`);
+
+                // Regenerate impedance grid with mapping-based ranges
+                generateSmartImpedanceButtons();
             } else {
                 // If no saved data, try with in-memory data
                 loadMemoryMappingData(selectedJoint);
@@ -2681,6 +2687,9 @@ function loadMemoryMappingData(jointName) {
                 });
                 appendStatusMessage(`Loaded in-memory data: ${totalPoints} points, ${dofCount} DOF (current)`);
                 updateMappingDataInfo(`Current data: ${totalPoints} points, ${dofCount} DOF`);
+
+                // Regenerate impedance grid with mapping-based ranges
+                generateSmartImpedanceButtons();
             } else {
                 appendStatusMessage(`No mapping data available for ${jointName}`);
                 updateMappingDataInfo(`No data available for ${jointName}`);
