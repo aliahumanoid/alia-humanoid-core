@@ -469,15 +469,8 @@ $(document).ready(function() {
             // Update joint combo box
             const jointSelect = $("#jointSelect");
             if (jointSelect.length && jointSelect.val() !== data.joint) {
-                jointSelect.val(data.joint);
+                jointSelect.val(data.joint).trigger('change');
                 appendStatusMessage(`🔄 Active joint updated automatically: ${data.joint}`);
-            }
-            
-            // If source is a mapping request, update charts
-            if (data.source === 'mapping_request' || data.source === 'automatic_mapping') {
-                setTimeout(() => {
-                    fetchMappingChartData();
-                }, 500); // Brief pause to allow combo box update
             }
         }
     });
