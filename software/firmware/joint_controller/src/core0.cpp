@@ -539,6 +539,20 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   return true;
 }
 
+static float normalizeAngleToPhysicalWindow(float angle_deg, float min_deg, float max_deg) {
+  float center_deg = 0.5f * (min_deg + max_deg);
+  while ((angle_deg - center_deg) > 180.0f) angle_deg -= 360.0f;
+  while ((angle_deg - center_deg) < -180.0f) angle_deg += 360.0f;
+  return angle_deg;
+}
+
+static float shortestWrappedAngleDiffDeg(float current_deg, float previous_deg) {
+  float diff_deg = current_deg - previous_deg;
+  while (diff_deg > 180.0f) diff_deg -= 360.0f;
+  while (diff_deg < -180.0f) diff_deg += 360.0f;
+  return diff_deg;
+}
+
 // ============================================================================
 // CORE0 MAIN LOOP - Serial Communication & Command Dispatch
 // ============================================================================
@@ -659,15 +673,19 @@ void updateSharedDofAngles() {
                     (directEncoders.getErrorCount(enc_ch) == 0);
     
     if (is_valid) {
-      // Get angle directly from DirectEncoders (already in degrees with multi-turn)
+      // DirectEncoders keeps a continuous multi-turn representation internally.
+      // Publish the equivalent angle inside the physical DOF window so startup,
+      // safety and host telemetry do not see 360° aliases when crossing zero.
       float new_angle = directEncoders.getAngle(enc_ch);
+      const auto &limits = controller->getConfig().dofs[dof].limits;
+      new_angle = normalizeAngleToPhysicalWindow(new_angle, limits.min_angle, limits.max_angle);
       
       // Reset error counter on successful read
       consecutive_errors[dof] = 0;
       
       // Calculate velocity if we have a previous reading
       if (dt_s > 0.0001f && shared_dof_angles.valid[dof]) {
-        float angle_diff = new_angle - shared_dof_angles.angles[dof];
+        float angle_diff = shortestWrappedAngleDiffDeg(new_angle, shared_dof_angles.angles[dof]);
         shared_dof_angles.velocities[dof] = angle_diff / dt_s;
       } else {
         shared_dof_angles.velocities[dof] = 0.0f;
