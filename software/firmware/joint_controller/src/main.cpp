@@ -367,11 +367,11 @@ void setup() {
 #pragma region Init Serial_Interface/Motors
   // initialize serial communication at 115200 bits per second:
   Serial.begin(115200);
-  // Wait for USB CDC connection (up to 500ms, exit early if connected)
-  // Previously delay(5000) — reduced to avoid blocking hardware init
+  // Wait for USB CDC connection (up to 3000ms, exit early if connected)
+  // Longer timeout ensures host serial handler captures CAN init and loopback messages
   {
     uint32_t t0 = millis();
-    while (!Serial && (millis() - t0 < 500)) {
+    while (!Serial && (millis() - t0 < 3000)) {
       // Yield to USB stack
     }
   }
@@ -412,6 +412,10 @@ void setup() {
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
 
+  // Initialize BOTH MCP2515 chips before running loopback tests.
+  // Both share SPI1 — initializing both first ensures neither chip has
+  // an undefined MISO state that could cause bus contention during tests.
+
   // Initialize Motor CAN module (J4 CAN_Servo)
   if (CAN.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
     LOG_INFO("Motor CAN (J4) initialized successfully on SPI1, CS=GP" + String(CAN_CS_PIN));
@@ -419,17 +423,11 @@ void setup() {
     LOG_ERROR("Failed to initialize Motor CAN on SPI1!");
     LOG_INFO("Continuing without Motor CAN (normal for serial-only testing)");
   }
-  
-  // Startup loopback test — verifies SPI + MCP2515 hardware
-  {
-    const unsigned char motor_test_data[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
-    can_loopback_test(CAN, "Motor CAN (J4)", 0x7FF, motor_test_data);
-  }
 
   // Initialize Host CAN module (J5 CAN_Controller)
   if (CAN_HOST.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
     LOG_INFO("Host CAN (J5) initialized successfully on SPI1, CS=GP" + String(CAN_HOST_CS_PIN));
-    
+
     // SAFETY: Flush any stale messages from MCP2515 RX buffers
     // This prevents old commands from executing after a reset
     int flushed = 0;
@@ -448,12 +446,73 @@ void setup() {
     LOG_ERROR("Failed to initialize Host CAN on SPI1!");
     LOG_INFO("Continuing without Host CAN (impedance via serial only)");
   }
-  
-  // Host CAN loopback test
+
+  // Loopback tests — run AFTER both chips are initialized
+  {
+    const unsigned char motor_test_data[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
+    can_loopback_test(CAN, "Motor CAN (J4)", 0x7FF, motor_test_data);
+  }
   {
     const unsigned char host_test_data[8] = {0xCA, 0xFE, 0xBA, 0xBE, 0x11, 0x22, 0x33, 0x44};
     can_loopback_test(CAN_HOST, "Host CAN (J5)", 0x123, host_test_data);
   }
+
+#ifdef CAN_CROSS_CHIP_TEST
+  // Cross-chip CAN bus test: requires external bridge J4↔J5 (CAN_H↔CAN_H, CAN_L↔CAN_L)
+  // Sends a frame on one MCP2515 and verifies reception on the other, both directions.
+  {
+    LOG_INFO("=== CROSS-CHIP CAN BUS TEST (J4↔J5 bridged) ===");
+    const unsigned long cross_test_id = 0x7EE;
+    const unsigned char cross_test_data[8] = {0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04, 0x05};
+    bool j4_to_j5_ok = false;
+    bool j5_to_j4_ok = false;
+
+    // --- J4 → J5 ---
+    // Flush J5 RX first
+    { unsigned long id; unsigned char l, b[8];
+      while (CAN_HOST.checkReceive() == CAN_MSGAVAIL) CAN_HOST.readMsgBuf(&id, &l, b); }
+
+    if (CAN.sendMsgBuf(cross_test_id, 0, 8, const_cast<unsigned char*>(cross_test_data)) == CAN_OK) {
+      delay(10);
+      if (CAN_HOST.checkReceive() == CAN_MSGAVAIL) {
+        unsigned long rx_id; unsigned char rx_len, rx_buf[8];
+        if (CAN_HOST.readMsgBuf(&rx_id, &rx_len, rx_buf) == CAN_OK) {
+          j4_to_j5_ok = (rx_id == cross_test_id) && (rx_len == 8);
+          for (int i = 0; i < 8 && j4_to_j5_ok; i++)
+            if (rx_buf[i] != cross_test_data[i]) j4_to_j5_ok = false;
+        }
+      }
+    }
+    LOG_INFO(String("J4→J5: ") + (j4_to_j5_ok ? "PASSED" : "FAILED"));
+
+    // --- J5 → J4 ---
+    // Flush J4 RX first
+    { unsigned long id; unsigned char l, b[8];
+      while (CAN.checkReceive() == CAN_MSGAVAIL) CAN.readMsgBuf(&id, &l, b); }
+
+    if (CAN_HOST.sendMsgBuf(cross_test_id, 0, 8, const_cast<unsigned char*>(cross_test_data)) == CAN_OK) {
+      delay(10);
+      if (CAN.checkReceive() == CAN_MSGAVAIL) {
+        unsigned long rx_id; unsigned char rx_len, rx_buf[8];
+        if (CAN.readMsgBuf(&rx_id, &rx_len, rx_buf) == CAN_OK) {
+          j5_to_j4_ok = (rx_id == cross_test_id) && (rx_len == 8);
+          for (int i = 0; i < 8 && j5_to_j4_ok; i++)
+            if (rx_buf[i] != cross_test_data[i]) j5_to_j4_ok = false;
+        }
+      }
+    }
+    LOG_INFO(String("J5→J4: ") + (j5_to_j4_ok ? "PASSED" : "FAILED"));
+
+    if (j4_to_j5_ok && j5_to_j4_ok) {
+      LOG_INFO("Cross-chip CAN bus test PASSED — both transceivers OK");
+      led_blink(3, 100, 100);
+    } else {
+      LOG_ERROR("Cross-chip CAN bus test FAILED — check bus wiring/termination");
+      led_blink(10, 50, 50);
+    }
+    LOG_INFO("=================================================");
+  }
+#endif
 
   // Verify CS pins are HIGH (inactive) after initialization
   LOG_INFO("CS pin state: Motor CAN (GP" + String(CAN_CS_PIN) + ")=" + String(digitalRead(CAN_CS_PIN)) +

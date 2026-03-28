@@ -59,6 +59,11 @@
 #define ACTIVE_JOINT JOINT_KNEE_RIGHT
 //#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
 
+// Cross-chip CAN bus test: bridge J4 CAN_H↔J5 CAN_H and J4 CAN_L↔J5 CAN_L
+// externally, then enable this to verify both transceivers through the physical bus.
+// Disable for normal operation (motors on J4, host on J5 are separate buses).
+//#define CAN_CROSS_CHIP_TEST
+
 // CAN ID assignment scheme for motors:
 // - IDs always start from 1
 // - First DOF: ID 1 agonist, ID 2 antagonist
