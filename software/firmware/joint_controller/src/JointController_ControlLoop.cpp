@@ -326,15 +326,18 @@ static const float OSC_MIN_ERROR_TO_CHECK = 1.0f;    // Don't check if error is 
 static bool wp_first_read[MAX_DOFS] = {true, true, true};
 static CANErrorTracker wp_canErrorTracker;
 
-// === SHADOW MODE: Revolution tracking validation ===
-// Tracks motor angles from 0xA1 torque responses in parallel with 0x92 reads.
-// Phase 1 (shadow): 0x92 remains source of truth, 0xA1 tracked angles are compared.
-// Phase 2 (future): swap to 0xA1-only feedback after validation, use 0x92 as watchdog.
+// === PHASE 2: 0xA1-only motor angle feedback with 0x92 watchdog ===
+// First cycle: 0x92 bootstraps revolution tracking (absolute multi-turn angle).
+// Subsequent cycles: tracked angle from 0xA1 torque response is source of truth.
+// Periodic 0x92 watchdog (~1Hz) verifies tracking hasn't drifted.
 static bool wp_rev_track_init[MAX_DOFS] = {false, false, false};
+static bool wp_0x92_bootstrap_done[MAX_DOFS] = {false, false, false};
+static uint32_t wp_watchdog_cycle_count[MAX_DOFS] = {0, 0, 0};
+static uint8_t wp_a1_miss_count[MAX_DOFS] = {0, 0, 0};
+static uint32_t wp_last_a1_miss_log_ms[MAX_DOFS] = {0, 0, 0};
+static const uint32_t WP_WATCHDOG_INTERVAL = 500; // 0x92 every 500 cycles ≈ 1Hz @ 500Hz
 static int wp_prev_torque_A[MAX_DOFS] = {0};
 static int wp_prev_torque_B[MAX_DOFS] = {0};
-static uint32_t wp_shadow_log_timer = 0;     // Throttle shadow comparison logs
-static uint32_t wp_shadow_resync_timer = 0;  // Periodic resync watchdog
 
 // === MOTOR POINTER CACHE ===
 // Cache motor pointers to avoid searching every cycle (saves ~10µs per DOF per cycle)
@@ -421,8 +424,12 @@ bool JointController::executeControlLoop() {
       velocity_filtered[dof] = 0.0f;
       resetDiagHoldState(dof);
       expected_velocity_cache[dof] = 0.0f;
-      // Reset shadow mode state
+      // Reset Phase2 tracking state
       wp_rev_track_init[dof] = false;
+      wp_0x92_bootstrap_done[dof] = false;
+      wp_watchdog_cycle_count[dof] = 0;
+      wp_a1_miss_count[dof] = 0;
+      wp_last_a1_miss_log_ms[dof] = 0;
       wp_prev_torque_A[dof] = 0;
       wp_prev_torque_B[dof] = 0;
       continue; // Skip this DOF entirely
@@ -474,8 +481,12 @@ bool JointController::executeControlLoop() {
       wp_canErrorTracker.clearErrors(dof);
       wp_first_read[dof] = true;  // Reset jump detection for clean start
 
-      // Reset shadow mode revolution tracking for clean start
+      // Reset Phase2 tracking for clean start
       wp_rev_track_init[dof] = false;
+      wp_0x92_bootstrap_done[dof] = false;
+      wp_watchdog_cycle_count[dof] = 0;
+      wp_a1_miss_count[dof] = 0;
+      wp_last_a1_miss_log_ms[dof] = 0;
       wp_prev_torque_A[dof] = 0;
       wp_prev_torque_B[dof] = 0;
 
@@ -551,6 +562,10 @@ bool JointController::executeControlLoop() {
         wp_canErrorTracker.clearErrors(dof);
         wp_first_read[dof] = true;
         wp_rev_track_init[dof] = false;
+        wp_0x92_bootstrap_done[dof] = false;
+        wp_watchdog_cycle_count[dof] = 0;
+        wp_a1_miss_count[dof] = 0;
+        wp_last_a1_miss_log_ms[dof] = 0;
         wp_prev_torque_A[dof] = 0;
         wp_prev_torque_B[dof] = 0;
         LOG_C1_INFO("[IMPEDANCE] DOF " + String(dof) + " bumpless init at " + String(q_init, 1) + "°");
@@ -1425,13 +1440,34 @@ bool JointController::executeControlLoop() {
       }
     }
     
-    // Read current motor angles
+    // === PHASE 2: Motor angle acquisition ===
+    // Bootstrap (first cycle): 0x92 provides absolute multi-turn angle for rev tracking init.
+    // Normal cycles: use tracked angle from previous 0xA1 torque response (no CAN round-trip).
+    // Watchdog (~1Hz): re-read 0x92 to verify tracking hasn't drifted.
+    bool recover_after_a1_miss = wp_a1_miss_count[dof] > 0;
+    bool need_0x92 = !wp_0x92_bootstrap_done[dof] || recover_after_a1_miss;
+    if (wp_0x92_bootstrap_done[dof] && !recover_after_a1_miss) {
+      wp_watchdog_cycle_count[dof]++;
+      if (wp_watchdog_cycle_count[dof] >= WP_WATCHDOG_INTERVAL) {
+        need_0x92 = true;
+        wp_watchdog_cycle_count[dof] = 0;
+      }
+    }
+
+    PipelinedAngleData pipelined = {};
+    MultiAngleData data_A = {};
+    MultiAngleData data_B = {};
+    data_A.angle = NAN;
+    data_B.angle = NAN;
+
 #if CONTROLLER_DEBUG
     uint32_t can_start_us = time_us_32();
 #endif
-    PipelinedAngleData pipelined = LKM_Motor::getMultiAnglePairPipelined(agonist, antagonist);
-    MultiAngleData data_A = pipelined.dataA;
-    MultiAngleData data_B = pipelined.dataB;
+    if (need_0x92) {
+      pipelined = LKM_Motor::getMultiAnglePairPipelined(agonist, antagonist);
+      data_A = pipelined.dataA;
+      data_B = pipelined.dataB;
+    }
 #if CONTROLLER_DEBUG
     {
       uint32_t can_dt = time_us_32() - can_start_us;
@@ -1441,8 +1477,21 @@ bool JointController::executeControlLoop() {
       }
     }
 #endif
-    float theta_A_curr = data_A.angle;
-    float theta_B_curr = data_B.angle;
+
+    float theta_A_curr, theta_B_curr;
+    if (need_0x92) {
+      // Bootstrap or watchdog cycle: 0x92 is source of truth
+      theta_A_curr = data_A.angle;
+      theta_B_curr = data_B.angle;
+    } else {
+      // Normal cycle: use tracked angle from 0xA1 (updated by setTorquePairPipelined)
+      theta_A_curr = agonist->getTrackedAngle();
+      theta_B_curr = antagonist->getTrackedAngle();
+      if (isnan(theta_A_curr) || isnan(theta_B_curr)) {
+        // Tracking not yet initialized — should not happen after bootstrap, skip DOF
+        continue;
+      }
+    }
     
     // === SANITY CHECK: Detect obviously invalid readings ===
     // Values outside ±100000° are clearly garbage (CAN corruption)
@@ -1728,49 +1777,69 @@ bool JointController::executeControlLoop() {
     PipelinedTorqueResponseData trResp = LKM_Motor::setTorquePairPipelined(
         agonist, (int)command_A, antagonist, (int)command_B);
 
-    // === SHADOW MODE: Revolution tracking initialization and validation ===
-    // Phase 1: 0x92 remains source of truth. Tracked angle from 0xA1 is compared.
-    // Phase 2 (future): swap to 0xA1-only, use 0x92 as periodic watchdog.
+    // === PHASE 2: Revolution tracking bootstrap and watchdog ===
+    // Bootstrap (first cycle): init rev tracking from 0x92 absolute + 0xA1 encoder.
+    // Watchdog (~1Hz): compare tracked angle vs 0x92, resync if drift > 1°.
+    // Normal cycles: 0xA1 response updates rev tracking internally (no action needed here).
     if (trResp.dataA.valid && trResp.dataB.valid) {
-      if (!wp_rev_track_init[dof]) {
-        // Bootstrap: initialize rev tracking from 0x92 absolute angle + 0xA1 encoder
+      if (!wp_rev_track_init[dof] || recover_after_a1_miss) {
+        // Bootstrap or recover after a missed 0xA1 response: need 0x92 absolute
+        // angle to re-anchor the tracked encoder stream before trusting it again.
         agonist->initRevTracking(data_A.rawMotorAngle_centideg, trResp.dataA.encoder);
         antagonist->initRevTracking(data_B.rawMotorAngle_centideg, trResp.dataB.encoder);
         wp_rev_track_init[dof] = true;
-        LOG_C1_INFO("[Shadow] DOF " + String(dof) + " rev tracking init: encA=" +
-                    String(trResp.dataA.encoder) + " encB=" + String(trResp.dataB.encoder));
-      } else {
-        // Validation: compare tracked angle vs 0x92 angle
+        wp_0x92_bootstrap_done[dof] = true;
+        wp_a1_miss_count[dof] = 0;
+        if (recover_after_a1_miss) {
+          LOG_C1_WARN("[Phase2] DOF " + String(dof) +
+                      " re-anchored after missed 0xA1 response"
+                      " (encA=" + String(trResp.dataA.encoder) +
+                      " encB=" + String(trResp.dataB.encoder) + ")");
+        } else {
+          LOG_C1_INFO("[Phase2] DOF " + String(dof) + " bootstrap done → tracked-only mode"
+                      " (encA=" + String(trResp.dataA.encoder) +
+                      " encB=" + String(trResp.dataB.encoder) + ")");
+        }
+      } else if (need_0x92 && !isnan(data_A.angle) && !isnan(data_B.angle)) {
+        // Watchdog cycle: compare tracked vs 0x92 absolute
         float tracked_A = agonist->getTrackedAngle();
         float tracked_B = antagonist->getTrackedAngle();
-        float err_A = fabs(tracked_A - theta_A_curr);
-        float err_B = fabs(tracked_B - theta_B_curr);
+        float err_A = fabs(tracked_A - data_A.angle);
+        float err_B = fabs(tracked_B - data_B.angle);
 
-        // Log comparison periodically (every 5s, DOF 0 only to avoid spam)
-        if (dof == 0 && millis() - wp_shadow_log_timer > 5000) {
-          wp_shadow_log_timer = millis();
-          LOG_C1_INFO("[Shadow] A: 0x92=" + String(theta_A_curr, 3) +
-                      " tracked=" + String(tracked_A, 3) + " err=" + String(err_A, 4) +
-                      " spd=" + String(trResp.dataA.motorSpeed) +
-                      " iq=" + String(trResp.dataA.torqueCurrent));
-          LOG_C1_INFO("[Shadow] B: 0x92=" + String(theta_B_curr, 3) +
-                      " tracked=" + String(tracked_B, 3) + " err=" + String(err_B, 4) +
-                      " spd=" + String(trResp.dataB.motorSpeed) +
-                      " iq=" + String(trResp.dataB.torqueCurrent));
-        }
+        LOG_C1_INFO("[Watchdog] DOF " + String(dof) +
+                    " A: 0x92=" + String(data_A.angle, 3) +
+                    " tracked=" + String(tracked_A, 3) + " err=" + String(err_A, 4) +
+                    " spd=" + String(trResp.dataA.motorSpeed) +
+                    " iq=" + String(trResp.dataA.torqueCurrent));
+        LOG_C1_INFO("[Watchdog] DOF " + String(dof) +
+                    " B: 0x92=" + String(data_B.angle, 3) +
+                    " tracked=" + String(tracked_B, 3) + " err=" + String(err_B, 4) +
+                    " spd=" + String(trResp.dataB.motorSpeed) +
+                    " iq=" + String(trResp.dataB.torqueCurrent));
 
-        // Auto-resync if discrepancy exceeds 1° (output shaft)
-        // This catches power glitches, CAN corruption, or tracking drift
+        // Resync if drift exceeds 1° (output shaft)
         if (err_A > 1.0f || err_B > 1.0f) {
           agonist->initRevTracking(data_A.rawMotorAngle_centideg, trResp.dataA.encoder);
           antagonist->initRevTracking(data_B.rawMotorAngle_centideg, trResp.dataB.encoder);
-          static uint32_t last_resync_log = 0;
-          if (millis() - last_resync_log > 2000) {
-            LOG_C1_WARN("[Shadow] DOF " + String(dof) + " RESYNC: errA=" +
-                        String(err_A, 3) + "° errB=" + String(err_B, 3) + "°");
-            last_resync_log = millis();
-          }
+          LOG_C1_WARN("[Watchdog] DOF " + String(dof) + " RESYNC: errA=" +
+                      String(err_A, 2) + "° errB=" + String(err_B, 2) + "°");
         }
+      }
+    } else if (wp_0x92_bootstrap_done[dof]) {
+      // Tracked-only cycle but at least one 0xA1 response was missed.
+      // Do not keep consuming stale tracked angles indefinitely: force a 0x92
+      // recovery on the very next cycle.
+      if (wp_a1_miss_count[dof] < 255) {
+        wp_a1_miss_count[dof]++;
+      }
+      uint32_t now_ms = millis();
+      if (now_ms - wp_last_a1_miss_log_ms[dof] > 500) {
+        LOG_C1_WARN("[Phase2] DOF " + String(dof) +
+                    " missed 0xA1 response (A=" + String(trResp.dataA.valid ? 1 : 0) +
+                    " B=" + String(trResp.dataB.valid ? 1 : 0) +
+                    ") → forcing 0x92 recovery next cycle");
+        wp_last_a1_miss_log_ms[dof] = now_ms;
       }
     }
 
