@@ -781,7 +781,7 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   }
 
   const float MIN_TENSION_DISPLACEMENT = 0.1f;  // Minimum displacement indicating tension (degrees)
-  const float MAX_TENSION_DISPLACEMENT = 10.0f; // Maximum displacement indicating tendons too loose (degrees)
+  const float MAX_TENSION_DISPLACEMENT = 20.0f; // Maximum displacement indicating tendons too loose (degrees)
   const int MAX_TENSION_ATTEMPTS = 3;           // Maximum attempts to achieve proper tension
   const float TORQUE_INCREMENT_FACTOR = 1.5f;   // Multiply torque by this factor each attempt
   const float MAX_TORQUE_MULTIPLIER = 3.0f;     // Maximum torque = initial * this (safety limit)

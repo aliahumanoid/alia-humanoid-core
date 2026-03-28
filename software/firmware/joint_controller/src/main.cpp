@@ -684,6 +684,51 @@ void setup() {
   // Rev A: no-op (motors always powered)
   safety_motor_power_enable();
 
+  // Motor CAN read diagnostic: test each motor outside the control loop.
+  // Always runs at boot to verify motor communication before control starts.
+  {
+    LOG_INFO("=== MOTOR CAN READ DIAGNOSTIC ===");
+    const int NUM_READS = 50;
+    const int READ_DELAY_MS = 20;  // 50Hz — no SPI1 contention (Core1 not running yet)
+
+    for (int m = 0; m < ACTIVE_JOINT_CONFIG.motor_count; m++) {
+      LKM_Motor *motor = active_joint_controller->getMotor(m);
+      if (motor == nullptr) {
+        LOG_WARN("Motor " + String(m) + ": nullptr, skipping");
+        continue;
+      }
+
+      int ok_count = 0;
+      int nan_count = 0;
+      int timeout_count = 0;
+      float first_angle = 0.0f;
+      float last_angle = 0.0f;
+
+      for (int r = 0; r < NUM_READS; r++) {
+        LKM_Motor::MultiAngleData data = motor->getMultiAngleSync(false);
+        if (isnan(data.angle)) {
+          nan_count++;
+        } else if (data.waitTime == 0) {
+          timeout_count++;
+        } else {
+          if (ok_count == 0) first_angle = data.angle;
+          last_angle = data.angle;
+          ok_count++;
+        }
+        delay(READ_DELAY_MS);
+      }
+
+      LOG_INFO("Motor " + String(m) + " (ID=" + String(ACTIVE_JOINT_CONFIG.motors[m].id) +
+               " " + String(ACTIVE_JOINT_CONFIG.motors[m].name) + "): " +
+               String(ok_count) + "/" + String(NUM_READS) + " OK, " +
+               String(nan_count) + " nan, " + String(timeout_count) + " timeout");
+      if (ok_count > 0) {
+        LOG_INFO("  Angle range: " + String(first_angle, 2) + " → " + String(last_angle, 2) + "°");
+      }
+    }
+    LOG_INFO("=================================");
+  }
+
   // Auto-start: execute startup sequence if enabled and equations available
   if (system_settings.auto_start_enabled && active_joint_controller != nullptr) {
     // Core1 needs time to initialize and start reading encoders
