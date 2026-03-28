@@ -108,11 +108,27 @@ void DirectEncoders::begin() {
       LOG_INFO_F("Encoder %d: Initialized on CS=GP%d (offset=%.4f rad)", 
                  i + 1, _cs_pins[i], _offsets[i]);
       
-      // Get initial reading
+      // Get initial reading and compute PROCESSED angle for multi-turn tracker
       float initial_angle = _sensors[i]->getSensorAngle();
       if (initial_angle >= 0) {
-        _last_angles[i] = initial_angle;
-        _last_valid_angles[i] = initial_angle;
+        _last_valid_angles[i] = initial_angle;  // Raw for spike validation
+
+        // CRITICAL: _last_angles must hold the PROCESSED value (offset + inversion)
+        // because update() compares the processed angle against _last_angles.
+        // Using raw here caused false turn detection on first update() for inverted encoders.
+        float processed = fmod(initial_angle - _offsets[i], 2.0f * PI);
+        if (processed < 0) processed += 2.0f * PI;
+        if (_invert[i]) {
+          processed = 2.0f * PI - processed;
+          if (processed >= 2.0f * PI) processed = 0.0f;  // Normalize 2π → 0
+        }
+        _last_angles[i] = processed;
+
+        // Also compute initial total angle in degrees
+        float angle_deg = processed * (180.0f / PI);
+        if (angle_deg > 180.0f) angle_deg -= 360.0f;
+        _total_angles_deg[i] = angle_deg;
+
         // Skip spike validation on first real read (offset might have changed)
         _skip_validation[i] = true;
       }
@@ -154,8 +170,11 @@ void DirectEncoders::update() {
     // Apply inversion if needed
     if (_invert[i]) {
       angle = 2 * PI - angle;
+      // Normalize: when angle == 0 before inversion, result is exactly 2π.
+      // Clamp to 0 to keep angle in [0, 2π) and prevent false turn detection.
+      if (angle >= 2 * PI) angle = 0.0f;
     }
-    
+
     // Multi-turn tracking: detect wrap-around
     float delta_angle = angle - _last_angles[i];
     
@@ -305,7 +324,10 @@ void DirectEncoders::resetEncoder(uint8_t encoder_index, bool save_to_flash) {
   if (current_raw >= 0) {
     _offsets[encoder_index] = current_raw;
     _turns[encoder_index] = 0;
-    _last_angles[encoder_index] = 0.0f;
+    // CRITICAL: _last_angles must hold the PROCESSED value that update() will produce.
+    // After reset: fmod(raw - raw, 2π) = 0; if inverted: 2π - 0 → clamp to 0.
+    // For non-inverted: processed = 0.  For inverted: processed = 0 (clamped from 2π).
+    _last_angles[encoder_index] = 0.0f;  // Correct for both cases (0 or 2π→0)
     // CRITICAL: Reset last_valid_angles to current raw to avoid spike detection
     _last_valid_angles[encoder_index] = current_raw;
     _total_angles_deg[encoder_index] = 0.0f;
@@ -395,11 +417,23 @@ void DirectEncoders::processPendingResets() {
       
       _offsets[i] = current_raw - target_rad_for_offset;
       _turns[i] = 0;
-      _last_angles[i] = 0.0f;
       _last_valid_angles[i] = current_raw;
-      _total_angles_deg[i] = target_deg;  // Start at target angle
       _error_counts[i] = 0;
       _skip_validation[i] = true;
+
+      // CRITICAL: _last_angles must hold the PROCESSED value that update() will produce
+      // with the new offset. Raw → offset subtract → normalize → invert.
+      // This prevents false turn detection on the first update() after reset.
+      {
+        float processed = fmod(current_raw - _offsets[i], 2.0f * PI);
+        if (processed < 0) processed += 2.0f * PI;
+        if (_invert[i]) {
+          processed = 2.0f * PI - processed;
+          if (processed >= 2.0f * PI) processed = 0.0f;  // Normalize 2π → 0
+        }
+        _last_angles[i] = processed;
+      }
+      _total_angles_deg[i] = target_deg;  // Start at target angle
       
       LOG_INFO_F("Encoder %d: Reset OK → angle = %.2f° (raw = %.2f rad, offset = %.2f rad, invert = %d)", 
                  i + 1, target_deg, current_raw, _offsets[i], _invert[i] ? 1 : 0);
@@ -471,10 +505,21 @@ void DirectEncoders::setJointOffset(uint8_t encoder_index, float offset_deg, boo
       _last_valid_angles[encoder_index] = current_raw;
       // Also reset turns and total angle
       _turns[encoder_index] = 0;
-      _last_angles[encoder_index] = 0.0f;
-      _total_angles_deg[encoder_index] = 0.0f;
       _error_counts[encoder_index] = 0;
-      
+
+      // CRITICAL: Compute processed angle for _last_angles (same as update() pipeline)
+      float processed = fmod(current_raw - _offsets[encoder_index], 2.0f * PI);
+      if (processed < 0) processed += 2.0f * PI;
+      if (_invert[encoder_index]) {
+        processed = 2.0f * PI - processed;
+        if (processed >= 2.0f * PI) processed = 0.0f;
+      }
+      _last_angles[encoder_index] = processed;
+
+      float angle_deg = processed * (180.0f / PI);
+      if (angle_deg > 180.0f) angle_deg -= 360.0f;
+      _total_angles_deg[encoder_index] = angle_deg;
+
       // Signal Core0 to skip spike validation on next read (inter-core sync)
       _skip_validation[encoder_index] = true;
     }
