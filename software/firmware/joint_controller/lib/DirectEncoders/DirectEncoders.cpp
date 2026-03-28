@@ -309,6 +309,31 @@ float DirectEncoders::getRawAngleRad(uint8_t encoder_index) const {
 void DirectEncoders::setOffset(uint8_t encoder_index, float offset_rad) {
   if (encoder_index >= DIRECT_ENCODER_COUNT) return;
   _offsets[encoder_index] = offset_rad;
+
+  // Realign multi-turn tracker to prevent false turn detection after offset change.
+  // Same pattern as setJointOffset / processPendingResets.
+  if (_sensors[encoder_index] != nullptr && _connected[encoder_index]) {
+    float current_raw = _sensors[encoder_index]->getSensorAngle();
+    if (current_raw >= 0) {
+      _last_valid_angles[encoder_index] = current_raw;
+      _turns[encoder_index] = 0;
+      _error_counts[encoder_index] = 0;
+
+      float processed = fmod(current_raw - _offsets[encoder_index], 2.0f * PI);
+      if (processed < 0) processed += 2.0f * PI;
+      if (_invert[encoder_index]) {
+        processed = 2.0f * PI - processed;
+        if (processed >= 2.0f * PI) processed = 0.0f;
+      }
+      _last_angles[encoder_index] = processed;
+
+      float angle_deg = processed * (180.0f / PI);
+      if (angle_deg > 180.0f) angle_deg -= 360.0f;
+      _total_angles_deg[encoder_index] = angle_deg;
+
+      _skip_validation[encoder_index] = true;
+    }
+  }
 }
 
 float DirectEncoders::getOffset(uint8_t encoder_index) const {
@@ -557,11 +582,12 @@ void DirectEncoders::zeroEncoders(uint8_t encoder_index) {
 
 int32_t DirectEncoders::getCount(uint8_t encoder_index) const {
   if (encoder_index >= DIRECT_ENCODER_COUNT) return 0;
-  // Convert raw angle (radians) to encoder count
+  // Convert processed angle to encoder count (multi-turn aware)
   // MT6835 is 21-bit (2^21 = 2097152 counts per revolution)
-  // Count = (angle_rad / 2π) × 2097152 + turns × 2097152
-  float raw_rad = _last_angles[encoder_index];
-  int32_t single_turn_count = (int32_t)((raw_rad / (2.0f * PI)) * 2097152.0f);
+  // NOTE: _last_angles is in processed domain (offset-subtracted + inverted),
+  // so this count reflects the calibrated position, not raw sensor ticks.
+  float processed_rad = _last_angles[encoder_index];
+  int32_t single_turn_count = (int32_t)((processed_rad / (2.0f * PI)) * 2097152.0f);
   return _turns[encoder_index] * 2097152 + single_turn_count;
 }
 

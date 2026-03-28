@@ -94,16 +94,19 @@ public:
   float getAngle(uint8_t encoder_index) const;
   
   /**
-   * @brief Get raw angle in radians for a specific encoder
+   * @brief Get processed angle in radians for a specific encoder
    * @param encoder_index Encoder index (0-2)
-   * @return Raw angle in radians [0, 2π]
+   * @return Processed angle in radians [0, 2π) (offset-subtracted, inverted)
+   * @note Despite the legacy name, this returns the processed angle, not the raw sensor value.
    */
   float getRawAngleRad(uint8_t encoder_index) const;
   
   /**
-   * @brief Set zero offset for an encoder
+   * @brief Set zero offset for an encoder and realign multi-turn tracker
    * @param encoder_index Encoder index (0-2)
    * @param offset_rad Zero offset in radians
+   * @note Reads the current sensor position and recomputes the processed angle
+   *       to prevent false turn detection after offset change.
    */
   void setOffset(uint8_t encoder_index, float offset_rad);
   
