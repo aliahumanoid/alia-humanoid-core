@@ -94,8 +94,16 @@ def register_routes(
             "file_timestamp": saved.get("timestamp"),
         }
 
+        # Raw format stores DOF data under "mapping_data" dict.
+        # Enriched format stores DOF data at top level (dof_0, dof_1, ...).
+        # Check both locations.
         for dof_key, dof_data in saved.get("mapping_data", {}).items():
             mapping_data[dof_key] = dof_data
+
+        # Also check top-level dof_* keys (enriched format)
+        for key, value in saved.items():
+            if key.startswith("dof_") and isinstance(value, dict) and key not in mapping_data:
+                mapping_data[key] = value
 
         return mapping_data
 
