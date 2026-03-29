@@ -2171,6 +2171,8 @@ function updateSerialPortSelectUI(joint) {
 
     if (assignedPort) {
         select.val(assignedPort);
+    } else if (currentSelection && (availableSerialPorts.includes(currentSelection) || currentSelection === assignedPort)) {
+        select.val(currentSelection);
     } else if (currentSelection) {
         select.val('');
     }
@@ -2183,14 +2185,17 @@ function updateSerialPortHint(joint) {
     if (!hint.length) {
         return;
     }
-    const port = jointPortMapping[joint];
-    if (port) {
-        const ownerJoint = getJointUsingPort(port);
+    const mappedPort = jointPortMapping[joint];
+    const selectedPort = $("#serialPortSelect").val();
+    if (selectedPort) {
+        const ownerJoint = getJointUsingPort(selectedPort);
         if (ownerJoint && ownerJoint !== joint) {
-            hint.text(`Port ${port} currently assigned to ${ownerJoint}`);
+            hint.text(`Selected board USB serial: ${selectedPort} (currently assigned to ${ownerJoint})`);
         } else {
-            hint.text(`Associated board USB serial: ${port}`);
+            hint.text(`Selected board USB serial: ${selectedPort}`);
         }
+    } else if (mappedPort) {
+        hint.text(`Associated board USB serial: ${mappedPort}`);
     } else {
         hint.text('No board USB serial associated with this joint');
     }
@@ -2198,8 +2203,7 @@ function updateSerialPortHint(joint) {
 
 function clearBoardIdentityUI(statusText) {
     boardProvisioningIdentity = null;
-    const currentJoint = $("#jointSelect").val();
-    $("#boardIdentityPort").text(jointPortMapping[currentJoint] || '-');
+    $("#boardIdentityPort").text($("#serialPortSelect").val() || '-');
     $("#boardIdentityUid").text('-');
     $("#boardIdentityProfile").text('-');
     $("#boardIdentityStoredProfile").text('-');
@@ -2235,7 +2239,7 @@ function renderBoardIdentityUI(joint, port, identity) {
 function refreshBoardIdentity(options = {}) {
     const { showStatus = false } = options;
     const joint = $("#jointSelect").val();
-    const port = jointPortMapping[joint];
+    const port = $("#serialPortSelect").val() || jointPortMapping[joint];
 
     if (!joint) {
         clearBoardIdentityUI('Select a joint first.');
@@ -2256,7 +2260,7 @@ function refreshBoardIdentity(options = {}) {
         method: 'POST',
         contentType: 'application/json; charset=utf-8',
         dataType: 'json',
-        data: JSON.stringify({ joint }),
+        data: JSON.stringify({ joint, port }),
     }).done(function(response) {
         const identity = response.identity || null;
         renderBoardIdentityUI(joint, response.port || port, identity);
@@ -2274,7 +2278,7 @@ function refreshBoardIdentity(options = {}) {
 
 function saveSelectedJointProfileToBoard() {
     const joint = $("#jointSelect").val();
-    const port = jointPortMapping[joint];
+    const port = $("#serialPortSelect").val() || jointPortMapping[joint];
 
     if (!joint) {
         appendStatusMessage('⚠️ Select a joint first.');
@@ -2299,7 +2303,7 @@ function saveSelectedJointProfileToBoard() {
         method: 'POST',
         contentType: 'application/json; charset=utf-8',
         dataType: 'json',
-        data: JSON.stringify({ joint, profile: joint }),
+        data: JSON.stringify({ joint, profile: joint, port }),
     }).done(function(response) {
         appendStatusMessage(`💾 ${response.message}`);
         refreshBoardIdentity({ showStatus: false });

@@ -83,6 +83,36 @@ class SerialManager:
         with self._lock:
             return self._handlers_by_port.get(port)
 
+    def get_handler_for_port(self, port: str, create_if_missing: bool = False) -> Optional[SerialHandler]:
+        """
+        Returns the SerialHandler instance for a specific serial port.
+
+        Args:
+            port: Serial port path
+            create_if_missing: Create and start a handler if one is not active yet
+
+        Returns:
+            Optional[SerialHandler]: SerialHandler instance or None
+        """
+        if not port:
+            return None
+
+        with self._lock:
+            handler = self._handlers_by_port.get(port)
+            if handler is not None or not create_if_missing:
+                return handler
+
+            handler = SerialHandler(self.socketio, port=port, serial_logger=self.session_logger)
+            listener = threading.Thread(
+                target=handler.listen_for_messages,
+                daemon=True,
+                name=f"SerialListener-{port}"
+            )
+            listener.start()
+            self._handlers_by_port[port] = handler
+            self._listener_threads[port] = listener
+            return handler
+
     def assign_port_to_joint(self, joint: str, port: Optional[str]) -> Dict[str, Any]:
         """
         Assigns or removes the association between a joint and a serial port.

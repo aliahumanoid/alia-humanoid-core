@@ -65,6 +65,23 @@ def register_routes(
             )
         return handler, None, None
 
+    def provisioning_handler_or_error(joint: str, port: Optional[str]):
+        if port:
+            handler = serial_manager.get_handler_for_port(port, create_if_missing=True)
+            if handler is None:
+                return (
+                    None,
+                    jsonify({
+                        "status": "error",
+                        "message": f"No serial handler available for port {port}.",
+                        "joint": joint,
+                        "port": port,
+                    }),
+                    400,
+                )
+            return handler, None, None
+        return handler_or_error(joint)
+
     def can_unavailable_response():
         if not CAN_AVAILABLE or can_manager is None:
             return jsonify({
@@ -523,13 +540,14 @@ def register_routes(
     def provisioning_identity():
         data = request.get_json(silent=True) or {}
         joint = data.get('joint')
+        port = data.get('port')
         if not joint:
             return jsonify({
                 "status": "error",
                 "message": "Missing 'joint' parameter",
             }), 400
 
-        handler, error_response, status_code = handler_or_error(joint)
+        handler, error_response, status_code = provisioning_handler_or_error(joint, port)
         if handler is None:
             return error_response, status_code
 
@@ -544,12 +562,13 @@ def register_routes(
                 "status": "error",
                 "message": f"No identity response from board on joint {joint}",
                 "joint": joint,
+                "port": port,
             }), 504
 
         return jsonify({
             "status": "success",
             "joint": joint,
-            "port": serial_manager.get_joint_to_port_mapping().get(joint),
+            "port": port or serial_manager.get_joint_to_port_mapping().get(joint),
             "identity": identity,
         })
 
@@ -558,6 +577,7 @@ def register_routes(
         data = request.get_json(silent=True) or {}
         joint = data.get('joint')
         profile = data.get('profile') or joint
+        port = data.get('port')
 
         if not joint:
             return jsonify({
@@ -575,7 +595,7 @@ def register_routes(
                 "message": f"Unknown joint profile: {profile}",
             }), 400
 
-        handler, error_response, status_code = handler_or_error(joint)
+        handler, error_response, status_code = provisioning_handler_or_error(joint, port)
         if handler is None:
             return error_response, status_code
 
@@ -591,12 +611,13 @@ def register_routes(
                 "message": f"No confirmation from board while saving profile {profile}",
                 "joint": joint,
                 "profile": profile,
+                "port": port,
             }), 504
 
         return jsonify({
             "status": "success",
             "joint": joint,
-            "port": serial_manager.get_joint_to_port_mapping().get(joint),
+            "port": port or serial_manager.get_joint_to_port_mapping().get(joint),
             "profile": profile,
             "result": result,
             "message": f"Profile {profile} saved to flash. Reboot required.",
