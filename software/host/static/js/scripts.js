@@ -2152,13 +2152,13 @@ function updateSerialPortSelectUI(joint) {
 
     const currentSelection = select.val();
     select.empty();
-    select.append('<option value="">Select port</option>');
+    select.append('<option value="">Select board USB serial</option>');
 
     availableSerialPorts.forEach(port => {
         const ownerJoint = getJointUsingPort(port);
         let label = port;
         if (ownerJoint && ownerJoint !== joint) {
-            label = `${port} (in uso da ${ownerJoint})`;
+            label = `${port} (used by ${ownerJoint})`;
         }
         const option = $('<option></option>').val(port).text(label);
         select.append(option);
@@ -2166,7 +2166,7 @@ function updateSerialPortSelectUI(joint) {
 
     const assignedPort = jointPortMapping[joint] || '';
     if (assignedPort && !availableSerialPorts.includes(assignedPort)) {
-        select.append($('<option></option>').val(assignedPort).text(`${assignedPort} (non rilevata)`));
+        select.append($('<option></option>').val(assignedPort).text(`${assignedPort} (not detected)`));
     }
 
     if (assignedPort) {
@@ -2189,10 +2189,10 @@ function updateSerialPortHint(joint) {
         if (ownerJoint && ownerJoint !== joint) {
             hint.text(`Port ${port} currently assigned to ${ownerJoint}`);
         } else {
-            hint.text(`Associated port: ${port}`);
+            hint.text(`Associated board USB serial: ${port}`);
         }
     } else {
-        hint.text('No port associated with this joint');
+        hint.text('No board USB serial associated with this joint');
     }
 }
 
@@ -2242,9 +2242,9 @@ function refreshBoardIdentity(options = {}) {
         return $.Deferred().reject().promise();
     }
     if (!port) {
-        clearBoardIdentityUI(`No serial port associated with ${joint}.`);
+        clearBoardIdentityUI(`No board serial port associated with ${joint}.`);
         if (showStatus) {
-            appendStatusMessage(`ℹ️ No serial port associated with ${joint}, cannot read board identity.`);
+            appendStatusMessage(`ℹ️ No board serial port associated with ${joint}, cannot read board identity.`);
         }
         return $.Deferred().reject().promise();
     }
@@ -2281,7 +2281,7 @@ function saveSelectedJointProfileToBoard() {
         return;
     }
     if (!port) {
-        appendStatusMessage(`⚠️ No serial port associated with ${joint}, cannot save board profile.`);
+        appendStatusMessage(`⚠️ No board serial port associated with ${joint}, cannot save board profile.`);
         return;
     }
 
@@ -2408,7 +2408,7 @@ function updateCanInterfaceSelectUI(connectedConfig = null) {
 
     const currentSelection = select.val();
     select.empty();
-    select.append('<option value="">Select CAN interface</option>');
+    select.append('<option value="">Select CAN transport</option>');
 
     availableCanInterfaces.forEach(iface => {
         const option = $('<option></option>')
@@ -2447,14 +2447,14 @@ function updateCanInterfaceHint() {
     const selectedValue = $("#canInterfaceSelect").val();
     
     if (!selectedValue) {
-        hint.text('No CAN interface selected');
+        hint.text('No CAN transport selected');
         hint.removeClass('text-green-600').addClass('text-gray-500');
         return;
     }
 
     try {
         const config = JSON.parse(selectedValue);
-        hint.text(`Selected: ${config.interface} on ${config.channel}`);
+        hint.text(`Selected CAN transport: ${config.interface} on ${config.channel}`);
         hint.removeClass('text-gray-500').addClass('text-green-600');
     } catch (e) {
         hint.text('Invalid interface configuration');
@@ -2620,11 +2620,11 @@ function updateCanStatusUI(state = {}) {
         if (connected && state.config) {
             const cfg = state.config;
             const bitrate = cfg.bitrate ? `${(cfg.bitrate / 1000).toFixed(0)} kbps` : 'unknown bitrate';
-            details.text(`${cfg.interface || '??'} @ ${cfg.channel || 'N/A'} (${bitrate})`);
+            details.text(`CAN via ${cfg.interface || '??'} on ${cfg.channel || 'N/A'} (${bitrate})`);
         } else if (state.error) {
             details.text(state.error);
         } else {
-            details.text('Select interface and press Connect');
+            details.text('Select a CAN transport and press Connect');
         }
     }
 

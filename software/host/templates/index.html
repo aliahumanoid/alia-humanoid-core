@@ -420,15 +420,15 @@
                             </select>
                         </div>
 
-                        <!-- CAN Interface -->
+                        <!-- CAN Transport Interface -->
                         <div class="pt-3 border-t border-gray-200">
                             <label for="canInterfaceSelect" class="block text-sm font-medium text-gray-700">
-                                <i class="fas fa-network-wired mr-1"></i>CAN Interface:
+                                <i class="fas fa-network-wired mr-1"></i>CAN Transport (USB-CAN / SLCAN):
                             </label>
                             <div class="mt-1 flex items-center space-x-2">
                                 <select id="canInterfaceSelect"
                                     class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                    <option value="">Select CAN interface</option>
+                                    <option value="">Select CAN transport</option>
                                 </select>
                                 <button id="refreshCanInterfaces" type="button"
                                     class="p-2 rounded-md border border-gray-300 text-gray-600 hover:bg-gray-100"
@@ -448,8 +448,8 @@
                         <div id="canControlPanel" class="bg-gray-50 rounded-lg p-3 space-y-3">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <p class="text-sm font-semibold text-gray-700">CAN Connection</p>
-                                    <p id="canConnectionDetails" class="text-xs text-gray-500">Select interface and press Connect</p>
+                                    <p class="text-sm font-semibold text-gray-700">CAN Transport Status</p>
+                                    <p id="canConnectionDetails" class="text-xs text-gray-500">Select a CAN transport and press Connect</p>
                                 </div>
                                 <span id="canConnectionBadge"
                                     class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-gray-200 text-gray-700">Disconnected</span>
@@ -484,15 +484,15 @@
                             </div>
                         </div>
 
-                        <!-- Serial Port (Debug) -->
+                        <!-- Board Serial Port -->
                         <div class="pt-3 border-t border-gray-200">
                             <label for="serialPortSelect" class="block text-sm font-medium text-gray-700">
-                                <i class="fas fa-terminal mr-1 text-gray-400"></i>Serial Port (Debug):
+                                <i class="fas fa-terminal mr-1 text-gray-400"></i>Board Serial Port (Provisioning / Debug):
                             </label>
                             <div class="mt-1 flex items-center space-x-2">
                                 <select id="serialPortSelect"
                                     class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                    <option value="">Select port</option>
+                                    <option value="">Select board USB serial</option>
                                 </select>
                                 <button id="refreshSerialPorts" type="button"
                                     class="p-2 rounded-md border border-gray-300 text-gray-600 hover:bg-gray-100"
@@ -511,7 +511,7 @@
                                     <div>
                                         <p class="text-sm font-semibold text-gray-700">Board Provisioning</p>
                                         <p id="boardIdentityStatus" class="text-xs text-gray-500">
-                                            Read board identity from the serial port associated with the selected joint.
+                                            Read board identity from the USB serial port associated with the selected joint.
                                         </p>
                                     </div>
                                     <div class="flex flex-wrap gap-2">
