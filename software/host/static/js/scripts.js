@@ -34,6 +34,7 @@ let impedanceStateRateStart = 0;
 let impedanceStagedTarget = null;  // { dofs: [{ dof, angle }] } — staged when auto-send OFF
 let impedanceMoveStream = null;    // setInterval handle for 50Hz move keepalive
 let impedanceMoveHolding = {};     // per-DOF holding flag from JOINT_STATE
+let impedanceMovePosition = {};    // per-DOF q_deg from JOINT_STATE
 
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
@@ -394,6 +395,9 @@ $(document).ready(function() {
 
         // Track per-DOF holding state (used by move stream to detect arrival)
         impedanceMoveHolding[dof] = !!data.holding;
+        if (Number.isFinite(data.q_deg)) {
+            impedanceMovePosition[dof] = data.q_deg;
+        }
 
         // Update status dots
         $('#impedanceDotValid').css('background-color', data.valid ? '#22c55e' : '#d1d5db');
@@ -3704,6 +3708,8 @@ function sendImpedanceFastTarget(dof, qTarget, dqCruise, stiffness) {
 const WATCHDOG_STREAM_MS = 500;   // relaxed for webapp (HTTP jitter)
 const WATCHDOG_DEFAULT_MS = 60000;  // webapp default hold watchdog
 const HOLD_WATCHDOG_STORAGE_KEY = 'impedanceHoldWatchdogMs';
+const IMPEDANCE_MOVE_ARRIVAL_TOL_DEG = 0.5;
+const IMPEDANCE_HOLD_KEEPALIVE_STRIDE = 10;  // 10 * 20ms = 200ms for already-arrived DOFs
 
 function clampImpedanceHoldWatchdogMs(raw) {
     if (!Number.isFinite(raw)) return WATCHDOG_DEFAULT_MS;
@@ -3784,12 +3790,30 @@ function startImpedanceMoveStream(dofs, dqCruise) {
     stopImpedanceMoveStream();
 
     // Clear holding flags so we don't stop immediately from stale state
-    dofs.forEach(d => { impedanceMoveHolding[d.dof] = false; });
+    dofs.forEach(d => {
+        impedanceMoveHolding[d.dof] = false;
+        impedanceMovePosition[d.dof] = null;
+    });
 
     const tickMs = 20;  // 50 Hz
     const maxDurationMs = 30000;  // safety: auto-stop after 30s
     const startTime = Date.now();
     let graceExpired = false;  // ignore stale HOLDING for first 200ms
+    let tickCount = 0;
+
+    const dofArrived = (d) => {
+        if (!impedanceMoveHolding[d.dof]) return false;
+        const qDeg = impedanceMovePosition[d.dof];
+        return Number.isFinite(qDeg) && Math.abs(qDeg - d.angle) <= IMPEDANCE_MOVE_ARRIVAL_TOL_DEG;
+    };
+
+    const refreshDofs = (forceAll = false) => {
+        dofs.forEach(d => {
+            if (forceAll || !dofArrived(d) || (tickCount % IMPEDANCE_HOLD_KEEPALIVE_STRIDE) === 0) {
+                sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness);
+            }
+        });
+    };
 
     // Send the first target(s) before shortening the watchdog.
     // Otherwise, if the joint has been idle for a long time, dropping directly
@@ -3806,6 +3830,7 @@ function startImpedanceMoveStream(dofs, dqCruise) {
 
     impedanceMoveStream = setInterval(() => {
         const elapsed = Date.now() - startTime;
+        tickCount++;
 
         // Safety timeout
         if (elapsed > maxDurationMs) {
@@ -3819,17 +3844,22 @@ function startImpedanceMoveStream(dofs, dqCruise) {
         if (!graceExpired) {
             if (elapsed < 200) {
                 // Keep sending targets but don't check holding yet
-                dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
+                refreshDofs(true);
                 return;
             }
             // Grace expired — re-clear holding flags to discard stale state
-            dofs.forEach(d => { impedanceMoveHolding[d.dof] = false; });
+            dofs.forEach(d => {
+                impedanceMoveHolding[d.dof] = false;
+                impedanceMovePosition[d.dof] = null;
+            });
             graceExpired = true;
         }
 
-        // Check if all target DOFs are holding (= arrived)
-        const allHolding = dofs.every(d => impedanceMoveHolding[d.dof]);
-        if (allHolding) {
+        // Check if all target DOFs are both holding and close enough to target.
+        // This avoids declaring arrival when firmware has already switched to HOLDING
+        // but the joint still has visible residual error.
+        const allArrived = dofs.every(dofArrived);
+        if (allArrived) {
             // Don't restore watchdog if oscillation is about to take over
             const oscActive = !!impedanceOscInterval;
             stopImpedanceMoveStream(oscActive ? false : true);
@@ -3838,8 +3868,9 @@ function startImpedanceMoveStream(dofs, dqCruise) {
             return;
         }
 
-        // Re-send targets to keep watchdog alive
-        dofs.forEach(d => sendImpedanceFastTarget(d.dof, d.angle, dqCruise, d.stiffness));
+        // Keep active DOFs at 50 Hz, but only keep arrived DOFs alive at a much
+        // lower rate to reduce redundant CAN traffic and host-side jitter.
+        refreshDofs(false);
     }, tickMs);
 }
 

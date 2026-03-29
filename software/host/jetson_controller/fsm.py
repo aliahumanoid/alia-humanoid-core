@@ -319,15 +319,27 @@ class StartupFSM:
         timeout = 30.0  # Generous for slow homing
         deadline = time.monotonic() + timeout
         period = 1.0 / config.send_rate_hz
+        arrived_keepalive_period = min(0.2, max(period, config.watchdog_ms / 1000.0 / 4.0))
+        last_arrived_keepalive: dict[tuple[str, int], float] = {}
 
         while time.monotonic() < deadline:
             if telemetry.all_at_target(targets, config.homing_tolerance_deg):
                 self._set_state(FSMState.HOME, "Home position reached")
                 return
 
-            # Keep sending target to refresh watchdog
+            arrived_map = telemetry.dofs_at_target(targets, config.homing_tolerance_deg)
+            now = time.monotonic()
+
+            # Keep active DOFs at full rate, but refresh already-arrived DOFs more slowly.
+            # This matches the webapp behavior and avoids unnecessary CAN traffic while
+            # another DOF/controller is still converging.
             for key, jcfg in config.joints.items():
                 for dof, target_deg in jcfg.home_position_deg.items():
+                    if arrived_map.get(key, {}).get(dof, False):
+                        last_sent = last_arrived_keepalive.get((key, dof), 0.0)
+                        if (now - last_sent) < arrived_keepalive_period:
+                            continue
+
                     arb_id, data = encode_set_impedance_frame0(
                         jcfg.joint_id, dof,
                         q_deg=target_deg,
@@ -336,6 +348,7 @@ class StartupFSM:
                         has_more=False,
                     )
                     await can_bus.send(arb_id, data)
+                    last_arrived_keepalive[(key, dof)] = now
 
             await asyncio.sleep(period)
 

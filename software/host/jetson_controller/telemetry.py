@@ -319,7 +319,7 @@ class TelemetryManager:
 
     def all_at_target(self, targets: dict[str, dict[int, float]],
                       tolerance_deg: float = 1.0) -> bool:
-        """Check if all joints/DOFs are within tolerance of their targets."""
+        """Check if all joints/DOFs are holding and within tolerance of target."""
         for key, dof_targets in targets.items():
             state = self.states.get(key)
             if state is None or not state.is_online:
@@ -328,9 +328,30 @@ class TelemetryManager:
                 current = state.angles_deg.get(dof)
                 if current is None:
                     return False
+                if not state.holding.get(dof, False):
+                    return False
                 if abs(current - target) > tolerance_deg:
                     return False
         return True
+
+    def dofs_at_target(self, targets: dict[str, dict[int, float]],
+                       tolerance_deg: float = 1.0) -> dict[str, dict[int, bool]]:
+        """Per-DOF arrival status using the same holding+error criterion as all_at_target()."""
+        result: dict[str, dict[int, bool]] = {}
+        for key, dof_targets in targets.items():
+            state = self.states.get(key)
+            result[key] = {}
+            for dof, target in dof_targets.items():
+                current = state.angles_deg.get(dof) if state is not None else None
+                holding = state.holding.get(dof, False) if state is not None else False
+                result[key][dof] = (
+                    state is not None
+                    and state.is_online
+                    and current is not None
+                    and holding
+                    and abs(current - target) <= tolerance_deg
+                )
+        return result
 
     def any_stale(self, max_age_s: float = 2.0) -> list[str]:
         """Return list of joints with stale telemetry."""

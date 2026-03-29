@@ -61,10 +61,18 @@ static uint32_t last_hold_event_log_ms[MAX_DOFS] = {0}; // rate-limit [HOLD_EVT]
 static float last_outer_ki_scale_dbg[MAX_DOFS] = {1.0f}; // last applied outer Ki scale
 static bool last_outer_i_freeze_dbg[MAX_DOFS] = {false}; // last applied outer I freeze state
 static float last_retension_boost_dbg[MAX_DOFS] = {0.0f}; // last applied probe boost
+static uint8_t hold_entry_stable_count[MAX_DOFS] = {0};  // stable outer-loop samples before MOVING -> HOLDING
+static bool metrics_finalize_pending[MAX_DOFS] = {false};
+static uint32_t metrics_finalize_hold_start_ms[MAX_DOFS] = {0};
 static const float HOLD_EVENT_Q_STEP_TH_DEG = 0.10f; // log when HOLDING q jumps by >= 0.10°
 static const float HOLD_EVENT_VEL_TH_DEG_S = 1.00f; // or when HOLDING velocity exceeds 1 deg/s
 static const uint16_t HOLD_EVENT_MIN_INTERVAL_MS = 50; // high-rate but not every cycle
 static const uint16_t RETN_PROBE_HOLD_EVT_BLOCK_MS = 500; // don't probe right after a HOLD_EVT
+static const float HOLD_ENTRY_ERROR_BAND_DEG = 0.50f;     // require this residual error before declaring HOLDING
+static const float HOLD_ENTRY_MAX_VEL_DEG_S = 5.0f;       // filtered velocity must also be low
+static const uint8_t HOLD_ENTRY_STABLE_CYCLES = 3;        // ~30 ms at 100 Hz outer loop
+static const uint16_t METRICS_FINALIZE_MIN_HOLD_SAMPLES = 10; // require some post-arrival hold samples
+static const uint16_t METRICS_FINALIZE_MAX_HOLD_MS = 250; // don't wait forever if a joint never fully settles
 
 enum RetensionProbeClassCode : uint8_t {
   RPROBE_CLASS_UNKNOWN = 0,
@@ -126,6 +134,57 @@ static void resetRetensionProbeState(uint8_t dof) {
   last_retension_boost_dbg[dof] = 0.0f;
 }
 
+static void resetMovementSettleState(uint8_t dof) {
+  if (dof >= MAX_DOFS) return;
+  hold_entry_stable_count[dof] = 0;
+  metrics_finalize_pending[dof] = false;
+  metrics_finalize_hold_start_ms[dof] = 0;
+}
+
+static void finalizeMovementMetricsForDof(uint8_t dof) {
+  if (dof >= 3 || !metrics_tracking_enabled) return;
+
+  MetricsTracker &mt = metrics_tracker[dof];
+  if (!mt.tracking_active) {
+    metrics_finalize_pending[dof] = false;
+    metrics_finalize_hold_start_ms[dof] = 0;
+    return;
+  }
+
+  // Final target may differ from the first streamed waypoint. Finalize against the
+  // actual hold target (or the original desired target if the move stalled).
+  float original_target = mt.target_angle_deg;
+  float metrics_target = dof_hold_angle[dof];
+  if (mt.aborted_by_stall) {
+    metrics_target = mt.abort_target_deg;
+  }
+  mt.target_angle_deg = metrics_target;
+  mt.movement_direction = (metrics_target > mt.start_angle_deg) ? 1.0f : -1.0f;
+
+  MovementMetrics m = mt.finalize();
+  m.dof_index = dof;
+  last_movement_metrics[dof] = m;
+  metrics_ready[dof] = true;
+
+  mt.tracking_active = false;
+  metrics_finalize_pending[dof] = false;
+  metrics_finalize_hold_start_ms[dof] = 0;
+
+  LOG_C1_INFO("[Metrics] DOF " + String(dof) + " FINAL:");
+  LOG_C1_INFO("  start=" + String(mt.start_angle_deg, 2) +
+              "° → target=" + String(metrics_target, 2) +
+              "° (orig=" + String(original_target, 2) + "°)");
+  LOG_C1_INFO("  rise=" + String(m.rise_time_ms) + "ms (90%=" +
+              String(mt.reached_90_percent ? "yes" : "no") + ")");
+  LOG_C1_INFO("  settle=" + String(m.settling_time_ms) + "ms, max_err=" +
+              String(mt.max_error_deg, 2) + "°");
+  LOG_C1_INFO("  overshoot=" + String(m.overshoot_x100 / 100.0f, 1) +
+              "% (max=" + String(mt.max_overshoot_deg, 2) +
+              "°, dir=" + String(mt.movement_direction, 0) + ")");
+  LOG_C1_INFO("  sse=" + String(m.sse_x100 / 100.0f, 2) +
+              "° (samples=" + String(mt.sse_sample_count) + ")");
+}
+
 static void clearRetensionProbeWindows(RetensionProbeState &rps) {
   rps.pre_abs_iq_a_sum = 0.0f;
   rps.pre_abs_iq_b_sum = 0.0f;
@@ -160,6 +219,7 @@ void resetDiagHoldState(uint8_t dof) {
   last_outer_ki_scale_dbg[dof] = 1.0f;
   last_outer_i_freeze_dbg[dof] = false;
   resetRetensionProbeState(dof);
+  resetMovementSettleState(dof);
 }
 
 static void clearImpedanceControlState(uint8_t dof, JointController *jc) {
@@ -489,6 +549,7 @@ bool JointController::executeControlLoop() {
       wp_last_a1_miss_log_ms[dof] = 0;
       wp_prev_torque_A[dof] = 0;
       wp_prev_torque_B[dof] = 0;
+      resetMovementSettleState(dof);
 
       LOG_C1_DEBUG("[Control] DOF " + String(dof) + " bumpless init (IDLE → " +
                    String(cur_dof_state == DofState::MOVING ? "MOVING" : "HOLDING") +
@@ -507,12 +568,15 @@ bool JointController::executeControlLoop() {
                                  (cur_dof_state == DofState::MOVING);
 
     if (new_movement_started) {
+      if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
+        finalizeMovementMetricsForDof(dof);
+      }
       compliance_state[dof].reset();
       velocity_filtered[dof] = 0.0f;
+      resetMovementSettleState(dof);
     }
     
-    if (metrics_tracking_enabled && new_movement_started && dof < 3 &&
-        !metrics_tracker[dof].tracking_active) {
+    if (metrics_tracking_enabled && new_movement_started && dof < 3) {
       if (impedance_target[dof].valid) {
         float start_angle = dof_data.valid[dof] ? dof_data.angles[dof] : 0.0f;
         metrics_tracker[dof].reset(start_angle, impedance_target[dof].q_target_deg);
@@ -568,6 +632,7 @@ bool JointController::executeControlLoop() {
         wp_last_a1_miss_log_ms[dof] = 0;
         wp_prev_torque_A[dof] = 0;
         wp_prev_torque_B[dof] = 0;
+        resetMovementSettleState(dof);
         LOG_C1_INFO("[IMPEDANCE] DOF " + String(dof) + " bumpless init at " + String(q_init, 1) + "°");
       }
     }
@@ -622,6 +687,34 @@ bool JointController::executeControlLoop() {
         velocity_filtered[dof] = (1.0f - alpha) * velocity_filtered[dof] + alpha * actual_velocity;
       }
       // Note: if invalid, velocity_filtered[dof] retains its previous value
+
+      // Segment timing reaching t_arrival is not enough to declare arrival. Keep the
+      // joint in MOVING until the position error and filtered velocity are both small
+      // for a few consecutive outer-loop cycles.
+      if (impedance_active) {
+        if (impedance_segment[dof].active || compliance_state[dof].compliance_active) {
+          hold_entry_stable_count[dof] = 0;
+        } else {
+          const bool hold_ready = (abs_error <= HOLD_ENTRY_ERROR_BAND_DEG) &&
+                                  (fabs(velocity_filtered[dof]) <= HOLD_ENTRY_MAX_VEL_DEG_S);
+          if (hold_ready) {
+            if (hold_entry_stable_count[dof] < 255) {
+              hold_entry_stable_count[dof]++;
+            }
+          } else {
+            hold_entry_stable_count[dof] = 0;
+          }
+
+          if (hold_entry_stable_count[dof] < HOLD_ENTRY_STABLE_CYCLES) {
+            is_moving = true;
+            any_movement = true;
+          } else {
+            is_moving = false;
+          }
+        }
+      } else {
+        hold_entry_stable_count[dof] = 0;
+      }
 
       bool expected_holding = fabs(expected_velocity_deg_s) <= expected_velocity_deadband_deg_s;
       bool compliance_should_activate = false;
@@ -927,44 +1020,9 @@ bool JointController::executeControlLoop() {
           delta_theta[dof] = 0.0f;
           delta_theta_prev[dof] = 0.0f;
           
-          // === METRICS: Finalize movement metrics ===
           if (metrics_tracking_enabled && dof < 3 && metrics_tracker[dof].tracking_active) {
-            MetricsTracker& mt = metrics_tracker[dof];
-            
-            // Update final target (in case it changed during movement)
-            float original_target = mt.target_angle_deg;
-            float metrics_target = holding_target;
-            if (mt.aborted_by_stall) {
-              metrics_target = mt.abort_target_deg;
-            }
-            mt.target_angle_deg = metrics_target;
-            // Recalculate direction for final target (initial direction was
-            // based on first WP which may differ for multi-WP trajectories)
-            mt.movement_direction = (metrics_target > mt.start_angle_deg) ? 1.0f : -1.0f;
-
-            // Finalize and store metrics
-            MovementMetrics m = mt.finalize();
-            m.dof_index = dof;
-            last_movement_metrics[dof] = m;
-            metrics_ready[dof] = true;
-            
-            // Stop tracking
-            mt.tracking_active = false;
-            
-            // Detailed logging for debugging
-            LOG_C1_INFO("[Metrics] DOF " + String(dof) + " FINAL:");
-            LOG_C1_INFO("  start=" + String(mt.start_angle_deg, 2) + 
-                     "° → target=" + String(metrics_target, 2) + 
-                     "° (orig=" + String(original_target, 2) + "°)");
-            LOG_C1_INFO("  rise=" + String(m.rise_time_ms) + "ms (90%=" + 
-                     String(mt.reached_90_percent ? "yes" : "no") + ")");
-            LOG_C1_INFO("  settle=" + String(m.settling_time_ms) + "ms, max_err=" + 
-                     String(mt.max_error_deg, 2) + "°");
-            LOG_C1_INFO("  overshoot=" + String(m.overshoot_x100 / 100.0f, 1) + 
-                     "% (max=" + String(mt.max_overshoot_deg, 2) + 
-                     "°, dir=" + String(mt.movement_direction, 0) + ")");
-            LOG_C1_INFO("  sse=" + String(m.sse_x100 / 100.0f, 2) + 
-                     "° (samples=" + String(mt.sse_sample_count) + ")");
+            metrics_finalize_pending[dof] = true;
+            metrics_finalize_hold_start_ms[dof] = t_now;
           }
         }
       }
@@ -1150,6 +1208,17 @@ bool JointController::executeControlLoop() {
             mt.sse_sample_count++;
           }
         }  // End of: if (now >= mt.movement_start_ms)
+      }
+
+      if (metrics_finalize_pending[dof] && metrics_tracker[dof].tracking_active) {
+        MetricsTracker &mt = metrics_tracker[dof];
+        const bool hold_samples_ready = mt.sse_sample_count >= METRICS_FINALIZE_MIN_HOLD_SAMPLES;
+        const bool settled_ready = mt.settling_time_ms > 0;
+        const bool hold_timeout = metrics_finalize_hold_start_ms[dof] > 0 &&
+                                  (t_now - metrics_finalize_hold_start_ms[dof] >= METRICS_FINALIZE_MAX_HOLD_MS);
+        if (is_holding && (hold_samples_ready || settled_ready || hold_timeout)) {
+          finalizeMovementMetricsForDof(dof);
+        }
       }
 
 #if CONTROLLER_DEBUG
