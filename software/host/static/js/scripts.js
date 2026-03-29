@@ -13,6 +13,7 @@ let automaticMappingData = null; // Stores automatic mapping data
 let availableSerialPorts = [];
 let jointPortMapping = {};
 let serialPortAssignmentPending = false;
+let boardProvisioningIdentity = null;
 
 // Variables for encoder test
 let encoderTestInterval = null;
@@ -240,6 +241,7 @@ $(document).ready(function() {
         // Now that jointPortMapping is populated, we can safely select the joint
         const initialJoint = $("#jointSelect").val();
         sendCommand('select-joint', { joint: initialJoint });
+        refreshBoardIdentity({ showStatus: false });
         console.log('Initial PID values requested for joint:', initialJoint);
     });
     
@@ -765,6 +767,7 @@ $(document).ready(function() {
     $("#jointSelect").change(function() {
         const joint = $(this).val();
         updateSerialPortSelectUI(joint);
+        refreshBoardIdentity({ showStatus: false });
         
         // Clear stale mapping data from previous joint immediately
         // Prevents quick-angle buttons from showing previous joint's data
@@ -803,6 +806,14 @@ $(document).ready(function() {
         
         // Show expected mapping grid for new joint
         showExpectedMappingGrid(joint);
+    });
+
+    $("#readBoardIdentityBtn").on('click', function() {
+        refreshBoardIdentity({ showStatus: true });
+    });
+
+    $("#programBoardProfileBtn").on('click', function() {
+        saveSelectedJointProfileToBoard();
     });
 
     $('#impedanceHoldWatchdogMs').on('change blur', function() {
@@ -2092,6 +2103,7 @@ function discoverJoints() {
                 } else {
                     // Same joint — just update serial port UI
                     updateSerialPortSelectUI(currentJoint);
+                    refreshBoardIdentity({ showStatus: false });
                 }
                 
                 // Load PID and configuration for discovered joint
@@ -2184,6 +2196,120 @@ function updateSerialPortHint(joint) {
     }
 }
 
+function clearBoardIdentityUI(statusText) {
+    boardProvisioningIdentity = null;
+    const currentJoint = $("#jointSelect").val();
+    $("#boardIdentityPort").text(jointPortMapping[currentJoint] || '-');
+    $("#boardIdentityUid").text('-');
+    $("#boardIdentityProfile").text('-');
+    $("#boardIdentityStoredProfile").text('-');
+    $("#boardIdentitySource").text('-');
+    $("#boardIdentityFirmware").text('-');
+    $("#boardIdentityStatus").text(statusText || 'No board identity loaded');
+}
+
+function renderBoardIdentityUI(joint, port, identity) {
+    boardProvisioningIdentity = identity || null;
+    $("#boardIdentityPort").text(port || '-');
+    $("#boardIdentityUid").text(identity?.uid || '-');
+    $("#boardIdentityProfile").text(identity?.profile || '-');
+    $("#boardIdentityStoredProfile").text(identity?.stored_profile || '-');
+    $("#boardIdentitySource").text(identity ? `${identity.source || '-'} / joint ${identity.active_joint_id}` : '-');
+    $("#boardIdentityFirmware").text(identity?.fw_version || '-');
+
+    if (!identity) {
+        $("#boardIdentityStatus").text('No board identity loaded');
+        return;
+    }
+
+    if (identity.profile === joint && identity.stored_profile === joint) {
+        $("#boardIdentityStatus").text(`Board profile matches selected joint ${joint}.`);
+        return;
+    }
+
+    $("#boardIdentityStatus").text(
+        `Board reports runtime ${identity.profile}, stored ${identity.stored_profile}; selected joint is ${joint}.`
+    );
+}
+
+function refreshBoardIdentity(options = {}) {
+    const { showStatus = false } = options;
+    const joint = $("#jointSelect").val();
+    const port = jointPortMapping[joint];
+
+    if (!joint) {
+        clearBoardIdentityUI('Select a joint first.');
+        return $.Deferred().reject().promise();
+    }
+    if (!port) {
+        clearBoardIdentityUI(`No serial port associated with ${joint}.`);
+        if (showStatus) {
+            appendStatusMessage(`ℹ️ No serial port associated with ${joint}, cannot read board identity.`);
+        }
+        return $.Deferred().reject().promise();
+    }
+
+    $("#boardIdentityStatus").text(`Reading board identity on ${port}...`);
+
+    return $.ajax({
+        url: '/api/provisioning/identity',
+        method: 'POST',
+        contentType: 'application/json; charset=utf-8',
+        dataType: 'json',
+        data: JSON.stringify({ joint }),
+    }).done(function(response) {
+        const identity = response.identity || null;
+        renderBoardIdentityUI(joint, response.port || port, identity);
+        if (showStatus && identity) {
+            appendStatusMessage(`🪪 ${joint} board identity: runtime=${identity.profile}, stored=${identity.stored_profile}, uid=${identity.uid}`);
+        }
+    }).fail(function(xhr) {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'unknown error';
+        clearBoardIdentityUI(`Identity read failed: ${message}`);
+        if (showStatus) {
+            appendStatusMessage(`❌ Failed to read board identity: ${message}`);
+        }
+    });
+}
+
+function saveSelectedJointProfileToBoard() {
+    const joint = $("#jointSelect").val();
+    const port = jointPortMapping[joint];
+
+    if (!joint) {
+        appendStatusMessage('⚠️ Select a joint first.');
+        return;
+    }
+    if (!port) {
+        appendStatusMessage(`⚠️ No serial port associated with ${joint}, cannot save board profile.`);
+        return;
+    }
+
+    const confirmed = window.confirm(
+        `Save joint profile ${joint} to flash on board ${port}?\nA reboot or power-cycle is required before the new profile becomes active.`
+    );
+    if (!confirmed) {
+        return;
+    }
+
+    $("#boardIdentityStatus").text(`Saving profile ${joint} to flash on ${port}...`);
+
+    $.ajax({
+        url: '/api/provisioning/joint_profile',
+        method: 'POST',
+        contentType: 'application/json; charset=utf-8',
+        dataType: 'json',
+        data: JSON.stringify({ joint, profile: joint }),
+    }).done(function(response) {
+        appendStatusMessage(`💾 ${response.message}`);
+        refreshBoardIdentity({ showStatus: false });
+    }).fail(function(xhr) {
+        const message = xhr.responseJSON?.message || xhr.statusText || 'unknown error';
+        $("#boardIdentityStatus").text(`Profile save failed: ${message}`);
+        appendStatusMessage(`❌ Failed to save board profile: ${message}`);
+    });
+}
+
 function assignSerialPortToJoint(joint, port) {
     if (serialPortAssignmentPending) {
         return;
@@ -2212,9 +2338,11 @@ function assignSerialPortToJoint(joint, port) {
                 setTimeout(function() {
                     sendCommand('select-joint', { joint: joint });
                     console.log('PID values requested after serial port change for:', joint);
+                    refreshBoardIdentity({ showStatus: false });
                 }, 300); // Short delay to allow connection to stabilize
             } else {
                 appendStatusMessage(`🔌 Serial association removed for ${joint}`);
+                clearBoardIdentityUI(`No serial port associated with ${joint}.`);
             }
         },
         error: function(xhr, status, error) {

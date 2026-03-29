@@ -131,6 +131,8 @@ COMMANDS = {
     'STARTUP_SEQUENCE': 'STARTUP_SEQUENCE',  # Manual startup sequence (recalc all DOFs + enter HOLDING)
     'SET_AUTO_START': 'SET_AUTO_START',      # Enable/disable auto-start on boot
     'GET_AUTO_START': 'GET_AUTO_START',       # Query auto-start setting
+    'GET_IDENTITY': 'GET_IDENTITY',           # Query board identity and persisted profile
+    'SET_JOINT_PROFILE': 'SET_JOINT_PROFILE', # Persist a different joint profile (reboot required)
     'CHECK_OFFSETS': 'CHECK_OFFSETS',          # Validate saved motor offsets (smart recalc detection)
     'FRICTION_FF': 'FRICTION_FF',  # Friction feedforward compensation
     'GET_ENCODER_OFFSETS': 'GET_ENCODER_OFFSETS',      # Query encoder offsets for cross-validation

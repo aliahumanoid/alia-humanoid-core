@@ -519,6 +519,89 @@ def register_routes(
             "mappings": serial_manager.get_joint_to_port_mapping(),
         })
 
+    @app.route('/api/provisioning/identity', methods=['POST'])
+    def provisioning_identity():
+        data = request.get_json(silent=True) or {}
+        joint = data.get('joint')
+        if not joint:
+            return jsonify({
+                "status": "error",
+                "message": "Missing 'joint' parameter",
+            }), 400
+
+        handler, error_response, status_code = handler_or_error(joint)
+        if handler is None:
+            return error_response, status_code
+
+        try:
+            identity = handler.get_board_identity()
+        except Exception as exc:
+            current_app.logger.exception("Provisioning identity query failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        if not identity:
+            return jsonify({
+                "status": "error",
+                "message": f"No identity response from board on joint {joint}",
+                "joint": joint,
+            }), 504
+
+        return jsonify({
+            "status": "success",
+            "joint": joint,
+            "port": serial_manager.get_joint_to_port_mapping().get(joint),
+            "identity": identity,
+        })
+
+    @app.route('/api/provisioning/joint_profile', methods=['POST'])
+    def provisioning_joint_profile():
+        data = request.get_json(silent=True) or {}
+        joint = data.get('joint')
+        profile = data.get('profile') or joint
+
+        if not joint:
+            return jsonify({
+                "status": "error",
+                "message": "Missing 'joint' parameter",
+            }), 400
+        if not profile:
+            return jsonify({
+                "status": "error",
+                "message": "Missing 'profile' parameter",
+            }), 400
+        if profile not in JOINTS:
+            return jsonify({
+                "status": "error",
+                "message": f"Unknown joint profile: {profile}",
+            }), 400
+
+        handler, error_response, status_code = handler_or_error(joint)
+        if handler is None:
+            return error_response, status_code
+
+        try:
+            result = handler.set_board_joint_profile(profile)
+        except Exception as exc:
+            current_app.logger.exception("Provisioning joint profile failed")
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+        if not result:
+            return jsonify({
+                "status": "error",
+                "message": f"No confirmation from board while saving profile {profile}",
+                "joint": joint,
+                "profile": profile,
+            }), 504
+
+        return jsonify({
+            "status": "success",
+            "joint": joint,
+            "port": serial_manager.get_joint_to_port_mapping().get(joint),
+            "profile": profile,
+            "result": result,
+            "message": f"Profile {profile} saved to flash. Reboot required.",
+        })
+
     @app.route('/api/can/startup_sequence', methods=['POST'])
     def can_startup_sequence():
         """

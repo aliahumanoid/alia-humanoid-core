@@ -506,6 +506,49 @@
                                 </button>
                             </div>
                             <p id="serialPortHint" class="text-xs text-gray-500 mt-1"></p>
+                            <div class="mt-3 rounded-md border border-gray-200 bg-gray-50 p-3">
+                                <div class="flex flex-wrap items-start justify-between gap-3">
+                                    <div>
+                                        <p class="text-sm font-semibold text-gray-700">Board Provisioning</p>
+                                        <p id="boardIdentityStatus" class="text-xs text-gray-500">
+                                            Read board identity from the serial port associated with the selected joint.
+                                        </p>
+                                    </div>
+                                    <div class="flex flex-wrap gap-2">
+                                        <button id="readBoardIdentityBtn" type="button"
+                                            class="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700 text-sm hover:bg-gray-100">
+                                            <i class="fas fa-fingerprint mr-1"></i>Read Identity
+                                        </button>
+                                        <button id="programBoardProfileBtn" type="button"
+                                            class="px-3 py-1.5 rounded-md bg-amber-500 text-white text-sm font-medium hover:bg-amber-600">
+                                            <i class="fas fa-save mr-1"></i>Save Selected Joint To Flash
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="mt-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
+                                    <div class="rounded border border-gray-200 bg-white px-2 py-1.5">
+                                        <div class="text-gray-500">Port</div>
+                                        <div id="boardIdentityPort" class="font-mono text-gray-800">-</div>
+                                    </div>
+                                    <div class="rounded border border-gray-200 bg-white px-2 py-1.5">
+                                        <div class="text-gray-500">Board UID</div>
+                                        <div id="boardIdentityUid" class="font-mono text-gray-800">-</div>
+                                    </div>
+                                    <div class="rounded border border-gray-200 bg-white px-2 py-1.5">
+                                        <div class="text-gray-500">Runtime Profile</div>
+                                        <div id="boardIdentityProfile" class="font-semibold text-gray-800">-</div>
+                                    </div>
+                                    <div class="rounded border border-gray-200 bg-white px-2 py-1.5">
+                                        <div class="text-gray-500">Stored Profile</div>
+                                        <div id="boardIdentityStoredProfile" class="font-semibold text-gray-800">-</div>
+                                    </div>
+                                    <div class="rounded border border-gray-200 bg-white px-2 py-1.5">
+                                        <div class="text-gray-500">Source / FW</div>
+                                        <div id="boardIdentitySource" class="font-mono text-gray-800">-</div>
+                                        <div id="boardIdentityFirmware" class="font-mono text-gray-500">-</div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

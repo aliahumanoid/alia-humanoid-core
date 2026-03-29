@@ -28,6 +28,13 @@ from serial_logger import SerialLogger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+IDENTITY_RESPONSE_RE = re.compile(
+    r"^RSP:IDENTITY\((\d+)\):PROFILE=([A-Z_]+):STORED_PROFILE=([A-Z_]+):SOURCE=([A-Z_]+):UID=([0-9A-F]+):FW=(.+)$"
+)
+JOINT_PROFILE_SET_RE = re.compile(
+    r"^RSP:JOINT_PROFILE_SET\((\d+)\):NEW_PROFILE=([A-Z_]+):REBOOT_REQUIRED=(\d+)$"
+)
+
 
 class SerialHandler:
     """
@@ -2923,6 +2930,131 @@ class SerialHandler:
             logger.warning(
                 f"Outer PID response timeout for {joint} DOF {dof_to_use}"
             )
+
+    def _send_command_and_capture_response(
+        self,
+        command: str,
+        expected_regexes: List[re.Pattern],
+        read_timeout: float = 0.8,
+        post_success_drain: float = 0.1,
+    ) -> Optional[str]:
+        """
+        Sends a command and returns the first matching response line.
+        """
+        matched_line: Optional[str] = None
+
+        try:
+            self.pause_listening()
+            time.sleep(0.05)
+            with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
+                try:
+                    ser.reset_input_buffer()
+                except Exception:
+                    pass
+
+                try:
+                    ser.reset_output_buffer()
+                except Exception:
+                    pass
+
+                self.send_command_with_prefix(command, ser)
+
+                deadline = time.time() + read_timeout
+                post_deadline: Optional[float] = None
+
+                while True:
+                    now = time.time()
+                    if matched_line is not None:
+                        if post_deadline is None:
+                            post_deadline = now + post_success_drain
+                        elif now >= post_deadline:
+                            break
+                    elif now >= deadline:
+                        break
+
+                    raw_line = ser.readline()
+                    if not raw_line:
+                        continue
+
+                    try:
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                    except Exception:
+                        continue
+
+                    if not line:
+                        continue
+
+                    try:
+                        self.handle_serial_message(line, ser)
+                    except Exception as exc:
+                        logger.error(
+                            f"Error handling temporary serial message '{line}': {exc}"
+                        )
+
+                    if matched_line is None and any(rx.match(line) for rx in expected_regexes):
+                        matched_line = line
+
+                return matched_line
+        except Exception as exc:
+            logger.error(
+                f"Error sending command {command} with direct capture: {exc}"
+            )
+            return None
+        finally:
+            self.resume_listening()
+
+    def get_board_identity(self) -> Optional[Dict[str, Any]]:
+        """
+        Query the board identity over serial using CMD:GET_IDENTITY.
+        """
+        line = self._send_command_and_capture_response(
+            COMMANDS["GET_IDENTITY"],
+            [IDENTITY_RESPONSE_RE],
+            read_timeout=1.0,
+            post_success_drain=0.05,
+        )
+        if not line:
+            return None
+
+        match = IDENTITY_RESPONSE_RE.match(line)
+        if not match:
+            return None
+
+        active_joint_id, profile, stored_profile, source, uid, fw_version = match.groups()
+        return {
+            "active_joint_id": int(active_joint_id),
+            "profile": profile,
+            "stored_profile": stored_profile,
+            "source": source,
+            "uid": uid,
+            "fw_version": fw_version,
+            "raw": line,
+        }
+
+    def set_board_joint_profile(self, profile: str) -> Optional[Dict[str, Any]]:
+        """
+        Persist a new board joint profile over serial.
+        """
+        line = self._send_command_and_capture_response(
+            f"{COMMANDS['SET_JOINT_PROFILE']}:{profile}",
+            [JOINT_PROFILE_SET_RE],
+            read_timeout=1.0,
+            post_success_drain=0.05,
+        )
+        if not line:
+            return None
+
+        match = JOINT_PROFILE_SET_RE.match(line)
+        if not match:
+            return None
+
+        active_joint_id, new_profile, reboot_required = match.groups()
+        return {
+            "active_joint_id": int(active_joint_id),
+            "new_profile": new_profile,
+            "reboot_required": bool(int(reboot_required)),
+            "raw": line,
+        }
 
     def set_pid_for_joint_dof(self, joint, dof, motor_type, kp, ki, kd, tau):
         """
