@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Type alias for async callbacks
 AsyncCallback = Callable[[], Coroutine]
+NudgeCallback = Callable[[float, str, int], Coroutine]
 
 
 class TUI:
@@ -52,6 +53,9 @@ class TUI:
         self._start_time = time.monotonic()
         self._loop_paused = False
         self._status_line = ""  # Transient status message from key commands
+        self._joint_keys = list(config.joints.keys())
+        self._selected_joint_idx = 0
+        self._selected_dof = 0
 
         self._quit_event = asyncio.Event()
         self._bg_tasks: set[asyncio.Task] = set()  # tracked background tasks
@@ -62,7 +66,7 @@ class TUI:
         self._cb_home: Optional[AsyncCallback] = None
         self._cb_startup: Optional[AsyncCallback] = None
         self._cb_discover: Optional[AsyncCallback] = None
-        self._cb_nudge: Optional[Callable[[float], Coroutine]] = None
+        self._cb_nudge: Optional[NudgeCallback] = None
         self._cb_toggle_loop: Optional[AsyncCallback] = None
 
     def set_fsm_state(self, state: FSMState, message: str = "") -> None:
@@ -83,8 +87,29 @@ class TUI:
         self._cb_discover = cb
 
     def on_nudge(self, cb) -> None:
-        """cb(delta_deg: float) -> coroutine"""
+        """cb(delta_deg: float, joint_key: str, dof: int) -> coroutine"""
         self._cb_nudge = cb
+
+    def _selected_joint_key(self) -> str:
+        return self._joint_keys[self._selected_joint_idx]
+
+    def _selected_joint_cfg(self):
+        return self._config.joints[self._selected_joint_key()]
+
+    def _clamp_selected_dof(self) -> None:
+        jcfg = self._selected_joint_cfg()
+        if self._selected_dof >= jcfg.dof_count:
+            self._selected_dof = 0
+
+    def _cycle_joint(self) -> None:
+        if not self._joint_keys:
+            return
+        self._selected_joint_idx = (self._selected_joint_idx + 1) % len(self._joint_keys)
+        self._clamp_selected_dof()
+
+    def _cycle_dof(self) -> None:
+        jcfg = self._selected_joint_cfg()
+        self._selected_dof = (self._selected_dof + 1) % max(jcfg.dof_count, 1)
 
     def on_toggle_loop(self, cb: AsyncCallback) -> None:
         self._cb_toggle_loop = cb
@@ -144,6 +169,12 @@ class TUI:
         header.append(f"  {minutes:02d}:{seconds:02d}", style="dim")
         if self._loop_paused:
             header.append("  [PAUSED]", style="bold yellow")
+        if self._joint_keys:
+            header.append("  Sel: ", style="dim")
+            header.append(
+                f"{self._selected_joint_key()} DOF{self._selected_dof}",
+                style="bold yellow",
+            )
 
         # Joint table
         table = Table(show_header=True, header_style="bold", box=None,
@@ -182,8 +213,20 @@ class TUI:
                     cells.append("[dim]\u2014[/]")
                     cells.append("[dim]\u2014[/]")
 
+            joint_label = f"> {key}" if key == self._selected_joint_key() else f"  {key}"
+            rendered_cells: list[str] = []
+            for d in range(2):
+                current_cell = cells[d * 2]
+                target_cell = cells[d * 2 + 1]
+                if key == self._selected_joint_key() and d == self._selected_dof and d < jcfg.dof_count:
+                    current_cell = f"[bold yellow]{current_cell}[/]"
+                    target_cell = f"[bold yellow]{target_cell}[/]"
+                rendered_cells.extend([current_cell, target_cell])
+
             table.add_row(
-                key, online, cells[0], cells[1], cells[2], cells[3],
+                joint_label, online,
+                rendered_cells[0], rendered_cells[1],
+                rendered_cells[2], rendered_cells[3],
                 str(state.rx_count),
             )
 
@@ -220,7 +263,11 @@ class TUI:
         keys.append("[+]", style="bold green")
         keys.append("/", style="dim")
         keys.append("[-]", style="bold green")
-        keys.append(f" {self.STEP_DEG}\u00b0  ", style="dim")
+        keys.append(f" {self.STEP_DEG}\u00b0 sel  ", style="dim")
+        keys.append("[J]", style="bold white")
+        keys.append("oint  ", style="dim")
+        keys.append("[Tab]", style="bold white")
+        keys.append(" DOF  ", style="dim")
         keys.append("[L]", style="bold magenta")
         keys.append("og  ", style="dim")
         keys.append("[Space]", style="bold")
@@ -327,14 +374,40 @@ class TUI:
                 await self._cb_home()  # Fast: just updates targets
 
         elif key in ('+', '='):  # = is unshifted + on most keyboards
-            self._status_line = f"Nudge +{self.STEP_DEG}\u00b0"
+            self._status_line = (
+                f"Nudge {self._selected_joint_key()} DOF{self._selected_dof} "
+                f"+{self.STEP_DEG}\u00b0"
+            )
             if self._cb_nudge:
-                await self._cb_nudge(self.STEP_DEG)
+                await self._cb_nudge(
+                    self.STEP_DEG,
+                    self._selected_joint_key(),
+                    self._selected_dof,
+                )
 
         elif key == '-':
-            self._status_line = f"Nudge -{self.STEP_DEG}\u00b0"
+            self._status_line = (
+                f"Nudge {self._selected_joint_key()} DOF{self._selected_dof} "
+                f"-{self.STEP_DEG}\u00b0"
+            )
             if self._cb_nudge:
-                await self._cb_nudge(-self.STEP_DEG)
+                await self._cb_nudge(
+                    -self.STEP_DEG,
+                    self._selected_joint_key(),
+                    self._selected_dof,
+                )
+
+        elif k == 'j':
+            self._cycle_joint()
+            self._status_line = (
+                f"Selected {self._selected_joint_key()} DOF{self._selected_dof}"
+            )
+
+        elif key == '\t':
+            self._cycle_dof()
+            self._status_line = (
+                f"Selected {self._selected_joint_key()} DOF{self._selected_dof}"
+            )
 
         elif k == 'l':
             log_path = get_log_path()

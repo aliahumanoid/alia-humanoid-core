@@ -66,6 +66,7 @@ class TelemetryManager:
         self.announce_events: dict[int, asyncio.Event] = {}  # joint_id → event
         self.startup_events: dict[int, asyncio.Event] = {}   # joint_id → event
         self.startup_results: dict[int, StartupStatus] = {}  # last status per joint
+        self.unexpected_announces: dict[int, JointAnnounce] = {}
 
         # Set up events for expected joints
         for key, jcfg in config.joints.items():
@@ -281,7 +282,11 @@ class TelemetryManager:
         announce = decode_joint_announce(data, joint_id)
         jcfg = self._config.joint_by_id(joint_id)
         if jcfg is None:
-            logger.info(f"Announce from unknown joint_id={joint_id}, ignoring")
+            self.unexpected_announces[joint_id] = announce
+            logger.info(
+                f"Announce from unexpected joint_id={joint_id} "
+                f"(configured ids={sorted(self._config._id_to_key.keys())}), ignoring"
+            )
             return
 
         key = self._config._id_to_key[joint_id]

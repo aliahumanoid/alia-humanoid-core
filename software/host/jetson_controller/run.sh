@@ -7,6 +7,7 @@
 #   ./run.sh              # both panels (CAN TUI + Serial monitor)
 #   ./run.sh --no-serial  # CAN TUI only
 #   ./run.sh --serial     # Serial monitor only
+#   ./run.sh --joint ankle_right
 # ────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -18,6 +19,22 @@ SESSION_NAME="alia-jetson"
 
 MODE="both"
 APP_ARGS=()
+
+shell_quote() {
+    printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+}
+
+join_quoted_args() {
+    local joined=""
+    local arg
+    for arg in "$@"; do
+        if [ -n "$joined" ]; then
+            joined="$joined "
+        fi
+        joined="$joined$(shell_quote "$arg")"
+    done
+    printf "%s" "$joined"
+}
 
 print_usage() {
     cat <<EOF
@@ -32,13 +49,13 @@ Launcher options:
   -h, --help    Show this help
 
 Pass-through:
-  In single-mode, remaining arguments are forwarded to the selected app.
+  Remaining arguments are forwarded to the CAN controller.
+  In --serial mode, remaining arguments are forwarded to the serial monitor.
   Examples:
-    ./run.sh --no-serial --help
+    ./run.sh --no-serial --joint ankle_right
+    ./run.sh --joint knee_right --joint ankle_right
     ./run.sh --no-serial --config /path/to/controller.yaml
     ./run.sh --serial --port /dev/ttyACM0
-
-  In dual mode, app-specific arguments are rejected to avoid ambiguous routing.
 EOF
 }
 
@@ -74,12 +91,6 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "$MODE" = "both" ] && [ "${#APP_ARGS[@]}" -gt 0 ]; then
-    echo "Error: app-specific arguments are only supported with --no-serial or --serial." >&2
-    echo "Use './run.sh --help' for launcher options." >&2
-    exit 2
-fi
-
 # --- Ensure venv & deps ---
 cd "$HOST_DIR"
 if [ ! -d "$VENV_DIR" ]; then
@@ -100,15 +111,17 @@ fi
 if ! command -v tmux &>/dev/null; then
     echo "tmux not found — install with: brew install tmux"
     echo "Falling back to CAN TUI only."
-    exec "$PYTHON_BIN" -m jetson_controller -v
+    exec "$PYTHON_BIN" -m jetson_controller -v "${APP_ARGS[@]}"
 fi
+
+CAN_APP_ARGS="$(join_quoted_args "${APP_ARGS[@]}")"
 
 # Kill existing session if any
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 
 # Create session with CAN TUI in left pane
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
-    "cd '$HOST_DIR' && '$PYTHON_BIN' -u -m jetson_controller -v; printf 'Press Enter to close...'; read -r _"
+    "cd '$HOST_DIR' && '$PYTHON_BIN' -u -m jetson_controller -v ${CAN_APP_ARGS}; printf 'Press Enter to close...'; read -r _"
 
 # Split right pane for serial monitor
 tmux split-window -h -t "$SESSION_NAME" \

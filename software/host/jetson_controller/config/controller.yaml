@@ -21,8 +21,13 @@ nudge:
   speed_deg_s: 15.0       # Degrees/second for +/- nudge commands
 
 # Per-joint control parameters.
-# Only joints listed here are controlled. Others are ignored.
+# This file can define multiple joint profiles.
+# The controller will use:
+#   1. --joint <name> selections from the CLI, if provided
+#   2. otherwise default_joint below
 # Gains match firmware defaults from JointConfig.h as starting point.
+default_joint: knee_right
+
 joints:
   knee_right:
     gains:
@@ -32,11 +37,11 @@ joints:
     home_position_deg:
       0: 0.0              # flexion-extension
 
-  # ankle_right:                # uncomment when ready to test
-  #   gains:
-  #     outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
-  #     inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
-  #   stiffness_deg: 25.0
-  #   home_position_deg:
-  #     0: 0.0              # plantar-dorsal
-  #     1: 0.0              # inversion-eversion
+  ankle_right:
+    gains:
+      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+    stiffness_deg: 25.0
+    home_position_deg:
+      0: 0.0              # plantar-dorsal
+      1: 0.0              # inversion-eversion

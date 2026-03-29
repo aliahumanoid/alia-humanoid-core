@@ -47,12 +47,13 @@ def setup_logging(verbose: bool = False) -> None:
     logger.info(f"Session log: {get_log_path()}")
 
 
-async def main(config_path: str = None, verbose: bool = False) -> int:
+async def main(config_path: str = None, verbose: bool = False,
+               selected_joints: list[str] | None = None) -> int:
     setup_logging(verbose)
 
     # Load configuration
     try:
-        config = load_config(config_path)
+        config = load_config(config_path, selected_joints=selected_joints)
     except (FileNotFoundError, ValueError) as e:
         logger.error(f"Configuration error: {e}")
         return 1
@@ -126,18 +127,16 @@ async def main(config_path: str = None, verbose: bool = False) -> int:
         await can_bus.send(arb_id, data)
         logger.info("Discover sent (time_sync + identify_request)")
 
-    async def on_nudge(delta_deg: float):
-        """Nudge all controlled DOFs by delta_deg from current target."""
-        for key, jcfg in config.joints.items():
-            for dof in range(jcfg.dof_count):
-                target = impedance.targets[key][dof]
-                new_q = target.q_deg + delta_deg
-                # Clamp to joint limits
-                min_a = jcfg.min_angles.get(dof, -180.0)
-                max_a = jcfg.max_angles.get(dof, 180.0)
-                new_q = max(min_a, min(max_a, new_q))
-                impedance.set_target(key, dof, new_q, config.nudge_speed_deg_s)
-        logger.info(f"Nudge {delta_deg:+.1f}° all DOFs")
+    async def on_nudge(delta_deg: float, joint_key: str, dof: int):
+        """Nudge one selected DOF by delta_deg from current target."""
+        jcfg = config.joints[joint_key]
+        target = impedance.targets[joint_key][dof]
+        new_q = target.q_deg + delta_deg
+        min_a = jcfg.min_angles.get(dof, -180.0)
+        max_a = jcfg.max_angles.get(dof, 180.0)
+        new_q = max(min_a, min(max_a, new_q))
+        impedance.set_target(joint_key, dof, new_q, config.nudge_speed_deg_s)
+        logger.info(f"Nudge {joint_key} DOF{dof} {delta_deg:+.1f}° -> {new_q:+.1f}°")
 
     async def on_toggle_loop():
         """Pause/resume the impedance loop."""
@@ -223,9 +222,14 @@ def cli():
         action="store_true",
         help="Enable debug logging"
     )
+    parser.add_argument(
+        "--joint", "-j",
+        action="append",
+        help="Joint profile(s) to control, e.g. --joint knee_right --joint ankle_right"
+    )
     args = parser.parse_args()
 
-    exit_code = asyncio.run(main(args.config, args.verbose))
+    exit_code = asyncio.run(main(args.config, args.verbose, args.joint))
     sys.exit(exit_code)
 
 

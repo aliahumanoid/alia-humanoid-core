@@ -134,6 +134,7 @@ class StartupFSM:
     async def _discover(self, can_bus: CanBus, config: ControllerConfig,
                         telemetry: TelemetryManager) -> None:
         self._set_state(FSMState.DISCOVER, "Discovering joints")
+        telemetry.unexpected_announces.clear()
 
         # Send time sync first
         arb_id, data = encode_time_sync()
@@ -158,9 +159,16 @@ class StartupFSM:
                 discovered.append(joint_key)
                 logger.info(f"Discovered {joint_key} (id={joint_id})")
             except asyncio.TimeoutError:
+                unexpected_ids = sorted(telemetry.unexpected_announces.keys())
+                mismatch_hint = ""
+                if unexpected_ids:
+                    mismatch_hint = (
+                        f"; saw unexpected joint ids {unexpected_ids} instead. "
+                        "Check controller.yaml / --joint selection against board provisioning."
+                    )
                 raise StartupError(
                     f"Joint {joint_key} (id={joint_id}) did not respond "
-                    f"within {timeout}s"
+                    f"within {timeout}s{mismatch_hint}"
                 )
 
         self._set_state(FSMState.DISCOVER,

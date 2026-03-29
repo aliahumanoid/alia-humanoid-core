@@ -120,7 +120,8 @@ def _autodetect_can_channel() -> str:
     return candidates[0]
 
 
-def load_config(yaml_path: Optional[str] = None) -> ControllerConfig:
+def load_config(yaml_path: Optional[str] = None,
+                selected_joints: Optional[list[str]] = None) -> ControllerConfig:
     """Load and merge configuration.
 
     Args:
@@ -154,15 +155,53 @@ def load_config(yaml_path: Optional[str] = None) -> ControllerConfig:
     # --- Merge ---
     joints: dict[str, JointControlConfig] = {}
     yaml_joints = cfg.get("joints", {})
+    if not yaml_joints:
+        raise ValueError("controller.yaml does not define any joint profiles")
 
-    for joint_key, joint_yaml in yaml_joints.items():
-        upper_key = joint_key.upper()
-        lower_key = joint_key.lower()
+    available_joint_keys = {joint_key.lower(): joint_yaml for joint_key, joint_yaml in yaml_joints.items()}
+    requested_joint_keys: list[str]
+
+    if selected_joints:
+        requested_joint_keys = []
+        for raw_name in selected_joints:
+            for token in str(raw_name).split(","):
+                name = token.strip().lower()
+                if name:
+                    requested_joint_keys.append(name)
+        if not requested_joint_keys:
+            raise ValueError("Empty --joint selection")
+        missing = sorted(set(requested_joint_keys) - set(available_joint_keys.keys()))
+        if missing:
+            raise ValueError(
+                f"Selected joint profile(s) not found in controller.yaml: {missing}. "
+                f"Available: {sorted(available_joint_keys.keys())}"
+            )
+    else:
+        default_joint = cfg.get("default_joint")
+        if default_joint:
+            default_key = str(default_joint).strip().lower()
+            if default_key not in available_joint_keys:
+                raise ValueError(
+                    f"default_joint '{default_joint}' not found in controller.yaml. "
+                    f"Available: {sorted(available_joint_keys.keys())}"
+                )
+            requested_joint_keys = [default_key]
+        elif len(available_joint_keys) == 1:
+            requested_joint_keys = list(available_joint_keys.keys())
+        else:
+            raise ValueError(
+                "controller.yaml defines multiple joint profiles but no selection was provided. "
+                "Set default_joint in controller.yaml or launch with --joint <name>."
+            )
+
+    for lower_key in requested_joint_keys:
+        joint_yaml = available_joint_keys[lower_key]
+        upper_key = lower_key.upper()
 
         # Find in JSON
         if lower_key not in joint_json["joints"]:
             raise ValueError(
-                f"Joint '{joint_key}' in controller.yaml not found in joint_config.json. "
+                f"Joint '{lower_key}' in controller.yaml not found in joint_config.json. "
                 f"Available: {list(joint_json['joints'].keys())}"
             )
         jdata = joint_json["joints"][lower_key]
