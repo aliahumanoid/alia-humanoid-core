@@ -45,7 +45,15 @@
 #define CMD_GET_AUTO_START 5    // Query current auto-start setting
 #endif
 
-// Reserved: 6-9 for future system commands
+#ifndef CMD_GET_IDENTITY
+#define CMD_GET_IDENTITY 6      // Query board identity / active profile
+#endif
+
+#ifndef CMD_SET_JOINT_PROFILE
+#define CMD_SET_JOINT_PROFILE 7 // Persist a different joint profile (reboot required)
+#endif
+
+// Reserved: 8-9 for future system commands
 
 // --- Motor Control Commands (10-19) ---
 #ifndef CMD_PRETENSION
@@ -241,6 +249,8 @@
 #define SERIAL_CMD_STARTUP_SEQUENCE "STARTUP_SEQUENCE"
 #define SERIAL_CMD_SET_AUTO_START "SET_AUTO_START"
 #define SERIAL_CMD_GET_AUTO_START "GET_AUTO_START"
+#define SERIAL_CMD_GET_IDENTITY "GET_IDENTITY"
+#define SERIAL_CMD_SET_JOINT_PROFILE "SET_JOINT_PROFILE"
 
 // --- Command Strings (Motor Control) ---
 #define SERIAL_CMD_PRETENSION "PRETENSION"
@@ -347,6 +357,10 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_SET_AUTO_START;
   } else if (strcmp(cmd_name, SERIAL_CMD_GET_AUTO_START) == 0) {
     return CMD_GET_AUTO_START;
+  } else if (strcmp(cmd_name, SERIAL_CMD_GET_IDENTITY) == 0) {
+    return CMD_GET_IDENTITY;
+  } else if (strcmp(cmd_name, SERIAL_CMD_SET_JOINT_PROFILE) == 0) {
+    return CMD_SET_JOINT_PROFILE;
   }
   // Motor Control
   else if (strcmp(cmd_name, SERIAL_CMD_PRETENSION) == 0) {

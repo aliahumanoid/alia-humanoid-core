@@ -16,6 +16,7 @@
  */
 
 #include "main_common.h"
+#include "RuntimeProvisioning.h"
 
 //----------------------------------------------------------------------------
 // ACTIVE JOINT CONFIGURATION
@@ -40,8 +41,13 @@
 // - DOF 1: ID 3, 4
 // - DOF 2: ID 5, 6
 
-// Get active joint configuration
+// Compile-time fallback joint configuration.
+// Runtime code below switches to the persisted profile loaded from flash.
 const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
+
+#undef ACTIVE_JOINT
+#define ACTIVE_JOINT getRuntimeJointId()
+#define ACTIVE_JOINT_CONFIG getRuntimeJointConfig()
 //----------------------------------------------------------------------------
 
 #pragma region Variables
@@ -520,6 +526,44 @@ void setup() {
 
   LOG_INFO("Joint firmware starting!");
 
+  // Load persisted system settings before any joint-specific initialization.
+  // Phase 1 provisioning reuses SystemSettingsData.joint_type as the persisted
+  // runtime profile selector, with compile-time ACTIVE_JOINT as fallback.
+  LOG_INFO("------------------------------------");
+  LOG_INFO("Loading system settings from flash...");
+  if (load_system_settings_data(&system_settings)) {
+    system_settings_loaded = true;
+
+    if (isProvisionedJointProfileValid(system_settings.joint_type)) {
+      setRuntimeJointProfile(system_settings.joint_type, true);
+      LOG_INFO("Runtime joint profile loaded from flash: " + String(ACTIVE_JOINT_CONFIG.name));
+    } else {
+      const uint8_t fallback_joint = getBuildTimeFallbackJointId();
+      LOG_WARN("Invalid joint_type in system settings: " + String(system_settings.joint_type) +
+               " — falling back to build-time profile " + String(getBuildTimeFallbackJointConfig().name));
+      system_settings.joint_type = fallback_joint;
+      setRuntimeJointProfile(fallback_joint, false);
+      save_system_settings_data(system_settings);
+      LOG_INFO("System settings repaired with build-time fallback profile");
+    }
+
+    LOG_INFO("System settings loaded: auto_start=" +
+             String(system_settings.auto_start_enabled ? "ENABLED" : "DISABLED"));
+  } else {
+    LOG_INFO("No system settings found — initializing defaults and saving to flash...");
+    system_settings.auto_start_enabled = false;
+    system_settings.auto_start_pretension = 0;
+    system_settings.auto_start_duration = 0;
+    system_settings.joint_type = getBuildTimeFallbackJointId();
+    setRuntimeJointProfile(system_settings.joint_type, false);
+    save_system_settings_data(system_settings);
+    system_settings_loaded = true;
+    LOG_INFO("Default system settings saved: auto_start=DISABLED");
+  }
+
+  LOG_INFO("Active runtime joint profile: " + String(ACTIVE_JOINT_CONFIG.name) +
+           (runtimeJointProfileFromFlash() ? " (flash)" : " (build fallback)"));
+
   // Brief blink to signal firmware started
   led_blink(2, 80, 80);
   LOG_INFO("Joint firmware started!");
@@ -642,26 +686,6 @@ void setup() {
   // SAFETY: Movement is controlled by isSystemReadyForMovement()
   LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
   LOG_INFO("Mapping data will be sent to the client for visualization/diagnostics only");
-
-  // Load system settings from flash
-  LOG_INFO("------------------------------------");
-  LOG_INFO("Loading system settings from flash...");
-  if (load_system_settings_data(&system_settings)) {
-    system_settings_loaded = true;
-    LOG_INFO("System settings loaded: auto_start=" + String(system_settings.auto_start_enabled ? "ENABLED" : "DISABLED"));
-  } else {
-    // Initialize with defaults and save to flash (first boot / new Pico)
-    LOG_INFO("No system settings found — initializing defaults and saving to flash...");
-    system_settings.auto_start_enabled = false;
-    system_settings.auto_start_pretension = 0;
-    system_settings.auto_start_duration = 0;
-    system_settings.joint_type = ACTIVE_JOINT;
-    
-    // Save defaults to flash so next boot will find valid settings
-    save_system_settings_data(system_settings);
-    system_settings_loaded = true;
-    LOG_INFO("Default system settings saved: auto_start=DISABLED");
-  }
 
   // Setup complete: distinctive double-blink
   led_blink(2, 150, 100);

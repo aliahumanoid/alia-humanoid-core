@@ -20,6 +20,12 @@
  */
 
 #include "main_common.h"
+#include "RuntimeProvisioning.h"
+#include "pico/unique_id.h"
+
+#undef ACTIVE_JOINT
+#define ACTIVE_JOINT getRuntimeJointId()
+#define ACTIVE_JOINT_CONFIG getRuntimeJointConfig()
 
 // ============================================================================
 // HELPER FUNCTIONS - Serial & Mapping Data
@@ -47,6 +53,23 @@ const char *jointIdToSerialName(uint8_t joint_id) {
   default:
     return "UNKNOWN";
   }
+}
+
+static void formatBoardUidHex(char *out, size_t out_size) {
+  static const char HEX_DIGITS[] = "0123456789ABCDEF";
+  pico_unique_board_id_t board_id;
+  pico_get_unique_board_id(&board_id);
+
+  const size_t needed = PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1;
+  if (out == nullptr || out_size < needed) {
+    return;
+  }
+
+  for (size_t i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; ++i) {
+    out[i * 2]     = HEX_DIGITS[(board_id.id[i] >> 4) & 0x0F];
+    out[i * 2 + 1] = HEX_DIGITS[board_id.id[i] & 0x0F];
+  }
+  out[needed - 1] = '\0';
 }
 
 /**
@@ -935,8 +958,42 @@ void core0_main_loop() {
         char actual_command[96];
         strcpy(actual_command, command + 4); // Skip "CMD:"
 
+        // Provisioning / identity commands are intentionally handled as simple
+        // serial commands because v1 commissioning is one board at a time.
+        if (strcmp(actual_command, SERIAL_CMD_GET_IDENTITY) == 0) {
+          char board_uid_hex[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
+          formatBoardUidHex(board_uid_hex, sizeof(board_uid_hex));
+          const uint8_t stored_joint =
+              isProvisionedJointProfileValid(system_settings.joint_type)
+                  ? system_settings.joint_type
+                  : getBuildTimeFallbackJointId();
+
+          SERIAL_COM_LN("RSP:IDENTITY(" + String(ACTIVE_JOINT) +
+                        "):PROFILE=" + String(jointIdToSerialName(ACTIVE_JOINT)) +
+                        ":STORED_PROFILE=" + String(jointIdToSerialName(stored_joint)) +
+                        ":SOURCE=" + String(runtimeJointProfileFromFlash() ? "FLASH" : "FALLBACK") +
+                        ":UID=" + String(board_uid_hex) +
+                        ":FW=" + String(FW_VERSION));
+        } else if (strncmp(actual_command, SERIAL_CMD_SET_JOINT_PROFILE ":",
+                           strlen(SERIAL_CMD_SET_JOINT_PROFILE) + 1) == 0) {
+          const char *profile_str = actual_command + strlen(SERIAL_CMD_SET_JOINT_PROFILE) + 1;
+          uint8_t requested_joint = getJointId(profile_str);
+          if (!isProvisionedJointProfileValid(requested_joint)) {
+            SERIAL_COM_LN("RSP:ERROR: Invalid joint profile " + String(profile_str));
+          } else {
+            system_settings.joint_type = requested_joint;
+            save_system_settings_data(system_settings);
+            system_settings_loaded = true;
+            SERIAL_COM_LN("RSP:JOINT_PROFILE_SET(" + String(ACTIVE_JOINT) +
+                          "):NEW_PROFILE=" + String(jointIdToSerialName(requested_joint)) +
+                          ":REBOOT_REQUIRED=1");
+            LOG_INFO("Provisioning: saved joint profile " +
+                     String(jointIdToSerialName(requested_joint)) + " to flash (reboot required)");
+          }
+        }
+
         // First, try to recognize it as a simple command (e.g., STATUS, STOP)
-        {
+        else {
           int simple_cmd_id = getCommandId(actual_command);
           
           if (simple_cmd_id != CMD_UNKNOWN && 

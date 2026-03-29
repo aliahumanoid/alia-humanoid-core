@@ -18,7 +18,12 @@
  */
 
 #include "main_common.h"
+#include "RuntimeProvisioning.h"
 #include "hardware/sync.h"
+
+#undef ACTIVE_JOINT
+#define ACTIVE_JOINT getRuntimeJointId()
+#define ACTIVE_JOINT_CONFIG getRuntimeJointConfig()
 
 // RAM-resident function for waiting during flash operations
 // This MUST be in RAM because flash is inaccessible during erase/program
