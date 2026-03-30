@@ -9,6 +9,9 @@ can:
   channel: auto                            # "auto" = detect CANable USB device
   bitrate: 1000000
 
+startup:
+  pretension_all: false                    # Match webapp startup path by default
+
 impedance:
   send_rate_hz: 50
   watchdog_ms: 2000       # Impedance watchdog timeout (firmware fallback to HOLDING)

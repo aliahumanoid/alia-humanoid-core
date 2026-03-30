@@ -181,10 +181,15 @@ class StartupFSM:
         for key, jcfg in config.joints.items():
             logger.info(f"Starting up {key} (id={jcfg.joint_id})")
 
-            # Re-enable motor power (clears post-e-stop lockout)
-            arb_id, data = encode_pretension_all(jcfg.joint_id)
-            await can_bus.send(arb_id, data)
-            await asyncio.sleep(0.1)  # Let firmware process pretension
+            # Optional recovery step: re-enable motor power after a previous E-stop.
+            # Keep disabled by default so the startup path matches the webapp's
+            # CAN startup sequence more closely while debugging controller issues.
+            if config.startup_pretension_all:
+                arb_id, data = encode_pretension_all(jcfg.joint_id)
+                await can_bus.send(arb_id, data)
+                await asyncio.sleep(0.1)  # Let firmware process pretension
+            else:
+                logger.info(f"Skipping PRETENSION_ALL before startup for {key}")
 
             # Reset event for this joint
             evt = telemetry.startup_events.get(jcfg.joint_id)

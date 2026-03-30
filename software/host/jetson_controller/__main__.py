@@ -17,6 +17,7 @@ from .config import load_config
 from .fsm import StartupFSM
 from .impedance_loop import ImpedanceLoop
 from .safety import SafetyManager
+from .serial_monitor import discover_ports, preflight_boot
 from .session_log import setup_session_logging, get_log_path
 from .telemetry import TelemetryManager
 from .tui import TUI
@@ -48,7 +49,9 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 async def main(config_path: str = None, verbose: bool = False,
-               selected_joints: list[str] | None = None) -> int:
+               selected_joints: list[str] | None = None,
+               preflight_auto: bool = False,
+               preflight_serials: list[str] | None = None) -> int:
     setup_logging(verbose)
 
     # Load configuration
@@ -62,6 +65,29 @@ async def main(config_path: str = None, verbose: bool = False,
                 f"CAN={config.can_interface}:{config.can_channel}")
     for key, jcfg in config.joints.items():
         logger.info(f"  {key}: id={jcfg.joint_id}, dofs={jcfg.dof_count}")
+
+    preflight_ports: list[str] = []
+    if preflight_serials:
+        for port in preflight_serials:
+            if port not in preflight_ports:
+                preflight_ports.append(port)
+    if preflight_auto:
+        auto_ports = discover_ports(verbose_output=False)
+        if not auto_ports:
+            logger.warning("Serial preflight requested, but no Pico USB serial ports were auto-discovered")
+        for port in auto_ports:
+            if port not in preflight_ports:
+                preflight_ports.append(port)
+
+    if preflight_ports:
+        logger.info(f"Serial preflight on {len(preflight_ports)} port(s): {', '.join(preflight_ports)}")
+        try:
+            for port in preflight_ports:
+                preflight_boot(port)
+                await asyncio.sleep(0.1)
+        except Exception as exc:
+            logger.error(f"Serial preflight failed: {exc}")
+            return 1
 
     # Initialize components
     can_bus = CanBus()
@@ -227,9 +253,27 @@ def cli():
         action="append",
         help="Joint profile(s) to control, e.g. --joint knee_right --joint ankle_right"
     )
+    parser.add_argument(
+        "--preflight-auto",
+        action="store_true",
+        help="Open all auto-discovered Pico USB serial ports once before CAN startup, then close them"
+    )
+    parser.add_argument(
+        "--preflight-serial",
+        action="append",
+        help="Open a specific board USB serial port once before CAN startup (repeatable)"
+    )
     args = parser.parse_args()
 
-    exit_code = asyncio.run(main(args.config, args.verbose, args.joint))
+    exit_code = asyncio.run(
+        main(
+            args.config,
+            args.verbose,
+            args.joint,
+            args.preflight_auto,
+            args.preflight_serial,
+        )
+    )
     sys.exit(exit_code)
 
 

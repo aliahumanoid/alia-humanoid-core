@@ -81,7 +81,7 @@ def _colour_line(line: str) -> str:
     return line
 
 
-def discover() -> list[str]:
+def discover_ports(verbose_output: bool = True) -> list[str]:
     """Auto-discover Pico 2 serial ports by USB VID:PID.
 
     Returns list of port paths (may be multiple boards).
@@ -90,7 +90,8 @@ def discover() -> list[str]:
     ports = serial.tools.list_ports.comports()
     results: list[str] = []
 
-    print(f"{_BOLD}Serial discover:{_RESET} scanning USB devices...")
+    if verbose_output:
+        print(f"{_BOLD}Serial discover:{_RESET} scanning USB devices...")
 
     for info in sorted(ports, key=lambda p: p.device):
         vid_pid = (info.vid, info.pid) if info.vid and info.pid else None
@@ -99,21 +100,48 @@ def discover() -> list[str]:
 
         # Skip CAN adapters
         if vid_pid in CAN_ADAPTER_VID_PIDS:
-            print(f"  {_DIM}skip {label}  [CAN adapter]{_RESET}")
+            if verbose_output:
+                print(f"  {_DIM}skip {label}  [CAN adapter]{_RESET}")
             continue
 
         # Match Pico 2
         if vid_pid == PICO2_VID_PID:
-            print(f"  {_GREEN}found{_RESET} {_CYAN}{label}{_RESET}  {_DIM}[Pico 2]{_RESET}")
+            if verbose_output:
+                print(f"  {_GREEN}found{_RESET} {_CYAN}{label}{_RESET}  {_DIM}[Pico 2]{_RESET}")
             results.append(info.device)
             continue
 
         # Show other devices for debugging
         if "usbmodem" in info.device or "ttyACM" in info.device:
             vid_pid_text = _format_vid_pid(info.vid, info.pid)
-            print(f"  {_DIM}skip {label}  [unknown VID:PID={vid_pid_text}]{_RESET}")
+            if verbose_output:
+                print(f"  {_DIM}skip {label}  [unknown VID:PID={vid_pid_text}]{_RESET}")
 
     return results
+
+
+def discover() -> list[str]:
+    """Backward-compatible CLI discovery helper with console output."""
+    return discover_ports(verbose_output=True)
+
+
+def preflight_boot(port: str, boot_wait_s: float = BOOT_WAIT_S) -> None:
+    """Open a Pico CDC port long enough to trigger a reboot and wait for boot.
+
+    This intentionally replicates the side effect that today happens when the
+    serial monitor or webapp serial handler opens the board USB CDC port.
+    """
+    logger.info(f"Preflight serial open: {port} (wait {boot_wait_s:.1f}s for boot)")
+    with serial.Serial(port, BAUD_RATE, timeout=READ_TIMEOUT_S) as ser:
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        time.sleep(boot_wait_s)
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
 
 
 def monitor(port: str, verbose: bool = False) -> None:

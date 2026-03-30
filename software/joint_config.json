@@ -72,8 +72,8 @@
           "operating_max": 0.0,
           "encoder_channel": 1,
           "zero_angle_offset": -25.0,
-          "auto_mapping_min_angle": -20.0,
-          "auto_mapping_max_angle": 20.0,
+          "auto_mapping_min_angle": -23.0,
+          "auto_mapping_max_angle": 23.0,
           "auto_mapping_step": 10.0
         }
       ]
@@ -93,8 +93,8 @@
           "operating_max": 0.0,
           "encoder_channel": 0,
           "zero_angle_offset": -50.0,
-          "auto_mapping_min_angle": -20.0,
-          "auto_mapping_max_angle": 20.0,
+          "auto_mapping_min_angle": -48.0,
+          "auto_mapping_max_angle": 23.0,
           "auto_mapping_step": 10.0
         },
         {
@@ -106,8 +106,8 @@
           "operating_max": 0.0,
           "encoder_channel": 1,
           "zero_angle_offset": -25.0,
-          "auto_mapping_min_angle": -20.0,
-          "auto_mapping_max_angle": 20.0,
+          "auto_mapping_min_angle": -23.0,
+          "auto_mapping_max_angle": 23.0,
           "auto_mapping_step": 10.0
         }
       ]

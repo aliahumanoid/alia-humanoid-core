@@ -8,6 +8,7 @@
 #   ./run.sh --no-serial  # CAN TUI only
 #   ./run.sh --serial     # Serial monitor only
 #   ./run.sh --joint ankle_right
+#   ./run.sh --no-serial --preflight-auto --joint knee_right
 # ────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -55,6 +56,8 @@ Pass-through:
     ./run.sh --no-serial --joint ankle_right
     ./run.sh --joint knee_right --joint ankle_right
     ./run.sh --no-serial --config /path/to/controller.yaml
+    ./run.sh --no-serial --preflight-auto --joint knee_right
+    ./run.sh --no-serial --preflight-serial /dev/cu.usbmodem21301 --joint knee_right
     ./run.sh --serial --port /dev/ttyACM0
 EOF
 }
