@@ -179,6 +179,12 @@ class StartupFSM:
         self._set_state(FSMState.STARTUP, "Running startup sequence")
 
         for key, jcfg in config.joints.items():
+            state = telemetry.states.get(key)
+            if state and state.announce and state.announce.ready:
+                logger.info(f"Skipping startup for {key}: joint already ready")
+                self._set_state(FSMState.STARTUP, f"{key} already ready")
+                continue
+
             logger.info(f"Starting up {key} (id={jcfg.joint_id})")
 
             # Optional recovery step: re-enable motor power after a previous E-stop.
