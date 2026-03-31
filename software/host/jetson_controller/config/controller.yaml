@@ -11,6 +11,7 @@ can:
 
 startup:
   pretension_all: false                    # Match webapp startup path by default
+  recovery_settle_s: 30.0                 # After E-stop recovery, hold current pose before READY
 
 impedance:
   send_rate_hz: 50

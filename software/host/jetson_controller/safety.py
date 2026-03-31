@@ -19,6 +19,13 @@ class SafetyManager:
     def __init__(self):
         self._estop_sent = False
 
+    @property
+    def estop_latched(self) -> bool:
+        return self._estop_sent
+
+    def clear_estop_latch(self) -> None:
+        self._estop_sent = False
+
     async def send_estop(self, can_bus: CanBus, reason: int = 0) -> None:
         """Send emergency stop broadcast. Safe to call multiple times."""
         if not can_bus.connected:

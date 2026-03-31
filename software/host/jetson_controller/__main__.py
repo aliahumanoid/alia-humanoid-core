@@ -136,8 +136,22 @@ async def main(config_path: str = None, verbose: bool = False,
         # Re-discover then startup
         if not await new_fsm.run_discover(can_bus, config, telemetry):
             return
+        all_ready_on_entry = all(
+            (state is not None and state.announce is not None and state.announce.ready)
+            for state in (telemetry.states.get(key) for key in config.joints)
+        )
         ready = await new_fsm.run_startup(can_bus, config, telemetry, safety)
         if ready:
+            if all_ready_on_entry:
+                for key, jcfg in config.joints.items():
+                    state = telemetry.states.get(key)
+                    for dof in range(jcfg.dof_count):
+                        current_q = 0.0
+                        if state is not None and dof in state.angles_deg:
+                            current_q = state.angles_deg[dof]
+                        impedance.set_target(key, dof, current_q, dq_deg_s=0.0)
+                        impedance.set_stiffness(key, dof, jcfg.stiffness_deg)
+                logger.info("Startup resume: seeded impedance targets from current pose")
             impedance.start(can_bus)
 
     async def on_discover():

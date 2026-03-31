@@ -40,6 +40,7 @@ class FSMState(enum.Enum):
     STARTUP = "STARTUP"
     STREAM = "STREAM"
     INIT_GAINS = "INIT_GAINS"
+    RECOVERY_SETTLE = "RECOVERY_SETTLE"
     HOME = "HOME"
     READY = "READY"
     ERROR = "ERROR"
@@ -100,18 +101,99 @@ class StartupFSM:
         Expects joints to be already discovered.
         """
         try:
+            all_ready_on_entry = self._all_joints_ready(config, telemetry)
+            recovering_after_estop = all_ready_on_entry and safety.estop_latched
             await self._startup(can_bus, config, telemetry)
+
+            # After a host-side E-stop the firmware keeps announcing ready=True,
+            # but motor-moving commands stay rejected until PRETENSION(_ALL)
+            # re-enables motor power. Recover only in that specific path.
+            if recovering_after_estop:
+                await self._recover_ready_joints_after_estop(can_bus, config)
+
             await self._stream(can_bus, config, telemetry)
             await self._init_gains(can_bus, config, telemetry, safety)
+
+            if recovering_after_estop and config.startup_recovery_settle_s > 0.0:
+                await self._settle_current_pose(
+                    can_bus,
+                    config,
+                    telemetry,
+                    duration_s=config.startup_recovery_settle_s,
+                )
+
+            # Post-E-stop / reconnect case: all joints are already in HOLD and
+            # announce ready=True. Re-homing here just drives them back to the
+            # configured home pose, which is not what the user expects from a
+            # "resume" startup. Keep the current pose and let the host re-seed
+            # the impedance targets from live telemetry before restarting the loop.
+            if all_ready_on_entry:
+                self._set_state(FSMState.READY, "All joints already ready; resuming current pose")
+                safety.clear_estop_latch()
+                return True
+
             await self._home(can_bus, config, telemetry)
 
             self._set_state(FSMState.READY, "All joints at home position")
+            safety.clear_estop_latch()
             return True
 
         except StartupError as e:
             self._set_state(FSMState.ERROR, str(e))
             logger.error(f"Startup failed: {e}")
             return False
+
+    @staticmethod
+    def _all_joints_ready(config: ControllerConfig, telemetry: TelemetryManager) -> bool:
+        for key in config.joints:
+            state = telemetry.states.get(key)
+            if state is None or state.announce is None or not state.announce.ready:
+                return False
+        return True
+
+    async def _recover_ready_joints_after_estop(self, can_bus: CanBus,
+                                                config: ControllerConfig) -> None:
+        self._set_state(FSMState.STARTUP, "Recovering motor power after E-stop")
+        for key, jcfg in config.joints.items():
+            arb_id, data = encode_pretension_all(jcfg.joint_id)
+            await can_bus.send(arb_id, data)
+            logger.info(f"Recovery PRETENSION_ALL sent for {key}")
+            await asyncio.sleep(0.10)
+        await asyncio.sleep(0.20)
+
+    async def _settle_current_pose(self, can_bus: CanBus, config: ControllerConfig,
+                                   telemetry: TelemetryManager,
+                                   duration_s: float) -> None:
+        self._set_state(
+            FSMState.RECOVERY_SETTLE,
+            f"Holding current pose for {duration_s:.0f}s after E-stop recovery",
+        )
+
+        hold_targets: dict[str, dict[int, float]] = {}
+        for key, jcfg in config.joints.items():
+            hold_targets[key] = {}
+            state = telemetry.states.get(key)
+            for dof in range(jcfg.dof_count):
+                q_hold = 0.0
+                if state is not None and dof in state.angles_deg:
+                    q_hold = state.angles_deg[dof]
+                hold_targets[key][dof] = q_hold
+
+        deadline = time.monotonic() + duration_s
+        period = 1.0 / config.send_rate_hz
+        while time.monotonic() < deadline:
+            for key, jcfg in config.joints.items():
+                for dof, q_hold in hold_targets[key].items():
+                    arb_id, data = encode_set_impedance_frame0(
+                        jcfg.joint_id,
+                        dof,
+                        q_deg=q_hold,
+                        dq_deg_s=0.0,
+                        stiffness_deg=jcfg.stiffness_deg,
+                        has_more=False,
+                    )
+                    await can_bus.send(arb_id, data)
+            await asyncio.sleep(period)
 
     # ------------------------------------------------------------------
     # State implementations

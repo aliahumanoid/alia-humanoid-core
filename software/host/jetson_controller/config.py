@@ -52,6 +52,7 @@ class ControllerConfig:
     can_channel: str
     can_bitrate: int
     startup_pretension_all: bool
+    startup_recovery_settle_s: float
     send_rate_hz: int
     watchdog_ms: int
     homing_speed_deg_s: float
@@ -263,6 +264,7 @@ def load_config(yaml_path: Optional[str] = None,
         can_channel=can_channel,
         can_bitrate=can_cfg.get("bitrate", 1000000),
         startup_pretension_all=bool(cfg.get("startup", {}).get("pretension_all", False)),
+        startup_recovery_settle_s=float(cfg.get("startup", {}).get("recovery_settle_s", 30.0)),
         send_rate_hz=imp_cfg.get("send_rate_hz", 50),
         watchdog_ms=imp_cfg.get("watchdog_ms", 2000),
         homing_speed_deg_s=homing_cfg.get("speed_deg_s", 5.0),
