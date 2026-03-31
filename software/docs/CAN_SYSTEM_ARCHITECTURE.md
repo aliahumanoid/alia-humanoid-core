@@ -1,14 +1,20 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 2.2
-**Date:** 2026-03-15
-**Status:** Design Specification (Indicative)
+**Document Version:** 2.3
+**Date:** 2026-03-31
+**Status:** Design Specification (v1.0 host↔controller freeze subset added)
 **Authors:** Alia Robotics Team
+
+**Changelog v2.3 (D034):**
+- **Protocol v1.0 freeze subset added**: documents the bench-validated host↔controller baseline for `KNEE_RIGHT` and `ANKLE_RIGHT`
+- **Startup / recovery policy frozen**: nominal startup, already-ready resume, and same-session post-`E-stop` recovery are now specified explicitly
+- **Production telemetry contract clarified**: separates required motion telemetry from optional diagnostics
+- **Regression checklist added**: defines the current acceptance bench for the frozen path
 
 **Changelog v2.2 (D033):**
 - **Waypoint infrastructure removed**: CAN IDs 0x005, 0x01B, 0x01C, 0x380-0x39F removed from firmware
 - **Waypoint buffer deleted**: No more 2000-waypoint buffer per DOF
-- **Movement control**: Now exclusively via SET_IMPEDANCE (0x01D/0x01E) at 200 Hz
+- **Movement control**: Now exclusively via SET_IMPEDANCE (0x01D/0x01E)
 - **Sections 4.2.5, 4.2.6, 4.2.7, 5, 6 marked as REMOVED** (retained as historical reference)
 
 **Changelog v2.1:**
@@ -53,7 +59,7 @@ This document describes the complete CAN-based communication architecture for th
 - **Multi-Bus Architecture**: Dedicated CAN bus per joint controller (point-to-point, no bus sharing)
 - **Dual CAN per Joint**: Host CAN (commands/telemetry) + Motor CAN (torque/status) — electrically isolated
 - **Protocol**: CAN 2.0 @ 1 Mbps (upgradeable to CAN FD)
-- **Control Frequency**: 500 Hz (motor PID), 200 Hz (SET_IMPEDANCE)
+- **Control Frequency**: 500 Hz (motor PID), `SET_IMPEDANCE` sender cadence frozen at 50 Hz for the current validated Jetson bench path
 - **Latency**: < 1 ms single frame transit
 - **Hardware Platform**: Nvidia Jetson direct CAN + 4x CAN Expansion Boards (8ch each)
 - **Timing**: Rolling segment generation on firmware — immune to sender-side jitter
@@ -669,6 +675,158 @@ Each SPI bus on the Jetson serves one 8-channel expansion board. The Jetson send
 | SPI3 | Board #4 | 6-8 (Arm R) | 600-800 | ~0.4-0.5 ms |
 
 **Note**: SPI time per frame ~ 60 us (8 bytes @ 10 MHz + MCP2515 overhead). All within 10 ms cycle budget at 100 Hz. This load is Host CAN only — Motor CAN traffic is local to each Pico and never traverses the expansion board.
+
+### 4.5 Protocol v1.0 Freeze (Current Bench Baseline)
+
+This section freezes the **current host↔controller contract** that has been
+validated on the bench with:
+
+- `KNEE_RIGHT` single-controller
+- `ANKLE_RIGHT` single-controller
+- `KNEE_RIGHT + ANKLE_RIGHT` on Jetson
+- nominal startup / home / nudge
+- automatic exercise runner
+- post-`E-stop` recovery **within the same Jetson process**
+
+This is the protocol subset that should remain stable while `L3.5` is open and
+the `HIP` hybrid refactor is developed.
+
+#### 4.5.1 Included Scope
+
+Included in this freeze:
+- discovery via `JOINT_ANNOUNCE (0x4A0+joint)`
+- startup via `STARTUP_SEQUENCE (0x009)` and `STARTUP_STATUS (0x490+joint)`
+- streaming motion via `SET_IMPEDANCE (0x01D)` and `IMPEDANCE_CTRL (0x01E)`
+- encoder stream via `0x003` / `0x410`
+- runtime feedback via `JOINT_STATE (0x4F0+joint)`
+- probe telemetry via `RPROBE_RESULT (0x500+joint)`
+- same-session post-`E-stop` recovery using `PRETENSION_ALL (0x00D)`
+
+Explicitly **not** included in this freeze:
+- recovery after restarting the Jetson process post-`E-stop`
+- `HIP` hybrid topology / direct-drive semantics
+- provisioning via CAN
+- new capability frames or `JOINT_ANNOUNCE` extensions
+- tightening watchdog values beyond the current bench-proven settings
+
+#### 4.5.2 Frozen Sender Policy
+
+These values are frozen as the **current validated Jetson baseline**, not as the
+final forever values for the full robot.
+
+| Path | `SET_IMPEDANCE` cadence | Watchdog | Intent |
+|------|--------------------------|----------|--------|
+| Jetson nominal bench path | 50 Hz | 2000 ms | Current validated multi-controller baseline |
+| Jetson arrived-DOF keepalive | 5 Hz max (`min(200 ms, watchdog/4)`) | same as above | Keep already-arrived DOFs alive without chatty resends |
+| Webapp commissioning/debug | **Not part of this freeze** | commissioning-specific | Useful for tuning, but not the frozen production-like contract |
+
+Rationale:
+- the current validated Jetson path uses `impedance.send_rate_hz = 50` and `watchdog_ms = 2000`
+- these values are known-good on `knee + ankle`
+- higher cadence and tighter watchdogs remain possible, but are **not** frozen by `L3.5`
+
+#### 4.5.3 Frozen Startup / Resume State Machine
+
+The host-visible state machine is frozen as:
+
+`DISCOVER -> STARTUP -> HOME -> READY`
+
+with the following special cases:
+
+1. **Nominal startup**
+   - discover required joints
+   - send `STARTUP_SEQUENCE`
+   - wait for `STARTUP_STATUS`
+   - configure impedance watchdog
+   - home to configured home pose
+   - enter `READY`
+
+2. **Joint already ready**
+   - do **not** re-run firmware startup on joints that already announce `ready=true`
+
+3. **All selected joints already ready**
+   - skip firmware startup
+   - skip homing
+   - seed impedance targets from the current pose
+   - resume directly into `READY`
+
+4. **Post-`E-stop` recovery in the same Jetson process**
+   - only if the host knows it sent the `E-stop`
+   - send `PRETENSION_ALL` to re-enable motor power
+   - keep current pose
+   - wait `RECOVERY_SETTLE` (`30 s` in the current validated config)
+   - then transition to `READY`
+
+5. **Mixed ready / not-ready case**
+   - skip startup on joints already ready
+   - run startup only on joints still not ready
+
+#### 4.5.4 Production Telemetry Contract
+
+The following controller→host frames are part of the frozen motion contract:
+
+| Frame | Required | Role |
+|-------|----------|------|
+| `0x4A0+joint` `JOINT_ANNOUNCE` | Yes | discovery, `ready` bit, firmware version, topology summary |
+| `0x490+joint` `STARTUP_STATUS` | Yes | startup begin / per-DOF ready / complete / fail |
+| `0x410` encoder stream | Yes when enabled | position stream for host monitoring |
+| `0x4F0+joint` `JOINT_STATE` | Yes | runtime motion feedback (`valid`, `holding`, watchdog warning) |
+| `0x500+joint` `RPROBE_RESULT` | Optional but frozen | tendon diagnostics / history / analysis |
+| `0x4D0+joint` `DIAG_HOLD` | Optional debug path | not required for nominal motion control |
+
+Interpretation rules frozen here:
+- `ready=true` means the controller considers its startup/init complete
+- `holding=true` in `JOINT_STATE` means there is no active local rolling segment for that DOF
+- `watchdog_warning=true` means the host stream is still armed but is approaching timeout
+- `ema_settled` in `DIAG_HOLD` is a debug/diagnostic qualifier, not a movement-state flag
+
+#### 4.5.5 Error Handling Policy
+
+The host behavior is frozen as follows:
+
+- if a required joint is discovered but never emits `STARTUP_STATUS` completion within timeout:
+  - raise startup error
+  - do not continue to `HOME`
+- if a joint is already `ready=true`, the host must not force a redundant startup sequence
+- unsupported command paths on the controller must fail explicitly and be logged
+- `JOINT_STATE` and encoder stream are observability paths; motion control must not depend on them being lossless at all times
+
+#### 4.5.6 Regression Checklist for the Frozen Path
+
+Any protocol or host change that claims to preserve the frozen baseline should
+continue to pass this bench checklist:
+
+1. [run_knee_right_can_only.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_knee_right_can_only.sh)
+   - startup succeeds
+   - home succeeds
+   - manual nudge works
+
+2. [run_ankle_right_can_only.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_ankle_right_can_only.sh)
+   - startup succeeds
+   - both DOFs nudge correctly
+
+3. [run_knee_right_ankle_right_can_only.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_knee_right_ankle_right_can_only.sh)
+   - both joints discovered
+   - startup succeeds for both
+   - manual nudge works on all DOFs
+
+4. [run_knee_right_ankle_right_exercise.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_knee_right_ankle_right_exercise.sh)
+   - centering succeeds
+   - full run completes
+   - no automatic `EMERGENCY_STOP` on exit unless explicitly requested
+
+5. Post-`E-stop` same-session recovery
+   - `E-stop`
+   - press `S`
+   - verify `PRETENSION_ALL -> RECOVERY_SETTLE -> READY`
+   - nudge works again from current pose
+
+The benchmark is considered clean if the validated run stays at:
+- `INVALID CAN READ = 0`
+- `missed 0xA1 = 0`
+- `RESYNC = 0`
+- `JOINT LIMIT VIOLATED = 0`
+- `PROFILING OVER BUDGET = 0`
 
 ---
 
