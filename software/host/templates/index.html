@@ -596,7 +596,7 @@
                             </div>
                             <p class="text-xs text-gray-500 mt-2">
                                 <i class="fas fa-info-circle mr-1"></i>
-                                Startup runs recalc_offset for all DOFs and enters HOLDING mode. Enable auto-start to run automatically on power-up.
+                                Startup runs tendon recalculation on tendon-driven DOFs, validates direct-drive references, and enters HOLDING mode. Enable auto-start to run automatically on power-up.
                             </p>
                         </div>
 
@@ -688,7 +688,7 @@
                             </div>
                             <p class="text-xs text-gray-500 mt-2">
                                 <i class="fas fa-info-circle mr-1"></i>
-                                Startup runs recalc_offset for all DOFs and enters HOLDING mode. Enable auto-start to run automatically on power-up.
+                                Startup runs tendon recalculation on tendon-driven DOFs, validates direct-drive references, and enters HOLDING mode. Enable auto-start to run automatically on power-up.
                             </p>
                         </div>
 
@@ -799,7 +799,7 @@
                             </div>
                             <p class="text-xs text-gray-500 mt-2">
                                 <i class="fas fa-info-circle mr-1"></i>
-                                Startup runs recalc_offset for all DOFs and enters HOLDING mode. Enable auto-start to run automatically on power-up.
+                                Startup runs tendon recalculation on tendon-driven DOFs, validates direct-drive references, and enters HOLDING mode. Enable auto-start to run automatically on power-up.
                             </p>
                         </div>
 
@@ -830,17 +830,19 @@
                             </div>
                             <!-- Encoder values display -->
                             <div id="hipEncoderValues" class="text-sm text-gray-600 font-mono">
-                                <div class="grid grid-cols-2 gap-4">
+                                <div class="grid grid-cols-3 gap-4">
                                     <div>DOF 0 (Flexion-Extension): <span id="hipEncoderDof0"
                                             class="font-bold text-blue-600">-- °</span></div>
                                     <div>DOF 1 (Abduction-Adduction): <span id="hipEncoderDof1"
                                             class="font-bold text-green-600">-- °</span></div>
+                                    <div>DOF 2 (Axial-Roll): <span id="hipEncoderDof2"
+                                            class="font-bold text-cyan-600">-- °</span></div>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Separate temporal charts for each DOF -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
                                 <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 0 - Flexion-Extension</h4>
                                 <div style="height: 300px;">
@@ -860,11 +862,22 @@
                                 <button onclick="resetTemporalChart(hipDof1Chart, 'hip_dof1')"
                                     class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
                                     <i class="fas fa-redo mr-1"></i>Reset Chart
-                            </button>
+                                </button>
                                 <div id="hipDof1Buttons" class="mt-2 space-y-2"></div>
                         </div>
+                            <div>
+                                <h4 class="text-sm font-medium text-gray-700 mb-2">DOF 2 - Axial-Roll</h4>
+                                <div style="height: 300px;">
+                                    <canvas id="hipDof2Chart"></canvas>
+                                </div>
+                                <button onclick="resetTemporalChart(hipDof2Chart, 'hip_dof2')"
+                                    class="mt-2 w-full text-xs bg-gray-400 hover:bg-gray-500 text-white py-1 px-2 rounded">
+                                    <i class="fas fa-redo mr-1"></i>Reset Chart
+                                </button>
+                                <div id="hipDof2Buttons" class="mt-2 space-y-2"></div>
                         </div>
                         </div>
+                    </div>
                     </div>
 
                     <!-- PID Parameters -->
@@ -1156,7 +1169,7 @@
 
                         <!-- DOF 2 tab contents -->
                         <div id="pidTabDof2" class="pid-tab" style="display: none;">
-                            <h3 class="text-lg font-semibold mb-2">DOF 2 - Motor Agonist (1)</h3>
+                            <h3 id="pidDof2InnerTitle" class="text-lg font-semibold mb-2">DOF 2 - Motor Agonist (1)</h3>
                             <div class="grid grid-cols-2 gap-4 mb-4">
                                 <div>
                                     <label for="agonistPidDof2Kp"
@@ -1183,45 +1196,50 @@
                                         class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
                                 </div>
                             </div>
-                            <button onclick="updatePidForDofMotor(2, 1)"
+                            <button id="updatePidDof2InnerBtn" onclick="updatePidForDofMotor(2, 1)"
                                 class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded mb-4">
                                 <i class="fas fa-save mr-2"></i>Update Agonist PID
                             </button>
 
-                            <h3 class="text-lg font-semibold mb-2">DOF 2 - Motor Antagonist (2)</h3>
-                            <div class="grid grid-cols-2 gap-4 mb-4">
-                                <div>
-                                    <label for="antagonistPidDof2Kp"
-                                        class="block text-sm font-medium text-gray-700">Kp:</label>
-                                    <input id="antagonistPidDof2Kp" type="number" placeholder="Loading..." step="0.001"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                            <div id="pidDof2AntagonistBlock">
+                                <h3 class="text-lg font-semibold mb-2">DOF 2 - Motor Antagonist (2)</h3>
+                                <div class="grid grid-cols-2 gap-4 mb-4">
+                                    <div>
+                                        <label for="antagonistPidDof2Kp"
+                                            class="block text-sm font-medium text-gray-700">Kp:</label>
+                                        <input id="antagonistPidDof2Kp" type="number" placeholder="Loading..." step="0.001"
+                                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                    </div>
+                                    <div>
+                                        <label for="antagonistPidDof2Ki"
+                                            class="block text-sm font-medium text-gray-700">Ki:</label>
+                                        <input id="antagonistPidDof2Ki" type="number" placeholder="Loading..." step="0.0001"
+                                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                    </div>
+                                    <div>
+                                        <label for="antagonistPidDof2Kd"
+                                            class="block text-sm font-medium text-gray-700">Kd:</label>
+                                        <input id="antagonistPidDof2Kd" type="number" placeholder="Loading..." step="0.0001"
+                                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                    </div>
+                                    <div>
+                                        <label for="antagonistPidDof2Tau"
+                                            class="block text-sm font-medium text-gray-700">Tau:</label>
+                                        <input id="antagonistPidDof2Tau" type="number" placeholder="Loading..." step="0.001"
+                                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
+                                    </div>
                                 </div>
-                                <div>
-                                    <label for="antagonistPidDof2Ki"
-                                        class="block text-sm font-medium text-gray-700">Ki:</label>
-                                    <input id="antagonistPidDof2Ki" type="number" placeholder="Loading..." step="0.0001"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                </div>
-                                <div>
-                                    <label for="antagonistPidDof2Kd"
-                                        class="block text-sm font-medium text-gray-700">Kd:</label>
-                                    <input id="antagonistPidDof2Kd" type="number" placeholder="Loading..." step="0.0001"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                </div>
-                                <div>
-                                    <label for="antagonistPidDof2Tau"
-                                        class="block text-sm font-medium text-gray-700">Tau:</label>
-                                    <input id="antagonistPidDof2Tau" type="number" placeholder="Loading..." step="0.001"
-                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
-                                </div>
+                                <button onclick="updatePidForDofMotor(2, 2)"
+                                    class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
+                                    <i class="fas fa-save mr-2"></i>Update Antagonist PID
+                                </button>
                             </div>
-                            <button onclick="updatePidForDofMotor(2, 2)"
-                                class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded">
-                                <i class="fas fa-save mr-2"></i>Update Antagonist PID
-                            </button>
 
                             <div class="mt-6 border-t pt-4">
-                                <h3 class="text-lg font-semibold mb-3">DOF 2 - Outer Loop Cascade</h3>
+                                <h3 id="pidDof2OuterTitle" class="text-lg font-semibold mb-3">DOF 2 - Outer Loop Cascade</h3>
+                                <div id="pidDof2DirectNote" class="mb-3 p-2 bg-cyan-50 border border-cyan-200 rounded text-xs text-cyan-800" style="display: none;">
+                                    DOF 2 is direct-drive. Tendon-only semantics do not apply here.
+                                </div>
                                 <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-4">
                                     <div>
                                         <label for="outerPidDof2Kp"
@@ -1242,7 +1260,7 @@
                                             class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
                                     </div>
                                     <div>
-                                        <label for="outerPidDof2Stiffness"
+                                        <label id="outerPidDof2StiffnessLabel" for="outerPidDof2Stiffness"
                                             class="block text-sm font-medium text-gray-700">Stiffness (°):</label>
                                         <input id="outerPidDof2Stiffness" type="number" placeholder="Loading..." step="0.1"
                                             class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50">
@@ -1845,17 +1863,18 @@
                                 <div class="font-semibold text-gray-700 mb-1">Grid to explore:</div>
                                 <div id="autoMappingGridDetails" class="text-gray-600 space-y-0.5"></div>
                             </div>
+                            <div id="autoMappingUnsupportedNote" class="mb-3 p-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800" style="display: none;"></div>
                             
                             <div class="grid grid-cols-3 gap-2">
-                                <button onclick="sendCommand('start-auto-mapping')"
+                                <button id="autoMappingStartBtn" onclick="sendCommand('start-auto-mapping')"
                                     class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded text-sm">
                                     <i class="fas fa-robot mr-1"></i>Start
                                 </button>
-                                <button onclick="sendCommand('stop-auto-mapping')"
+                                <button id="autoMappingStopBtn" onclick="sendCommand('stop-auto-mapping')"
                                     class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-3 rounded text-sm">
                                     <i class="fas fa-stop mr-1"></i>Stop
                                 </button>
-                                <button onclick="sendCommand('recalc-safe-limits')"
+                                <button id="autoMappingRecalcBtn" onclick="sendCommand('recalc-safe-limits')"
                                     class="bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-3 rounded text-sm"
                                     title="Recalculate safe movement limits without re-running auto-mapping">
                                     <i class="fas fa-sync-alt mr-1"></i>Recalc Limits

@@ -1,7 +1,7 @@
 // Global variables
 let kneeChart;
 let ankleDof0Chart, ankleDof1Chart; // Charts for ankle
-let hipDof0Chart, hipDof1Chart;     // Charts for hip
+let hipDof0Chart, hipDof1Chart, hipDof2Chart;     // Charts for hip
 let mappingChart;
 let mappingCharts = {}; // Object to manage multiple charts for DOFs
 let pidErrorChart, pidTorqueChart;  // PID diagnostics charts
@@ -93,6 +93,16 @@ const JOINT_DOF_UI_CONFIG = {
             setZeroSubtitle: 'Abduction-Adduction',
             setZeroClasses: 'bg-orange-500 hover:bg-orange-600',
             recalcLabel: 'Recalc Offset DOF 1'
+        },
+        {
+            dof: '2',
+            containerId: 'hipDof2Buttons',
+            pretensionLabel: 'Pretension DOF 2',
+            releaseLabel: 'Release DOF 2',
+            setZeroLabel: 'Set Reference DOF 2',
+            setZeroSubtitle: 'Axial Roll',
+            setZeroClasses: 'bg-cyan-500 hover:bg-cyan-600',
+            recalcLabel: 'Recalc Offset DOF 2'
         }
     ]
 };
@@ -123,6 +133,46 @@ const MAX_SAFE_VELOCITY_DEG_S = 150;
 // Updated by encoder_stream listener, checked by getCurrentEncoderAngle()
 const ENCODER_FRESHNESS_MS = 2000;  // Max age before data is considered stale
 const encoderLastUpdateMs = {};
+
+function formatDofName(name, fallback = '') {
+    if (!name) return fallback;
+    return name.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join('-');
+}
+
+function getJointConfigEntry(jointName) {
+    if (!jointName || !jointConfigData?.joints) return null;
+    return jointConfigData.joints[jointName.toLowerCase()] || null;
+}
+
+function getDofConfigForJoint(jointName, dofIndex) {
+    const jointEntry = getJointConfigEntry(jointName);
+    if (!jointEntry?.dofs) return null;
+    return jointEntry.dofs.find(dof => dof.index === Number(dofIndex)) || null;
+}
+
+function isDirectDriveDof(jointName, dofIndex) {
+    return getDofConfigForJoint(jointName, dofIndex)?.drive_type === 'direct_drive';
+}
+
+function jointHasUnsupportedAutoMapping(jointName) {
+    const jointEntry = getJointConfigEntry(jointName);
+    if (!jointEntry?.dofs?.length) return false;
+    return jointEntry.dofs.some(dof => dof.supports_auto_mapping === false);
+}
+
+function getPidFieldPrefixForMotor(jointName, dof, motorType) {
+    if (motorType === 3 && isDirectDriveDof(jointName, dof)) {
+        return 'agonist';
+    }
+    return motorType === 1 ? 'agonist' : 'antagonist';
+}
+
+function getPidMotorDisplayName(jointName, dof, motorType) {
+    if (motorType === 3 && isDirectDriveDof(jointName, dof)) {
+        return 'Direct';
+    }
+    return motorType === 1 ? 'Agonist' : 'Antagonist';
+}
 
 /**
  * Get current encoder angle from LIVE streaming data only.
@@ -322,12 +372,15 @@ $(document).ready(function() {
             $('#kdInput').val(data.kd);
         } else if ('joint' in data && 'dof' in data && 'motor_type' in data && 'values' in data) {
             // New format
+            const selectedJoint = $("#jointSelect").val();
+            if (data.joint && data.joint !== selectedJoint) {
+                return;
+            }
             const dof = data.dof;
             const motorType = data.motor_type;
             const values = data.values;
             
-            // Get ID prefix based on motor type (1=agonist, 2=antagonist)
-            const prefix = motorType === 1 ? 'agonist' : 'antagonist';
+            const prefix = getPidFieldPrefixForMotor(selectedJoint, dof, motorType);
             
             // Update corresponding PID input fields
             $(`#${prefix}PidDof${dof}Kp`).val(values.kp);
@@ -781,6 +834,8 @@ $(document).ready(function() {
         
         // Regenerate DOF control buttons with new joint's zero_angle_offset
         renderDofControlButtons();
+        updateAutoMappingUiForJoint(joint);
+        updatePidUiForJoint(joint);
         
         // Stop encoder test if active (to avoid conflicts)
         if (encoderTestActive) {
@@ -1056,12 +1111,15 @@ function initializeCharts() {
     const ankleDof1Ctx = document.getElementById('ankleDof1Chart').getContext('2d');
     ankleDof1Chart = new Chart(ankleDof1Ctx, timeChartConfig('DOF 1', 'rgba(255, 99, 132, 1)'));
     
-    // Hip Charts DOF 0 and DOF 1
+    // Hip Charts DOF 0, DOF 1 and DOF 2
     const hipDof0Ctx = document.getElementById('hipDof0Chart').getContext('2d');
     hipDof0Chart = new Chart(hipDof0Ctx, timeChartConfig('DOF 0', 'rgba(75, 192, 192, 1)'));
     
     const hipDof1Ctx = document.getElementById('hipDof1Chart').getContext('2d');
     hipDof1Chart = new Chart(hipDof1Ctx, timeChartConfig('DOF 1', 'rgba(153, 102, 255, 1)'));
+
+    const hipDof2Ctx = document.getElementById('hipDof2Chart').getContext('2d');
+    hipDof2Chart = new Chart(hipDof2Ctx, timeChartConfig('DOF 2', 'rgba(34, 197, 94, 1)'));
 
     // PID Diagnostics Charts
     const pidErrorCtx = document.getElementById('pidErrorChart');
@@ -1943,8 +2001,13 @@ function sendPretension(dofValue) {
         appendStatusMessage('⚠️ Error: DOF not specified for pretension command');
         return;
     }
-    sendCommand('pretension', { dof: dofValue });
     const joint = $("#jointSelect").val();
+    const dofInfo = getDofConfigForJoint(joint, dofValue);
+    if (dofInfo && dofInfo.supports_pretension === false) {
+        appendStatusMessage(`⚠️ Pretension is not supported on ${joint} DOF ${dofValue} (${formatDofName(dofInfo.name, `DOF ${dofValue}`)}).`);
+        return;
+    }
+    sendCommand('pretension', { dof: dofValue });
     appendStatusMessage(`Pretension sent for ${joint} DOF ${dofValue}`);
 }
 
@@ -1958,8 +2021,13 @@ function sendRelease(dofValue) {
         appendStatusMessage('⚠️ Error: DOF not specified for release command');
         return;
     }
-    sendCommand('release', { dof: dofValue });
     const joint = $("#jointSelect").val();
+    const dofInfo = getDofConfigForJoint(joint, dofValue);
+    if (dofInfo && dofInfo.supports_pretension === false) {
+        appendStatusMessage(`⚠️ Release is not supported on ${joint} DOF ${dofValue} (${formatDofName(dofInfo.name, `DOF ${dofValue}`)}).`);
+        return;
+    }
+    sendCommand('release', { dof: dofValue });
     appendStatusMessage(`Release sent for ${joint} DOF ${dofValue}`);
 }
 
@@ -2722,6 +2790,75 @@ function getJointDofLabels(joint) {
         return `DOF${idx}`;
     });
 }
+
+function updateAutoMappingUiForJoint(jointName) {
+    const startBtn = $("#autoMappingStartBtn");
+    const stopBtn = $("#autoMappingStopBtn");
+    const recalcBtn = $("#autoMappingRecalcBtn");
+    const unsupportedNote = $("#autoMappingUnsupportedNote");
+    if (!startBtn.length || !recalcBtn.length || !unsupportedNote.length) return;
+
+    const disableJointWideMapping = jointHasUnsupportedAutoMapping(jointName);
+    const jointEntry = getJointConfigEntry(jointName);
+
+    if (disableJointWideMapping && jointEntry) {
+        const unsupportedDofs = jointEntry.dofs
+            .filter(dof => dof.supports_auto_mapping === false)
+            .map(dof => `DOF ${dof.index} (${formatDofName(dof.name, `DOF ${dof.index}`)})`)
+            .join(', ');
+        startBtn.prop('disabled', true).addClass('opacity-50 cursor-not-allowed');
+        recalcBtn.prop('disabled', true).addClass('opacity-50 cursor-not-allowed');
+        stopBtn.prop('disabled', false);
+        unsupportedNote
+            .text(`Automatic mapping is disabled for ${jointName} because ${unsupportedDofs} is direct-drive and the current mapper is tendon-only.`)
+            .show();
+        $("#autoMappingGridInfo").hide();
+        $("#autoMappingGridDetails").empty();
+    } else {
+        startBtn.prop('disabled', false).removeClass('opacity-50 cursor-not-allowed');
+        recalcBtn.prop('disabled', false).removeClass('opacity-50 cursor-not-allowed');
+        unsupportedNote.hide().text('');
+    }
+}
+
+function updatePidUiForJoint(jointName) {
+    const jointEntry = getJointConfigEntry(jointName);
+    const dof2 = jointEntry?.dofs?.find(dof => dof.index === 2) || null;
+    const dof2IsDirect = dof2?.drive_type === 'direct_drive';
+
+    const innerTitle = $("#pidDof2InnerTitle");
+    const innerButton = $("#updatePidDof2InnerBtn");
+    const antagonistBlock = $("#pidDof2AntagonistBlock");
+    const outerTitle = $("#pidDof2OuterTitle");
+    const stiffnessLabel = $("#outerPidDof2StiffnessLabel");
+    const stiffnessInput = $("#outerPidDof2Stiffness").closest('div');
+    const directNote = $("#pidDof2DirectNote");
+
+    if (!innerTitle.length) return;
+
+    if (dof2IsDirect) {
+        innerTitle.text('DOF 2 - Direct Motor');
+        innerButton
+            .attr('onclick', 'updatePidForDofMotor(2, 3)')
+            .html('<i class="fas fa-save mr-2"></i>Update Direct PID');
+        antagonistBlock.hide();
+        outerTitle.text('DOF 2 - Position Loop');
+        stiffnessLabel.text('Stiffness (unused):');
+        stiffnessInput.addClass('opacity-60');
+        directNote.show();
+    } else {
+        innerTitle.text('DOF 2 - Motor Agonist (1)');
+        innerButton
+            .attr('onclick', 'updatePidForDofMotor(2, 1)')
+            .html('<i class="fas fa-save mr-2"></i>Update Agonist PID');
+        antagonistBlock.show();
+        outerTitle.text('DOF 2 - Outer Loop Cascade');
+        stiffnessLabel.text('Stiffness (°):');
+        stiffnessInput.removeClass('opacity-60');
+        directNote.hide();
+    }
+}
+
 function startCanStatusPolling() {
     if (canStatusPollHandle) {
         clearInterval(canStatusPollHandle);
@@ -3049,8 +3186,9 @@ function renderMappingChart(mappingData) {
 
 // Function to update PID for selected DOF and motor type
 function updatePidForDofMotor(dof, motorType) {
-    const prefix = motorType === 1 ? 'agonist' : 'antagonist';
-    const motorName = motorType === 1 ? 'Agonist' : 'Antagonist';
+    const joint = $("#jointSelect").val();
+    const prefix = getPidFieldPrefixForMotor(joint, dof, motorType);
+    const motorName = getPidMotorDisplayName(joint, dof, motorType);
     
     const kp = $(`#${prefix}PidDof${dof}Kp`).val();
     const ki = $(`#${prefix}PidDof${dof}Ki`).val();
@@ -3399,6 +3537,16 @@ function generateSmartQuickButtons() {
     // Container for buttons
     const container = $('#smartQuickButtons');
     if (!container.length) return;
+
+    if (getJointDofCount(joint) > 2) {
+        container.empty().append(
+            '<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">' +
+            'Quick position buttons are currently limited to 1-2 DOF joints. ' +
+            'Use per-DOF controls for HIP bring-up until the 3-DOF hybrid UI is implemented.' +
+            '</div>'
+        );
+        return;
+    }
     
     // If no mapping data available, use default values
     if (!automaticMappingData || !automaticMappingData.present_dofs) {
@@ -4112,6 +4260,16 @@ function generateSmartImpedanceButtons() {
         return;
     }
 
+    if (getJointDofCount(joint) > 2) {
+        container.empty().append(
+            '<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">' +
+            'Smart impedance quick buttons are currently limited to 1-2 DOF joints. ' +
+            'Use per-DOF controls for HIP bring-up until the 3-DOF hybrid UI is implemented.' +
+            '</div>'
+        );
+        return;
+    }
+
     const isAutoSendEnabled = $("#autoImpedanceSendToggle").is(":checked");
 
     // If no mapping data, use defaults
@@ -4689,6 +4847,16 @@ function getButtonColorClass(type) {
  */
 function generateDefaultQuickButtons(jointType, container) {
     container.empty();
+    const joint = $("#jointSelect").val();
+    if (joint && getJointDofCount(joint) > 2) {
+        container.append(
+            '<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">' +
+            'Quick position buttons are currently limited to 1-2 DOF joints. ' +
+            'Use per-DOF controls for HIP bring-up until the 3-DOF hybrid UI is implemented.' +
+            '</div>'
+        );
+        return;
+    }
     
     // Check automatic execution toggle state
     const isAutoExecuteEnabled = $("#autoExecuteToggle").is(":checked");
@@ -4913,9 +5081,11 @@ function sendSetZeroForDof(dof) {
     const dofValue = String(dof);
     const joint = $("#jointSelect").val();
     
-    // Get zero_angle_offset from backend data
-    const dofInfo = jointPhysicalLimits?.[joint]?.dofs?.find(d => d.index === parseInt(dof));
+    // Get zero_angle_offset from config data
+    const dofInfo = getDofConfigForJoint(joint, dof);
     const zeroAngleOffset = dofInfo?.zero_angle_offset ?? 0;
+    const isDirectDrive = dofInfo?.drive_type === 'direct_drive';
+    const operationName = isDirectDrive ? 'Set Reference' : 'Set Zero';
     
     // Build confirmation message with explicit angle reference
     let angleMessage = '';
@@ -4927,82 +5097,99 @@ function sendSetZeroForDof(dof) {
     
     // Safety confirmation to prevent accidental clicks
     const confirmed = confirm(
-        `Set ZERO for ${joint} DOF ${dofValue}?\n\n${angleMessage}`
+        `${operationName} for ${joint} DOF ${dofValue}?\n\n${angleMessage}`
     );
     
     if (!confirmed) {
-        appendStatusMessage(`Set Zero cancelled for ${joint} DOF ${dofValue}`);
+        appendStatusMessage(`${operationName} cancelled for ${joint} DOF ${dofValue}`);
         return;
     }
     
     sendCommand('set-zero', { dof: dofValue });
-    appendStatusMessage(`Set Zero sent for ${joint} DOF ${dofValue}`);
+    appendStatusMessage(`${operationName} sent for ${joint} DOF ${dofValue}`);
 }
 
 function sendRecalcOffsetForDof(dof) {
     const dofValue = String(dof);
-    sendCommand('recalc-offset', { dof: dofValue });
     const joint = $("#jointSelect").val();
+    const dofInfo = getDofConfigForJoint(joint, dof);
+    if (dofInfo && dofInfo.supports_recalc_offset === false) {
+        appendStatusMessage(`⚠️ Recalc Offset is not supported on ${joint} DOF ${dofValue} (${formatDofName(dofInfo.name, `DOF ${dofValue}`)}).`);
+        return;
+    }
+    sendCommand('recalc-offset', { dof: dofValue });
     appendStatusMessage(`Recalc Offset sent for ${joint} DOF ${dofValue}`);
 }
 
 function renderDofControlButtons() {
+    const currentJoint = $("#jointSelect").val();
+    const currentJointType = currentJoint?.split('_')[0];
+
     Object.entries(JOINT_DOF_UI_CONFIG).forEach(([jointType, dofConfigs]) => {
         dofConfigs.forEach(dofConfig => {
             const container = $(`#${dofConfig.containerId}`);
             if (!container.length) return;
 
             container.empty();
+            if (jointType !== currentJointType) return;
 
-            // Pretension button (green)
-            const pretensionButton = $(`
-                <button class="w-full text-sm text-white py-2 px-3 rounded font-medium bg-green-500 hover:bg-green-600">
-                    <i class="fas fa-compress-arrows-alt mr-2"></i>${dofConfig.pretensionLabel}
-                </button>
-            `);
-            pretensionButton.on('click', () => sendPretension(dofConfig.dof));
+            const dofInfo = getDofConfigForJoint(currentJoint, dofConfig.dof);
+            if (!dofInfo) return;
 
-            // Release button (red)
-            const releaseButton = $(`
-                <button class="w-full text-sm text-white py-2 px-3 rounded font-medium bg-red-500 hover:bg-red-600">
-                    <i class="fas fa-expand-arrows-alt mr-2"></i>${dofConfig.releaseLabel}
-                </button>
-            `);
-            releaseButton.on('click', () => sendRelease(dofConfig.dof));
+            const zeroAngleOffset = dofInfo.zero_angle_offset ?? 0;
+            const isDirectDrive = dofInfo.drive_type === 'direct_drive';
+            const dofLabel = formatDofName(dofInfo.name, `DOF ${dofConfig.dof}`);
+            const buttons = [];
 
-            // Get zero_angle_offset from backend data
-            const currentJoint = $("#jointSelect").val();
-            const dofInfo = jointPhysicalLimits?.[currentJoint]?.dofs?.find(d => d.index === parseInt(dofConfig.dof));
-            const zeroAngleOffset = dofInfo?.zero_angle_offset ?? 0;
-            
-            // Debug log to verify data
-            if (dofInfo) {
-                console.log(`[renderDofControlButtons] ${currentJoint} DOF ${dofConfig.dof}: zero_angle_offset=${zeroAngleOffset}°`);
-            } else {
-                console.warn(`[renderDofControlButtons] No DOF info found for ${currentJoint} DOF ${dofConfig.dof}`);
+            if (dofInfo.supports_pretension !== false) {
+                const pretensionButton = $(`
+                    <button class="w-full text-sm text-white py-2 px-3 rounded font-medium bg-green-500 hover:bg-green-600">
+                        <i class="fas fa-compress-arrows-alt mr-2"></i>${dofConfig.pretensionLabel}
+                    </button>
+                `);
+                pretensionButton.on('click', () => sendPretension(dofConfig.dof));
+                buttons.push(pretensionButton);
+
+                const releaseButton = $(`
+                    <button class="w-full text-sm text-white py-2 px-3 rounded font-medium bg-red-500 hover:bg-red-600">
+                        <i class="fas fa-expand-arrows-alt mr-2"></i>${dofConfig.releaseLabel}
+                    </button>
+                `);
+                releaseButton.on('click', () => sendRelease(dofConfig.dof));
+                buttons.push(releaseButton);
             }
-            
-            // Set Zero button (yellow/orange depending on DOF)
-            // Show the reference angle that will be set
+
             const zeroAngleText = zeroAngleOffset !== 0 ? ` (${zeroAngleOffset.toFixed(1)}°)` : '';
+            const setZeroLabel = isDirectDrive ? `Set Reference DOF ${dofConfig.dof}` : dofConfig.setZeroLabel;
+            const setZeroSubtitle = isDirectDrive ? dofLabel : dofConfig.setZeroSubtitle;
             const setZeroButton = $(`
                 <button class="w-full text-sm text-white py-2 px-3 rounded font-medium ${dofConfig.setZeroClasses}">
-                    <i class="fas fa-map-marker-alt mr-2"></i>${dofConfig.setZeroLabel}${zeroAngleText}
-                    <br><span class="text-xs opacity-80">${dofConfig.setZeroSubtitle}</span>
+                    <i class="fas fa-map-marker-alt mr-2"></i>${setZeroLabel}${zeroAngleText}
+                    <br><span class="text-xs opacity-80">${setZeroSubtitle}</span>
                 </button>
             `);
             setZeroButton.on('click', () => sendSetZeroForDof(dofConfig.dof));
+            buttons.push(setZeroButton);
 
-            // Recalc Offset button (purple)
-            const recalcButton = $(`
-                <button class="w-full text-sm text-white py-2 px-3 rounded font-medium bg-purple-500 hover:bg-purple-600">
-                    <i class="fas fa-sync-alt mr-2"></i>${dofConfig.recalcLabel}
-                </button>
-            `);
-            recalcButton.on('click', () => sendRecalcOffsetForDof(dofConfig.dof));
+            if (dofInfo.supports_recalc_offset !== false) {
+                const recalcButton = $(`
+                    <button class="w-full text-sm text-white py-2 px-3 rounded font-medium bg-purple-500 hover:bg-purple-600">
+                        <i class="fas fa-sync-alt mr-2"></i>${dofConfig.recalcLabel}
+                    </button>
+                `);
+                recalcButton.on('click', () => sendRecalcOffsetForDof(dofConfig.dof));
+                buttons.push(recalcButton);
+            }
 
-            // Append in order: Pretension → Release → Set Zero → Recalc Offset
-            container.append(pretensionButton, releaseButton, setZeroButton, recalcButton);
+            if (isDirectDrive) {
+                buttons.push($(`
+                    <div class="w-full text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded px-3 py-2">
+                        Direct-drive DOF. Tendon calibration tools are disabled here.
+                    </div>
+                `));
+            }
+
+            container.append(...buttons);
         });
     });
 }
@@ -6482,9 +6669,9 @@ function updateAnkleChartFromStream(dataPoint) {
  * Uses {x, y} format for linear x-axis (time in seconds)
  */
 function updateHipChartFromStream(dataPoint) {
-    // Hip has 2 DOFs with separate charts: hipDof0Chart, hipDof1Chart
+    // Hip has separate charts for each DOF
     // Note: These are global let variables, not window properties
-    const charts = [hipDof0Chart, hipDof1Chart];
+    const charts = [hipDof0Chart, hipDof1Chart, hipDof2Chart];
     
     // Initialize start time if not set
     if (!window.hipChartStartTime) {
@@ -6752,6 +6939,7 @@ function updateHipChartWithEncoder(data) {
     
     const dof0Position = data.dof_positions['0']; // Flessione-Estensione
     const dof1Position = data.dof_positions['1']; // Abduzione-Adduzione
+    const dof2Position = data.dof_positions['2']; // Axial Roll
     
     // Aggiorna DOF 0 se presente
     if (dof0Position !== undefined && hipDof0Chart) {
@@ -6761,6 +6949,10 @@ function updateHipChartWithEncoder(data) {
     // Aggiorna DOF 1 se presente
     if (dof1Position !== undefined && hipDof1Chart) {
         addTimePointToChart(hipDof1Chart, 'hip_dof1', dof1Position);
+    }
+
+    if (dof2Position !== undefined && hipDof2Chart) {
+        addTimePointToChart(hipDof2Chart, 'hip_dof2', dof2Position);
     }
 }
 
@@ -6797,10 +6989,14 @@ function updateEncoderTestUI(isActive, jointType) {
  * @returns {number} Number of DOFs
  */
 function getDofCountForJoint(jointType) {
+    const selectedJoint = $("#jointSelect").val();
+    if (selectedJoint && selectedJoint.startsWith(`${jointType}_`)) {
+        return getJointDofCount(selectedJoint);
+    }
     switch (jointType) {
         case 'KNEE': return 1;
         case 'ANKLE': return 2;
-        case 'HIP': return 2;
+        case 'HIP': return 3;
         default: return 1;
     }
 }
@@ -7010,6 +7206,9 @@ function fetchJointConfig() {
 
                 // Show expected mapping grid for initially selected joint
                 const initialJoint = $("#jointSelect").val();
+                renderDofControlButtons();
+                updateAutoMappingUiForJoint(initialJoint);
+                updatePidUiForJoint(initialJoint);
                 showExpectedMappingGrid(initialJoint);
             } else {
                 console.error('Failed to load joint config:', response);
@@ -7028,6 +7227,9 @@ function fetchJointConfig() {
  */
 function showExpectedMappingGrid(jointName) {
     if (!jointConfigData || !jointConfigData.joints) {
+        return;
+    }
+    if (jointHasUnsupportedAutoMapping(jointName)) {
         return;
     }
     
