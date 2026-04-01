@@ -5,7 +5,7 @@
  * This file defines the complete configuration structure for multi-DOF joints.
  * Each joint can have:
  * - Multiple degrees of freedom (DOF) - up to MAX_DOFS
- * - Multiple motors - up to MAX_MOTORS (2 motors per DOF in agonist-antagonist pairs)
+ * - Multiple motors - up to MAX_MOTORS
  * 
  * STRUCTURE HIERARCHY:
  * JointConfig (top level)
@@ -91,16 +91,28 @@ struct MotorPIDParams {
 /**
  * @brief Motor configuration for a single motor
  * 
- * Each DOF has 2 motors in agonist-antagonist configuration.
- * The agonist motor pulls in the positive direction of the DOF,
- * while the antagonist provides counter-tension.
+ * Motors can belong to:
+ * - antagonistic tendon pairs (agonist/antagonist)
+ * - direct-drive single-motor DOFs
  */
+enum DriveType : uint8_t {
+  DRIVE_ANTAGONISTIC_TENDON = 0,
+  DRIVE_DIRECT_DRIVE = 1,
+};
+
+enum MotorRole : uint8_t {
+  MOTOR_ROLE_AGONIST = 0,
+  MOTOR_ROLE_ANTAGONIST = 1,
+  MOTOR_ROLE_DIRECT = 2,
+};
+
 struct MotorConfig {
   uint8_t id;           // Motor CAN ID for communication
   uint8_t dof_index;    // Which DOF this motor contributes to (0, 1, or 2)
   char name[16];        // Human-readable name (e.g., "extensor", "flexor")
   bool invert;          // Direction inversion flag
   bool is_agonist;      // true = agonist (primary), false = antagonist
+  MotorRole role;       // Explicit role (supports direct-drive single motor)
   float max_torque;     // Maximum allowed torque (mNm)
   float reduction_gear; // Gear reduction ratio (e.g., 10.0 means 10:1)
   MotorPIDParams pid;   // Inner loop PID gains for this motor
@@ -165,6 +177,33 @@ struct ZeroMappingParams {
   bool auto_mapping_invert_direction;   // NEW: Invert logic for motor movement during mapping
 };
 
+struct DofCapabilityFlags {
+  bool supports_pretension;
+  bool supports_recalc_offset;
+  bool supports_auto_mapping;
+  bool supports_outer_impedance;
+  bool supports_slack_diag;
+  bool supports_retension_probe;
+};
+
+constexpr DofCapabilityFlags DOF_CAP_TENDON = {
+    .supports_pretension = true,
+    .supports_recalc_offset = true,
+    .supports_auto_mapping = true,
+    .supports_outer_impedance = true,
+    .supports_slack_diag = true,
+    .supports_retension_probe = true,
+};
+
+constexpr DofCapabilityFlags DOF_CAP_DIRECT_DRIVE = {
+    .supports_pretension = false,
+    .supports_recalc_offset = false,
+    .supports_auto_mapping = false,
+    .supports_outer_impedance = true,
+    .supports_slack_diag = false,
+    .supports_retension_probe = false,
+};
+
 /**
  * @brief Complete configuration for a single degree of freedom
  * 
@@ -175,6 +214,9 @@ struct DofConfig {
   char name[32];                  // Human-readable DOF name (e.g., "flexion_extension")
   uint8_t encoder_channel;        // Encoder channel index for this DOF
   bool encoder_invert;            // true = invert encoder readings
+  DriveType drive_type;           // Tendon pair vs direct-drive single motor
+  uint8_t motor_count;            // Number of motors assigned to this DOF
+  DofCapabilityFlags capabilities; // Feature support for host/firmware branching
   MotionParams motion;            // Motion and trajectory parameters
   AngleLimits limits;             // Safety angle limits
   ZeroMappingParams zero_mapping; // Calibration and zero-finding parameters

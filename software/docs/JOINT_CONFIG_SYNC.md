@@ -2,12 +2,12 @@
 
 ## Problem Statement
 
-Previously, joint definitions (IDs, DOF counts, angle limits) were **duplicated** between:
+Previously, joint definitions (IDs, DOF counts, angle limits, topology) were **duplicated** between:
 - **Firmware**: `firmware/joint_controller/include/config_presets.h` (C++)
 - **Host**: `host/config.py` (Python)
 
 This duplication caused **critical issues**:
-1. ❌ **Configuration drift**: Firmware and host had different angle limits
+1. ❌ **Configuration drift**: Firmware and host had different limits and topology
 2. ❌ **Missing DOF**: Host thought HIP had 2 DOF, but firmware has 3 DOF
 3. ❌ **Safety risks**: Incorrect limits could violate mechanical constraints
 4. ❌ **Manual sync burden**: Every firmware change required manual host update
@@ -134,19 +134,22 @@ For each joint, the following data is synchronized:
 - **Joint ID** (e.g., `KNEE_LEFT` = 1)
 - **Joint name** (e.g., "Left Knee")
 - **DOF count** (e.g., 1, 2, or 3)
-- **Motor count** (e.g., 2, 4, or 6)
+- **Joint motor count** (e.g., 2, 4, or 5)
 - **For each DOF**:
   - DOF index (0, 1, 2)
   - DOF name (e.g., "flexion-extension")
+  - Drive type (`antagonistic_tendon` or `direct_drive`)
+  - DOF motor count
   - Min angle (degrees)
   - Max angle (degrees)
   - Encoder channel
+  - Capability flags (`supports_pretension`, `supports_recalc_offset`, `supports_auto_mapping`, `supports_outer_impedance`, `supports_slack_diag`, `supports_retension_probe`)
 
 ## Example: Joint Config JSON
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.1",
   "source": "config_presets.h",
   "joints": {
     "knee_left": {
@@ -157,37 +160,69 @@ For each joint, the following data is synchronized:
         {
           "index": 0,
           "name": "flexion_extension",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -30.0,
           "max_angle": 90.0,
-          "encoder_channel": 0
+          "encoder_channel": 0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         }
       ]
     },
     "hip_left": {
       "id": 5,
       "dof_count": 3,
-      "motor_count": 6,
+      "motor_count": 5,
       "dofs": [
         {
           "index": 0,
           "name": "flexion_extension",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -30.0,
           "max_angle": 120.0,
-          "encoder_channel": 0
+          "encoder_channel": 0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 1,
           "name": "abduction_adduction",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -45.0,
           "max_angle": 45.0,
-          "encoder_channel": 1
+          "encoder_channel": 1,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 2,
-          "name": "internal_external_rotation",
+          "name": "axial_roll",
+          "drive_type": "direct_drive",
+          "motor_count": 1,
           "min_angle": -40.0,
           "max_angle": 40.0,
-          "encoder_channel": 2
+          "encoder_channel": 2,
+          "supports_pretension": false,
+          "supports_recalc_offset": false,
+          "supports_auto_mapping": false,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": false,
+          "supports_retension_probe": false
         }
       ]
     }
@@ -243,6 +278,7 @@ MAX_ANGLES = {
 | `KNEE_LEFT_CONFIG` | `"knee_left"` | `JOINTS['KNEE_LEFT']` |
 | `.name = "knee_left"` | `"config_name": "knee_left"` | `'name': "Left Knee"` |
 | `.dofs[0].name = "flexion_extension"` | `"name": "flexion_extension"` | `'name': "flexion-extension"` |
+| `.dofs[2].drive_type = DRIVE_DIRECT_DRIVE` | `"drive_type": "direct_drive"` | topology-aware UI/Jetson behavior |
 
 **Transformations**:
 - Firmware → JSON: As-is (snake_case)

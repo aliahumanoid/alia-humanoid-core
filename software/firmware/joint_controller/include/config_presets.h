@@ -12,7 +12,8 @@
  * STRUCTURE:
  * - Each joint has a Left and Right configuration (mirrored)
  * - Supported joints: KNEE (1 DOF), ANKLE (2 DOF), HIP (3 DOF)
- * - Each DOF has 2 motors in agonist-antagonist configuration
+ * - KNEE/ANKLE DOFs are antagonistic tendon pairs
+ * - HIP is a hybrid joint: DOF0/DOF1 tendon pairs, DOF2 axial roll direct-drive
  * 
  * HOW TO ADD A NEW PRESET:
  * 1. Define a new JointConfig constant following the existing structure
@@ -44,6 +45,9 @@ const JointConfig KNEE_LEFT_CONFIG = {
         {{.name            = "flexion_extension",
           .encoder_channel = 0,
           .encoder_invert  = false,
+          .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+          .motor_count     = 2,
+          .capabilities    = DOF_CAP_TENDON,
           .motion =
               {
                   .path_steps      = 1000,
@@ -79,7 +83,8 @@ const JointConfig KNEE_LEFT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "extensor",
                 .invert         = false,
-                .is_agonist     = true, // Agonist motor for extension
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for extension
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -91,7 +96,8 @@ const JointConfig KNEE_LEFT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "flexor",
                 .invert         = false,
-                .is_agonist     = false, // Antagonist motor for flexion
+                .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for flexion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -109,6 +115,9 @@ const JointConfig KNEE_RIGHT_CONFIG = {
         {{.name            = "flexion_extension",
           .encoder_channel = 0,
           .encoder_invert  = false,
+          .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+          .motor_count     = 2,
+          .capabilities    = DOF_CAP_TENDON,
           .motion =
               {
                   .path_steps      = 1000,
@@ -142,7 +151,8 @@ const JointConfig KNEE_RIGHT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "extensor",
                 .invert         = true,
-                .is_agonist     = false, // Antagonist motor for extension
+                .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for extension
                 .max_torque     = 500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -154,7 +164,8 @@ const JointConfig KNEE_RIGHT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "flexor",
                 .invert         = true,
-                .is_agonist     = true, // Agonist motor for flexion
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for flexion
                 .max_torque     = 500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -174,6 +185,9 @@ const JointConfig ANKLE_LEFT_CONFIG = {
           .name            = "plantar_dorsal",
           .encoder_channel = 0,
           .encoder_invert  = false,
+          .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+          .motor_count     = 2,
+          .capabilities    = DOF_CAP_TENDON,
           .motion =
               {
                   .path_steps      = 1000,
@@ -206,6 +220,9 @@ const JointConfig ANKLE_LEFT_CONFIG = {
           .name            = "inversion_eversion",
           .encoder_channel = 1,
           .encoder_invert  = false,
+          .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+          .motor_count     = 2,
+          .capabilities    = DOF_CAP_TENDON,
           .motion =
               {
                   .path_steps      = 1000,
@@ -242,7 +259,8 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "plantar_flexion",
                 .invert         = false,
-                .is_agonist     = true, // Agonist motor for plantar flexion
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for plantar flexion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -254,7 +272,8 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "dorsal_flexion",
                 .invert         = false,
-                .is_agonist     = false, // Antagonist motor for dorsal flexion
+                .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for dorsal flexion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -266,7 +285,8 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                 .dof_index      = 1,
                 .name           = "inversion",
                 .invert         = false,
-                .is_agonist     = true, // Agonist motor for inversion
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for inversion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -278,7 +298,8 @@ const JointConfig ANKLE_LEFT_CONFIG = {
                 .dof_index      = 1,
                 .name           = "eversion",
                 .invert         = false,
-                .is_agonist     = false, // Antagonist motor for eversion
+                .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for eversion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -297,6 +318,9 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
           .name            = "plantar_dorsal",
           .encoder_channel = 0,
           .encoder_invert  = true,
+          .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+          .motor_count     = 2,
+          .capabilities    = DOF_CAP_TENDON,
           .motion =
               {
                   .path_steps      = 1000,
@@ -329,6 +353,9 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
           .name            = "inversion_eversion",
           .encoder_channel = 1,
           .encoder_invert  = true,
+          .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+          .motor_count     = 2,
+          .capabilities    = DOF_CAP_TENDON,
           .motion =
               {
                   .path_steps      = 1000,
@@ -365,7 +392,8 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "plantar_flexion",
                 .invert         = false,
-                .is_agonist     = true, // Agonist motor for plantar flexion
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for plantar flexion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -377,7 +405,8 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .dof_index      = 0,
                 .name           = "dorsal_flexion",
                 .invert         = false,
-                .is_agonist     = false, // Antagonist motor for dorsal flexion
+                .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for dorsal flexion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -389,7 +418,8 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .dof_index      = 1,
                 .name           = "inversion",
                 .invert         = false,
-                .is_agonist     = true, // Agonist motor for inversion
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for inversion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -401,7 +431,8 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                 .dof_index      = 1,
                 .name           = "eversion",
                 .invert         = false,
-                .is_agonist     = false, // Antagonist motor for eversion
+                .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for eversion
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -409,17 +440,20 @@ const JointConfig ANKLE_RIGHT_CONFIG = {
                                    .kd  = PID_DEFAULT_INNER_KD,
                                    .tau = 0.005f}}}};
 
-// Configuration for left hip joint (3 DOF, 6 motors)
+// Configuration for left hip joint (3 DOF, 5 motors)
 const JointConfig HIP_LEFT_CONFIG = {
      .name        = "hip_left",
      .joint_id    = JOINT_HIP_LEFT,
      .dof_count   = 3, // 3 DOF instead of 2
-     .motor_count = 6, // 6 motors total (2 motors for each DOF)
+     .motor_count = 5, // Hybrid topology: 2 + 2 + 1 motors
      .dofs =
          {{// DOF 0: flexion-extension
            .name            = "flexion_extension",
            .encoder_channel = 0,
            .encoder_invert  = false,
+           .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+           .motor_count     = 2,
+           .capabilities    = DOF_CAP_TENDON,
            .motion =
                {
                    .path_steps      = 1000,
@@ -453,6 +487,9 @@ const JointConfig HIP_LEFT_CONFIG = {
            .name            = "abduction_adduction",
            .encoder_channel = 1,
            .encoder_invert  = false,
+           .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+           .motor_count     = 2,
+           .capabilities    = DOF_CAP_TENDON,
            .motion =
                {
                    .path_steps      = 800,
@@ -483,10 +520,13 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .auto_mapping_invert_direction = false // Default behavior
 
                }},
-          {// DOF 2: internal-external rotation
-           .name            = "internal_external_rotation",
+          {// DOF 2: axial roll (direct-drive)
+           .name            = "axial_roll",
            .encoder_channel = 2,
            .encoder_invert  = false,
+           .drive_type      = DRIVE_DIRECT_DRIVE,
+           .motor_count     = 1,
+           .capabilities    = DOF_CAP_DIRECT_DRIVE,
            .motion =
                {
                    .path_steps      = 600,
@@ -502,13 +542,13 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .recalc_offset_torque           = 65,
                    .recalc_offset_duration         = 380,
                    .zero_angle_offset              = 0.0f,
-                   .pretension_torque              = -35.0f,
-                   .pretension_timeout             = 100,
-                   .tensioning_torque              = 30.0f,
-                   .auto_mapping_step              = 1.0f,
-                   .auto_mapping_settle_time       = 200,
-                   .auto_mapping_speed             = -1.0f,
-                   .auto_mapping_resistance_torque = -20.0f,
+                   .pretension_torque              = 0.0f,
+                   .pretension_timeout             = 0,
+                   .tensioning_torque              = 0.0f,
+                   .auto_mapping_step              = 0.0f,
+                   .auto_mapping_settle_time       = 0,
+                   .auto_mapping_speed             = 0.0f,
+                   .auto_mapping_resistance_torque = 0.0f,
                    .position_threshold             = 0.5f,
                    .auto_mapping_min_angle =
                        -35.0f, // More conservative range for auto-mapping (vs -40.0f limit)
@@ -523,7 +563,8 @@ const JointConfig HIP_LEFT_CONFIG = {
                  .dof_index      = 0,
                  .name           = "flexion",
                  .invert         = false,
-                 .is_agonist     = true, // Agonist motor for flexion
+                 .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for flexion
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -535,7 +576,8 @@ const JointConfig HIP_LEFT_CONFIG = {
                  .dof_index      = 0,
                  .name           = "extension",
                  .invert         = false,
-                 .is_agonist     = false, // Antagonist motor for extension
+                 .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for extension
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -548,7 +590,8 @@ const JointConfig HIP_LEFT_CONFIG = {
                  .dof_index      = 1,
                  .name           = "abduction",
                  .invert         = false,
-                 .is_agonist     = true, // Agonist motor for abduction
+                 .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for abduction
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -560,32 +603,22 @@ const JointConfig HIP_LEFT_CONFIG = {
                  .dof_index      = 1,
                  .name           = "adduction",
                  .invert         = false,
-                 .is_agonist     = false, // Antagonist motor for adduction
+                 .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for adduction
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                     .ki  = PID_DEFAULT_INNER_KI,
                                     .kd  = PID_DEFAULT_INNER_KD,
                                     .tau = 0.005f}},
-                // DOF 2: internal‑external rotation (2 motors)
-                {                     // Motor 4: internal rotation (agonist for DOF 2)
+                // DOF 2: axial roll (direct-drive, 1 motor)
+                {                     // Motor 4: roll drive motor
                  .id             = 5, // Sequential ID: 5 for third DOF agonist
                  .dof_index      = 2,
-                 .name           = "int_rotation", // Shortened name
+                 .name           = "axial_roll",
                  .invert         = false,
-                 .is_agonist     = true, // Agonist motor for internal rotation
-                 .max_torque     = 1500.0f,
-                 .reduction_gear = 10.0f,
-                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
-                                    .ki  = PID_DEFAULT_INNER_KI,
-                                    .kd  = PID_DEFAULT_INNER_KD,
-                                    .tau = 0.005f}},
-                {                     // Motor 5: external rotation (antagonist for DOF 2)
-                 .id             = 6, // Sequential ID: 6 for third DOF antagonist
-                 .dof_index      = 2,
-                 .name           = "ext_rotation", // Shortened name
-                 .invert         = false,
-                 .is_agonist     = false, // Antagonist motor for external rotation
+                 .is_agonist     = true,
+                .role           = MOTOR_ROLE_DIRECT, // Direct-drive roll motor
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -593,17 +626,20 @@ const JointConfig HIP_LEFT_CONFIG = {
                                     .kd  = PID_DEFAULT_INNER_KD,
                                     .tau = 0.005f}}}};
 
-// Configuration for right hip joint (3 DOF, 6 motors)
+// Configuration for right hip joint (3 DOF, 5 motors)
 const JointConfig HIP_RIGHT_CONFIG = {
      .name        = "hip_right",
      .joint_id    = JOINT_HIP_RIGHT,
      .dof_count   = 3, // 3 DOF instead of 2
-     .motor_count = 6, // 6 motors total (2 motors for each DOF)
+     .motor_count = 5, // Hybrid topology: 2 + 2 + 1 motors
      .dofs =
          {{// DOF 0: flexion-extension
            .name            = "flexion_extension",
            .encoder_channel = 0,
            .encoder_invert  = false,
+           .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+           .motor_count     = 2,
+           .capabilities    = DOF_CAP_TENDON,
            .motion =
                {
                    .path_steps      = 1000,
@@ -638,6 +674,9 @@ const JointConfig HIP_RIGHT_CONFIG = {
            .name            = "abduction_adduction",
            .encoder_channel = 1,
            .encoder_invert  = false,
+           .drive_type      = DRIVE_ANTAGONISTIC_TENDON,
+           .motor_count     = 2,
+           .capabilities    = DOF_CAP_TENDON,
            .motion =
                {
                    .path_steps      = 800,
@@ -668,10 +707,13 @@ const JointConfig HIP_RIGHT_CONFIG = {
                    .auto_mapping_invert_direction = false // Default behavior
 
                }},
-          {                                       // DOF 2: internal-external rotation
-           .name            = "int_ext_rotation", // Shortened name
+          {                                       // DOF 2: axial roll (direct-drive)
+           .name            = "axial_roll",
            .encoder_channel = 2,
            .encoder_invert  = false,
+           .drive_type      = DRIVE_DIRECT_DRIVE,
+           .motor_count     = 1,
+           .capabilities    = DOF_CAP_DIRECT_DRIVE,
            .motion =
                {
                    .path_steps      = 600,
@@ -687,13 +729,13 @@ const JointConfig HIP_RIGHT_CONFIG = {
                    .recalc_offset_torque           = 65,
                    .recalc_offset_duration         = 380,
                    .zero_angle_offset              = 0.0f,
-                   .pretension_torque              = -35.0f,
-                   .pretension_timeout             = 100,
-                   .tensioning_torque              = 30.0f,
-                   .auto_mapping_step              = 1.0f,
-                   .auto_mapping_settle_time       = 200,
-                   .auto_mapping_speed             = -1.0f,
-                   .auto_mapping_resistance_torque = -20.0f,
+                   .pretension_torque              = 0.0f,
+                   .pretension_timeout             = 0,
+                   .tensioning_torque              = 0.0f,
+                   .auto_mapping_step              = 0.0f,
+                   .auto_mapping_settle_time       = 0,
+                   .auto_mapping_speed             = 0.0f,
+                   .auto_mapping_resistance_torque = 0.0f,
                    .position_threshold             = 0.5f,
                    .auto_mapping_min_angle =
                        -35.0f, // More conservative range for auto-mapping (vs -40.0f limit)
@@ -708,7 +750,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
                  .dof_index      = 0,
                  .name           = "flexion",
                  .invert         = false,
-                 .is_agonist     = true, // Agonist motor for flexion
+                 .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for flexion
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -720,7 +763,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
                  .dof_index      = 0,
                  .name           = "extension",
                  .invert         = false,
-                 .is_agonist     = false, // Antagonist motor for extension
+                 .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for extension
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -733,7 +777,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
                  .dof_index      = 1,
                  .name           = "abduction",
                  .invert         = false,
-                 .is_agonist     = true, // Agonist motor for abduction
+                 .is_agonist     = true,
+                .role           = MOTOR_ROLE_AGONIST, // Agonist motor for abduction
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
@@ -745,32 +790,22 @@ const JointConfig HIP_RIGHT_CONFIG = {
                  .dof_index      = 1,
                  .name           = "adduction",
                  .invert         = false,
-                 .is_agonist     = false, // Antagonist motor for adduction
+                 .is_agonist     = false,
+                .role           = MOTOR_ROLE_ANTAGONIST, // Antagonist motor for adduction
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,
                                     .ki  = PID_DEFAULT_INNER_KI,
                                     .kd  = PID_DEFAULT_INNER_KD,
                                     .tau = 0.005f}},
-                // DOF 2: internal‑external rotation (2 motors)
-                {                     // Motor 4: internal rotation (agonist for DOF 2)
+                // DOF 2: axial roll (direct-drive, 1 motor)
+                {                     // Motor 4: roll drive motor
                  .id             = 5, // Sequential ID: 5 for third DOF agonist
                  .dof_index      = 2,
-                 .name           = "int_rotation", // Shortened name
+                 .name           = "axial_roll",
                  .invert         = false,
-                 .is_agonist     = true, // Agonist motor for internal rotation
-                 .max_torque     = 1500.0f,
-                 .reduction_gear = 10.0f,
-                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
-                                    .ki  = PID_DEFAULT_INNER_KI,
-                                    .kd  = PID_DEFAULT_INNER_KD,
-                                    .tau = 0.005f}},
-                {                     // Motor 5: external rotation (antagonist for DOF 2)
-                 .id             = 6, // Sequential ID: 6 for third DOF antagonist
-                 .dof_index      = 2,
-                 .name           = "ext_rotation", // Shortened name
-                 .invert         = false,
-                 .is_agonist     = false, // Antagonist motor for external rotation
+                 .is_agonist     = true,
+                .role           = MOTOR_ROLE_DIRECT, // Direct-drive roll motor
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
                  .pid            = {.kp  = PID_DEFAULT_INNER_KP,

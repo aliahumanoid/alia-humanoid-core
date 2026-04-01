@@ -5,6 +5,7 @@ Extract joint configuration from firmware config_presets.h and generate JSON.
 This script parses the C++ firmware configuration file and extracts:
 - Joint IDs and names
 - DOF counts and names
+- Joint and per-DOF motor topology
 - Angle limits (min/max) for each DOF
 - Lookup table entries
 
@@ -22,6 +23,30 @@ import re
 import json
 import sys
 from pathlib import Path
+
+CAPABILITY_PRESETS = {
+    'DOF_CAP_TENDON': {
+        'supports_pretension': True,
+        'supports_recalc_offset': True,
+        'supports_auto_mapping': True,
+        'supports_outer_impedance': True,
+        'supports_slack_diag': True,
+        'supports_retension_probe': True,
+    },
+    'DOF_CAP_DIRECT_DRIVE': {
+        'supports_pretension': False,
+        'supports_recalc_offset': False,
+        'supports_auto_mapping': False,
+        'supports_outer_impedance': True,
+        'supports_slack_diag': False,
+        'supports_retension_probe': False,
+    },
+}
+
+DRIVE_TYPE_MAP = {
+    'DRIVE_ANTAGONISTIC_TENDON': 'antagonistic_tendon',
+    'DRIVE_DIRECT_DRIVE': 'direct_drive',
+}
 
 
 def parse_config_presets(file_path):
@@ -122,6 +147,17 @@ def parse_config_presets(file_path):
                 # Extract encoder channel
                 encoder_ch_match = re.search(r'\.encoder_channel\s*=\s*(\d+)', dof_block)
                 encoder_channel = int(encoder_ch_match.group(1)) if encoder_ch_match else dof_idx
+
+                drive_type_match = re.search(r'\.drive_type\s*=\s*([A-Z_]+)', dof_block)
+                drive_type_key = drive_type_match.group(1) if drive_type_match else 'DRIVE_ANTAGONISTIC_TENDON'
+                drive_type = DRIVE_TYPE_MAP.get(drive_type_key, drive_type_key.lower())
+
+                dof_motor_count_match = re.search(r'\.motor_count\s*=\s*(\d+)', dof_block)
+                dof_motor_count = int(dof_motor_count_match.group(1)) if dof_motor_count_match else 2
+
+                capabilities_match = re.search(r'\.capabilities\s*=\s*([A-Z_]+)', dof_block)
+                capabilities_key = capabilities_match.group(1) if capabilities_match else 'DOF_CAP_TENDON'
+                capabilities = CAPABILITY_PRESETS.get(capabilities_key, {})
                 
                 # Extract zero angle offset from zero_mapping section
                 zero_offset_match = re.search(r'\.zero_angle_offset\s*=\s*([-\d.]+)f?', dof_block)
@@ -140,6 +176,8 @@ def parse_config_presets(file_path):
                 dofs.append({
                     'index': dof_idx,
                     'name': dof_name,
+                    'drive_type': drive_type,
+                    'motor_count': dof_motor_count,
                     'min_angle': min_angle,
                     'max_angle': max_angle,
                     'operating_min': operating_min,  # 0 = use min_angle
@@ -148,7 +186,8 @@ def parse_config_presets(file_path):
                     'zero_angle_offset': zero_angle_offset,
                     'auto_mapping_min_angle': auto_mapping_min_angle,
                     'auto_mapping_max_angle': auto_mapping_max_angle,
-                    'auto_mapping_step': auto_mapping_step
+                    'auto_mapping_step': auto_mapping_step,
+                    **capabilities,
                 })
         
         # Create joint entry
@@ -161,7 +200,7 @@ def parse_config_presets(file_path):
         }
     
     return {
-        'version': '1.0',
+        'version': '1.1',
         'source': 'config_presets.h',
         'joints': joints
     }
@@ -206,7 +245,7 @@ def main():
         for dof in joint_data['dofs']:
             op_min = dof.get('operating_min', 0.0)
             op_max = dof.get('operating_max', 0.0)
-            limits_str = f"physical: {dof['min_angle']:.1f}° to {dof['max_angle']:.1f}°"
+            limits_str = f"{dof['drive_type']}, {dof['motor_count']} motor(s), physical: {dof['min_angle']:.1f}° to {dof['max_angle']:.1f}°"
             if op_min != 0.0 or op_max != 0.0:
                 limits_str += f", operating: {op_min:.1f}° to {op_max:.1f}°"
             print(f"      DOF {dof['index']}: {dof['name']} ({limits_str})")
@@ -215,4 +254,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

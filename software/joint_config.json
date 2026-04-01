@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "source": "config_presets.h",
   "joints": {
     "knee_left": {
@@ -11,6 +11,8 @@
         {
           "index": 0,
           "name": "flexion_extension",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -2.0,
           "max_angle": 112.0,
           "operating_min": 0.0,
@@ -19,7 +21,13 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": 5.0,
           "auto_mapping_max_angle": 95.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 1.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         }
       ]
     },
@@ -32,6 +40,8 @@
         {
           "index": 0,
           "name": "flexion_extension",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -2.0,
           "max_angle": 112.0,
           "operating_min": 0.0,
@@ -40,7 +50,13 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": 5.0,
           "auto_mapping_max_angle": 95.0,
-          "auto_mapping_step": 10.0
+          "auto_mapping_step": 10.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         }
       ]
     },
@@ -53,6 +69,8 @@
         {
           "index": 0,
           "name": "plantar_dorsal",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -50.0,
           "max_angle": 25.0,
           "operating_min": 0.0,
@@ -61,11 +79,19 @@
           "zero_angle_offset": -50.0,
           "auto_mapping_min_angle": -20.0,
           "auto_mapping_max_angle": 20.0,
-          "auto_mapping_step": 10.0
+          "auto_mapping_step": 10.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 1,
           "name": "inversion_eversion",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -25.0,
           "max_angle": 25.0,
           "operating_min": 0.0,
@@ -74,7 +100,13 @@
           "zero_angle_offset": -25.0,
           "auto_mapping_min_angle": -23.0,
           "auto_mapping_max_angle": 23.0,
-          "auto_mapping_step": 10.0
+          "auto_mapping_step": 10.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         }
       ]
     },
@@ -87,6 +119,8 @@
         {
           "index": 0,
           "name": "plantar_dorsal",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -50.0,
           "max_angle": 25.0,
           "operating_min": 0.0,
@@ -95,11 +129,19 @@
           "zero_angle_offset": -50.0,
           "auto_mapping_min_angle": -48.0,
           "auto_mapping_max_angle": 23.0,
-          "auto_mapping_step": 10.0
+          "auto_mapping_step": 10.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 1,
           "name": "inversion_eversion",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -25.0,
           "max_angle": 25.0,
           "operating_min": 0.0,
@@ -108,7 +150,13 @@
           "zero_angle_offset": -25.0,
           "auto_mapping_min_angle": -23.0,
           "auto_mapping_max_angle": 23.0,
-          "auto_mapping_step": 10.0
+          "auto_mapping_step": 10.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         }
       ]
     },
@@ -116,11 +164,13 @@
       "id": 5,
       "config_name": "hip_left",
       "dof_count": 3,
-      "motor_count": 6,
+      "motor_count": 5,
       "dofs": [
         {
           "index": 0,
           "name": "flexion_extension",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -30.0,
           "max_angle": 120.0,
           "operating_min": 0.0,
@@ -129,11 +179,19 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": -25.0,
           "auto_mapping_max_angle": 115.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 1.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 1,
           "name": "abduction_adduction",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -45.0,
           "max_angle": 45.0,
           "operating_min": 0.0,
@@ -142,11 +200,19 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": -40.0,
           "auto_mapping_max_angle": 40.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 1.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 2,
-          "name": "internal_external_rotation",
+          "name": "axial_roll",
+          "drive_type": "direct_drive",
+          "motor_count": 1,
           "min_angle": -40.0,
           "max_angle": 40.0,
           "operating_min": 0.0,
@@ -155,7 +221,13 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": -35.0,
           "auto_mapping_max_angle": 35.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 0.0,
+          "supports_pretension": false,
+          "supports_recalc_offset": false,
+          "supports_auto_mapping": false,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": false,
+          "supports_retension_probe": false
         }
       ]
     },
@@ -163,11 +235,13 @@
       "id": 6,
       "config_name": "hip_right",
       "dof_count": 3,
-      "motor_count": 6,
+      "motor_count": 5,
       "dofs": [
         {
           "index": 0,
           "name": "flexion_extension",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -30.0,
           "max_angle": 120.0,
           "operating_min": 0.0,
@@ -176,11 +250,19 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": -25.0,
           "auto_mapping_max_angle": 85.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 1.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 1,
           "name": "abduction_adduction",
+          "drive_type": "antagonistic_tendon",
+          "motor_count": 2,
           "min_angle": -45.0,
           "max_angle": 45.0,
           "operating_min": 0.0,
@@ -189,11 +271,19 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": -40.0,
           "auto_mapping_max_angle": 40.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 1.0,
+          "supports_pretension": true,
+          "supports_recalc_offset": true,
+          "supports_auto_mapping": true,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": true,
+          "supports_retension_probe": true
         },
         {
           "index": 2,
-          "name": "int_ext_rotation",
+          "name": "axial_roll",
+          "drive_type": "direct_drive",
+          "motor_count": 1,
           "min_angle": -40.0,
           "max_angle": 40.0,
           "operating_min": 0.0,
@@ -202,7 +292,13 @@
           "zero_angle_offset": 0.0,
           "auto_mapping_min_angle": -35.0,
           "auto_mapping_max_angle": 35.0,
-          "auto_mapping_step": 1.0
+          "auto_mapping_step": 0.0,
+          "supports_pretension": false,
+          "supports_recalc_offset": false,
+          "supports_auto_mapping": false,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": false,
+          "supports_retension_probe": false
         }
       ]
     }
