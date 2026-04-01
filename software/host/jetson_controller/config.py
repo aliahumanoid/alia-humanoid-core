@@ -37,12 +37,21 @@ class JointControlConfig:
     joint_id: int                          # from JSON
     dof_count: int                         # from JSON
     dof_names: list[str]                   # from JSON
+    dof_drive_types: dict[int, str]        # from JSON, per DOF
+    dof_motor_counts: dict[int, int]       # from JSON, per DOF
+    dof_capabilities: dict[int, dict[str, bool]]  # from JSON, per DOF
     min_angles: dict[int, float]           # from JSON, per DOF
     max_angles: dict[int, float]           # from JSON, per DOF
     gains_outer: GainSet                   # from YAML
     gains_inner: GainSet                   # from YAML
     stiffness_deg: float                   # from YAML
     home_position_deg: dict[int, float]    # from YAML
+
+    def drive_type_for(self, dof: int) -> str:
+        return self.dof_drive_types.get(dof, "antagonistic_tendon")
+
+    def capabilities_for(self, dof: int) -> dict[str, bool]:
+        return self.dof_capabilities.get(dof, {})
 
 
 @dataclass
@@ -212,6 +221,22 @@ def load_config(yaml_path: Optional[str] = None,
         min_angles = {dof["index"]: dof["min_angle"] for dof in jdata["dofs"]}
         max_angles = {dof["index"]: dof["max_angle"] for dof in jdata["dofs"]}
         dof_names = [dof["name"] for dof in jdata["dofs"]]
+        dof_drive_types = {dof["index"]: dof.get("drive_type", "antagonistic_tendon") for dof in jdata["dofs"]}
+        dof_motor_counts = {dof["index"]: int(dof.get("motor_count", 0)) for dof in jdata["dofs"]}
+        dof_capabilities = {}
+        capability_keys = (
+            "supports_pretension",
+            "supports_recalc_offset",
+            "supports_auto_mapping",
+            "supports_outer_impedance",
+            "supports_slack_diag",
+            "supports_retension_probe",
+        )
+        for dof in jdata["dofs"]:
+            idx = dof["index"]
+            dof_capabilities[idx] = {
+                key: bool(dof.get(key, False)) for key in capability_keys
+            }
 
         # Parse gains from YAML
         outer = joint_yaml["gains"]["outer"]
@@ -241,6 +266,9 @@ def load_config(yaml_path: Optional[str] = None,
             joint_id=jdata["id"],
             dof_count=jdata["dof_count"],
             dof_names=dof_names,
+            dof_drive_types=dof_drive_types,
+            dof_motor_counts=dof_motor_counts,
+            dof_capabilities=dof_capabilities,
             min_angles=min_angles,
             max_angles=max_angles,
             gains_outer=GainSet(kp=outer["kp"], ki=outer["ki"], kd=outer["kd"]),

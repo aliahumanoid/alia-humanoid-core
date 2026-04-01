@@ -83,7 +83,7 @@
 
 **Stato:** ⏸ Blocked by hybrid-model refactor
 
-**Obiettivo:** Validare il caso più pesante per singolo controller: 3 DOF, 6 motori.
+**Obiettivo:** Validare il caso più pesante per singolo controller: 3 DOF, 5 motori.
 
 **Piattaforma:** Webapp
 
@@ -96,22 +96,22 @@
 
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi
-- 6 motori sullo stesso bus CAN motore (300 frame/s torque loop)
+- 5 motori sullo stesso bus CAN motore (~250 frame/s torque loop)
 - Outer PID per 3 DOF concorrenti
 - DIAG_HOLD per 3 DOF — massimo carico telemetria per controller
-- Timing del control loop: 3 DOF × 2 motori × (send + receive) = tempo ciclo critico
+- Timing del control loop: 2 + 2 + 1 motori attivi con un mix tendon/direct-drive = tempo ciclo critico
 
 **Rischi specifici:**
-- Control loop non completa entro 2ms con 6 motori
-- Bus CAN motore saturo: 6 motori × 50Hz × 2 (cmd+resp) = 600 frame/s
-- Pretension/recalc su 3 DOF sequenziali: tempo totale, stabilità
-- Heat: 6 motori attivi in hold generano calore — thermal throttling?
+- Control loop non completa entro 2ms con 5 motori (2 tendon pair + 1 direct-drive)
+- Bus CAN motore saturo: 5 motori × 50Hz × 2 (cmd+resp) = 500 frame/s
+- Pretension/recalc su 2 DOF tendon + startup direct-drive del roll: tempo totale, stabilità
+- Heat: 5 motori attivi in hold generano calore — thermal throttling?
 
 **Exit criteria:**
 - [ ] Init + homing di tutti e 3 DOF senza errori
 - [ ] Hold stabile su 3 DOF contemporaneamente per 120s
 - [ ] Control loop rate stabile a 500Hz (misura jitter con log)
-- [ ] Nessun CAN error/overrun su bus motore con 6 motori
+- [ ] Nessun CAN error/overrun su bus motore con 5 motori
 - [ ] DIAG_HOLD per tutti e 3 DOF: segnali coerenti
 - [ ] Temperatura motori stabile dopo 5 min di hold (no thermal runaway)
 - [ ] Move un DOF mentre gli altri 2 sono in hold — nessun disturbo

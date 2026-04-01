@@ -1265,11 +1265,20 @@ bool JointController::applySavedOffsetsToMotors(uint8_t dof_index) {
 
 // Verify if the system is ready for movement
 bool JointController::isSystemReadyForMovement() {
-  // Verify that linear equations are available for all DOFs
+  // Verify that each DOF completed the startup path appropriate to its drive topology.
   for (int dof = 0; dof < config.dof_count; dof++) {
+    if (config.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+      // Direct-drive DOFs do not use tendon equations, but they still require
+      // an explicit startup-time reference validation before movement is enabled.
+      if (!motor_offsets_calibrated[dof]) {
+        return false;
+      }
+      continue;
+    }
+
     if (!linear_equations[dof].calculated || !linear_equations[dof].agonist.valid ||
         !linear_equations[dof].antagonist.valid || !linear_equations[dof].limits_valid) {
-      return false; // Missing linear equations
+      return false; // Missing tendon equations
     }
 
     // Verify that offsets have been calibrated for this DOF
@@ -1279,6 +1288,13 @@ bool JointController::isSystemReadyForMovement() {
   }
 
   return true; // System fully ready
+}
+
+void JointController::setMovementReadyForDof(uint8_t dof_index, bool ready) {
+  if (dof_index >= config.dof_count) {
+    return;
+  }
+  motor_offsets_calibrated[dof_index] = ready;
 }
 
 // Get mapping data for a DOF

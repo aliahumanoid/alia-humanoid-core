@@ -683,6 +683,15 @@ public:
   bool isSystemReadyForMovement();
 
   /**
+   * @brief Mark a DOF as movement-ready after startup validation.
+   *
+   * Used by non-tendon startup paths (e.g. direct-drive DOFs) that do not
+   * populate tendon offset/equation state but still require an explicit
+   * startup-time validation before movement is enabled.
+   */
+  void setMovementReadyForDof(uint8_t dof_index, bool ready);
+
+  /**
    * @brief Get the number of SPI spikes detected for a DOF
    * @param dof_index DOF index
    * @return Number of spikes detected since boot

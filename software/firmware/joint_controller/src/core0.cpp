@@ -433,6 +433,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
 
       LOG_INFO("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
                ") direct-drive startup: using persisted absolute encoder reference from flash");
+      active_joint_controller->setMovementReadyForDof(dof, true);
       last_successful_dof = dof;
       SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
       pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
