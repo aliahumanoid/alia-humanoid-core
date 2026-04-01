@@ -96,6 +96,18 @@ class TUI:
     def _selected_joint_cfg(self):
         return self._config.joints[self._selected_joint_key()]
 
+    @staticmethod
+    def _format_dof_name(name: str | None, fallback: str) -> str:
+        if not name:
+            return fallback
+        return name.replace("_", "-")
+
+    def _selected_dof_label(self) -> str:
+        jcfg = self._selected_joint_cfg()
+        if self._selected_dof < len(jcfg.dof_names):
+            return self._format_dof_name(jcfg.dof_names[self._selected_dof], f"DOF{self._selected_dof}")
+        return f"DOF{self._selected_dof}"
+
     def _clamp_selected_dof(self) -> None:
         jcfg = self._selected_joint_cfg()
         if self._selected_dof >= jcfg.dof_count:
@@ -173,7 +185,7 @@ class TUI:
         if self._joint_keys:
             header.append("  Sel: ", style="dim")
             header.append(
-                f"{self._selected_joint_key()} DOF{self._selected_dof}",
+                f"{self._selected_joint_key()} DOF{self._selected_dof} ({self._selected_dof_label()})",
                 style="bold yellow",
             )
 
@@ -182,10 +194,10 @@ class TUI:
                       pad_edge=False, expand=True)
         table.add_column("Joint", style="bold", width=14)
         table.add_column("Online", width=6, justify="center")
-        table.add_column("DOF0", width=10, justify="right")
-        table.add_column("Target0", width=10, justify="right")
-        table.add_column("DOF1", width=10, justify="right")
-        table.add_column("Target1", width=10, justify="right")
+        max_dofs = max((jcfg.dof_count for jcfg in self._config.joints.values()), default=1)
+        for dof in range(max_dofs):
+            table.add_column(f"DOF{dof}", width=10, justify="right")
+            table.add_column(f"Target{dof}", width=10, justify="right")
         table.add_column("RX", width=6, justify="right")
 
         for key, jcfg in self._config.joints.items():
@@ -196,7 +208,7 @@ class TUI:
             online = "[green]YES[/]" if state.is_online else "[red]NO[/]"
 
             cells = []
-            for d in range(2):  # Show 2 DOFs max for compactness
+            for d in range(max_dofs):
                 if d < jcfg.dof_count:
                     # Current angle
                     val = state.angles_deg.get(d)
@@ -216,7 +228,7 @@ class TUI:
 
             joint_label = f"> {key}" if key == self._selected_joint_key() else f"  {key}"
             rendered_cells: list[str] = []
-            for d in range(2):
+            for d in range(max_dofs):
                 current_cell = cells[d * 2]
                 target_cell = cells[d * 2 + 1]
                 if key == self._selected_joint_key() and d == self._selected_dof and d < jcfg.dof_count:
@@ -224,12 +236,7 @@ class TUI:
                     target_cell = f"[bold yellow]{target_cell}[/]"
                 rendered_cells.extend([current_cell, target_cell])
 
-            table.add_row(
-                joint_label, online,
-                rendered_cells[0], rendered_cells[1],
-                rendered_cells[2], rendered_cells[3],
-                str(state.rx_count),
-            )
+            table.add_row(joint_label, online, *rendered_cells, str(state.rx_count))
 
         # CAN stats
         can_info = Text()
@@ -376,7 +383,7 @@ class TUI:
 
         elif key in ('+', '='):  # = is unshifted + on most keyboards
             self._status_line = (
-                f"Nudge {self._selected_joint_key()} DOF{self._selected_dof} "
+                f"Nudge {self._selected_joint_key()} DOF{self._selected_dof} ({self._selected_dof_label()}) "
                 f"+{self.STEP_DEG}\u00b0"
             )
             if self._cb_nudge:
@@ -388,7 +395,7 @@ class TUI:
 
         elif key == '-':
             self._status_line = (
-                f"Nudge {self._selected_joint_key()} DOF{self._selected_dof} "
+                f"Nudge {self._selected_joint_key()} DOF{self._selected_dof} ({self._selected_dof_label()}) "
                 f"-{self.STEP_DEG}\u00b0"
             )
             if self._cb_nudge:
@@ -401,13 +408,13 @@ class TUI:
         elif k == 'j':
             self._cycle_joint()
             self._status_line = (
-                f"Selected {self._selected_joint_key()} DOF{self._selected_dof}"
+                f"Selected {self._selected_joint_key()} DOF{self._selected_dof} ({self._selected_dof_label()})"
             )
 
         elif key == '\t':
             self._cycle_dof()
             self._status_line = (
-                f"Selected {self._selected_joint_key()} DOF{self._selected_dof}"
+                f"Selected {self._selected_joint_key()} DOF{self._selected_dof} ({self._selected_dof_label()})"
             )
 
         elif k == 'l':

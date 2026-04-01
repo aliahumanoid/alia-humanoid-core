@@ -174,9 +174,18 @@ async def main(config_path: str = None, verbose: bool = False,
         new_q = target.q_deg + delta_deg
         min_a = jcfg.min_angles.get(dof, -180.0)
         max_a = jcfg.max_angles.get(dof, 180.0)
-        new_q = max(min_a, min(max_a, new_q))
-        impedance.set_target(joint_key, dof, new_q, config.nudge_speed_deg_s)
-        logger.info(f"Nudge {joint_key} DOF{dof} {delta_deg:+.1f}° -> {new_q:+.1f}°")
+        clamped_q = max(min_a, min(max_a, new_q))
+        impedance.set_target(joint_key, dof, clamped_q, config.nudge_speed_deg_s)
+        dof_label = jcfg.dof_names[dof] if dof < len(jcfg.dof_names) else f"dof_{dof}"
+        if abs(clamped_q - new_q) > 1e-6:
+            logger.info(
+                f"Nudge {joint_key} DOF{dof} ({dof_label}) {delta_deg:+.1f}° "
+                f"clamped to {clamped_q:+.1f}° within [{min_a:+.1f}°, {max_a:+.1f}°]"
+            )
+        else:
+            logger.info(
+                f"Nudge {joint_key} DOF{dof} ({dof_label}) {delta_deg:+.1f}° -> {clamped_q:+.1f}°"
+            )
 
     async def on_toggle_loop():
         """Pause/resume the impedance loop."""
