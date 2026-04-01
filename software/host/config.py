@@ -78,7 +78,15 @@ def _load_joint_config():
                 {
                     'index': dof['index'],
                     'name': dof['name'].replace('_', '-'),  # Convert to hyphenated form
-                    'zero_angle_offset': dof.get('zero_angle_offset', 0.0)  # Reference angle for "Set Zero"
+                    'zero_angle_offset': dof.get('zero_angle_offset', 0.0),  # Reference angle for "Set Zero"
+                    'drive_type': dof.get('drive_type', 'antagonistic_tendon'),
+                    'motor_count': dof.get('motor_count', 2),
+                    'supports_pretension': dof.get('supports_pretension', True),
+                    'supports_recalc_offset': dof.get('supports_recalc_offset', True),
+                    'supports_auto_mapping': dof.get('supports_auto_mapping', True),
+                    'supports_outer_impedance': dof.get('supports_outer_impedance', True),
+                    'supports_slack_diag': dof.get('supports_slack_diag', True),
+                    'supports_retension_probe': dof.get('supports_retension_probe', True),
                 }
                 for dof in joint_data['dofs']
             ]

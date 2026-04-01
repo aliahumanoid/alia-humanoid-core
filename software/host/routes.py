@@ -90,6 +90,27 @@ def register_routes(
             }), 503
         return None
 
+    def get_joint_dof_meta(joint_name: str, dof_index: int):
+        joint_info = JOINTS.get(joint_name)
+        if not joint_info:
+            return None
+        for dof in joint_info.get("dofs", []):
+            if dof.get("index") == int(dof_index):
+                return dof
+        return None
+
+    def get_pid_motor_types_for_dof(joint_name: str, dof_index: int) -> list[int]:
+        dof_meta = get_joint_dof_meta(joint_name, dof_index)
+        if dof_meta and dof_meta.get("drive_type") == "direct_drive":
+            return [3]
+        return [1, 2]
+
+    def get_zero_operation_label(joint_name: str, dof_index: int) -> str:
+        dof_meta = get_joint_dof_meta(joint_name, dof_index)
+        if dof_meta and dof_meta.get("drive_type") == "direct_drive":
+            return "Reference set"
+        return "Zero set"
+
     def load_mapping_from_file(joint_name: str):
         # Try enriched data first (has interpolation/extrapolation), then raw
         enriched = f"mapping_data/{joint_name.lower()}_enriched_mapping.json"
@@ -1103,9 +1124,10 @@ def register_routes(
         try:
             result = can_manager.set_zero_via_can(joint_name, dof_index)
             if result.get("success"):
+                op_label = get_zero_operation_label(joint_name, dof_index)
                 return jsonify({
                     "status": "success",
-                    "message": f"Zero set for {joint_name} DOF {dof_index}",
+                    "message": f"{op_label} for {joint_name} DOF {dof_index}",
                     "offsets": result.get("offsets", {})
                 })
             else:
@@ -1498,15 +1520,16 @@ def register_routes(
             elif cmd == "set-zero":
                 # Set-zero is operational → CAN first, serial fallback
                 dof_int = int(dof) if dof != 'ALL' else 0
+                op_label = get_zero_operation_label(joint, dof_int)
                 if can_manager and can_manager.is_connected():
                     result = can_manager.set_zero_via_can(joint, dof_int)
                     if result.get("success"):
-                        message = f"Zero set via CAN for {joint} DOF {dof_int}"
+                        message = f"{op_label} via CAN for {joint} DOF {dof_int}"
                     else:
-                        message = f"Set-zero CAN failed: {result.get('error', 'unknown')}"
+                        message = f"{op_label} via CAN failed: {result.get('error', 'unknown')}"
                 else:
                     handler.send_new_command(joint, dof, COMMANDS['SET_ZERO'])
-                    message = f"Current position set as zero for {joint} DOF {dof} (serial)"
+                    message = f"{op_label} via serial for {joint} DOF {dof}"
             elif cmd == "start-test-encoder":
                 handler.send_new_command(joint, dof, COMMANDS['START_TEST_ENCODER'])
             elif cmd == "stop-test-encoder":
@@ -1595,8 +1618,8 @@ def register_routes(
                         if 'dofs' in joint_info and dof_index < len(joint_info['dofs']):
                             is_valid_dof = True
                     if is_valid_dof:
-                        handler.get_pid_for_joint_dof(joint, dof_index, 1)
-                        handler.get_pid_for_joint_dof(joint, dof_index, 2)
+                        for motor_type in get_pid_motor_types_for_dof(joint, dof_index):
+                            handler.get_pid_for_joint_dof(joint, dof_index, motor_type)
                         handler.get_outer_pid_for_joint_dof(joint, dof_index)
             elif cmd == "refresh-pid-all":
                 # Read current PID values from firmware (no flash load, no overwrite)
@@ -1607,8 +1630,8 @@ def register_routes(
                         if 'dofs' in joint_info and dof_index < len(joint_info['dofs']):
                             is_valid_dof = True
                     if is_valid_dof:
-                        handler.get_pid_for_joint_dof(joint, dof_index, 1)
-                        handler.get_pid_for_joint_dof(joint, dof_index, 2)
+                        for motor_type in get_pid_motor_types_for_dof(joint, dof_index):
+                            handler.get_pid_for_joint_dof(joint, dof_index, motor_type)
                         handler.get_outer_pid_for_joint_dof(joint, dof_index)
                 message = f"PID values refreshed for {joint}"
             elif cmd == "save-pid":
@@ -1709,9 +1732,8 @@ def register_routes(
                             is_valid_dof = True
                             
                     if is_valid_dof:
-                        # Request PID for both motor types
-                        handler.get_pid_for_joint_dof(joint_id, dof_index, 1)
-                        handler.get_pid_for_joint_dof(joint_id, dof_index, 2)
+                        for motor_type in get_pid_motor_types_for_dof(joint_id, dof_index):
+                            handler.get_pid_for_joint_dof(joint_id, dof_index, motor_type)
                         handler.get_outer_pid_for_joint_dof(joint_id, dof_index)
 
                 message = f"Joint {joint_id} selected and PIDs requested"

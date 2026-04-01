@@ -298,6 +298,11 @@ class StartupFSM:
 
             result = telemetry.startup_results.get(jcfg.joint_id)
             if result and result.is_failed:
+                if result.reason_name == "REFERENCE_REQUIRED":
+                    raise StartupError(
+                        f"Startup failed for {key}: DOF{result.dof_index} requires a saved "
+                        f"direct-drive reference. Set Reference for that DOF, then re-run startup."
+                    )
                 raise StartupError(
                     f"Startup failed for {key}: {result.event_name} "
                     f"DOF={result.dof_index} reason={result.reason_name}"

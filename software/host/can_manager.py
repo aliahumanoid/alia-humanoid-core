@@ -2803,7 +2803,7 @@ class CanManager:
         event_names = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAILED", 3: "COMPLETE", 4: "FAILED"}
         reason_names = {0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
                         4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT",
-                        7: "PARTIAL_HOLD"}
+                        7: "PARTIAL_HOLD", 8: "REFERENCE_REQUIRED"}
 
         joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id}")
         evt_name = event_names.get(event_type, f"UNKNOWN_{event_type}")

@@ -174,6 +174,19 @@ function getPidMotorDisplayName(jointName, dof, motorType) {
     return motorType === 1 ? 'Agonist' : 'Antagonist';
 }
 
+function getStartupReasonMessage(jointName, dofIndex, reason) {
+    const dofInfo = getDofConfigForJoint(jointName, dofIndex);
+    const dofLabel = dofInfo ? formatDofName(dofInfo.name, `DOF ${dofIndex}`) : `DOF ${dofIndex}`;
+
+    if (reason === 'REFERENCE_REQUIRED') {
+        return `Startup needs a saved reference on ${jointName} DOF ${dofIndex} (${dofLabel}). Use "Set Reference DOF ${dofIndex}" at a known safe pose, then re-run startup.`;
+    }
+    if (reason === 'PARTIAL_HOLD') {
+        return `Startup partial on ${jointName} DOF ${dofIndex} (${dofLabel}): encoder data is not valid enough to enter hold safely.`;
+    }
+    return `Startup failed on ${jointName} DOF ${dofIndex} (${dofLabel}): ${reason}.`;
+}
+
 /**
  * Get current encoder angle from LIVE streaming data only.
  * If streaming is not active, attempts to start it automatically.
@@ -795,6 +808,20 @@ $(document).ready(function() {
         const currentJoint = $("#jointSelect").val();
         if (data.joint_name && data.joint_name !== currentJoint) return;
         updateDiagHoldUI(data);
+    });
+
+    socket.on('startup_status', function(data) {
+        const currentJoint = $("#jointSelect").val();
+        if (data.joint && data.joint !== currentJoint) return;
+
+        if (data.event === 'DOF_FAILED' || data.event === 'FAILED') {
+            appendStatusMessage(`⚠️ ${getStartupReasonMessage(data.joint || currentJoint, data.dof_index, data.reason)}`);
+            return;
+        }
+
+        if (data.event === 'COMPLETE') {
+            appendStatusMessage(`✅ Startup complete for ${data.joint || currentJoint} (${data.elapsed_ms} ms)`);
+        }
     });
 
     // CAN control handlers
