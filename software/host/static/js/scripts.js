@@ -133,6 +133,7 @@ const MAX_SAFE_VELOCITY_DEG_S = 150;
 // Updated by encoder_stream listener, checked by getCurrentEncoderAngle()
 const ENCODER_FRESHNESS_MS = 2000;  // Max age before data is considered stale
 const encoderLastUpdateMs = {};
+const IMPEDANCE_NUDGE_DEFAULT_STEP_DEG = 5;
 
 function formatDofName(name, fallback = '') {
     if (!name) return fallback;
@@ -187,6 +188,83 @@ function getStartupReasonMessage(jointName, dofIndex, reason) {
     return `Startup failed on ${jointName} DOF ${dofIndex} (${dofLabel}): ${reason}.`;
 }
 
+function readFreshEncoderAngle(joint, dofIndex) {
+    if (!joint) return null;
+
+    const jointType = joint.split('_')[0].toLowerCase();
+    const freshnessKey = `${jointType}_${dofIndex}`;
+    const lastUpdate = encoderLastUpdateMs[freshnessKey];
+    const now = Date.now();
+
+    if (!(lastUpdate && (now - lastUpdate) < ENCODER_FRESHNESS_MS)) {
+        return null;
+    }
+
+    const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
+    if (!jointEncoderText || jointEncoderText === '-' || jointEncoderText.trim() === '') {
+        return null;
+    }
+
+    const parsed = parseFloat(jointEncoderText.replace('°', ''));
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getConfigLimitsForDof(jointName, dofIndex) {
+    const dofInfo = getDofConfigForJoint(jointName, dofIndex);
+    if (!dofInfo) return null;
+
+    const opMin = Number(dofInfo.operating_min);
+    const opMax = Number(dofInfo.operating_max);
+    if (Number.isFinite(opMin) && Number.isFinite(opMax) && opMax > opMin) {
+        return { min: opMin, max: opMax, source: 'config-operating' };
+    }
+
+    const minAngle = Number(dofInfo.min_angle);
+    const maxAngle = Number(dofInfo.max_angle);
+    if (Number.isFinite(minAngle) && Number.isFinite(maxAngle) && maxAngle > minAngle) {
+        return { min: minAngle, max: maxAngle, source: 'config-physical' };
+    }
+
+    return null;
+}
+
+function getFirmwareSafeLimitsForJoint(jointName, dofIndex) {
+    const jointEntry = getJointConfigEntry(jointName);
+    if (!jointEntry || !Number.isFinite(Number(jointEntry.id))) return null;
+
+    const key = `${Number(jointEntry.id)}_${Number(dofIndex)}`;
+    const safe = firmwareSafeLimits[key];
+    if (!safe) return null;
+
+    const minValue = Number(safe.min);
+    const maxValue = Number(safe.max);
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || maxValue <= minValue) {
+        return null;
+    }
+
+    return { min: minValue, max: maxValue, source: 'firmware-safe' };
+}
+
+function getImpedanceNudgeRange(jointName, dofIndex) {
+    return getFirmwareSafeLimitsForJoint(jointName, dofIndex)
+        || getPhysicalLimitsForJoint(jointName, dofIndex)
+        || getConfigLimitsForDof(jointName, dofIndex);
+}
+
+function clampImpedanceNudgeTarget(jointName, dofIndex, targetDeg) {
+    const range = getImpedanceNudgeRange(jointName, dofIndex);
+    if (!range) {
+        return { target: targetDeg, clamped: false, range: null };
+    }
+
+    const clampedTarget = Math.min(range.max, Math.max(range.min, targetDeg));
+    return {
+        target: clampedTarget,
+        clamped: Math.abs(clampedTarget - targetDeg) > 1e-6,
+        range
+    };
+}
+
 /**
  * Get current encoder angle from LIVE streaming data only.
  * If streaming is not active, attempts to start it automatically.
@@ -198,25 +276,10 @@ function getStartupReasonMessage(jointName, dofIndex, reason) {
  */
 function getCurrentEncoderAngle(joint, dofIndex) {
     const jointType = joint.split('_')[0].toLowerCase();
-    
-    // === SAFETY: Only use LIVE encoder data with freshness check ===
-    // The encoder_stream listener records a timestamp on every update.
-    // If data is older than ENCODER_FRESHNESS_MS, it's considered stale
-    // (stream may have stopped or stalled without a clean UI teardown).
-
     const freshnessKey = `${jointType}_${dofIndex}`;
-    const lastUpdate = encoderLastUpdateMs[freshnessKey];
-    const now = Date.now();
-
-    if (lastUpdate && (now - lastUpdate) < ENCODER_FRESHNESS_MS) {
-        // Data is fresh — read from DOM
-        const jointEncoderText = $(`#${jointType}EncoderDof${dofIndex}`).text();
-        if (jointEncoderText && jointEncoderText !== '-' && jointEncoderText.trim() !== '') {
-            const parsed = parseFloat(jointEncoderText.replace('°', ''));
-            if (!isNaN(parsed)) {
-                return parsed;
-            }
-        }
+    const freshAngle = readFreshEncoderAngle(joint, dofIndex);
+    if (freshAngle !== null) {
+        return freshAngle;
     }
     
     // No live data available - try to auto-start encoder streaming
@@ -465,6 +528,7 @@ $(document).ready(function() {
         impedanceMoveHolding[dof] = !!data.holding;
         if (Number.isFinite(data.q_deg)) {
             impedanceMovePosition[dof] = data.q_deg;
+            updateImpedanceNudgeValueReadout(dof, data.q_deg);
         }
 
         // Update status dots
@@ -564,6 +628,7 @@ $(document).ready(function() {
         // Update the chart and display from real-time CAN data
         if (data && data.angles_deg) {
             updateEncoderChartFromCanStream(data);
+            refreshImpedancePerDofNudgeReadouts();
             
             // Also store in data buffer for history
             const timestamp = Date.now();
@@ -3823,6 +3888,8 @@ function updateImpedanceMoveJoint() {
 
     // Update stiffness display from PID section
     updateImpedanceStiffnessDisplay();
+    renderImpedancePerDofNudgeControls();
+    refreshImpedancePerDofNudgeReadouts();
 
     // Regenerate smart impedance buttons (mapping data may arrive later)
     generateSmartImpedanceButtons();
@@ -4067,6 +4134,125 @@ function applyImpedanceHoldWatchdog() {
     return setImpedanceWatchdog(ms)
         .done(() => appendStatusMessage(`🛡️ Hold watchdog set to ${ms}ms`))
         .fail(() => appendStatusMessage('❌ Failed to set hold watchdog', 'error'));
+}
+
+function getImpedanceNudgeStepDeg() {
+    const raw = parseFloat($('#impedanceNudgeStepDeg').val());
+    const step = Number.isFinite(raw) ? Math.max(0.1, Math.min(20, raw)) : IMPEDANCE_NUDGE_DEFAULT_STEP_DEG;
+    $('#impedanceNudgeStepDeg').val(step.toFixed(step % 1 === 0 ? 0 : 1));
+    return step;
+}
+
+function updateImpedanceNudgeValueReadout(dofIndex, angleDeg) {
+    const valueEl = $(`#impedanceNudgeValueDof${dofIndex}`);
+    if (!valueEl.length) return;
+
+    if (Number.isFinite(angleDeg)) {
+        valueEl.text(`${angleDeg.toFixed(1)}°`);
+        valueEl.removeClass('text-gray-400').addClass('text-indigo-700');
+    } else {
+        valueEl.text('—');
+        valueEl.removeClass('text-indigo-700').addClass('text-gray-400');
+    }
+}
+
+function refreshImpedancePerDofNudgeReadouts() {
+    const joint = $("#jointSelect").val();
+    const jointEntry = getJointConfigEntry(joint);
+    if (!jointEntry?.dofs?.length) return;
+
+    jointEntry.dofs.forEach(dofInfo => {
+        updateImpedanceNudgeValueReadout(dofInfo.index, readFreshEncoderAngle(joint, dofInfo.index));
+    });
+}
+
+function renderImpedancePerDofNudgeControls() {
+    const joint = $("#jointSelect").val();
+    const container = $('#impedancePerDofNudgeControls');
+    if (!container.length) return;
+
+    container.empty();
+    if (!joint) {
+        container.append('<div class="text-xs text-gray-500">Select a joint to enable per-DOF nudging.</div>');
+        return;
+    }
+
+    const jointEntry = getJointConfigEntry(joint);
+    if (!jointEntry?.dofs?.length) {
+        container.append('<div class="text-xs text-gray-500">Joint configuration is not loaded yet.</div>');
+        return;
+    }
+
+    jointEntry.dofs.forEach(dofInfo => {
+        const dofIndex = Number(dofInfo.index);
+        const dofLabel = formatDofName(dofInfo.name, `DOF ${dofIndex}`);
+        const range = getImpedanceNudgeRange(joint, dofIndex);
+        const rangeText = range
+            ? `[${range.min.toFixed(1)}°, ${range.max.toFixed(1)}°]`
+            : 'range unavailable';
+        const driveBadge = dofInfo.drive_type === 'direct_drive'
+            ? '<span class="px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-700 text-[10px] font-semibold uppercase tracking-wide">Direct</span>'
+            : '<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-semibold uppercase tracking-wide">Tendon</span>';
+
+        const row = $(`
+            <div class="border border-gray-200 rounded-md px-3 py-2 bg-gray-50">
+                <div class="flex items-center justify-between gap-3 flex-wrap">
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-sm font-semibold text-gray-700">DOF ${dofIndex}</span>
+                            <span class="text-sm text-gray-600">${dofLabel}</span>
+                            ${driveBadge}
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1">
+                            Current: <span id="impedanceNudgeValueDof${dofIndex}" class="font-mono text-gray-400">—</span>
+                            <span class="mx-1 text-gray-300">|</span>
+                            Range: <span class="font-mono">${rangeText}</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="nudgeImpedanceDof(${dofIndex}, -1)"
+                            class="px-3 py-2 rounded-md bg-slate-500 text-white hover:bg-slate-600 font-medium text-sm">
+                            <i class="fas fa-minus mr-1"></i>Step
+                        </button>
+                        <button type="button" onclick="nudgeImpedanceDof(${dofIndex}, 1)"
+                            class="px-3 py-2 rounded-md bg-indigo-500 text-white hover:bg-indigo-600 font-medium text-sm">
+                            <i class="fas fa-plus mr-1"></i>Step
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `);
+        container.append(row);
+    });
+
+    refreshImpedancePerDofNudgeReadouts();
+}
+
+function nudgeImpedanceDof(dofIndex, direction) {
+    const joint = $("#jointSelect").val();
+    if (!joint) {
+        appendStatusMessage('⚠️ Select a joint first.');
+        return;
+    }
+
+    const currentPos = getCurrentEncoderAngle(joint, dofIndex);
+    if (!Number.isFinite(currentPos)) {
+        appendStatusMessage(`⚠️ No live encoder data for ${joint} DOF ${dofIndex} — cannot nudge.`);
+        return;
+    }
+
+    const stepDeg = getImpedanceNudgeStepDeg();
+    const requestedTarget = currentPos + (direction >= 0 ? stepDeg : -stepDeg);
+    const clamped = clampImpedanceNudgeTarget(joint, dofIndex, requestedTarget);
+
+    if (clamped.clamped && clamped.range) {
+        appendStatusMessage(
+            `⚠️ ${joint} DOF ${dofIndex} nudge clamped to ${clamped.target.toFixed(1)}° ` +
+            `within [${clamped.range.min.toFixed(1)}°, ${clamped.range.max.toFixed(1)}°].`
+        );
+    }
+
+    setImpedanceQuickAngle(dofIndex, Number(clamped.target.toFixed(2)));
 }
 
 /**

@@ -1994,6 +1994,24 @@
                                 </button>
                             </div>
                         </div>
+                        <div class="bg-white rounded-md p-3 border border-gray-200">
+                            <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                                <h4 class="text-sm font-medium text-gray-700">
+                                    <i class="fas fa-arrows-left-right mr-1"></i>Per-DOF Nudge
+                                </h4>
+                                <div class="flex items-center gap-2">
+                                    <label for="impedanceNudgeStepDeg" class="text-xs font-medium text-gray-600">Step (°)</label>
+                                    <input type="number" id="impedanceNudgeStepDeg" value="5" min="0.1" max="20" step="0.1"
+                                        class="w-20 rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm font-mono" />
+                                </div>
+                            </div>
+                            <div id="impedancePerDofNudgeControls" class="space-y-2">
+                                <!-- Filled dynamically by renderImpedancePerDofNudgeControls() -->
+                            </div>
+                            <p class="text-xs text-gray-400 mt-2">
+                                Uses the live encoder pose as the start point and sends a single-DOF SET_IMPEDANCE target clamped to available safe limits.
+                            </p>
+                        </div>
                         <!-- Smart Impedance Buttons (mapping-based) -->
                         <div class="bg-white p-3 rounded border border-indigo-200 mb-2">
                             <div class="flex items-center justify-between mb-2">
