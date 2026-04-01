@@ -554,7 +554,128 @@ Do **not** start HIP validation until all these are true:
 
 ---
 
-## 12. Open Questions
+## 12. First Hardware Bring-Up Checklist (DOF2 Roll First)
+
+This is the first **physical** HIP validation slice. It is intentionally narrow.
+
+The goal is **not** to validate the whole hip immediately.
+The goal is to validate the **direct-drive roll path first**, with the fewest moving parts.
+
+### 12.1 Preconditions
+
+- hybrid HIP firmware is flashed
+- webapp/Jetson include:
+  - `Set Reference DOF2`
+  - `REFERENCE_REQUIRED` handling
+  - single-DOF nudge controls
+- the mechanism can move `DOF2 axial_roll` safely without touching hard stops
+- tendon DOFs are not part of the first acceptance decision
+
+### 12.2 Test Goal
+
+Validate only these claims:
+
+1. `DOF2` requires a saved reference when missing
+2. the reference persists across reboot
+3. startup succeeds once the reference exists
+4. small `+/-` commands move and hold the roll
+5. no tendon-only workflow is required on `DOF2`
+
+### 12.3 Sequence
+
+#### Step A — Boot without saved reference
+
+Expected:
+- startup fails on `DOF2` with `REFERENCE_REQUIRED`
+- no fake tendon recovery path runs on roll
+
+Pass criteria:
+- the failure is explicit and actionable in host output
+
+#### Step B — Set reference at a known safe pose
+
+Action:
+- place `DOF2` in a mechanically known neutral/reference pose
+- use `Set Reference DOF2`
+
+Expected:
+- host reports `Reference set`
+- no tendon-related command is involved
+
+#### Step C — Reboot and verify persistence
+
+Expected:
+- provisioned HIP profile is still present
+- startup no longer fails with `REFERENCE_REQUIRED`
+
+Pass criteria:
+- the stored reference survives reboot/power cycle
+
+#### Step D — Startup
+
+Expected:
+- `DOF2` becomes ready without `PRETENSION`, `RECALC_OFFSET`, or tendon mapping
+
+Pass criteria:
+- startup completes cleanly
+- no tendon-only workflow is attempted on the roll
+
+#### Step E — Small nudge test
+
+Action:
+- command `DOF2` only with small increments, e.g. `±5°`
+
+Expected:
+- roll moves
+- encoder follows correctly
+- hold stabilizes near target
+
+Pass criteria:
+- no uncontrolled drift
+- no false `REFERENCE_REQUIRED`
+- no tendon diagnostics/probe activity on `DOF2`
+
+#### Step F — Limits sanity
+
+Action:
+- nudge conservatively toward both sides, staying away from hard stops
+
+Expected:
+- host-side clamp and configured limits are coherent with the real roll range
+
+Pass criteria:
+- software does not allow obviously unsafe commands
+- no unexpected limit violation inside the intended usable range
+
+### 12.4 Logs to Inspect
+
+- startup log:
+  - `REFERENCE_REQUIRED` before reference is set
+  - `STARTUP_DOF_READY` after reference exists
+- host/Jetson logs:
+  - `DOF2` target and current angle
+  - clamp messages, if limits are hit
+- firmware:
+  - no tendon-only workflow on `DOF2`
+
+### 12.5 Exit Criteria for “DOF2 Bring-Up Passed”
+
+The roll slice is considered passed when all of the following are true:
+
+1. reference is required when missing
+2. reference can be set and survives reboot
+3. startup succeeds with that reference
+4. small nudge commands move and hold the roll
+5. no tendon-only command path is used on `DOF2`
+
+Only after this should the project move to:
+- mixed HIP startup (`DOF0/1 tendon + DOF2 direct-drive`)
+- combined motion tests
+- tuning beyond minimal stabilization
+
+---
+
+## 13. Open Questions
 
 1. What is the final canonical name of DOF2?
 2. Is DOF2 truly single-motor direct-drive in both left and right hip, or only on the current prototype?
@@ -565,7 +686,7 @@ Do **not** start HIP validation until all these are true:
 
 ---
 
-## 13. Recommendation
+## 14. Recommendation
 
 Do **not** use HIP as the next validation target until this hybrid model is implemented.
 
