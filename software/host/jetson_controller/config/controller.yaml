@@ -55,6 +55,13 @@ joints:
       outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
+    # Optional per-DOF overrides can be added after hardware tuning, e.g.:
+    # dof_overrides:
+    #   2:
+    #     stiffness_deg: 12.0
+    #     gains:
+    #       outer: { kp: 6.0, ki: 4.0, kd: 0.05 }
+    #       inner: { kp: 8.0, ki: 0.5, kd: 0.15 }
     home_position_deg:
       0: 0.0              # flexion-extension
       1: 0.0              # abduction-adduction
@@ -65,6 +72,13 @@ joints:
       outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
+    # Optional per-DOF overrides can be added after hardware tuning, e.g.:
+    # dof_overrides:
+    #   2:
+    #     stiffness_deg: 12.0
+    #     gains:
+    #       outer: { kp: 6.0, ki: 4.0, kd: 0.05 }
+    #       inner: { kp: 8.0, ki: 0.5, kd: 0.15 }
     home_position_deg:
       0: 0.0              # flexion-extension
       1: 0.0              # abduction-adduction

@@ -3899,10 +3899,31 @@ function updateImpedanceMoveJoint() {
  * Read stiffness from PID Tuning section and display it in impedance panel.
  */
 function updateImpedanceStiffnessDisplay() {
-    const stiff = parseFloat($('#outerPidDof0Stiffness').val());
     const display = $('#impedanceStiffnessDisplay');
-    if (display.length) {
-        display.text(Number.isFinite(stiff) ? stiff.toFixed(2) : '—');
+    if (!display.length) return;
+
+    const selectedJoint = $("#jointSelect").val();
+    const jointEntry = getJointConfigEntry(selectedJoint);
+    const dofEntries = jointEntry?.dofs || [];
+    if (!dofEntries.length) {
+        display.text('—');
+        return;
+    }
+
+    const stiffnessValues = dofEntries
+        .map(dof => parseFloat($(`#outerPidDof${dof.index}Stiffness`).val()))
+        .filter(value => Number.isFinite(value));
+
+    if (!stiffnessValues.length) {
+        display.text('—');
+        return;
+    }
+
+    const uniqueValues = [...new Set(stiffnessValues.map(value => value.toFixed(2)))];
+    if (uniqueValues.length === 1) {
+        display.text(uniqueValues[0]);
+    } else {
+        display.text('per-DOF');
     }
 }
 

@@ -189,7 +189,7 @@ class StartupFSM:
                         dof,
                         q_deg=q_hold,
                         dq_deg_s=0.0,
-                        stiffness_deg=jcfg.stiffness_deg,
+                        stiffness_deg=jcfg.stiffness_for(dof),
                         has_more=False,
                     )
                     await can_bus.send(arb_id, data)
@@ -352,6 +352,9 @@ class StartupFSM:
             await asyncio.sleep(0.01)
 
             for dof in range(jcfg.dof_count):
+                outer_gains = jcfg.outer_gains_for(dof)
+                inner_gains = jcfg.inner_gains_for(dof)
+                stiffness_deg = jcfg.stiffness_for(dof)
                 # Get current position from encoder (hold in place)
                 state = telemetry.states.get(key)
                 current_angle = 0.0
@@ -365,21 +368,21 @@ class StartupFSM:
                     encode_set_impedance_frame0(
                         jcfg.joint_id, dof,
                         q_deg=current_angle, dq_deg_s=0.0,
-                        stiffness_deg=jcfg.stiffness_deg,
+                        stiffness_deg=stiffness_deg,
                         has_more=True,
                     ),
                     encode_set_impedance_frame1(
                         jcfg.joint_id, dof,
-                        kp=jcfg.gains_outer.kp,
-                        ki=jcfg.gains_outer.ki,
-                        kd=jcfg.gains_outer.kd,
+                        kp=outer_gains.kp,
+                        ki=outer_gains.ki,
+                        kd=outer_gains.kd,
                         has_more=True,
                     ),
                     encode_set_impedance_frame2(
                         jcfg.joint_id, dof,
-                        kp_inner=jcfg.gains_inner.kp,
-                        ki_inner=jcfg.gains_inner.ki,
-                        kd_inner=jcfg.gains_inner.kd,
+                        kp_inner=inner_gains.kp,
+                        ki_inner=inner_gains.ki,
+                        kd_inner=inner_gains.kd,
                         has_more=True,
                     ),
                     encode_set_impedance_frame3(
@@ -391,8 +394,9 @@ class StartupFSM:
 
                 logger.info(
                     f"Init gains [{key}] DOF{dof}: hold@{current_angle:.1f}deg, "
-                    f"outer=({jcfg.gains_outer.kp}/{jcfg.gains_outer.ki}/{jcfg.gains_outer.kd}), "
-                    f"inner=({jcfg.gains_inner.kp}/{jcfg.gains_inner.ki}/{jcfg.gains_inner.kd})"
+                    f"outer=({outer_gains.kp}/{outer_gains.ki}/{outer_gains.kd}), "
+                    f"inner=({inner_gains.kp}/{inner_gains.ki}/{inner_gains.kd}), "
+                    f"stiffness={stiffness_deg}"
                 )
                 await asyncio.sleep(0.02)  # Small gap between DOFs
 
@@ -415,7 +419,7 @@ class StartupFSM:
                     jcfg.joint_id, dof,
                     q_deg=target_deg,
                     dq_deg_s=config.homing_speed_deg_s,
-                    stiffness_deg=jcfg.stiffness_deg,
+                    stiffness_deg=jcfg.stiffness_for(dof),
                     has_more=False,
                 )
                 await can_bus.send(arb_id, data)
@@ -450,7 +454,7 @@ class StartupFSM:
                         jcfg.joint_id, dof,
                         q_deg=target_deg,
                         dq_deg_s=config.homing_speed_deg_s,
-                        stiffness_deg=jcfg.stiffness_deg,
+                        stiffness_deg=jcfg.stiffness_for(dof),
                         has_more=False,
                     )
                     await can_bus.send(arb_id, data)

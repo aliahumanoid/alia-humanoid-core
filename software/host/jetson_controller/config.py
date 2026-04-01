@@ -42,9 +42,12 @@ class JointControlConfig:
     dof_capabilities: dict[int, dict[str, bool]]  # from JSON, per DOF
     min_angles: dict[int, float]           # from JSON, per DOF
     max_angles: dict[int, float]           # from JSON, per DOF
-    gains_outer: GainSet                   # from YAML
-    gains_inner: GainSet                   # from YAML
-    stiffness_deg: float                   # from YAML
+    gains_outer: GainSet                   # default from YAML
+    gains_inner: GainSet                   # default from YAML
+    stiffness_deg: float                   # default from YAML
+    dof_gains_outer: dict[int, GainSet]    # optional per-DOF override from YAML
+    dof_gains_inner: dict[int, GainSet]    # optional per-DOF override from YAML
+    dof_stiffness_deg: dict[int, float]    # optional per-DOF override from YAML
     home_position_deg: dict[int, float]    # from YAML
 
     def drive_type_for(self, dof: int) -> str:
@@ -52,6 +55,15 @@ class JointControlConfig:
 
     def capabilities_for(self, dof: int) -> dict[str, bool]:
         return self.dof_capabilities.get(dof, {})
+
+    def outer_gains_for(self, dof: int) -> GainSet:
+        return self.dof_gains_outer.get(dof, self.gains_outer)
+
+    def inner_gains_for(self, dof: int) -> GainSet:
+        return self.dof_gains_inner.get(dof, self.gains_inner)
+
+    def stiffness_for(self, dof: int) -> float:
+        return self.dof_stiffness_deg.get(dof, self.stiffness_deg)
 
 
 @dataclass
@@ -241,6 +253,51 @@ def load_config(yaml_path: Optional[str] = None,
         # Parse gains from YAML
         outer = joint_yaml["gains"]["outer"]
         inner = joint_yaml["gains"]["inner"]
+        dof_overrides = joint_yaml.get("dof_overrides", {})
+        if dof_overrides is None:
+            dof_overrides = {}
+        if not isinstance(dof_overrides, dict):
+            raise ValueError(f"Joint '{lower_key}': dof_overrides must be a mapping")
+
+        dof_gains_outer: dict[int, GainSet] = {}
+        dof_gains_inner: dict[int, GainSet] = {}
+        dof_stiffness_deg: dict[int, float] = {}
+
+        for raw_dof_idx, override_cfg in dof_overrides.items():
+            dof_idx = int(raw_dof_idx)
+            if dof_idx >= jdata["dof_count"]:
+                raise ValueError(
+                    f"Joint '{lower_key}': dof_overrides[{dof_idx}] exceeds "
+                    f"dof_count={jdata['dof_count']}"
+                )
+            if not isinstance(override_cfg, dict):
+                raise ValueError(
+                    f"Joint '{lower_key}': dof_overrides[{dof_idx}] must be a mapping"
+                )
+
+            if "stiffness_deg" in override_cfg:
+                dof_stiffness_deg[dof_idx] = float(override_cfg["stiffness_deg"])
+
+            gains_cfg = override_cfg.get("gains", {})
+            if gains_cfg and not isinstance(gains_cfg, dict):
+                raise ValueError(
+                    f"Joint '{lower_key}': dof_overrides[{dof_idx}].gains must be a mapping"
+                )
+
+            if "outer" in gains_cfg:
+                outer_override = gains_cfg["outer"]
+                dof_gains_outer[dof_idx] = GainSet(
+                    kp=float(outer_override["kp"]),
+                    ki=float(outer_override["ki"]),
+                    kd=float(outer_override["kd"]),
+                )
+            if "inner" in gains_cfg:
+                inner_override = gains_cfg["inner"]
+                dof_gains_inner[dof_idx] = GainSet(
+                    kp=float(inner_override["kp"]),
+                    ki=float(inner_override["ki"]),
+                    kd=float(inner_override["kd"]),
+                )
 
         # Parse home positions
         home_pos = {}
@@ -248,7 +305,7 @@ def load_config(yaml_path: Optional[str] = None,
             dof_idx = int(k)
             if dof_idx >= jdata["dof_count"]:
                 raise ValueError(
-                    f"Joint '{joint_key}': home_position DOF {dof_idx} exceeds "
+                    f"Joint '{lower_key}': home_position DOF {dof_idx} exceeds "
                     f"dof_count={jdata['dof_count']}"
                 )
             home_pos[dof_idx] = float(v)
@@ -257,7 +314,7 @@ def load_config(yaml_path: Optional[str] = None,
         for dof in jdata["dofs"]:
             if dof["index"] not in home_pos:
                 raise ValueError(
-                    f"Joint '{joint_key}': missing home_position for DOF {dof['index']} "
+                    f"Joint '{lower_key}': missing home_position for DOF {dof['index']} "
                     f"({dof['name']})"
                 )
 
@@ -274,6 +331,9 @@ def load_config(yaml_path: Optional[str] = None,
             gains_outer=GainSet(kp=outer["kp"], ki=outer["ki"], kd=outer["kd"]),
             gains_inner=GainSet(kp=inner["kp"], ki=inner["ki"], kd=inner["kd"]),
             stiffness_deg=float(joint_yaml["stiffness_deg"]),
+            dof_gains_outer=dof_gains_outer,
+            dof_gains_inner=dof_gains_inner,
+            dof_stiffness_deg=dof_stiffness_deg,
             home_position_deg=home_pos,
         )
 

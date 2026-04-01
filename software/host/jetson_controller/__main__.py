@@ -150,7 +150,7 @@ async def main(config_path: str = None, verbose: bool = False,
                         if state is not None and dof in state.angles_deg:
                             current_q = state.angles_deg[dof]
                         impedance.set_target(key, dof, current_q, dq_deg_s=0.0)
-                        impedance.set_stiffness(key, dof, jcfg.stiffness_deg)
+                        impedance.set_stiffness(key, dof, jcfg.stiffness_for(dof))
                 logger.info("Startup resume: seeded impedance targets from current pose")
             impedance.start(can_bus)
 

@@ -539,8 +539,8 @@ const JointConfig HIP_LEFT_CONFIG = {
            .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 65,
-                   .recalc_offset_duration         = 380,
+                   .recalc_offset_torque           = 0,
+                   .recalc_offset_duration         = 0,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = 0.0f,
                    .pretension_timeout             = 0,
@@ -550,10 +550,8 @@ const JointConfig HIP_LEFT_CONFIG = {
                    .auto_mapping_speed             = 0.0f,
                    .auto_mapping_resistance_torque = 0.0f,
                    .position_threshold             = 0.5f,
-                   .auto_mapping_min_angle =
-                       -35.0f, // More conservative range for auto-mapping (vs -40.0f limit)
-                   .auto_mapping_max_angle =
-                       35.0f, // More conservative range for auto-mapping (vs 40.0f limit)
+                   .auto_mapping_min_angle         = 0.0f,
+                   .auto_mapping_max_angle         = 0.0f,
                    .auto_mapping_invert_direction = false // Default behavior
 
                }}},
@@ -726,8 +724,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
            .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f}, // operating=0 means use physical limits
            .zero_mapping =
                {
-                   .recalc_offset_torque           = 65,
-                   .recalc_offset_duration         = 380,
+                   .recalc_offset_torque           = 0,
+                   .recalc_offset_duration         = 0,
                    .zero_angle_offset              = 0.0f,
                    .pretension_torque              = 0.0f,
                    .pretension_timeout             = 0,
@@ -737,10 +735,8 @@ const JointConfig HIP_RIGHT_CONFIG = {
                    .auto_mapping_speed             = 0.0f,
                    .auto_mapping_resistance_torque = 0.0f,
                    .position_threshold             = 0.5f,
-                   .auto_mapping_min_angle =
-                       -35.0f, // More conservative range for auto-mapping (vs -40.0f limit)
-                   .auto_mapping_max_angle =
-                       35.0f, // More conservative range for auto-mapping (vs 40.0f limit)
+                   .auto_mapping_min_angle         = 0.0f,
+                   .auto_mapping_max_angle         = 0.0f,
                    .auto_mapping_invert_direction = false // Default behavior
 
                }}},

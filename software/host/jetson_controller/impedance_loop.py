@@ -54,16 +54,16 @@ class ImpedanceLoop:
             for dof in range(jcfg.dof_count):
                 self.targets[key][dof] = ImpedanceTarget(
                     q_deg=jcfg.home_position_deg.get(dof, 0.0),
-                    stiffness_deg=jcfg.stiffness_deg,
+                    stiffness_deg=jcfg.stiffness_for(dof),
                     gains_outer=GainSet(
-                        jcfg.gains_outer.kp,
-                        jcfg.gains_outer.ki,
-                        jcfg.gains_outer.kd,
+                        jcfg.outer_gains_for(dof).kp,
+                        jcfg.outer_gains_for(dof).ki,
+                        jcfg.outer_gains_for(dof).kd,
                     ),
                     gains_inner=GainSet(
-                        jcfg.gains_inner.kp,
-                        jcfg.gains_inner.ki,
-                        jcfg.gains_inner.kd,
+                        jcfg.inner_gains_for(dof).kp,
+                        jcfg.inner_gains_for(dof).ki,
+                        jcfg.inner_gains_for(dof).kd,
                     ),
                 )
                 self._gains_dirty[key][dof] = False

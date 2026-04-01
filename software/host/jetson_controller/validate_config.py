@@ -43,6 +43,38 @@ def _validate_profile(profile_name: str, profile_cfg: dict, json_joint: dict, er
         _fail(errors, f"{profile_name}: home_position_deg must be a mapping")
         return
 
+    dof_overrides = profile_cfg.get("dof_overrides", {})
+    if dof_overrides is None:
+        dof_overrides = {}
+    if not isinstance(dof_overrides, dict):
+        _fail(errors, f"{profile_name}: dof_overrides must be a mapping")
+        return
+
+    valid_indices = {int(dof["index"]) for dof in dofs}
+    for raw_idx, override_cfg in dof_overrides.items():
+        idx = int(raw_idx)
+        if idx not in valid_indices:
+            _fail(errors, f"{profile_name}: dof_overrides[{idx}] does not match any DOF in joint_config.json")
+            continue
+        if not isinstance(override_cfg, dict):
+            _fail(errors, f"{profile_name}: dof_overrides[{idx}] must be a mapping")
+            continue
+        gains_cfg = override_cfg.get("gains")
+        if gains_cfg is not None and not isinstance(gains_cfg, dict):
+            _fail(errors, f"{profile_name}: dof_overrides[{idx}].gains must be a mapping")
+            continue
+        if isinstance(gains_cfg, dict):
+            for gain_name in ("outer", "inner"):
+                block = gains_cfg.get(gain_name)
+                if block is None:
+                    continue
+                if not isinstance(block, dict):
+                    _fail(errors, f"{profile_name}: dof_overrides[{idx}].gains.{gain_name} must be a mapping")
+                    continue
+                missing = [k for k in ("kp", "ki", "kd") if k not in block]
+                if missing:
+                    _fail(errors, f"{profile_name}: dof_overrides[{idx}].gains.{gain_name} missing keys {missing}")
+
     for dof in dofs:
         idx = int(dof["index"])
         if idx not in [int(k) for k in home.keys()]:

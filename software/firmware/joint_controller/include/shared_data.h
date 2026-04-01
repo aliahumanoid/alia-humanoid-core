@@ -191,6 +191,8 @@ struct AutoMappingState_t {
   float max_angles[MAX_DOFS];        // Max angles per DOF
   float step_sizes[MAX_DOFS];        // Step per DOF
   int dof_count;                     // Joint DOF count
+  int active_dof_count;              // DOFs actively participating in auto-mapping
+  uint8_t active_dof_indices[MAX_DOFS]; // Physical DOF indices included in auto-mapping
   int motor_count;                   // Joint motor count
   int current_point;                 // Current point index
   int total_points;                  // Total points to acquire

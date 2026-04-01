@@ -21,6 +21,17 @@
 #include <algorithm>
 #include "main_common.h"  // For shared_dof_angles
 
+namespace {
+bool isActiveAutoMappingDof(const AutoMappingState_t &state, uint8_t dof_index) {
+  for (int i = 0; i < state.active_dof_count; i++) {
+    if (state.active_dof_indices[i] == dof_index) {
+      return true;
+    }
+  }
+  return false;
+}
+}
+
 // External variables for inter-core communication
 // Note: emergency_stop_requested, buffer_ready, active_buffer, pending_command_type
 // are declared in main_common.h (included above)
@@ -43,16 +54,33 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
     return false;
   }
 
+  uint8_t active_dof_indices[MAX_DOFS] = {0};
+  int active_dof_count = 0;
   for (int i = 0; i < config.dof_count; i++) {
-    if (!dofSupportsAutoMapping(i)) {
-      LOG_C1_ERROR("Auto mapping not supported for DOF " + String(i) + " (" +
-                   String(config.dofs[i].name) + ")");
-      return false;
+    if (dofSupportsAutoMapping(i)) {
+      active_dof_indices[active_dof_count++] = static_cast<uint8_t>(i);
+      continue;
     }
+
+    if (config.dofs[i].drive_type == DRIVE_DIRECT_DRIVE) {
+      LOG_C1_INFO("Skipping auto mapping for DOF " + String(i) + " (" +
+                  String(config.dofs[i].name) + ") - direct-drive DOF");
+      continue;
+    }
+
+    LOG_C1_ERROR("Auto mapping not supported for DOF " + String(i) + " (" +
+                 String(config.dofs[i].name) + ")");
+    return false;
+  }
+
+  if (active_dof_count == 0) {
+    LOG_C1_ERROR("No tendon DOFs available for auto mapping");
+    return false;
   }
 
   // Verify that each DOF has at least 2 motors (agonist and antagonist)
-  for (int i = 0; i < config.dof_count; i++) {
+  for (int idx = 0; idx < active_dof_count; idx++) {
+    int i = active_dof_indices[idx];
     int motor_count_for_dof = 0;
     bool has_agonist = false, has_antagonist = false;
 
@@ -108,21 +136,27 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
 
   // Set number of DOFs and motors
   auto_mapping_state.dof_count   = config.dof_count;
+  auto_mapping_state.active_dof_count = active_dof_count;
+  for (int i = 0; i < active_dof_count; i++) {
+    auto_mapping_state.active_dof_indices[i] = active_dof_indices[i];
+  }
   auto_mapping_state.motor_count = config.motor_count;
 
   // Set settle time
   auto_mapping_state.settle_time_ms =
-      (settle_time_ms > 0) ? settle_time_ms : config.dofs[0].zero_mapping.auto_mapping_settle_time;
+      (settle_time_ms > 0) ? settle_time_ms :
+      config.dofs[auto_mapping_state.active_dof_indices[0]].zero_mapping.auto_mapping_settle_time;
 
   // Set tensioning torque and active motor speed
   float applied_tensioning_torque =
-      (tensioning_torque != 0) ? tensioning_torque : config.dofs[0].zero_mapping.tensioning_torque;
+      (tensioning_torque != 0) ? tensioning_torque :
+      config.dofs[auto_mapping_state.active_dof_indices[0]].zero_mapping.tensioning_torque;
 
   // Get motor speed from configuration
-  float motor_speed       = config.dofs[0].zero_mapping.auto_mapping_speed;
-  float resistance_torque = config.dofs[0].zero_mapping.auto_mapping_resistance_torque;
+  float motor_speed       = config.dofs[auto_mapping_state.active_dof_indices[0]].zero_mapping.auto_mapping_speed;
+  float resistance_torque = config.dofs[auto_mapping_state.active_dof_indices[0]].zero_mapping.auto_mapping_resistance_torque;
 
-  LOG_C1_INFO("Starting auto mapping - DOF: " + String(auto_mapping_state.dof_count) +
+  LOG_C1_INFO("Starting auto mapping - active DOFs: " + String(auto_mapping_state.active_dof_count) +
            ", motors: " + String(auto_mapping_state.motor_count) +
            ", tensioning torque: " + String(applied_tensioning_torque) +
            ", motor speed: " + String(motor_speed) + " deg/s" +
@@ -131,7 +165,8 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
   // Set limits and steps for each DOF
   auto_mapping_state.total_points = 1; // Initialize to 1 and multiply for each DOF
 
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     // Use specific limits for auto-mapping instead of general limits
     auto_mapping_state.min_angles[i] = config.dofs[i].zero_mapping.auto_mapping_min_angle;
     auto_mapping_state.max_angles[i] = config.dofs[i].zero_mapping.auto_mapping_max_angle;
@@ -198,12 +233,16 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
 
   // Initialize applied torques
   for (int i = 0; i < auto_mapping_state.motor_count; i++) {
+    int motor_dof = config.motors[i].dof_index;
+    if (!isActiveAutoMappingDof(auto_mapping_state, motor_dof)) {
+      auto_mapping_state.applied_torques[i] = 0.0f;
+      continue;
+    }
+
     // Initial setting: tensioning torques based on motor role (agonist/antagonist)
     if (config.motors[i].is_agonist) {
-      // Agonist motors
       auto_mapping_state.applied_torques[i] = applied_tensioning_torque;
     } else {
-      // Antagonist motors
       auto_mapping_state.applied_torques[i] = -applied_tensioning_torque;
     }
   }
@@ -216,6 +255,12 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
   // Apply initial torques to all motors
   LOG_C1_INFO("Applying initial torques for auto mapping");
   for (int i = 0; i < auto_mapping_state.motor_count; i++) {
+    if (!isActiveAutoMappingDof(auto_mapping_state, config.motors[i].dof_index)) {
+      motors[i]->setTorque(0);
+      LOG_C1_DEBUG("  Motor " + String(i) + ": skipped (DOF " +
+                   String(config.motors[i].dof_index) + " not in auto-mapping set)");
+      continue;
+    }
     motors[i]->setTorque(auto_mapping_state.applied_torques[i]);
     LOG_C1_DEBUG("  Motor " + String(i) + ": torque " +
               String(auto_mapping_state.applied_torques[i]));
@@ -237,7 +282,8 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
   LOG_C1_DEBUG("\n----------------------------------------------------------");
   LOG_C1_DEBUG("MAPPING POINT CHANGE — Current point: " + String(auto_mapping_state.current_point));
   LOG_C1_DEBUG("Current position:");
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     // Use shared_dof_angles (updated by Core0)
     float current_angle = shared_dof_angles.valid[i] ? shared_dof_angles.angles[i] : 0.0f;
     LOG_C1_DEBUG("  DOF " + String(i) + ": " + String(current_angle, 2) +
@@ -252,7 +298,8 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
   sleep_ms(TRANSITION_DELAY_MS);
 
   // Multidimensional increment, like nested counters
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     // Increment target angle for this DOF
     auto_mapping_state.target_angles[i] += auto_mapping_state.step_sizes[i];
 
@@ -260,13 +307,15 @@ bool JointController::moveToNextMappingPoint(AutoMappingState_t &auto_mapping_st
     if (auto_mapping_state.target_angles[i] <= auto_mapping_state.max_angles[i]) {
       // Target updated, continue with new point
       LOG_C1_DEBUG("New target:");
-      for (int j = 0; j < auto_mapping_state.dof_count; j++) {
+      for (int jdx = 0; jdx < auto_mapping_state.active_dof_count; jdx++) {
+        int j = auto_mapping_state.active_dof_indices[jdx];
         LOG_C1_DEBUG("  DOF " + String(j) + ": " + String(auto_mapping_state.target_angles[j], 2) +
                   "°");
       }
 
       // Explicit reset of all movement flags for each DOF
-      for (int k = 0; k < auto_mapping_state.dof_count; k++) {
+      for (int kdx = 0; kdx < auto_mapping_state.active_dof_count; kdx++) {
+        int k = auto_mapping_state.active_dof_indices[kdx];
         auto_mapping_state.dof_movement_initialized[k] = false;
         auto_mapping_state.last_direction[k]           = 0;
         auto_mapping_state.direction_check_counter[k]  = 0;
@@ -306,7 +355,8 @@ bool JointController::acquireCurrentPoint(AutoMappingState_t &auto_mapping_state
   auto_mapping_state.last_sample.timestamp = millis();
 
   // Acquire DOF angles from shared state (updated by Core0)
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     if (!shared_dof_angles.valid[i]) {
       LOG_C1_ERROR("Acquisition failed — invalid encoder reading for DOF " + String(i));
       return false;
@@ -329,9 +379,10 @@ bool JointController::acquireCurrentPoint(AutoMappingState_t &auto_mapping_state
 
   // Add DOF angles
   point_data += "DOF=[";
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     point_data += String(auto_mapping_state.last_sample.dof_angles[i], 2);
-    if (i < auto_mapping_state.dof_count - 1)
+    if (idx < auto_mapping_state.active_dof_count - 1)
       point_data += ",";
   }
   point_data += "]:";
@@ -378,7 +429,8 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
     auto_mapping_state.first_call = false;
 
     // Initialize all arrays to zero
-    for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+    for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+      int i = auto_mapping_state.active_dof_indices[idx];
       auto_mapping_state.dof_movement_initialized[i] = false;
       auto_mapping_state.last_direction[i]           = 0;
       auto_mapping_state.last_agonist_value[i]       = 0.0f;
@@ -391,7 +443,8 @@ void JointController::applyTorquesForTargetPosition(AutoMappingState_t &auto_map
     }
   }
 
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     // Get current DOF angle from shared state (updated by Core0)
     if (!shared_dof_angles.valid[i]) {
       LOG_C1_ERROR("Invalid encoder reading for DOF " + String(i));
@@ -617,7 +670,8 @@ bool JointController::isPositionReached(AutoMappingState_t &auto_mapping_state) 
   bool all_reached = true;
 
   // Check stability for each DOF using shared state (updated by Core0)
-  for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int i = auto_mapping_state.active_dof_indices[idx];
     if (!shared_dof_angles.valid[i]) {
       return false; // Invalid encoder reading
     }
@@ -718,7 +772,8 @@ int JointController::updateAutoMapping(AutoMappingState_t &auto_mapping_state) {
     bool position_check_ok = true;
 
     // Verify that all encoders are valid using shared state (updated by Core0)
-    for (int i = 0; i < auto_mapping_state.dof_count; i++) {
+    for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+      int i = auto_mapping_state.active_dof_indices[idx];
       if (!shared_dof_angles.valid[i]) {
         position_check_ok = false;
         auto_mapping_state.consecutive_encoder_errors++;
@@ -828,7 +883,8 @@ bool JointController::transferAutoMappingData(const AutoMappingState_t &auto_map
   }
 
   // For each DOF, extract data and populate it in DofMappingData_t structure
-  for (int dof = 0; dof < auto_mapping_state.dof_count; dof++) {
+  for (int idx = 0; idx < auto_mapping_state.active_dof_count; idx++) {
+    int dof = auto_mapping_state.active_dof_indices[idx];
     DofMappingData_t &mapping_data = dof_mappings[dof];
 
     // Reset structure
