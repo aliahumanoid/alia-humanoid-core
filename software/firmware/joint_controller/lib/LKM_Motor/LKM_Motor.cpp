@@ -881,43 +881,59 @@ uint16_t LKM_Motor::getEncoderRawSync() {
  */
 LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
   MultiAngleData data;
-  data.angle    = 0.0;
+  data.angle    = NAN;
   data.waitTime = 0;
   data.rawMotorAngle_centideg = 0;
 
   unsigned long targetID = 0x140 + _motorID;
+  unsigned long expectedResponseID = targetID;
   unsigned char cmd[8]   = {0x94, 0, 0, 0, 0, 0, 0, 0};
 
-  if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
-    LOG_C1_ERROR("ERROR sending READ_SL_ANGLE.");
-    return data;
+  int flushed = 0;
+  while (_can->checkReceive() == CAN_MSGAVAIL && flushed < 5) {
+    unsigned long dummyId;
+    unsigned char dummyLen;
+    unsigned char dummyBuf[8];
+    _can->readMsgBuf(&dummyId, &dummyLen, dummyBuf);
+    flushed++;
   }
 
-  unsigned long startTime = millis();
-  while (millis() - startTime < 2) {
-    if (_can->checkReceive() == CAN_MSGAVAIL) {
-      unsigned long canId;
-      unsigned char len;
-      unsigned char rcvBuf[8];
-      if (_can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK) {
-        if (rcvBuf[0] == 0x94) {
-          data.waitTime = millis() - startTime;
-          // Build a 56-bit value from bytes 1-7
-          uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
-                          ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
-                          ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
-                          ((uint64_t)rcvBuf[1]);
-          int64_t motorAngle = ((int64_t)temp << 8) >> 8;
-          // motorAngle is in 0.01° units; convert to degrees and apply reduction
-          data.angle = (motorAngle / 100.0) / _reductionGear;
-          if (invertEncoder) {
-            data.angle = -data.angle;
+  const int MAX_RETRIES = 2;
+  for (int retry = 0; retry < MAX_RETRIES; retry++) {
+    if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
+      if (retry == MAX_RETRIES - 1) {
+        LOG_C1_ERROR("ERROR sending READ_SL_ANGLE (after " + String(MAX_RETRIES) + " retries).");
+      }
+      delayMicroseconds(100);
+      continue;
+    }
+
+    unsigned long startTime = micros();
+    while (micros() - startTime < 2000) {
+      if (_can->checkReceive() == CAN_MSGAVAIL) {
+        unsigned long canId;
+        unsigned char len;
+        unsigned char rcvBuf[8];
+        if (_can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK) {
+          if (canId == expectedResponseID && rcvBuf[0] == 0x94) {
+            data.waitTime = micros() - startTime;
+            uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
+                            ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
+                            ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
+                            ((uint64_t)rcvBuf[1]);
+            int64_t motorAngle = ((int64_t)temp << 8) >> 8;
+            data.rawMotorAngle_centideg = motorAngle;
+            data.angle = (motorAngle / 100.0) / _reductionGear;
+            if (invertEncoder) {
+              data.angle = -data.angle;
+            }
+            return data;
           }
-          return data;
         }
       }
     }
   }
+
   LOG_C1_WARN("Timeout: no response from READ_SL_ANGLE.");
   return data;
 }

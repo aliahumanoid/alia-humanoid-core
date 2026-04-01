@@ -162,6 +162,11 @@ private:
   static constexpr float SPIKE_DETECTION_MARGIN = 1.5f; // Safety margin (150% of max speed)
   static constexpr int MAX_CONSECUTIVE_READS    = 3;    // Reads to confirm a value
 
+  // Direct-drive feedback cache (updated on Core1 from motor internal encoder reads)
+  float *direct_feedback_angles;
+  float *direct_feedback_velocities;
+  bool *direct_feedback_valid;
+
   // Private method to validate readings
   float getValidatedAngle(uint8_t dof_index, bool &is_valid);
 
@@ -211,6 +216,11 @@ public:
 
   bool dofSupportsAutoMapping(uint8_t dof_index) const {
     return dof_index < config.dof_count && config.dofs[dof_index].capabilities.supports_auto_mapping;
+  }
+
+  bool isDirectDriveDof(uint8_t dof_index) const {
+    return dof_index < config.dof_count &&
+           config.dofs[dof_index].drive_type == DRIVE_DIRECT_DRIVE;
   }
 
   // ==========================================================================
@@ -690,6 +700,9 @@ public:
    * startup-time validation before movement is enabled.
    */
   void setMovementReadyForDof(uint8_t dof_index, bool ready);
+  bool hasSavedReference(uint8_t dof_index) const;
+  void updateDirectDriveFeedback(uint8_t dof_index, float angle_deg, float velocity_deg_s, bool valid);
+  bool getDirectDriveFeedback(uint8_t dof_index, float &angle_deg, float &velocity_deg_s) const;
 
   /**
    * @brief Get the number of SPI spikes detected for a DOF

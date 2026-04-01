@@ -627,4 +627,3 @@ bool JointController::recalculateSafeLimits() {
     return false;
   }
 }
-

@@ -42,6 +42,8 @@ static float delta_theta_prev[MAX_DOFS] = {0};      // Previous outer PID output
 static float velocity_filtered[MAX_DOFS] = {0};     // Filtered joint velocity (deg/s)
 static float expected_velocity_cache[MAX_DOFS] = {0}; // Cached expected velocity for inner loop stiffness scaling
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
+static float direct_drive_last_angle[MAX_DOFS] = {0};
+static uint32_t direct_drive_last_update_us[MAX_DOFS] = {0};
 
 // === SLACK MONITOR: delta_theta bias tracking during HOLDING ===
 // Exponential moving average of delta_theta while in HOLDING state.
@@ -487,6 +489,57 @@ bool JointController::executeControlLoop() {
   // Read a consistent snapshot of shared DOF angles for this cycle
   SharedDofAngles dof_snapshot;
   readSharedDofAnglesSnapshot(dof_snapshot);
+  uint32_t feedback_now_us = time_us_32();
+
+  // Direct-drive DOFs use the motor's internal absolute encoder on Core1.
+  // Override the snapshot locally so the rest of the control loop can stay
+  // topology-agnostic.
+  for (uint8_t dof = 0; dof < config.dof_count; dof++) {
+    if (config.dofs[dof].drive_type != DRIVE_DIRECT_DRIVE) {
+      continue;
+    }
+
+    LKM_Motor *direct_motor = nullptr;
+    for (int i = 0; i < config.motor_count; i++) {
+      if (config.motors[i].dof_index == dof &&
+          config.motors[i].role == MOTOR_ROLE_DIRECT) {
+        direct_motor = motors[i];
+        break;
+      }
+    }
+
+    if (direct_motor == nullptr) {
+      dof_snapshot.valid[dof] = false;
+      dof_snapshot.velocities[dof] = 0.0f;
+      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      continue;
+    }
+
+    LKM_Motor::MultiAngleData raw_angle = direct_motor->getSingleAngleSync();
+    if (isnan(raw_angle.angle) || !_saved_offsets[dof].valid) {
+      dof_snapshot.valid[dof] = false;
+      dof_snapshot.velocities[dof] = 0.0f;
+      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      continue;
+    }
+
+    const float calibrated_angle = raw_angle.angle - _saved_offsets[dof].agonist_offset;
+
+    float velocity_deg_s = 0.0f;
+    if (direct_drive_last_update_us[dof] > 0 && dof_snapshot.valid[dof]) {
+      float dt_s = (feedback_now_us - direct_drive_last_update_us[dof]) / 1000000.0f;
+      if (dt_s > 0.0001f) {
+        velocity_deg_s = (calibrated_angle - direct_drive_last_angle[dof]) / dt_s;
+      }
+    }
+
+    dof_snapshot.angles[dof] = calibrated_angle;
+    dof_snapshot.velocities[dof] = velocity_deg_s;
+    dof_snapshot.valid[dof] = true;
+    direct_drive_last_angle[dof] = calibrated_angle;
+    direct_drive_last_update_us[dof] = feedback_now_us;
+    updateDirectDriveFeedback(dof, calibrated_angle, velocity_deg_s, true);
+  }
   const SharedDofAngles &dof_data = dof_snapshot;
 
   // === OUTER LOOP SCHEDULING ===

@@ -548,6 +548,11 @@ void setup() {
   LOG_INFO("DOF count: " + String(ACTIVE_JOINT_CONFIG.dof_count));
   
   for (int i = 0; i < ACTIVE_JOINT_CONFIG.dof_count; i++) {
+    if (ACTIVE_JOINT_CONFIG.dofs[i].drive_type == DRIVE_DIRECT_DRIVE) {
+      LOG_INFO("DOF " + String(i) + " (" + String(ACTIVE_JOINT_CONFIG.dofs[i].name) +
+               ") uses motor-internal absolute feedback — skipping DirectEncoder enable");
+      continue;
+    }
     uint8_t encoder_channel = ACTIVE_JOINT_CONFIG.dofs[i].encoder_channel;
     if (encoder_channel < DIRECT_ENCODER_COUNT) {
       directEncoders.setEncoderConnected(encoder_channel, true);

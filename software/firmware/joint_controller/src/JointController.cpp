@@ -92,6 +92,9 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
 
   // Set encoder inversion flags based on configuration
   for (int i = 0; i < config.dof_count; i++) {
+    if (cfg.dofs[i].drive_type == DRIVE_DIRECT_DRIVE) {
+      continue;
+    }
     uint8_t encoder_channel = cfg.dofs[i].encoder_channel;
     bool invert             = cfg.dofs[i].encoder_invert;
     // Set inversion flag directly in encoders object
@@ -127,9 +130,12 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
   }
 
   // NEW: Initialize encoder reading tracking to detect SPI spikes
-  last_valid_angles    = new float[config.dof_count];
-  last_read_timestamps = new uint64_t[config.dof_count];
-  spike_counters       = new uint32_t[config.dof_count];
+  last_valid_angles       = new float[config.dof_count];
+  last_read_timestamps    = new uint64_t[config.dof_count];
+  spike_counters          = new uint32_t[config.dof_count];
+  direct_feedback_angles  = new float[config.dof_count];
+  direct_feedback_velocities = new float[config.dof_count];
+  direct_feedback_valid   = new bool[config.dof_count];
 
   // Apply default PID immediately; any values from flash will override them subsequently
   applyDefaultPidTunings(false);
@@ -139,6 +145,9 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
     last_valid_angles[i]    = 0.0f;
     last_read_timestamps[i] = 0;
     spike_counters[i]       = 0;
+    direct_feedback_angles[i] = 0.0f;
+    direct_feedback_velocities[i] = 0.0f;
+    direct_feedback_valid[i] = false;
   }
 }
 
@@ -184,6 +193,9 @@ JointController::~JointController() {
   delete[] last_valid_angles;
   delete[] last_read_timestamps;
   delete[] spike_counters;
+  delete[] direct_feedback_angles;
+  delete[] direct_feedback_velocities;
+  delete[] direct_feedback_valid;
 }
 
 // ============================================================================
@@ -235,6 +247,9 @@ bool JointController::init() {
   if (!encoders->isFlashDataValid()) {
     LOG_C1_INFO("No valid flash calibration - applying default zero_angle_offsets");
     for (int i = 0; i < config.dof_count; i++) {
+      if (config.dofs[i].drive_type == DRIVE_DIRECT_DRIVE) {
+        continue;
+      }
       float zero_offset = config.dofs[i].zero_mapping.zero_angle_offset;
       if (zero_offset != 0.0f) {
         uint8_t encoder_channel = config.dofs[i].encoder_channel;
@@ -473,6 +488,42 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
     return false;
   }
 
+  if (config.dofs[dof_index].drive_type == DRIVE_DIRECT_DRIVE) {
+    LKM_Motor *direct_motor = nullptr;
+    for (int i = 0; i < config.motor_count; i++) {
+      if (config.motors[i].dof_index == dof_index &&
+          config.motors[i].role == MOTOR_ROLE_DIRECT) {
+        direct_motor = motors[i];
+        break;
+      }
+    }
+
+    if (direct_motor == nullptr) {
+      LOG_C1_ERROR("Set Reference failed: no direct-drive motor for DOF " + String(dof_index));
+      return false;
+    }
+
+    float reference_angle = config.dofs[dof_index].zero_mapping.zero_angle_offset;
+    LKM_Motor::MultiAngleData current_angle = direct_motor->getSingleAngleSync();
+    if (isnan(current_angle.angle)) {
+      LOG_C1_ERROR("Set Reference failed: no single-turn angle from direct-drive motor DOF " +
+                   String(dof_index));
+      return false;
+    }
+
+    _saved_offsets[dof_index].agonist_offset = current_angle.angle - reference_angle;
+    _saved_offsets[dof_index].antagonist_offset = 0.0f;
+    _saved_offsets[dof_index].joint_angle_at_calib = reference_angle;
+    _saved_offsets[dof_index].valid = true;
+    _pending_offsets_save = true;
+    motor_offsets_calibrated[dof_index] = true;
+
+    LOG_C1_INFO("Set Reference: DOF " + String(dof_index) +
+                " direct-drive offset=" + String(_saved_offsets[dof_index].agonist_offset, 2) +
+                " target=" + String(reference_angle, 2) + "°");
+    return true;
+  }
+
   // Get the encoder channel for this DOF
   uint8_t encoder_channel = config.dofs[dof_index].encoder_channel;
 
@@ -522,10 +573,41 @@ float JointController::getValidatedAngle(uint8_t dof_index, bool &is_valid) {
     return 0.0f;
   }
 
+  if (config.dofs[dof_index].drive_type == DRIVE_DIRECT_DRIVE) {
+    is_valid = direct_feedback_valid[dof_index];
+    return direct_feedback_angles[dof_index];
+  }
+
   // Read from shared memory (updated by Core0)
   // This is thread-safe and does NOT access SPI
   is_valid = shared_dof_angles.valid[dof_index];
   return shared_dof_angles.angles[dof_index];
+}
+
+void JointController::updateDirectDriveFeedback(uint8_t dof_index, float angle_deg,
+                                                float velocity_deg_s, bool valid) {
+  if (dof_index >= config.dof_count ||
+      config.dofs[dof_index].drive_type != DRIVE_DIRECT_DRIVE) {
+    return;
+  }
+  direct_feedback_angles[dof_index] = angle_deg;
+  direct_feedback_velocities[dof_index] = velocity_deg_s;
+  direct_feedback_valid[dof_index] = valid;
+}
+
+bool JointController::getDirectDriveFeedback(uint8_t dof_index, float &angle_deg,
+                                             float &velocity_deg_s) const {
+  if (dof_index >= config.dof_count ||
+      config.dofs[dof_index].drive_type != DRIVE_DIRECT_DRIVE ||
+      !direct_feedback_valid[dof_index]) {
+    angle_deg = 0.0f;
+    velocity_deg_s = 0.0f;
+    return false;
+  }
+
+  angle_deg = direct_feedback_angles[dof_index];
+  velocity_deg_s = direct_feedback_velocities[dof_index];
+  return true;
 }
 
 // Read current angle of a DOF (alias for getValidatedAngle)
@@ -1209,6 +1291,15 @@ bool JointController::applySavedOffsetsToMotors(uint8_t dof_index) {
     return false;
   }
 
+  if (config.dofs[dof_index].drive_type == DRIVE_DIRECT_DRIVE) {
+    motor_offsets_calibrated[dof_index] = true;
+
+    LOG_C1_INFO("DOF " + String(dof_index) + " direct-drive reference applied from flash: offset=" +
+                String(_saved_offsets[dof_index].agonist_offset, 2) + " target=" +
+                String(_saved_offsets[dof_index].joint_angle_at_calib, 2) + "°");
+    return true;
+  }
+
   // Find agonist and antagonist motors for this DOF
   LKM_Motor *agonist_motor = nullptr;
   LKM_Motor *antagonist_motor = nullptr;
@@ -1295,6 +1386,13 @@ void JointController::setMovementReadyForDof(uint8_t dof_index, bool ready) {
     return;
   }
   motor_offsets_calibrated[dof_index] = ready;
+}
+
+bool JointController::hasSavedReference(uint8_t dof_index) const {
+  if (dof_index >= config.dof_count) {
+    return false;
+  }
+  return _saved_offsets[dof_index].valid;
 }
 
 // Get mapping data for a DOF

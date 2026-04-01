@@ -319,6 +319,9 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
 
     bool all_valid = true;
     for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
+      if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+        continue;
+      }
       if (!shared_dof_angles.valid[dof]) {
         all_valid = false;
         break;
@@ -348,6 +351,11 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   const float POSITION_HARD_MARGIN = 15.0f;
 
   for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
+    if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+      LOG_INFO("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
+               ") uses motor-internal feedback — skipping Core0 position sanity check");
+      continue;
+    }
     if (!shared_dof_angles.valid[dof]) {
       LOG_ERROR("DOF " + String(dof) + " encoder invalid during position check");
       positions_ok = false;
@@ -423,9 +431,9 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
 
     if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
-      if (!directEncoders.isFlashDataValid()) {
+      if (!active_joint_controller->hasSavedReference(dof)) {
         LOG_ERROR("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
-                  ") direct-drive startup failed: persisted absolute reference required");
+                  ") direct-drive startup failed: persisted motor reference required");
         SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" +
                       String(dof) + ":REASON=REFERENCE_REQUIRED");
         pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_REFERENCE_REQUIRED,
@@ -436,7 +444,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       }
 
       LOG_INFO("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
-               ") direct-drive startup: using persisted absolute encoder reference from flash");
+               ") direct-drive startup: using persisted motor-internal reference from flash");
       active_joint_controller->setMovementReadyForDof(dof, true);
       last_successful_dof = dof;
       SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
@@ -744,6 +752,13 @@ void updateSharedDofAngles() {
   __atomic_fetch_add(&shared_dof_angles.seq, 1, __ATOMIC_ACQ_REL);
   
   for (uint8_t dof = 0; dof < dof_count; dof++) {
+    if (controller->getConfig().dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+      consecutive_errors[dof] = 0;
+      shared_dof_angles.valid[dof] = false;
+      shared_dof_angles.velocities[dof] = 0.0f;
+      continue;
+    }
+
     // Use encoder_channel from config (may differ from dof index depending on wiring)
     uint8_t enc_ch = controller->getConfig().dofs[dof].encoder_channel;
     
@@ -1427,12 +1442,16 @@ void core0_main_loop() {
                     }
 
                     case CMD_SET_ZERO_CURRENT_POS: {
-                      // Set zero: joint encoder on Core0, motor encoders delegated to Core1
+                      // Tendon DOFs: joint encoder on Core0, motor encoders delegated to Core1.
+                      // Direct-drive DOFs: delegate the full reference capture to Core1.
                       JointController *ctrl = active_joint_controller;
                       if (ctrl != nullptr) {
                         uint8_t dof = parsed_cmd.dof_index;
                         const JointConfig& cfg = ctrl->getConfig();
                         if (dof < cfg.dof_count) {
+                          if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+                            break;  // let Core1 handle Set Reference via motor-internal encoder
+                          }
                           uint8_t enc_channel = cfg.dofs[dof].encoder_channel;
                           float zero_offset = cfg.dofs[dof].zero_mapping.zero_angle_offset;
                           
@@ -1540,6 +1559,14 @@ void core0_main_loop() {
       break;
 
     case CMD1_END_ZERO:
+      if (active_joint_controller != nullptr && active_joint_controller->isPendingOffsetsSave()) {
+        if (active_joint_controller->saveMotorOffsetsToFlash()) {
+          LOG_INFO("Motor offsets saved to flash after set-reference");
+        } else {
+          LOG_WARN("Failed to save motor offsets after set-reference");
+        }
+        active_joint_controller->clearPendingOffsetsSave();
+      }
       SERIAL_COM_LN("RSP:ZERO_COMPLETE(" + String(shared_data_ext.joint_id) + "," +
                      String(shared_data_ext.dof_index) + ")");
       break;
@@ -1601,9 +1628,14 @@ void core0_main_loop() {
   // NOTE: Suspend measuring streaming during movement to avoid Serial conflicts with Core1
   if (measuring_data_ext.flag == 1 && !movement_in_progress) {
     uint8_t dof = measuring_data_ext.dof_index;
-    if (dof < shared_dof_angles.dof_count && shared_dof_angles.valid[dof]) {
+    bool angle_valid = false;
+    float angle_deg = 0.0f;
+    if (active_joint_controller != nullptr && dof < active_joint_controller->getConfig().dof_count) {
+      angle_deg = active_joint_controller->getCurrentAngle(dof, angle_valid);
+    }
+    if (angle_valid) {
       SERIAL_COM_LN("EVT:ANGLE(" + String(ACTIVE_JOINT) + "," + String(dof) + "," +
-                     String(shared_dof_angles.angles[dof], 4) + ")");
+                     String(angle_deg, 4) + ")");
     }
     delay(50); // Throttle streaming to ~20Hz
   }
@@ -1742,15 +1774,19 @@ void core0_main_loop() {
         if (encoder_test_all_dofs) {
           // Send data for all DOFs of the joint
           for (int dof = 0; dof < shared_dof_angles.dof_count; dof++) {
-            // Get encoder channel for this DOF (for raw count)
-            uint8_t encoder_channel = controller->getConfig().dofs[dof].encoder_channel;
-            int32_t encoder_count = directEncoders.getCount(encoder_channel);
+            bool angle_valid = false;
+            float angle_deg = controller->getCurrentAngle(dof, angle_valid);
+            int32_t encoder_count = -1;
+            if (!controller->isDirectDriveDof(dof)) {
+              uint8_t encoder_channel = controller->getConfig().dofs[dof].encoder_channel;
+              encoder_count = directEncoders.getCount(encoder_channel);
+            }
 
-            if (shared_dof_angles.valid[dof]) {
+            if (angle_valid) {
               // Build output message for this DOF using shared angles
               char buffer[100];
               snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld", 
-                       dof, shared_dof_angles.angles[dof], encoder_count);
+                       dof, angle_deg, encoder_count);
               SERIAL_COM_LN(buffer);
             } else {
               char buffer[100];
@@ -1760,14 +1796,19 @@ void core0_main_loop() {
           }
         } else {
           // Single DOF handling
-          uint8_t encoder_channel = controller->getConfig().dofs[encoder_test_dof_index].encoder_channel;
-          int32_t encoder_count = directEncoders.getCount(encoder_channel);
+          int32_t encoder_count = -1;
+          if (!controller->isDirectDriveDof(encoder_test_dof_index)) {
+            uint8_t encoder_channel = controller->getConfig().dofs[encoder_test_dof_index].encoder_channel;
+            encoder_count = directEncoders.getCount(encoder_channel);
+          }
+          bool angle_valid = false;
+          float angle_deg = controller->getCurrentAngle(encoder_test_dof_index, angle_valid);
 
-          if (shared_dof_angles.valid[encoder_test_dof_index]) {
+          if (angle_valid) {
             // Build output message using shared angles
             char buffer[100];
             snprintf(buffer, sizeof(buffer), "EVT:ENCODER_DATA:DOF=%d:ANGLE=%.2f:COUNT=%ld",
-                     encoder_test_dof_index, shared_dof_angles.angles[encoder_test_dof_index], encoder_count);
+                     encoder_test_dof_index, angle_deg, encoder_count);
             SERIAL_COM_LN(buffer);
           } else {
             SERIAL_COM_LN("EVT:ENCODER_DATA:ERROR=Invalid encoder data");

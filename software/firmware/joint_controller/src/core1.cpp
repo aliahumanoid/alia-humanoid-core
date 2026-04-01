@@ -383,11 +383,24 @@ void sendEncoderStreamData() {
   } frame;
   
   // Read angles from shared_dof_angles (updated by Core0)
-  // NOTE: shared_dof_angles.angles[] are ALREADY in degrees (from DirectEncoders)
+  // NOTE: tendon DOFs use shared_dof_angles from Core0; direct-drive DOFs use
+  // cached motor-internal feedback updated on Core1 by the control loop.
   for (uint8_t dof = 0; dof < 3; dof++) {
-    if (dof < MAX_DOFS && shared_dof_angles.valid[dof]) {
+    float angle_deg = 0.0f;
+    float velocity_deg_s = 0.0f;
+    bool valid = false;
+
+    if (active_joint_controller != nullptr &&
+        dof < active_joint_controller->getConfig().dof_count &&
+        active_joint_controller->isDirectDriveDof(dof)) {
+      valid = active_joint_controller->getDirectDriveFeedback(dof, angle_deg, velocity_deg_s);
+    } else if (dof < MAX_DOFS && shared_dof_angles.valid[dof]) {
+      valid = true;
+      angle_deg = shared_dof_angles.angles[dof];
+    }
+
+    if (valid) {
       // Convert to 0.01° resolution (standard CAN encoding)
-      float angle_deg = shared_dof_angles.angles[dof];  // Already in degrees
       int16_t angle_int = (int16_t)(angle_deg * 100.0f);
       
       if (dof == 0) frame.dof0_angle = angle_int;
@@ -574,9 +587,22 @@ void sendJointStateData() {
     frame.dof_index = d;
 
     // Joint angle from shared encoder data
-    if (shared_dof_angles.valid[d]) {
-      frame.q_actual_x100 = (int16_t)(shared_dof_angles.angles[d] * 100.0f);
-      frame.dq_actual_x10 = (int16_t)(shared_dof_angles.velocities[d] * 10.0f);
+    float q_actual_deg = 0.0f;
+    float dq_actual_deg_s = 0.0f;
+    bool q_valid = false;
+    if (active_joint_controller != nullptr &&
+        d < active_joint_controller->getConfig().dof_count &&
+        active_joint_controller->isDirectDriveDof(d)) {
+      q_valid = active_joint_controller->getDirectDriveFeedback(d, q_actual_deg, dq_actual_deg_s);
+    } else if (shared_dof_angles.valid[d]) {
+      q_valid = true;
+      q_actual_deg = shared_dof_angles.angles[d];
+      dq_actual_deg_s = shared_dof_angles.velocities[d];
+    }
+
+    if (q_valid) {
+      frame.q_actual_x100 = (int16_t)(q_actual_deg * 100.0f);
+      frame.dq_actual_x10 = (int16_t)(dq_actual_deg_s * 10.0f);
     } else {
       frame.q_actual_x100 = 0;
       frame.dq_actual_x10 = 0;
@@ -588,7 +614,7 @@ void sendJointStateData() {
 
     // Status bits
     frame.status = 0;
-    if (shared_dof_angles.valid[d]) frame.status |= 0x01;  // bit0: valid
+    if (q_valid) frame.status |= 0x01;  // bit0: valid
     if (!impedance_segment[d].active) frame.status |= 0x02;  // bit1: holding (local segment inactive)
     // Watchdog warning: > 80% of timeout elapsed while host stream is still armed.
     // Once the timeout has been latched into LOCAL HOLD, we suppress this bit to
