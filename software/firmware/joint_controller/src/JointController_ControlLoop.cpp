@@ -511,6 +511,7 @@ bool JointController::executeControlLoop() {
     if (direct_motor == nullptr) {
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
+      direct_drive_last_update_us[dof] = 0;
       updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
       continue;
     }
@@ -519,6 +520,7 @@ bool JointController::executeControlLoop() {
     if (isnan(raw_angle.angle) || !_saved_offsets[dof].valid) {
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
+      direct_drive_last_update_us[dof] = 0;
       updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
       continue;
     }
@@ -526,7 +528,7 @@ bool JointController::executeControlLoop() {
     const float calibrated_angle = raw_angle.angle - _saved_offsets[dof].agonist_offset;
 
     float velocity_deg_s = 0.0f;
-    if (direct_drive_last_update_us[dof] > 0 && dof_snapshot.valid[dof]) {
+    if (direct_drive_last_update_us[dof] > 0) {
       float dt_s = (feedback_now_us - direct_drive_last_update_us[dof]) / 1000000.0f;
       if (dt_s > 0.0001f) {
         velocity_deg_s = (calibrated_angle - direct_drive_last_angle[dof]) / dt_s;
