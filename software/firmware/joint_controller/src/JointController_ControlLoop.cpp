@@ -315,6 +315,30 @@ static void applyImpedanceInnerOverrides(uint8_t dof, PID *pid_agonist, PID *pid
     pid_antagonist->setTunings(kp_inner, ki_inner, kd_inner, pid_antagonist->getTau());
   }
 }
+
+static void applyImpedanceInnerOverrideSingle(uint8_t dof, PID *pid_direct) {
+  if (!pid_direct || !impedance_target[dof].valid) {
+    return;
+  }
+
+  if (!inner_pid_backup[dof][0].saved) {
+    inner_pid_backup[dof][0] = {pid_direct->getKp(), pid_direct->getKi(), pid_direct->getKd(), true};
+    inner_pid_backup[dof][1] = {};
+    LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " direct-drive PID backed up:"
+                " Kp=" + String(inner_pid_backup[dof][0].kp, 3) +
+                " Ki=" + String(inner_pid_backup[dof][0].ki, 3) +
+                " Kd=" + String(inner_pid_backup[dof][0].kd, 3));
+  }
+
+  const float kp_inner = impedance_target[dof].kp_inner;
+  const float ki_inner = impedance_target[dof].ki_inner;
+  const float kd_inner = impedance_target[dof].kd_inner;
+  if (fabsf(pid_direct->getKp() - kp_inner) > 0.001f ||
+      fabsf(pid_direct->getKi() - ki_inner) > 0.001f ||
+      fabsf(pid_direct->getKd() - kd_inner) > 0.001f) {
+    pid_direct->setTunings(kp_inner, ki_inner, kd_inner, pid_direct->getTau());
+  }
+}
 // When outer_loop_divisor > 1, delta_theta changes every N cycles creating "steps".
 // To smooth this, we interpolate between delta_theta_prev and delta_theta based on
 // where we are in the current outer loop period. This eliminates vibrations caused
@@ -1237,6 +1261,8 @@ bool JointController::executeControlLoop() {
     // The MCP2515 flush mechanism in LKM_Motor handles any CAN buffer issues.
     // See: LKM_Motor::getMultiAngleSync() for the flush and retry logic.
 
+    const bool direct_drive = (config.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE);
+
     // Use cached motor pointers (populated on first access per DOF)
     if (!motor_cache_valid[dof]) {
       // Populate cache for this DOF
@@ -1271,11 +1297,6 @@ bool JointController::executeControlLoop() {
     int agonist_idx = cached_agonist_idx[dof];
     int antagonist_idx = cached_antagonist_idx[dof];
 
-    if (agonist == nullptr || antagonist == nullptr) {
-      // No motors for this DOF, skip
-      continue;
-    }
-    
     // Get current position reference for inner loop theta_0 calculation
     float theta_0_joint;
 
@@ -1286,6 +1307,148 @@ bool JointController::executeControlLoop() {
     } else {
       // HOLDING: use last known position
       theta_0_joint = dof_hold_angle[dof];
+    }
+
+    if (direct_drive) {
+      LKM_Motor *direct_motor = nullptr;
+      PID *pid_direct = nullptr;
+      int direct_idx = -1;
+      for (int i = 0; i < config.motor_count; i++) {
+        if (config.motors[i].dof_index == dof && config.motors[i].role == MOTOR_ROLE_DIRECT) {
+          direct_motor = motors[i];
+          pid_direct = pid_controllers[i];
+          direct_idx = i;
+          break;
+        }
+      }
+
+      if (direct_motor == nullptr || pid_direct == nullptr || direct_idx < 0) {
+        static uint32_t last_direct_warn_ms[MAX_DOFS] = {0};
+        if (t_now - last_direct_warn_ms[dof] > 1000) {
+          LOG_C1_WARN("[Control] DOF " + String(dof) +
+                      " direct-drive motor/PID not configured");
+          last_direct_warn_ms[dof] = t_now;
+        }
+        continue;
+      }
+
+      if (!dof_data.valid[dof]) {
+        continue;
+      }
+
+      float q_direct_curr = dof_data.angles[dof];
+      float q_direct_ref = theta_0_joint;
+
+      if (inner_pid_init_needed[dof] || inner_pid_reinit_after_impedance[dof]) {
+        pid_direct->initializeState(q_direct_curr, q_direct_ref, 0.0f);
+        inner_pid_init_needed[dof] = false;
+        inner_pid_reinit_after_impedance[dof] = false;
+        LOG_C1_DEBUG("[Control] DOF " + String(dof) +
+                     " direct-drive PID init: ref=" + String(q_direct_ref, 1) +
+                     " curr=" + String(q_direct_curr, 1));
+      }
+
+      float uff_direct = 0.0f;
+      if (friction_ff_enabled) {
+        float speed = fabs(expected_velocity_cache[dof]);
+        float T = friction_ff_speed_thresh;
+        if (speed > 0.01f && speed <= 2.0f * T) {
+          float direction = (expected_velocity_cache[dof] >= 0.0f) ? 1.0f : -1.0f;
+          float gain = (speed <= T) ? 1.0f : (1.0f - (speed - T) / T);
+          uff_direct = friction_ff_torque * direction * gain;
+        }
+      }
+      if (impedance_active && impedance_target[dof].tau_ff != 0) {
+        uff_direct += (float)impedance_target[dof].tau_ff;
+      }
+
+#if CONTROLLER_DEBUG
+      uint32_t pid_start_us = time_us_32();
+#endif
+      if (impedance_active) {
+        applyImpedanceInnerOverrideSingle(dof, pid_direct);
+      }
+
+      float command_A = pid_direct->control(q_direct_ref, q_direct_curr, uff_direct);
+      float command_B = 0.0f;
+
+      if (dof == 0 && pid_diag_terms_enabled) {
+        pid_diagnostics.inner_p_term = (int16_t)constrain(pid_direct->last_up * 100.0f, -32767, 32767);
+        pid_diagnostics.inner_i_term = (int16_t)constrain(pid_direct->last_ui * 100.0f, -32767, 32767);
+        pid_diagnostics.inner_d_term = (int16_t)constrain(pid_direct->last_udfilt * 100.0f, -32767, 32767);
+        pid_diagnostics.inner_ff_term = (int16_t)constrain(uff_direct * 100.0f, -32767, 32767);
+        pid_diagnostics.pid_terms_valid = true;
+      }
+
+#if CONTROLLER_DEBUG
+      {
+        uint32_t pid_dt = time_us_32() - pid_start_us;
+        loop_micro_profile.accum_pid_us += pid_dt;
+        if (pid_dt > loop_micro_profile.max_pid_us) {
+          loop_micro_profile.max_pid_us = pid_dt;
+        }
+      }
+#endif
+
+      float max_torque_direct = config.motors[direct_idx].max_torque;
+      static float prev_command_direct[MAX_DOFS] = {0};
+      command_A = constrain(command_A, -max_torque_direct, max_torque_direct);
+      if (torque_ramp_time_ms > 0) {
+        float rate = max_torque_direct * inner_loop_period_us / (torque_ramp_time_ms * 1000.0f);
+        command_A = constrain(command_A,
+                              prev_command_direct[dof] - rate,
+                              prev_command_direct[dof] + rate);
+      }
+      prev_command_direct[dof] = command_A;
+
+#if CONTROLLER_DEBUG
+      uint32_t torque_start_us = time_us_32();
+#endif
+      direct_motor->setTorque((int)command_A);
+#if CONTROLLER_DEBUG
+      {
+        uint32_t torque_dt = time_us_32() - torque_start_us;
+        loop_micro_profile.accum_torque_us += torque_dt;
+        if (torque_dt > loop_micro_profile.max_torque_us) {
+          loop_micro_profile.max_torque_us = torque_dt;
+        }
+      }
+#endif
+
+      if (dof < 3) {
+        pid_diagnostics.target_deg_x100[dof] = (int16_t)(theta_0_joint * 100.0f);
+        pid_diagnostics.error_deg_x100[dof] = (int16_t)((theta_0_joint - q_direct_curr) * 100.0f);
+        pid_diagnostics.torque_A[dof] = (int16_t)command_A;
+        pid_diagnostics.torque_B[dof] = 0;
+
+        if (metrics_tracking_enabled && metrics_tracker[dof].tracking_active) {
+          int16_t abs_A = abs((int16_t)command_A);
+          if (abs_A > metrics_tracker[dof].max_torque_A) {
+            metrics_tracker[dof].max_torque_A = abs_A;
+          }
+          uint32_t torque_sum = abs_A;
+          if (metrics_tracker[dof].torque_integral < 0xFFFFFFFF - torque_sum) {
+            metrics_tracker[dof].torque_integral += torque_sum;
+          }
+        }
+      }
+
+#if CONTROLLER_DEBUG
+      {
+        uint32_t dof_dt = time_us_32() - dof_start_us;
+        loop_micro_profile.accum_dof_us += dof_dt;
+        if (dof_dt > loop_micro_profile.max_dof_us) {
+          loop_micro_profile.max_dof_us = dof_dt;
+        }
+        loop_micro_profile.samples++;
+      }
+#endif
+      continue;
+    }
+
+    if (agonist == nullptr || antagonist == nullptr) {
+      // No motors for this DOF, skip
+      continue;
     }
     
     // Compute theta_0 for motors using linear equations

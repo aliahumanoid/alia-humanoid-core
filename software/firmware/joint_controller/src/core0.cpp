@@ -244,9 +244,10 @@ static void pushStartupEvent(uint8_t event_type, uint8_t dof_index,
 #define STARTUP_REASON_RECALC_ERROR      5
 #define STARTUP_REASON_GLOBAL_TIMEOUT    6
 #define STARTUP_REASON_PARTIAL_HOLD     7  // COMPLETE but some DOFs stayed IDLE (encoder invalid)
+#define STARTUP_REASON_REFERENCE_REQUIRED 8 // Direct-drive DOF has no persisted absolute reference
 
 /**
- * @brief Execute startup sequence (recalc_offset for all DOFs, then HOLDING)
+ * @brief Execute startup sequence (tendon DOFs: recalc_offset, direct-drive DOFs: encoder/reference check)
  *
  * This function is the shared implementation for:
  * - Serial CMD_STARTUP_SEQUENCE
@@ -273,9 +274,16 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     return false;
   }
 
-  // SAFETY CHECK 1: Linear equations loaded for all DOFs
+  const JointConfig &cfg = active_joint_controller->getConfig();
+
+  // SAFETY CHECK 1: Linear equations loaded for all tendon DOFs
   bool equations_ok = true;
-  for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+  for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
+    if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+      LOG_INFO("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
+               ") is direct-drive — skipping linear equation requirement");
+      continue;
+    }
     if (!active_joint_controller->hasValidEquations(dof)) {
       LOG_ERROR("DOF " + String(dof) + ": linear equations not available");
       equations_ok = false;
@@ -306,7 +314,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     }
 
     bool all_valid = true;
-    for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+    for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
       if (!shared_dof_angles.valid[dof]) {
         all_valid = false;
         break;
@@ -335,15 +343,15 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   const float POSITION_MARGIN = 5.0f;
   const float POSITION_HARD_MARGIN = 15.0f;
 
-  for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+  for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
     if (!shared_dof_angles.valid[dof]) {
       LOG_ERROR("DOF " + String(dof) + " encoder invalid during position check");
       positions_ok = false;
       break;
     }
     float current_angle = shared_dof_angles.angles[dof];
-    float phys_min = active_joint_controller->getConfig().dofs[dof].limits.min_angle;
-    float phys_max = active_joint_controller->getConfig().dofs[dof].limits.max_angle;
+    float phys_min = cfg.dofs[dof].limits.min_angle;
+    float phys_max = cfg.dofs[dof].limits.max_angle;
 
     if (current_angle < (phys_min - POSITION_HARD_MARGIN) ||
         current_angle > (phys_max + POSITION_HARD_MARGIN)) {
@@ -395,18 +403,42 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   // For each DOF: try applying saved offsets first, fallback to full recalc
   bool all_success = true;
   uint8_t last_successful_dof = 0;
+  uint8_t startup_failure_reason = STARTUP_REASON_OK;
 
-  for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
+  for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
     if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
       LOG_ERROR("Startup sequence timed out at DOF " + String(dof));
       SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
       pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_GLOBAL_TIMEOUT,
                        (uint16_t)(millis() - startup_start_time));
       all_success = false;
+      startup_failure_reason = STARTUP_REASON_GLOBAL_TIMEOUT;
       break;
     }
 
     SERIAL_COM_LN("EVT:STARTUP_DOF_BEGIN(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+
+    if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+      if (!directEncoders.isFlashDataValid()) {
+        LOG_ERROR("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
+                  ") direct-drive startup failed: persisted absolute reference required");
+        SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" +
+                      String(dof) + ":REASON=REFERENCE_REQUIRED");
+        pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_REFERENCE_REQUIRED,
+                         (uint16_t)(millis() - startup_start_time));
+        all_success = false;
+        startup_failure_reason = STARTUP_REASON_REFERENCE_REQUIRED;
+        break;
+      }
+
+      LOG_INFO("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
+               ") direct-drive startup: using persisted absolute encoder reference from flash");
+      last_successful_dof = dof;
+      SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+      pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
+                       (uint16_t)(millis() - startup_start_time));
+      continue;
+    }
 
     // --- Phase 1: DISABLED (BUG-2: validateSavedOffsets hangs Core1) ---
     // Smart startup bypassed — always do full recalc
@@ -447,6 +479,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
                        (uint16_t)(millis() - startup_start_time));
       shared_data_ext.flag = 0;
       all_success = false;
+      startup_failure_reason = STARTUP_REASON_GLOBAL_TIMEOUT;
       break;
     }
 
@@ -463,6 +496,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_RECALC_ERROR,
                        (uint16_t)(millis() - startup_start_time));
       all_success = false;
+      startup_failure_reason = STARTUP_REASON_RECALC_ERROR;
     }
 
     shared_data_ext.flag = 0;
@@ -473,9 +507,24 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   if (!all_success) {
     emergency_stop_requested = true;
     delay(50);
-    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=RECALC_ERROR:LAST_OK_DOF=" + String(last_successful_dof));
+    String failure_name = "FAILED";
+    switch (startup_failure_reason) {
+    case STARTUP_REASON_GLOBAL_TIMEOUT:
+      failure_name = "GLOBAL_TIMEOUT";
+      break;
+    case STARTUP_REASON_REFERENCE_REQUIRED:
+      failure_name = "REFERENCE_REQUIRED";
+      break;
+    case STARTUP_REASON_RECALC_ERROR:
+      failure_name = "RECALC_ERROR";
+      break;
+    default:
+      break;
+    }
+    SERIAL_COM_LN("RSP:STARTUP_FAILED(" + String(ACTIVE_JOINT) + "):REASON=" +
+                  failure_name + ":LAST_OK_DOF=" + String(last_successful_dof));
     LOG_ERROR("Startup sequence failed - emergency stop sent");
-    pushStartupEvent(STARTUP_EVT_FAILED, last_successful_dof, STARTUP_REASON_RECALC_ERROR,
+    pushStartupEvent(STARTUP_EVT_FAILED, last_successful_dof, startup_failure_reason,
                      (uint16_t)(millis() - startup_start_time));
     return false;
   }
@@ -512,7 +561,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   }
 
   uint32_t t_now_hold = millis();
-  uint8_t dof_count_hold = active_joint_controller->getConfig().dof_count;
+  uint8_t dof_count_hold = cfg.dof_count;
 
   for (uint8_t dof = 0; dof < dof_count_hold; dof++) {
     // Step 1: Force DOF to IDLE so Core1 skips it entirely

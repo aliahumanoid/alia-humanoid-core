@@ -140,9 +140,20 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
             elapsed = struct.unpack_from("<H", data, 3)[0]
             evt_names = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAIL",
                          3: "COMPLETE", 4: "FAILED"}
+            reason_names = {
+                0: "OK",
+                1: "NO_CONTROLLER",
+                2: "NO_EQUATIONS",
+                3: "ENCODER_TIMEOUT",
+                4: "POSITION_RANGE",
+                5: "RECALC_ERROR",
+                6: "GLOBAL_TIMEOUT",
+                7: "PARTIAL_HOLD",
+                8: "REFERENCE_REQUIRED",
+            }
             return (f"STARTUP_STATUS j={joint_id} "
                     f"{evt_names.get(evt, f'evt={evt}')} "
-                    f"dof={dof_idx} reason={reason} {elapsed}ms",
+                    f"dof={dof_idx} reason={reason_names.get(reason, reason)} {elapsed}ms",
                     False)
         return f"STARTUP_STATUS j={joint_id} [{data.hex(' ')}]", False
 

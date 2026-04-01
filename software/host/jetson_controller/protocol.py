@@ -79,6 +79,7 @@ class StartupStatus:
         0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
         4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT",
         7: "PARTIAL_HOLD",
+        8: "REFERENCE_REQUIRED",
     }
 
     @property

@@ -594,6 +594,10 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
     return false;
   }
 
+  if (config.dofs[dof_index].drive_type == DRIVE_DIRECT_DRIVE) {
+    return true;
+  }
+
   if (!hasValidEquations(dof_index)) {
     // If equations are invalid, the entire movement should not be authorized
     violation_message = "Equation limits unavailable";
@@ -701,7 +705,7 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
     return false;
   }
 
-  if (check_motors) {
+  if (check_motors && config.dofs[dof_index].drive_type != DRIVE_DIRECT_DRIVE) {
     if (!checkMotorsInRange(dof_index, violation_message)) {
       return false;
     }
@@ -1291,16 +1295,28 @@ DofMappingData_t *JointController::getMappingData(uint8_t dof_index) {
 bool JointController::getPid(uint8_t dof_index, uint8_t motor_type, float &kp, float &ki, float &kd,
                              float &tau) {
   // Validate parameters
-  if (dof_index >= config.dof_count || (motor_type != 1 && motor_type != 2)) {
+  if (dof_index >= config.dof_count || (motor_type != 1 && motor_type != 2 && motor_type != 3)) {
     SERIAL_C1_COM_LN("Invalid parameters in getPid");
     return false;
   }
 
-  // Find corresponding motor using is_agonist flag (1=agonist, 2=antagonist)
-  bool want_agonist = (motor_type == 1);
   int motor_index = -1;
   for (int i = 0; i < config.motor_count; i++) {
-    if (config.motors[i].dof_index == dof_index && config.motors[i].is_agonist == want_agonist) {
+    if (config.motors[i].dof_index != dof_index) {
+      continue;
+    }
+
+    bool role_match = false;
+    if (motor_type == 1) {
+      role_match = (config.motors[i].role == MOTOR_ROLE_AGONIST) || config.motors[i].is_agonist;
+    } else if (motor_type == 2) {
+      role_match = (config.motors[i].role == MOTOR_ROLE_ANTAGONIST) ||
+                   (config.motors[i].role != MOTOR_ROLE_DIRECT && !config.motors[i].is_agonist);
+    } else if (motor_type == 3) {
+      role_match = (config.motors[i].role == MOTOR_ROLE_DIRECT);
+    }
+
+    if (role_match) {
       motor_index = i;
       break;
     }
@@ -1335,16 +1351,28 @@ bool JointController::getPid(uint8_t dof_index, uint8_t motor_type, float &kp, f
 bool JointController::setPid(uint8_t dof_index, uint8_t motor_type, float kp, float ki, float kd,
                              float tau) {
   // Validate parameters
-  if (dof_index >= config.dof_count || (motor_type != 1 && motor_type != 2)) {
+  if (dof_index >= config.dof_count || (motor_type != 1 && motor_type != 2 && motor_type != 3)) {
     LOG_C1_ERROR("Invalid parameters in setPid");
     return false;
   }
 
-  // Find corresponding motor using is_agonist flag (1=agonist, 2=antagonist)
-  bool want_agonist = (motor_type == 1);
   int motor_index = -1;
   for (int i = 0; i < config.motor_count; i++) {
-    if (config.motors[i].dof_index == dof_index && config.motors[i].is_agonist == want_agonist) {
+    if (config.motors[i].dof_index != dof_index) {
+      continue;
+    }
+
+    bool role_match = false;
+    if (motor_type == 1) {
+      role_match = (config.motors[i].role == MOTOR_ROLE_AGONIST) || config.motors[i].is_agonist;
+    } else if (motor_type == 2) {
+      role_match = (config.motors[i].role == MOTOR_ROLE_ANTAGONIST) ||
+                   (config.motors[i].role != MOTOR_ROLE_DIRECT && !config.motors[i].is_agonist);
+    } else if (motor_type == 3) {
+      role_match = (config.motors[i].role == MOTOR_ROLE_DIRECT);
+    }
+
+    if (role_match) {
       motor_index = i;
       break;
     }

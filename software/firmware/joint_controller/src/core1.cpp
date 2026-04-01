@@ -205,6 +205,27 @@ void handleTimeSyncFrame(const uint8_t *data, uint8_t len) {
 void restoreInnerPidGains(uint8_t dof, JointController *jc) {
   if (!jc || !inner_pid_backup[dof][0].saved) return;
 
+  const JointConfig &cfg = jc->getConfig();
+  if (dof >= cfg.dof_count) return;
+
+  if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+    float unused_kp, unused_ki, unused_kd, tau_direct;
+    if (jc->getPid(dof, 3, unused_kp, unused_ki, unused_kd, tau_direct)) {
+      jc->setPid(dof, 3, inner_pid_backup[dof][0].kp, inner_pid_backup[dof][0].ki,
+                 inner_pid_backup[dof][0].kd, tau_direct);
+    }
+
+    inner_pid_backup[dof][0].saved = false;
+    inner_pid_backup[dof][1].saved = false;
+    inner_pid_reinit_after_impedance[dof] = true;
+
+    LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " direct-drive PID restored:"
+                " Kp=" + String(inner_pid_backup[dof][0].kp, 3) +
+                " Ki=" + String(inner_pid_backup[dof][0].ki, 3) +
+                " Kd=" + String(inner_pid_backup[dof][0].kd, 3));
+    return;
+  }
+
   float unused_kp, unused_ki, unused_kd, tau_a, tau_b;
   // Get current Tau; gains come from the impedance backup.
   jc->getPid(dof, 1, unused_kp, unused_ki, unused_kd, tau_a);  // agonist
