@@ -809,6 +809,116 @@ const JointConfig HIP_RIGHT_CONFIG = {
                                     .kd  = PID_DEFAULT_INNER_KD,
                                     .tau = 0.005f}}}};
 
+// Configuration for left hip roll bench (1 DOF, 1 motor direct-drive)
+// Purpose: bench bring-up of the real HIP axial-roll path without requiring
+// DOF0/DOF1 tendon hardware to be connected.
+const JointConfig HIP_ROLL_BENCH_LEFT_CONFIG = {
+    .name        = "hip_roll_bench_left",
+    .joint_id    = JOINT_HIP_ROLL_BENCH_LEFT,
+    .dof_count   = 1,
+    .motor_count = 1,
+    .dofs =
+        {{
+          .name            = "axial_roll",
+          .encoder_channel = 2,   // Match real HIP roll encoder wiring
+          .encoder_invert  = false,
+          .drive_type      = DRIVE_DIRECT_DRIVE,
+          .motor_count     = 1,
+          .capabilities    = DOF_CAP_DIRECT_DRIVE,
+          .motion =
+              {
+                  .path_steps      = 600,
+                  .max_speed       = 0.35f * PI,
+                  .accel_time      = 0.25f,
+                  .sampling_period = 1000,
+                  .holding_position_error_threshold = 2.0f
+              },
+          .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f},
+          .zero_mapping =
+              {
+                  .recalc_offset_torque           = 0,
+                  .recalc_offset_duration         = 0,
+                  .zero_angle_offset              = 0.0f,
+                  .pretension_torque              = 0.0f,
+                  .pretension_timeout             = 0,
+                  .tensioning_torque              = 0.0f,
+                  .auto_mapping_step              = 0.0f,
+                  .auto_mapping_settle_time       = 0,
+                  .auto_mapping_speed             = 0.0f,
+                  .auto_mapping_resistance_torque = 0.0f,
+                  .position_threshold             = 0.5f,
+                  .auto_mapping_min_angle         = 0.0f,
+                  .auto_mapping_max_angle         = 0.0f,
+                  .auto_mapping_invert_direction  = false
+              }}},
+    .motors = {{
+                .id             = 5, // Match real HIP roll motor CAN ID
+                .dof_index      = 0,
+                .name           = "axial_roll",
+                .invert         = false,
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_DIRECT,
+                .max_torque     = 1500.0f,
+                .reduction_gear = 10.0f,
+                .pid            = {.kp  = PID_DEFAULT_INNER_KP,
+                                   .ki  = PID_DEFAULT_INNER_KI,
+                                   .kd  = PID_DEFAULT_INNER_KD,
+                                   .tau = 0.005f}}}};
+
+// Configuration for right hip roll bench (1 DOF, 1 motor direct-drive)
+const JointConfig HIP_ROLL_BENCH_RIGHT_CONFIG = {
+    .name        = "hip_roll_bench_right",
+    .joint_id    = JOINT_HIP_ROLL_BENCH_RIGHT,
+    .dof_count   = 1,
+    .motor_count = 1,
+    .dofs =
+        {{
+          .name            = "axial_roll",
+          .encoder_channel = 2,   // Match real HIP roll encoder wiring
+          .encoder_invert  = false,
+          .drive_type      = DRIVE_DIRECT_DRIVE,
+          .motor_count     = 1,
+          .capabilities    = DOF_CAP_DIRECT_DRIVE,
+          .motion =
+              {
+                  .path_steps      = 600,
+                  .max_speed       = 0.35f * PI,
+                  .accel_time      = 0.25f,
+                  .sampling_period = 1000,
+                  .holding_position_error_threshold = 2.0f
+              },
+          .limits = {.min_angle = -40.0f, .max_angle = 40.0f, .operating_min = 0.0f, .operating_max = 0.0f},
+          .zero_mapping =
+              {
+                  .recalc_offset_torque           = 0,
+                  .recalc_offset_duration         = 0,
+                  .zero_angle_offset              = 0.0f,
+                  .pretension_torque              = 0.0f,
+                  .pretension_timeout             = 0,
+                  .tensioning_torque              = 0.0f,
+                  .auto_mapping_step              = 0.0f,
+                  .auto_mapping_settle_time       = 0,
+                  .auto_mapping_speed             = 0.0f,
+                  .auto_mapping_resistance_torque = 0.0f,
+                  .position_threshold             = 0.5f,
+                  .auto_mapping_min_angle         = 0.0f,
+                  .auto_mapping_max_angle         = 0.0f,
+                  .auto_mapping_invert_direction  = false
+              }}},
+    .motors = {{
+                .id             = 5, // Match real HIP roll motor CAN ID
+                .dof_index      = 0,
+                .name           = "axial_roll",
+                .invert         = false,
+                .is_agonist     = true,
+                .role           = MOTOR_ROLE_DIRECT,
+                .max_torque     = 1500.0f,
+                .reduction_gear = 10.0f,
+                .pid            = {.kp  = PID_DEFAULT_INNER_KP,
+                                   .ki  = PID_DEFAULT_INNER_KI,
+                                   .kd  = PID_DEFAULT_INNER_KD,
+                                   .tau = 0.005f}}}};
+
 /**
  * @brief Lookup table entry mapping joint name/ID to configuration
  */
@@ -831,6 +941,8 @@ static const ConfigLookupEntry CONFIG_LOOKUP[] = {
     {"ankle_right", 4, &ANKLE_RIGHT_CONFIG},
     {"hip_left", 5, &HIP_LEFT_CONFIG},
     {"hip_right", 6, &HIP_RIGHT_CONFIG},
+    {"hip_roll_bench_left", 7, &HIP_ROLL_BENCH_LEFT_CONFIG},
+    {"hip_roll_bench_right", 8, &HIP_ROLL_BENCH_RIGHT_CONFIG},
 };
 
 static const size_t CONFIG_LOOKUP_SIZE = sizeof(CONFIG_LOOKUP) / sizeof(CONFIG_LOOKUP[0]);

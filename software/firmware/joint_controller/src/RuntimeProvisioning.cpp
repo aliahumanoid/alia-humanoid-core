@@ -21,6 +21,8 @@ bool isProvisionedJointProfileValid(uint8_t joint_profile) {
     case JOINT_ANKLE_RIGHT:
     case JOINT_HIP_LEFT:
     case JOINT_HIP_RIGHT:
+    case JOINT_HIP_ROLL_BENCH_LEFT:
+    case JOINT_HIP_ROLL_BENCH_RIGHT:
       return true;
     default:
       return false;

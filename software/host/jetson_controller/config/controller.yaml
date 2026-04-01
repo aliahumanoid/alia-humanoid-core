@@ -83,3 +83,19 @@ joints:
       0: 0.0              # flexion-extension
       1: 0.0              # abduction-adduction
       2: 0.0              # axial-roll
+
+  hip_roll_bench_right:
+    gains:
+      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+    stiffness_deg: 25.0
+    home_position_deg:
+      0: 0.0              # axial-roll
+
+  hip_roll_bench_left:
+    gains:
+      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+    stiffness_deg: 25.0
+    home_position_deg:
+      0: 0.0              # axial-roll

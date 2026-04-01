@@ -252,7 +252,7 @@ volatile uint8_t pending_command_type     = 0;
 std::atomic<bool> emergency_stop_requested{false};
 
 // Array of active controllers accessible from core1 (indices 1..6 for joints)
-JointController *active_controllers[7] = {nullptr}; // Index 0 not used
+JointController *active_controllers[9] = {nullptr}; // Index 0 not used, joint IDs 1..8
 
 // Active controller state for current cycle
 uint8_t current_joint_id  = 0;

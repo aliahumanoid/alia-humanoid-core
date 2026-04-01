@@ -1074,7 +1074,8 @@ class SerialHandler:
             
             # Map joint_id to joint_name
             joint_name_map = {1: "KNEE_LEFT", 2: "KNEE_RIGHT", 3: "ANKLE_LEFT", 
-                            4: "ANKLE_RIGHT", 5: "HIP_LEFT", 6: "HIP_RIGHT"}
+                            4: "ANKLE_RIGHT", 5: "HIP_LEFT", 6: "HIP_RIGHT",
+                            7: "HIP_ROLL_BENCH_LEFT", 8: "HIP_ROLL_BENCH_RIGHT"}
             joint_name = joint_name_map.get(joint_id, f"JOINT_{joint_id}")
             
             logger.info(f"📊 Receiving movement samples for {joint_name} ({dof_count} DOFs)")
@@ -2122,6 +2123,8 @@ class SerialHandler:
         # #define JOINT_ANKLE_RIGHT           4  // Right
         # #define JOINT_HIP_LEFT              5  // Left
         # #define JOINT_HIP_RIGHT             6  // Right
+        # #define JOINT_HIP_ROLL_BENCH_LEFT   7
+        # #define JOINT_HIP_ROLL_BENCH_RIGHT  8
         joint_id_mapping = {
             0: None,  # JOINT_NONE
             1: "KNEE_LEFT",
@@ -2130,6 +2133,8 @@ class SerialHandler:
             4: "ANKLE_RIGHT",
             5: "HIP_LEFT",
             6: "HIP_RIGHT",
+            7: "HIP_ROLL_BENCH_LEFT",
+            8: "HIP_ROLL_BENCH_RIGHT",
         }
 
         return joint_id_mapping.get(joint_id)
@@ -2284,6 +2289,8 @@ class SerialHandler:
             "ANKLE_RIGHT",
             "HIP_LEFT",
             "HIP_RIGHT",
+            "HIP_ROLL_BENCH_LEFT",
+            "HIP_ROLL_BENCH_RIGHT",
         ]:
             if joint_name in self.joint_status:
                 joint_data = self.joint_status[joint_name]

@@ -52,6 +52,10 @@ const char *jointIdToSerialName(uint8_t joint_id) {
     return SERIAL_JOINT_HIP_LEFT;
   case JOINT_HIP_RIGHT:
     return SERIAL_JOINT_HIP_RIGHT;
+  case JOINT_HIP_ROLL_BENCH_LEFT:
+    return SERIAL_JOINT_HIP_ROLL_BENCH_LEFT;
+  case JOINT_HIP_ROLL_BENCH_RIGHT:
+    return SERIAL_JOINT_HIP_ROLL_BENCH_RIGHT;
   default:
     return "UNKNOWN";
   }

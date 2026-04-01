@@ -301,6 +301,64 @@
           "supports_retension_probe": false
         }
       ]
+    },
+    "hip_roll_bench_left": {
+      "id": 7,
+      "config_name": "hip_roll_bench_left",
+      "dof_count": 1,
+      "motor_count": 1,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "axial_roll",
+          "drive_type": "direct_drive",
+          "motor_count": 1,
+          "min_angle": -40.0,
+          "max_angle": 40.0,
+          "operating_min": 0.0,
+          "operating_max": 0.0,
+          "encoder_channel": 2,
+          "zero_angle_offset": 0.0,
+          "auto_mapping_min_angle": 0.0,
+          "auto_mapping_max_angle": 0.0,
+          "auto_mapping_step": 0.0,
+          "supports_pretension": false,
+          "supports_recalc_offset": false,
+          "supports_auto_mapping": false,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": false,
+          "supports_retension_probe": false
+        }
+      ]
+    },
+    "hip_roll_bench_right": {
+      "id": 8,
+      "config_name": "hip_roll_bench_right",
+      "dof_count": 1,
+      "motor_count": 1,
+      "dofs": [
+        {
+          "index": 0,
+          "name": "axial_roll",
+          "drive_type": "direct_drive",
+          "motor_count": 1,
+          "min_angle": -40.0,
+          "max_angle": 40.0,
+          "operating_min": 0.0,
+          "operating_max": 0.0,
+          "encoder_channel": 2,
+          "zero_angle_offset": 0.0,
+          "auto_mapping_min_angle": 0.0,
+          "auto_mapping_max_angle": 0.0,
+          "auto_mapping_step": 0.0,
+          "supports_pretension": false,
+          "supports_recalc_offset": false,
+          "supports_auto_mapping": false,
+          "supports_outer_impedance": true,
+          "supports_slack_diag": false,
+          "supports_retension_probe": false
+        }
+      ]
     }
   }
 }

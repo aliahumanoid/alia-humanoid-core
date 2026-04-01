@@ -205,6 +205,10 @@
 #define JOINT_HIP_LEFT 5
 #define JOINT_HIP_RIGHT 6
 
+// Hip roll bench profiles
+#define JOINT_HIP_ROLL_BENCH_LEFT 7
+#define JOINT_HIP_ROLL_BENCH_RIGHT 8
+
 // ============================================================================
 // MOVEMENT PARAMETERS
 // ============================================================================
@@ -238,6 +242,8 @@
 #define SERIAL_JOINT_ANKLE_RIGHT "ANKLE_RIGHT"
 #define SERIAL_JOINT_HIP_LEFT "HIP_LEFT"
 #define SERIAL_JOINT_HIP_RIGHT "HIP_RIGHT"
+#define SERIAL_JOINT_HIP_ROLL_BENCH_LEFT "HIP_ROLL_BENCH_LEFT"
+#define SERIAL_JOINT_HIP_ROLL_BENCH_RIGHT "HIP_ROLL_BENCH_RIGHT"
 
 // Special DOF token
 #define SERIAL_DOF_ALL "ALL"
@@ -335,6 +341,10 @@ inline uint8_t getJointId(const char *joint_name) {
     return JOINT_HIP_LEFT;
   } else if (strcmp(joint_name, SERIAL_JOINT_HIP_RIGHT) == 0) {
     return JOINT_HIP_RIGHT;
+  } else if (strcmp(joint_name, SERIAL_JOINT_HIP_ROLL_BENCH_LEFT) == 0) {
+    return JOINT_HIP_ROLL_BENCH_LEFT;
+  } else if (strcmp(joint_name, SERIAL_JOINT_HIP_ROLL_BENCH_RIGHT) == 0) {
+    return JOINT_HIP_ROLL_BENCH_RIGHT;
   }
 
   return JOINT_NONE;
