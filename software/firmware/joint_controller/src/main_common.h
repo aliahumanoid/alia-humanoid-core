@@ -50,19 +50,18 @@
 #include <vector>
 
 // ============================================================================
-// ACTIVE JOINT CONFIGURATION
+// RUNTIME JOINT PROFILE / BOARD MODE
 // ============================================================================
 
-// Set the joint type for this PICO board
-// Possible values: JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT, JOINT_ANKLE_LEFT,
-// JOINT_ANKLE_RIGHT, JOINT_HIP_LEFT, JOINT_HIP_RIGHT
-#define ACTIVE_JOINT JOINT_KNEE_RIGHT
-//#define ACTIVE_JOINT JOINT_ANKLE_RIGHT
+// The board identity now comes from persisted flash settings.
+// If no valid profile is provisioned, the firmware enters an unprovisioned
+// safe mode (`JOINT_NONE`) and exposes only identity/provisioning paths.
 
 // Cross-chip CAN bus test: bridge J4 CAN_H↔J5 CAN_H and J4 CAN_L↔J5 CAN_L
 // externally, then enable this to verify both transceivers through the physical bus.
 // Disable for normal operation (motors on J4, host on J5 are separate buses).
 //#define CAN_CROSS_CHIP_TEST
+
 
 // CAN ID assignment scheme for motors:
 // - IDs always start from 1
@@ -78,9 +77,6 @@
 // - DOF 0: ID 1, 2
 // - DOF 1: ID 3, 4
 // - DOF 2: ID 5, 6
-
-// Get active joint configuration
-extern const JointConfig &ACTIVE_JOINT_CONFIG;
 
 // ============================================================================
 // GLOBAL HARDWARE OBJECTS

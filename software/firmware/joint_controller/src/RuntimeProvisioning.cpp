@@ -1,9 +1,16 @@
-#include "main_common.h"
 #include "RuntimeProvisioning.h"
 
-static constexpr uint8_t BUILD_TIME_FALLBACK_JOINT = ACTIVE_JOINT;
+#include "commands.h"
+#include "config_presets.h"
 
-static uint8_t g_runtime_joint_profile = BUILD_TIME_FALLBACK_JOINT;
+static const JointConfig UNPROVISIONED_CONFIG = {
+    .name = "unprovisioned",
+    .joint_id = JOINT_NONE,
+    .dof_count = 0,
+    .motor_count = 0,
+};
+
+static uint8_t g_runtime_joint_profile = JOINT_NONE;
 static bool g_runtime_joint_profile_from_flash = false;
 
 bool isProvisionedJointProfileValid(uint8_t joint_profile) {
@@ -22,7 +29,7 @@ bool isProvisionedJointProfileValid(uint8_t joint_profile) {
 
 void setRuntimeJointProfile(uint8_t joint_profile, bool from_flash) {
   if (!isProvisionedJointProfileValid(joint_profile)) {
-    joint_profile = BUILD_TIME_FALLBACK_JOINT;
+    joint_profile = JOINT_NONE;
     from_flash = false;
   }
   g_runtime_joint_profile = joint_profile;
@@ -34,17 +41,16 @@ uint8_t getRuntimeJointId() {
 }
 
 const JointConfig &getRuntimeJointConfig() {
+  if (!isProvisionedJointProfileValid(g_runtime_joint_profile)) {
+    return UNPROVISIONED_CONFIG;
+  }
   return getConfigById(g_runtime_joint_profile);
-}
-
-uint8_t getBuildTimeFallbackJointId() {
-  return BUILD_TIME_FALLBACK_JOINT;
-}
-
-const JointConfig &getBuildTimeFallbackJointConfig() {
-  return getConfigById(BUILD_TIME_FALLBACK_JOINT);
 }
 
 bool runtimeJointProfileFromFlash() {
   return g_runtime_joint_profile_from_flash;
+}
+
+bool runtimeJointProfileProvisioned() {
+  return isProvisionedJointProfileValid(g_runtime_joint_profile);
 }

@@ -19,33 +19,8 @@
 #include "RuntimeProvisioning.h"
 
 //----------------------------------------------------------------------------
-// ACTIVE JOINT CONFIGURATION
+// RUNTIME JOINT CONFIGURATION
 //----------------------------------------------------------------------------
-// Set the joint type for this PICO board
-// Possible values: JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT, JOINT_ANKLE_LEFT,
-// JOINT_ANKLE_RIGHT, JOINT_HIP_LEFT, JOINT_HIP_RIGHT
-// #define ACTIVE_JOINT JOINT_KNEE_RIGHT // Configured in main_common.h
-
-// CAN ID assignment scheme for motors:
-// - IDs always start from 1
-// - First DOF: ID 1 agonist, ID 2 antagonist
-// - Second DOF: ID 3 agonist, ID 4 antagonist
-// - Third DOF (hip only): ID 5 agonist, ID 6 antagonist
-//
-// Example for a 2‑DOF joint (ankle):
-// - DOF 0: ID 1, 2
-// - DOF 1: ID 3, 4
-//
-// Example for a 3‑DOF joint (hip):
-// - DOF 0: ID 1, 2
-// - DOF 1: ID 3, 4
-// - DOF 2: ID 5, 6
-
-// Compile-time fallback joint configuration.
-// Runtime code below switches to the persisted profile loaded from flash.
-const JointConfig &ACTIVE_JOINT_CONFIG = getConfigById(ACTIVE_JOINT);
-
-#undef ACTIVE_JOINT
 #define ACTIVE_JOINT getRuntimeJointId()
 #define ACTIVE_JOINT_CONFIG getRuntimeJointConfig()
 //----------------------------------------------------------------------------
@@ -527,8 +502,7 @@ void setup() {
   LOG_INFO("Joint firmware starting!");
 
   // Load persisted system settings before any joint-specific initialization.
-  // Phase 1 provisioning reuses SystemSettingsData.joint_type as the persisted
-  // runtime profile selector, with compile-time ACTIVE_JOINT as fallback.
+  // A board without a valid stored profile stays in JOINT_NONE unprovisioned safe mode.
   LOG_INFO("------------------------------------");
   LOG_INFO("Loading system settings from flash...");
   if (load_system_settings_data(&system_settings)) {
@@ -538,31 +512,30 @@ void setup() {
       setRuntimeJointProfile(system_settings.joint_type, true);
       LOG_INFO("Runtime joint profile loaded from flash: " + String(ACTIVE_JOINT_CONFIG.name));
     } else {
-      const uint8_t fallback_joint = getBuildTimeFallbackJointId();
       LOG_WARN("Invalid joint_type in system settings: " + String(system_settings.joint_type) +
-               " — falling back to build-time profile " + String(getBuildTimeFallbackJointConfig().name));
-      system_settings.joint_type = fallback_joint;
-      setRuntimeJointProfile(fallback_joint, false);
-      save_system_settings_data(system_settings);
-      LOG_INFO("System settings repaired with build-time fallback profile");
+               " — entering UNPROVISIONED safe mode");
+      system_settings.joint_type = JOINT_NONE;
+      system_settings.auto_start_enabled = false;
+      system_settings.auto_start_pretension = 0;
+      system_settings.auto_start_duration = 0;
+      setRuntimeJointProfile(JOINT_NONE, false);
     }
 
     LOG_INFO("System settings loaded: auto_start=" +
              String(system_settings.auto_start_enabled ? "ENABLED" : "DISABLED"));
   } else {
-    LOG_INFO("No system settings found — initializing defaults and saving to flash...");
+    LOG_INFO("No system settings found — entering UNPROVISIONED safe mode");
     system_settings.auto_start_enabled = false;
     system_settings.auto_start_pretension = 0;
     system_settings.auto_start_duration = 0;
-    system_settings.joint_type = getBuildTimeFallbackJointId();
-    setRuntimeJointProfile(system_settings.joint_type, false);
-    save_system_settings_data(system_settings);
+    system_settings.joint_type = JOINT_NONE;
+    setRuntimeJointProfile(JOINT_NONE, false);
     system_settings_loaded = true;
-    LOG_INFO("Default system settings saved: auto_start=DISABLED");
   }
 
   LOG_INFO("Active runtime joint profile: " + String(ACTIVE_JOINT_CONFIG.name) +
-           (runtimeJointProfileFromFlash() ? " (flash)" : " (build fallback)"));
+           (runtimeJointProfileFromFlash() ? " (flash)" :
+            (runtimeJointProfileProvisioned() ? " (runtime)" : " (unprovisioned)")));
 
   // Brief blink to signal firmware started
   led_blink(2, 80, 80);
@@ -614,86 +587,95 @@ void setup() {
   }
   LOG_DEBUG("------------------------------------");
 
-  // Initialize active joint controller (uses direct encoder reading)
-  active_joint_controller = new JointController(ACTIVE_JOINT_CONFIG, &CAN, &directEncoders);
-  if (!active_joint_controller->init()) {
-    LOG_ERROR("Failed to initialize controller for " + String(ACTIVE_JOINT_CONFIG.name) + "!");
-    // Rapid blinks to signal controller init error
-    led_blink(5, 50, 50);
-  } else {
-    LOG_INFO("Controller for " + String(ACTIVE_JOINT_CONFIG.name) +
-             " initialized successfully.");
-    // Single long blink to signal controller init success
-    led_blink(1, 300, 0);
-  }
-
-  // Register controller in global array for core1 access
-  active_controllers[ACTIVE_JOINT] = active_joint_controller;
-
-  // Attempt to load PID parameters from flash (safe system)
-  LOG_INFO("------------------------------------");
-  LOG_INFO("Attempting to load PID parameters from flash...");
-  if (active_joint_controller->loadPIDDataFromFlash()) {
-    LOG_INFO("PID parameters successfully loaded from flash!");
-
-    // Brief blink: PID loaded from flash
-    led_blink(2, 100, 100);
-  } else {
-    LOG_INFO("No PID parameters found in flash - applying default PID values (kp=" + String(PID_DEFAULT_INNER_KP, 2) + ", ki=" + String(PID_DEFAULT_INNER_KI, 2) + ", kd=" + String(PID_DEFAULT_INNER_KD, 2) + ")");
-
-    // Brief blink: using default PID
-    led_blink(1, 100, 0);
-  }
-
-  // Attempt to load linear equations from flash
-  LOG_INFO("------------------------------------");
-  LOG_INFO("Attempting to load linear equations from flash...");
-  if (active_joint_controller->loadLinearEquationsFromFlash()) {
-    LOG_INFO("✓ Linear equations successfully loaded from flash!");
-    LOG_INFO("✓ System ready for autonomous control without Pi5");
-    LOG_INFO("✓ Ultra-compact equations enable precise motion");
-
-    // Emit safe limits at boot so host UI has them immediately
-    for (int dof = 0; dof < ACTIVE_JOINT_CONFIG.dof_count; dof++) {
-      DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
-      if (eq != nullptr && eq->calculated && eq->limits_valid) {
-        char buf[80];
-        snprintf(buf, sizeof(buf), "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
-                 ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
-        SERIAL_COM_LN(buf);
-      }
+  if (runtimeJointProfileProvisioned()) {
+    // Initialize active joint controller (uses direct encoder reading)
+    active_joint_controller = new JointController(ACTIVE_JOINT_CONFIG, &CAN, &directEncoders);
+    if (!active_joint_controller->init()) {
+      LOG_ERROR("Failed to initialize controller for " + String(ACTIVE_JOINT_CONFIG.name) + "!");
+      // Rapid blinks to signal controller init error
+      led_blink(5, 50, 50);
+    } else {
+      LOG_INFO("Controller for " + String(ACTIVE_JOINT_CONFIG.name) +
+               " initialized successfully.");
+      // Single long blink to signal controller init success
+      led_blink(1, 300, 0);
     }
 
-    // Brief blink: equations loaded from flash
-    led_blink(2, 100, 100);
-  } else {
-    LOG_INFO("No linear equations found in flash — auto-mapping required");
-    LOG_INFO("Equations will be computed and saved automatically after the first auto-mapping");
+    // Register controller in global array for core1 access
+    active_controllers[ACTIVE_JOINT] = active_joint_controller;
 
-    // Brief blink: no equations in flash
-    led_blink(1, 100, 0);
+    // Attempt to load PID parameters from flash (safe system)
+    LOG_INFO("------------------------------------");
+    LOG_INFO("Attempting to load PID parameters from flash...");
+    if (active_joint_controller->loadPIDDataFromFlash()) {
+      LOG_INFO("PID parameters successfully loaded from flash!");
+
+      // Brief blink: PID loaded from flash
+      led_blink(2, 100, 100);
+    } else {
+      LOG_INFO("No PID parameters found in flash - applying default PID values (kp=" + String(PID_DEFAULT_INNER_KP, 2) + ", ki=" + String(PID_DEFAULT_INNER_KI, 2) + ", kd=" + String(PID_DEFAULT_INNER_KD, 2) + ")");
+
+      // Brief blink: using default PID
+      led_blink(1, 100, 0);
+    }
+
+    // Attempt to load linear equations from flash
+    LOG_INFO("------------------------------------");
+    LOG_INFO("Attempting to load linear equations from flash...");
+    if (active_joint_controller->loadLinearEquationsFromFlash()) {
+      LOG_INFO("✓ Linear equations successfully loaded from flash!");
+      LOG_INFO("✓ System ready for autonomous control without Pi5");
+      LOG_INFO("✓ Ultra-compact equations enable precise motion");
+
+      // Emit safe limits at boot so host UI has them immediately
+      for (int dof = 0; dof < ACTIVE_JOINT_CONFIG.dof_count; dof++) {
+        DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
+        if (eq != nullptr && eq->calculated && eq->limits_valid) {
+          char buf[80];
+          snprintf(buf, sizeof(buf), "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
+                   ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
+          SERIAL_COM_LN(buf);
+        }
+      }
+
+      // Brief blink: equations loaded from flash
+      led_blink(2, 100, 100);
+    } else {
+      LOG_INFO("No linear equations found in flash — auto-mapping required");
+      LOG_INFO("Equations will be computed and saved automatically after the first auto-mapping");
+
+      // Brief blink: no equations in flash
+      led_blink(1, 100, 0);
+    }
+
+    // Attempt to load saved motor offsets from flash (for smart recalc detection)
+    LOG_INFO("------------------------------------");
+    LOG_INFO("Attempting to load motor offsets from flash...");
+    if (active_joint_controller->loadMotorOffsetsFromFlash()) {
+      LOG_INFO("Motor offsets loaded — will validate at startup to check if recalc needed");
+    } else {
+      LOG_INFO("No motor offsets in flash — recalc_offset required");
+    }
+
+    // SAFETY: Movement is controlled by isSystemReadyForMovement()
+    LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
+    LOG_INFO("Mapping data will be sent to the client for visualization/diagnostics only");
+
+    // Setup complete: distinctive double-blink
+    led_blink(2, 150, 100);
+    LOG_DEBUG("------------------------------------");
+  } else {
+    active_joint_controller = nullptr;
+    LOG_WARN("UNPROVISIONED safe mode: JointController init skipped, only identity/provisioning is available");
+    led_blink(3, 120, 120);
   }
 
-  // Attempt to load saved motor offsets from flash (for smart recalc detection)
-  LOG_INFO("------------------------------------");
-  LOG_INFO("Attempting to load motor offsets from flash...");
-  if (active_joint_controller->loadMotorOffsetsFromFlash()) {
-    LOG_INFO("Motor offsets loaded — will validate at startup to check if recalc needed");
-  } else {
-    LOG_INFO("No motor offsets in flash — recalc_offset required");
-  }
-
-  // SAFETY: Movement is controlled by isSystemReadyForMovement()
-  LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
-  LOG_INFO("Mapping data will be sent to the client for visualization/diagnostics only");
-
-  // Setup complete: distinctive double-blink
-  led_blink(2, 150, 100);
-  LOG_DEBUG("------------------------------------");
-
-  // Allocate memory for shared data (use maximum number of motors)
-  shared_data_ext.motor_data       = new MultiAngleData[ACTIVE_JOINT_CONFIG.motor_count];
-  measuring_data_ext.motor_outputs = new float[ACTIVE_JOINT_CONFIG.motor_count];
+  const uint8_t provisioned_motor_count =
+      runtimeJointProfileProvisioned() ? ACTIVE_JOINT_CONFIG.motor_count : 0;
+  shared_data_ext.motor_data =
+      provisioned_motor_count ? new MultiAngleData[provisioned_motor_count] : nullptr;
+  measuring_data_ext.motor_outputs =
+      provisioned_motor_count ? new float[provisioned_motor_count] : nullptr;
 
   queue_init(&movement_sample_queue, sizeof(MovementSample), 512);
   clearMovementSampleQueue();
@@ -703,58 +685,61 @@ void setup() {
 
   // Core1 log queue already initialized early in setup (before safety_init)
 
-  // Enable motor power now that all systems are initialized
-  // Rev B: GP22 HIGH — motors can now receive commands
-  // Rev A: no-op (motors always powered)
-  safety_motor_power_enable();
+  if (runtimeJointProfileProvisioned()) {
+    // Enable motor power now that all systems are initialized
+    // Rev B: GP22 HIGH — motors can now receive commands
+    // Rev A: no-op (motors always powered)
+    safety_motor_power_enable();
 
-  // Motor CAN read diagnostic: test each motor outside the control loop.
-  // Always runs at boot to verify motor communication before control starts.
-  {
-    LOG_INFO("=== MOTOR CAN READ DIAGNOSTIC ===");
-    const int NUM_READS = 50;
-    const int READ_DELAY_MS = 20;  // 50Hz — no SPI1 contention (Core1 not running yet)
+    // Motor CAN read diagnostic: test each motor outside the control loop.
+    // Always runs at boot to verify motor communication before control starts.
+    {
+      LOG_INFO("=== MOTOR CAN READ DIAGNOSTIC ===");
+      const int NUM_READS = 50;
+      const int READ_DELAY_MS = 20;  // 50Hz — no SPI1 contention (Core1 not running yet)
 
-    for (int m = 0; m < ACTIVE_JOINT_CONFIG.motor_count; m++) {
-      LKM_Motor *motor = active_joint_controller->getMotor(m);
-      if (motor == nullptr) {
-        LOG_WARN("Motor " + String(m) + ": nullptr, skipping");
-        continue;
-      }
-
-      int ok_count = 0;
-      int nan_count = 0;
-      int timeout_count = 0;
-      float first_angle = 0.0f;
-      float last_angle = 0.0f;
-
-      for (int r = 0; r < NUM_READS; r++) {
-        LKM_Motor::MultiAngleData data = motor->getMultiAngleSync(false);
-        if (isnan(data.angle)) {
-          nan_count++;
-        } else if (data.waitTime == 0) {
-          timeout_count++;
-        } else {
-          if (ok_count == 0) first_angle = data.angle;
-          last_angle = data.angle;
-          ok_count++;
+      for (int m = 0; m < ACTIVE_JOINT_CONFIG.motor_count; m++) {
+        LKM_Motor *motor = active_joint_controller->getMotor(m);
+        if (motor == nullptr) {
+          LOG_WARN("Motor " + String(m) + ": nullptr, skipping");
+          continue;
         }
-        delay(READ_DELAY_MS);
-      }
 
-      LOG_INFO("Motor " + String(m) + " (ID=" + String(ACTIVE_JOINT_CONFIG.motors[m].id) +
-               " " + String(ACTIVE_JOINT_CONFIG.motors[m].name) + "): " +
-               String(ok_count) + "/" + String(NUM_READS) + " OK, " +
-               String(nan_count) + " nan, " + String(timeout_count) + " timeout");
-      if (ok_count > 0) {
-        LOG_INFO("  Angle range: " + String(first_angle, 2) + " → " + String(last_angle, 2) + "°");
+        int ok_count = 0;
+        int nan_count = 0;
+        int timeout_count = 0;
+        float first_angle = 0.0f;
+        float last_angle = 0.0f;
+
+        for (int r = 0; r < NUM_READS; r++) {
+          LKM_Motor::MultiAngleData data = motor->getMultiAngleSync(false);
+          if (isnan(data.angle)) {
+            nan_count++;
+          } else if (data.waitTime == 0) {
+            timeout_count++;
+          } else {
+            if (ok_count == 0) first_angle = data.angle;
+            last_angle = data.angle;
+            ok_count++;
+          }
+          delay(READ_DELAY_MS);
+        }
+
+        LOG_INFO("Motor " + String(m) + " (ID=" + String(ACTIVE_JOINT_CONFIG.motors[m].id) +
+                 " " + String(ACTIVE_JOINT_CONFIG.motors[m].name) + "): " +
+                 String(ok_count) + "/" + String(NUM_READS) + " OK, " +
+                 String(nan_count) + " nan, " + String(timeout_count) + " timeout");
+        if (ok_count > 0) {
+          LOG_INFO("  Angle range: " + String(first_angle, 2) + " → " + String(last_angle, 2) + "°");
+        }
       }
+      LOG_INFO("=================================");
     }
-    LOG_INFO("=================================");
   }
 
   // Auto-start: execute startup sequence if enabled and equations available
-  if (system_settings.auto_start_enabled && active_joint_controller != nullptr) {
+  if (runtimeJointProfileProvisioned() &&
+      system_settings.auto_start_enabled && active_joint_controller != nullptr) {
     // Core1 needs time to initialize and start reading encoders
     delay(1000);
 

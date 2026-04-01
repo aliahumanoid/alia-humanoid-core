@@ -38,6 +38,8 @@
  */
 const char *jointIdToSerialName(uint8_t joint_id) {
   switch (joint_id) {
+  case JOINT_NONE:
+    return "UNPROVISIONED";
   case JOINT_KNEE_LEFT:
     return SERIAL_JOINT_KNEE_LEFT;
   case JOINT_KNEE_RIGHT:
@@ -966,12 +968,13 @@ void core0_main_loop() {
           const uint8_t stored_joint =
               isProvisionedJointProfileValid(system_settings.joint_type)
                   ? system_settings.joint_type
-                  : getBuildTimeFallbackJointId();
+                  : JOINT_NONE;
 
           SERIAL_COM_LN("RSP:IDENTITY(" + String(ACTIVE_JOINT) +
                         "):PROFILE=" + String(jointIdToSerialName(ACTIVE_JOINT)) +
                         ":STORED_PROFILE=" + String(jointIdToSerialName(stored_joint)) +
-                        ":SOURCE=" + String(runtimeJointProfileFromFlash() ? "FLASH" : "FALLBACK") +
+                        ":SOURCE=" + String(runtimeJointProfileFromFlash() ? "FLASH" :
+                                            (runtimeJointProfileProvisioned() ? "RUNTIME" : "UNPROVISIONED")) +
                         ":UID=" + String(board_uid_hex) +
                         ":FW=" + String(FW_VERSION));
         } else if (strncmp(actual_command, SERIAL_CMD_SET_JOINT_PROFILE ":",
