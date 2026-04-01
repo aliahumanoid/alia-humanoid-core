@@ -201,6 +201,18 @@ public:
     return config;
   }
 
+  bool dofSupportsPretension(uint8_t dof_index) const {
+    return dof_index < config.dof_count && config.dofs[dof_index].capabilities.supports_pretension;
+  }
+
+  bool dofSupportsRecalcOffset(uint8_t dof_index) const {
+    return dof_index < config.dof_count && config.dofs[dof_index].capabilities.supports_recalc_offset;
+  }
+
+  bool dofSupportsAutoMapping(uint8_t dof_index) const {
+    return dof_index < config.dof_count && config.dofs[dof_index].capabilities.supports_auto_mapping;
+  }
+
   // ==========================================================================
   // SAFETY & VALIDATION
   // ==========================================================================

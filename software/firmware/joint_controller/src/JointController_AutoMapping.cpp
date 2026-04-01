@@ -43,6 +43,14 @@ bool JointController::startAutoMapping(AutoMappingState_t &auto_mapping_state,
     return false;
   }
 
+  for (int i = 0; i < config.dof_count; i++) {
+    if (!dofSupportsAutoMapping(i)) {
+      LOG_C1_ERROR("Auto mapping not supported for DOF " + String(i) + " (" +
+                   String(config.dofs[i].name) + ")");
+      return false;
+    }
+  }
+
   // Verify that each DOF has at least 2 motors (agonist and antagonist)
   for (int i = 0; i < config.dof_count; i++) {
     int motor_count_for_dof = 0;
@@ -888,4 +896,3 @@ bool JointController::transferAutoMappingData(const AutoMappingState_t &auto_map
 
   return true;
 }
-

@@ -1037,16 +1037,24 @@ void pollHostCan() {
       if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
         uint8_t dof = buf[1];
         int16_t torque = (len >= 4) ? (int16_t)(buf[2] | (buf[3] << 8)) : 0;
+        const JointConfig& cfg = active_joint_controller->getConfig();
+        if (dof >= cfg.dof_count) {
+          LOG_C1_WARN("[CAN_HOST] Pretension rejected: invalid DOF " + String(dof));
+        } else if (!active_joint_controller->dofSupportsPretension(dof)) {
+          LOG_C1_WARN("[CAN_HOST] Pretension rejected: unsupported DOF " + String(dof) +
+                      " (" + String(cfg.dofs[dof].name) + ")");
+        } else {
         if (!safety_is_motor_power_enabled()) {
           safety_motor_power_enable();
         }
-        bool invert = active_joint_controller->getConfig().dofs[dof].zero_mapping.auto_mapping_invert_direction;
+        bool invert = cfg.dofs[dof].zero_mapping.auto_mapping_invert_direction;
         if (invert) {
           active_joint_controller->release(dof, torque, 0);
         } else {
           active_joint_controller->pretension(dof, torque, 0);
         }
         LOG_C1_INFO("[CAN_HOST] Pretension DOF=" + String(dof) + " torque=" + String(torque));
+        }
       }
     } else if (rx_id == CAN_ID_PRETENSION_ALL) {
       // Pretension all DOFs: [joint_id, 0,0,0,0,0,0,0]
@@ -1062,13 +1070,21 @@ void pollHostCan() {
       if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
         uint8_t dof = buf[1];
         int16_t torque = (len >= 4) ? (int16_t)(buf[2] | (buf[3] << 8)) : 0;
-        bool invert = active_joint_controller->getConfig().dofs[dof].zero_mapping.auto_mapping_invert_direction;
-        if (invert) {
-          active_joint_controller->pretension(dof, torque, 0);
+        const JointConfig& cfg = active_joint_controller->getConfig();
+        if (dof >= cfg.dof_count) {
+          LOG_C1_WARN("[CAN_HOST] Release rejected: invalid DOF " + String(dof));
+        } else if (!active_joint_controller->dofSupportsPretension(dof)) {
+          LOG_C1_WARN("[CAN_HOST] Release rejected: unsupported DOF " + String(dof) +
+                      " (" + String(cfg.dofs[dof].name) + ")");
         } else {
-          active_joint_controller->release(dof, torque, 0);
+          bool invert = cfg.dofs[dof].zero_mapping.auto_mapping_invert_direction;
+          if (invert) {
+            active_joint_controller->pretension(dof, torque, 0);
+          } else {
+            active_joint_controller->release(dof, torque, 0);
+          }
+          LOG_C1_INFO("[CAN_HOST] Release DOF=" + String(dof));
         }
-        LOG_C1_INFO("[CAN_HOST] Release DOF=" + String(dof));
       }
     } else if (rx_id == CAN_ID_RELEASE_ALL) {
       // Release all DOFs: [joint_id, 0,0,0,0,0,0,0]
@@ -1083,11 +1099,18 @@ void pollHostCan() {
         int16_t torque = (len >= 4) ? (int16_t)(buf[2] | (buf[3] << 8)) : 0;
         int16_t duration = (len >= 6) ? (int16_t)(buf[4] | (buf[5] << 8)) : 0;
         const JointConfig& cfg = active_joint_controller->getConfig();
-        float actual_torque = (torque > 0) ? torque : cfg.dofs[dof].zero_mapping.recalc_offset_torque;
-        int actual_duration = (duration > 0) ? duration : cfg.dofs[dof].zero_mapping.recalc_offset_duration;
-        LOG_C1_INFO("[CAN_HOST] Recalc offset DOF=" + String(dof) +
-                    " torque=" + String(actual_torque) + " dur=" + String(actual_duration));
-        active_joint_controller->recalculateMotorOffsets(dof, actual_torque, actual_duration);
+        if (dof >= cfg.dof_count) {
+          LOG_C1_WARN("[CAN_HOST] Recalc offset rejected: invalid DOF " + String(dof));
+        } else if (!active_joint_controller->dofSupportsRecalcOffset(dof)) {
+          LOG_C1_WARN("[CAN_HOST] Recalc offset rejected: unsupported DOF " + String(dof) +
+                      " (" + String(cfg.dofs[dof].name) + ")");
+        } else {
+          float actual_torque = (torque > 0) ? torque : cfg.dofs[dof].zero_mapping.recalc_offset_torque;
+          int actual_duration = (duration > 0) ? duration : cfg.dofs[dof].zero_mapping.recalc_offset_duration;
+          LOG_C1_INFO("[CAN_HOST] Recalc offset DOF=" + String(dof) +
+                      " torque=" + String(actual_torque) + " dur=" + String(actual_duration));
+          active_joint_controller->recalculateMotorOffsets(dof, actual_torque, actual_duration);
+        }
       }
     } else if (rx_id == CAN_ID_SAVE_PID) {
       // Save PID to flash: [joint_id, 0,0,0,0,0,0,0] — Core0 handler (flash access)
@@ -1871,6 +1894,14 @@ void core1_loop() {
       break;
 
     case CMD_PRETENSION: {
+      if (!controller->dofSupportsPretension(dof_index)) {
+        if (shared_data_ext.flag == 0) {
+          strcpy(shared_data_ext.message, "Pretension unsupported for this DOF");
+          shared_data_ext.flag = CMD1_FAIL_MOVE;
+        }
+        LOG_C1_WARN("CMD_PRETENSION rejected for unsupported DOF " + String(dof_index));
+        break;
+      }
       // Re-enable motor power if it was cut by emergency stop (Rev B HW gate)
       if (!safety_is_motor_power_enabled()) {
         safety_motor_power_enable();
@@ -1901,6 +1932,14 @@ void core1_loop() {
       break;
 
     case CMD_RELEASE: {
+      if (!controller->dofSupportsPretension(dof_index)) {
+        if (shared_data_ext.flag == 0) {
+          strcpy(shared_data_ext.message, "Release unsupported for this DOF");
+          shared_data_ext.flag = CMD1_FAIL_MOVE;
+        }
+        LOG_C1_WARN("CMD_RELEASE rejected for unsupported DOF " + String(dof_index));
+        break;
+      }
       // Release the motors of the specific DOF
       // Check for inverted logic
       bool invert = controller->getConfig().dofs[dof_index].zero_mapping.auto_mapping_invert_direction;
@@ -1948,6 +1987,14 @@ void core1_loop() {
       break;
 
     case CMD_RECALC_OFFSET:
+      if (!controller->dofSupportsRecalcOffset(dof_index)) {
+        if (shared_data_ext.flag == 0) {
+          strcpy(shared_data_ext.message, "Recalc offset unsupported for this DOF");
+          shared_data_ext.flag = CMD1_FAIL_MOVE;
+        }
+        LOG_C1_WARN("CMD_RECALC_OFFSET rejected for unsupported DOF " + String(dof_index));
+        break;
+      }
       // Recalculate the offsets of the motors for the specific DOF
       if (controller->recalculateMotorOffsets(
               dof_index,
@@ -1974,6 +2021,14 @@ void core1_loop() {
       break;
 
     case CMD_APPLY_SAVED_OFFSETS: {
+      if (!controller->dofSupportsRecalcOffset(dof_index)) {
+        if (shared_data_ext.flag == 0) {
+          strcpy(shared_data_ext.message, "Saved offsets unsupported for this DOF");
+          shared_data_ext.flag = CMD1_FAIL_MOVE;
+        }
+        LOG_C1_WARN("CMD_APPLY_SAVED_OFFSETS rejected for unsupported DOF " + String(dof_index));
+        break;
+      }
       // Validate saved offsets against current motor positions, apply if valid
       LOG_C1_INFO("=== SMART STARTUP: DOF " + String(dof_index) + " ===");
       JointController::OffsetValidationResult vr = controller->validateSavedOffsets(dof_index);

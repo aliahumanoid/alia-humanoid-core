@@ -301,6 +301,12 @@ bool JointController::pretension(uint8_t dof_index, int torque, int duration_ms)
     return false;
   }
 
+  if (!dofSupportsPretension(dof_index)) {
+    LOG_C1_WARN("Pretension not supported for DOF " + String(dof_index) + " (" +
+                String(config.dofs[dof_index].name) + ")");
+    return false;
+  }
+
   // If parameters are not specified, use configured ones
   if (torque == 0) {
     torque = config.dofs[dof_index].zero_mapping.pretension_torque;
@@ -340,12 +346,24 @@ bool JointController::pretension(uint8_t dof_index, int torque, int duration_ms)
 // Pretension all DOFs of the joint
 bool JointController::pretensionAll() {
   bool result = true;
+  bool any_supported = false;
 
   // Pretension each DOF using configured parameters
   for (int i = 0; i < config.dof_count; i++) {
+    if (!dofSupportsPretension(i)) {
+      LOG_C1_INFO("Skipping pretension for DOF " + String(i) + " (" +
+                  String(config.dofs[i].name) + "): unsupported");
+      continue;
+    }
+    any_supported = true;
     if (!pretension(i, 0, 0)) { // Use configured parameters (0 = use config)
       result = false;
     }
+  }
+
+  if (!any_supported) {
+    LOG_C1_WARN("PretensionAll requested, but no DOF supports pretension");
+    return false;
   }
 
   LOG_C1_INFO("Pretensioning all DOFs with configured parameters");
@@ -365,6 +383,12 @@ bool JointController::pretensionAll() {
 // Release motors of a specific DOF (inverse torque compared to pretensioning)
 bool JointController::release(uint8_t dof_index, int torque, int duration_ms) {
   if (dof_index >= config.dof_count) {
+    return false;
+  }
+
+  if (!dofSupportsPretension(dof_index)) {
+    LOG_C1_WARN("Release not supported for DOF " + String(dof_index) + " (" +
+                String(config.dofs[dof_index].name) + ")");
     return false;
   }
 
@@ -408,12 +432,24 @@ bool JointController::release(uint8_t dof_index, int torque, int duration_ms) {
 // Release all DOFs of the joint (inverse torque compared to pretensioning)
 bool JointController::releaseAll() {
   bool result = true;
+  bool any_supported = false;
 
   // Release each DOF using configured parameters
   for (int i = 0; i < config.dof_count; i++) {
+    if (!dofSupportsPretension(i)) {
+      LOG_C1_INFO("Skipping release for DOF " + String(i) + " (" +
+                  String(config.dofs[i].name) + "): unsupported");
+      continue;
+    }
+    any_supported = true;
     if (!release(i, 0, 0)) { // Use configured parameters (0 = use config)
       result = false;
     }
+  }
+
+  if (!any_supported) {
+    LOG_C1_WARN("ReleaseAll requested, but no DOF supports release");
+    return false;
   }
 
   LOG_C1_INFO("Releasing all DOFs with configured parameters");
@@ -702,6 +738,12 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
                                               int pretension_duration_ms) {
   if (dof_index >= config.dof_count) {
     LOG_C1_ERROR("DOF index out of range in recalculateMotorOffsets");
+    return false;
+  }
+
+  if (!dofSupportsRecalcOffset(dof_index)) {
+    LOG_C1_WARN("Recalc offset not supported for DOF " + String(dof_index) + " (" +
+                String(config.dofs[dof_index].name) + ")");
     return false;
   }
 
@@ -1402,4 +1444,3 @@ void JointController::setOuterLoopSamplingPeriod(float new_ts) {
     }
   }
 }
-
