@@ -35,10 +35,20 @@ from config import (
 )
 from diagnostic_history import DiagnosticHistoryWriter
 from jetson_controller.protocol import (
+    DIAG_EVENT_NAMES,
+    DIAG_FAULT_NAMES,
+    DIAG_PHASE_NAMES,
+    DIAG_REBOOT_REASON_NAMES,
+    DIAG_SEVERITY_NAMES,
+    DIAG_SOURCE_NAMES,
+    FAULT_SNAPSHOT_PENDING_TIMEOUT_S,
+    STARTUP_REASON_NAMES,
     FaultSnapshotMeta,
+    decode_fault_mask,
     decode_fault_snapshot_blob,
     decode_fault_snapshot_chunk,
     decode_fault_snapshot_meta,
+    decode_source_id,
     encode_fault_snapshot_ctrl,
 )
 from motor_can_bench import (
@@ -72,102 +82,6 @@ except ImportError:  # pragma: no cover - optional dependency
     can = None  # type: ignore
 
 
-DIAG_FAULT_NAMES = {
-    0: "HOST_CAN_WARN",
-    1: "MOTOR_CAN_WARN",
-    2: "LOOP_OVERRUN",
-    3: "HOST_WATCHDOG_TIMEOUT",
-    4: "ENCODER_INVALID",
-    5: "ENCODER_STALE",
-    6: "MOTOR_TIMEOUT",
-    7: "SAFETY_LIMIT",
-    8: "MAPPING_LIMIT",
-    9: "MOTOR_RANGE",
-    10: "STARTUP_FAILED",
-    11: "CONFIG_INVALID",
-    12: "FLASH_ERROR",
-    13: "BAD_COMMAND",
-    14: "ESTOP_LATCHED",
-    15: "INTERNAL_ERROR",
-}
-
-DIAG_EVENT_NAMES = {
-    0x01: "BOOT_COMPLETE",
-    0x02: "READY_ASSERTED",
-    0x03: "READY_CLEARED",
-    0x04: "STARTUP_BEGIN",
-    0x05: "STARTUP_COMPLETE",
-    0x06: "STARTUP_FAILED",
-    0x07: "WATCHDOG_WARNING",
-    0x08: "WATCHDOG_TIMEOUT",
-    0x09: "ESTOP_ASSERTED",
-    0x0A: "ESTOP_CLEARED",
-    0x0B: "FAULT_SET",
-    0x0C: "FAULT_CLEARED",
-    0x0D: "ENCODER_INVALID",
-    0x0E: "MOTOR_TIMEOUT",
-    0x0F: "LOOP_OVERRUN_BURST",
-    0x10: "SNAPSHOT_FROZEN",
-    0x11: "SNAPSHOT_AVAILABLE",
-}
-
-DIAG_SOURCE_NAMES = {
-    0: "GLOBAL",
-    1: "DOF",
-    2: "MOTOR",
-    3: "HOST_CAN",
-    4: "MOTOR_CAN",
-    5: "STARTUP",
-    6: "CONFIG",
-    7: "SAFETY",
-}
-
-DIAG_PHASE_NAMES = {
-    0: "BOOT",
-    1: "SAFE_MODE_UNPROVISIONED",
-    2: "IDLE_NOT_READY",
-    3: "STARTUP_RUNNING",
-    4: "READY",
-    5: "LOCAL_HOLD",
-    6: "FAULT_LOCKOUT",
-    7: "SERVICE_ONLY",
-}
-
-DIAG_REBOOT_REASON_NAMES = {
-    0: "POWER_ON",
-    1: "SOFT_RESET_CMD",
-    2: "WATCHDOG_RESET",
-    3: "BROWNOUT_OR_POWER_DIP",
-    4: "CAN_FAULT_RECOVERY",
-    5: "FLASH_RECOVERY",
-    6: "UNKNOWN",
-    7: "RESERVED",
-}
-
-DIAG_SEVERITY_NAMES = {
-    0: "INFO",
-    1: "WARN",
-    2: "ERROR",
-    3: "CRITICAL",
-}
-
-STARTUP_REASON_NAMES = {
-    0: "OK",
-    1: "NO_CONTROLLER",
-    2: "NO_EQUATIONS",
-    3: "ENCODER_TIMEOUT",
-    4: "POSITION_RANGE",
-    5: "RECALC_ERROR",
-    6: "GLOBAL_TIMEOUT",
-    7: "PARTIAL_HOLD",
-    8: "REFERENCE_REQUIRED",
-}
-
-
-def _decode_fault_mask(mask: int) -> list[str]:
-    return [name for bit, name in DIAG_FAULT_NAMES.items() if mask & (1 << bit)]
-
-
 def _decode_state_bits(state_bits: int) -> Dict[str, bool]:
     return {
         "config_valid": bool(state_bits & 0x01),
@@ -179,23 +93,6 @@ def _decode_state_bits(state_bits: int) -> Dict[str, bool]:
         "watchdog_warning": bool(state_bits & 0x40),
         "snapshot_available": bool(state_bits & 0x80),
     }
-
-
-def _decode_source_id(source_id: int) -> Dict[str, Any]:
-    if source_id <= 0x0F:
-        return {"source": f"DOF_{source_id}", "source_kind": "DOF", "source_index": source_id}
-    if 0x80 <= source_id <= 0x8F:
-        return {
-            "source": f"MOTOR_{source_id - 0x80}",
-            "source_kind": "MOTOR",
-            "source_index": source_id - 0x80,
-        }
-    if source_id == 0xE0:
-        return {"source": "HOST_CAN", "source_kind": "HOST_CAN", "source_index": None}
-    if source_id == 0xE1:
-        return {"source": "MOTOR_CAN", "source_kind": "MOTOR_CAN", "source_index": None}
-    return {"source": "GLOBAL", "source_kind": "GLOBAL", "source_index": None}
-
 
 class CanManager:
     """High-level helper that manages python-can Bus lifecycle and protocol helpers."""
@@ -2055,6 +1952,7 @@ class CanManager:
     def _handle_message(self, message: "can.Message") -> None:
         arb_id = message.arbitration_id
         data = bytes(message.data)
+        self._expire_fault_snapshot_pending(message.timestamp)
 
         # Direct motor responses (0x140 + motor_id) for single-motor CAN bench.
         if self.MOTOR_ID_BASE < arb_id < 0x200 and len(data) >= 1:
@@ -2916,7 +2814,7 @@ class CanManager:
             "<BHHBBB", data[:8]
         )
         joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
-        source_info = _decode_source_id(source_id)
+        source_info = decode_source_id(source_id)
 
         payload = {
             "type": "fault_status",
@@ -2927,8 +2825,8 @@ class CanManager:
             "seq": seq,
             "active_fault_bits": active_bits,
             "latched_fault_bits": latched_bits,
-            "active_faults": _decode_fault_mask(active_bits),
-            "latched_faults": _decode_fault_mask(latched_bits),
+            "active_faults": decode_fault_mask(active_bits),
+            "latched_faults": decode_fault_mask(latched_bits),
             "primary_fault_code": None if primary_fault_code == 0xFF else primary_fault_code,
             "primary_fault": None
             if primary_fault_code == 0xFF
@@ -3050,6 +2948,7 @@ class CanManager:
                     "total_chunks": meta.total_chunks,
                     "payload_bytes": meta.payload_bytes,
                     "meta_payload": payload,
+                    "last_timestamp": timestamp,
                 }
             )
         else:
@@ -3102,6 +3001,16 @@ class CanManager:
             self._fault_snapshots[meta_payload["joint_name"]] = dict(payload)
         self._fault_snapshot_pending.pop(joint_id, None)
         self._publish_diagnostic(payload, "fault_snapshot_dump")
+
+    def _expire_fault_snapshot_pending(self, now_timestamp: float) -> None:
+        stale_joint_ids = [
+            joint_id
+            for joint_id, pending in self._fault_snapshot_pending.items()
+            if isinstance(pending.get("last_timestamp"), (int, float))
+            and (now_timestamp - float(pending["last_timestamp"])) > FAULT_SNAPSHOT_PENDING_TIMEOUT_S
+        ]
+        for joint_id in stale_joint_ids:
+            self._fault_snapshot_pending.pop(joint_id, None)
 
     def get_joint_state(self) -> Dict[str, Any]:
         """Return current joint state data for all joints/DOFs in impedance mode."""

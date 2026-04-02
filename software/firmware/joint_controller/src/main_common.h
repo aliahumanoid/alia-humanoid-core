@@ -539,7 +539,9 @@ enum DiagFaultCode : uint8_t {
   DIAG_FAULT_BAD_COMMAND = 13,
   DIAG_FAULT_ESTOP_LATCHED = 14,
   DIAG_FAULT_INTERNAL_ERROR = 15,
+  DIAG_FAULT_COUNT,
 };
+static_assert(DIAG_FAULT_COUNT <= 16, "Diagnostic fault mask exceeds 16-bit wire format");
 
 enum DiagEventCode : uint8_t {
   DIAG_EVENT_BOOT_COMPLETE = 0x01,
@@ -578,7 +580,7 @@ void diag_set_estop_latched(bool latched);
 void diag_note_watchdog_timeout(uint8_t dof, uint32_t elapsed_ms);
 void diag_note_loop_overrun();
 void diag_note_encoder_invalid(uint8_t dof);
-void diag_note_safety_violation(uint8_t dof, const String &message);
+void diag_note_safety_violation(uint8_t dof, SafetyViolationType violation_type);
 void diag_note_bad_command(uint8_t source_kind, uint8_t source_index);
 
 // ============================================================================

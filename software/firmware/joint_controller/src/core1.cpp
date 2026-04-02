@@ -190,8 +190,8 @@ static uint16_t diag_event_seq = 0;
 static uint16_t diag_persistent_fault_bits = 0;
 static uint16_t diag_latched_fault_bits = 0;
 static uint16_t diag_last_active_fault_bits = 0;
-static uint8_t diag_fault_source_hint[16] = {};
-static uint32_t diag_transient_fault_until_ms[16] = {};
+static uint8_t diag_fault_source_hint[DIAG_FAULT_COUNT] = {};
+static uint32_t diag_transient_fault_until_ms[DIAG_FAULT_COUNT] = {};
 static uint8_t diag_watchdog_trip_count = 0;
 static uint8_t diag_can_recovery_count = 0;
 static uint8_t diag_loop_overrun_count = 0;
@@ -264,12 +264,16 @@ static inline uint16_t diagFaultMask(DiagFaultCode code) {
   return (uint16_t)1u << static_cast<uint8_t>(code);
 }
 
+static inline bool diagFaultIndexValid(uint8_t idx) {
+  return idx < DIAG_FAULT_COUNT;
+}
+
 static inline bool diagTimeBefore(uint32_t now_ms, uint32_t target_ms) {
   return (int32_t)(now_ms - target_ms) < 0;
 }
 
 static void diagInitSourceHints() {
-  for (uint8_t i = 0; i < 16; ++i) {
+  for (uint8_t i = 0; i < DIAG_FAULT_COUNT; ++i) {
     diag_fault_source_hint[i] = 0xFF;
   }
 }
@@ -557,11 +561,12 @@ static void diagFreezeSnapshotForFault(uint8_t fault_code, uint16_t active_fault
   diagBuildSnapshotPayload(diag_snapshot_freeze_event_code, fault_code, active_fault_bits);
   diag_snapshot_available = true;
   diag_last_health_status_ms = millis() - DIAG_HEALTH_PERIOD_MS;
+  const uint8_t source_id = diagFaultIndexValid(fault_code) ? diag_fault_source_hint[fault_code] : 0xFF;
   diagQueueEvent(
       DIAG_EVENT_SNAPSHOT_FROZEN,
       diagBuildEventFlags(3, true, false, false, true, true),
-      diagSourceKindForFault(fault_code, diag_fault_source_hint[fault_code]),
-      diagSourceIndexForEvent(diag_fault_source_hint[fault_code]),
+      diagSourceKindForFault(fault_code, source_id),
+      diagSourceIndexForEvent(source_id),
       fault_code,
       diagComputePhaseCode());
 }
@@ -691,7 +696,10 @@ static uint8_t diagComputeStateBits() {
 
 static void diagMarkLatchedFault(DiagFaultCode code, uint8_t source_id) {
   const uint16_t mask = diagFaultMask(code);
-  diag_fault_source_hint[static_cast<uint8_t>(code)] = source_id;
+  const uint8_t idx = static_cast<uint8_t>(code);
+  if (diagFaultIndexValid(idx)) {
+    diag_fault_source_hint[idx] = source_id;
+  }
   if ((diag_latched_fault_bits & mask) == 0) {
     diag_latched_fault_bits |= mask;
     ++diag_fault_epoch;
@@ -701,7 +709,10 @@ static void diagMarkLatchedFault(DiagFaultCode code, uint8_t source_id) {
 
 static void diagSetPersistentFaultActive(DiagFaultCode code, uint8_t source_id) {
   const uint16_t mask = diagFaultMask(code);
-  diag_fault_source_hint[static_cast<uint8_t>(code)] = source_id;
+  const uint8_t idx = static_cast<uint8_t>(code);
+  if (diagFaultIndexValid(idx)) {
+    diag_fault_source_hint[idx] = source_id;
+  }
   if ((diag_persistent_fault_bits & mask) == 0) {
     diag_persistent_fault_bits |= mask;
     diag_force_fault_status_send = true;
@@ -718,6 +729,7 @@ static void diagClearPersistentFaultActive(DiagFaultCode code) {
 
 static void diagSetTransientFault(DiagFaultCode code, uint8_t source_id, uint32_t hold_ms, bool latch) {
   const uint8_t idx = static_cast<uint8_t>(code);
+  if (!diagFaultIndexValid(idx)) return;
   diag_fault_source_hint[idx] = source_id;
   diag_transient_fault_until_ms[idx] = millis() + hold_ms;
   if (latch) {
@@ -729,7 +741,7 @@ static void diagSetTransientFault(DiagFaultCode code, uint8_t source_id, uint32_
 
 static uint16_t diagComputeActiveFaultMask(uint32_t now_ms) {
   uint16_t active_mask = diag_persistent_fault_bits;
-  for (uint8_t i = 0; i < 16; ++i) {
+  for (uint8_t i = 0; i < DIAG_FAULT_COUNT; ++i) {
     const uint32_t until_ms = diag_transient_fault_until_ms[i];
     if (until_ms != 0 && diagTimeBefore(now_ms, until_ms)) {
       active_mask |= (uint16_t)1u << i;
@@ -816,7 +828,7 @@ static void diagRefreshRuntimeFaults() {
   const uint16_t newly_cleared = diag_last_active_fault_bits & ~active_fault_bits;
   int8_t snapshot_freeze_fault = -1;
 
-  for (uint8_t bit = 0; bit < 16; ++bit) {
+  for (uint8_t bit = 0; bit < DIAG_FAULT_COUNT; ++bit) {
     const uint16_t mask = (uint16_t)1u << bit;
     if (newly_active & mask) {
       diagQueueFaultTransitionEvent(DIAG_EVENT_FAULT_SET, bit, diag_fault_source_hint[bit],
@@ -888,7 +900,6 @@ static void sendHealthStatusData() {
   diag_last_health_status_ms = now_ms;
 
   diagSampleCanHealthCounters();
-  diagRefreshRuntimeFaults();
 
   const uint8_t seq = ++diag_health_seq;
 
@@ -936,7 +947,6 @@ static void sendHealthStatusData() {
 static void sendFaultStatusData() {
   if (suspend_host_can_polling) return;
 
-  diagRefreshRuntimeFaults();
   const uint32_t now_ms = millis();
   const uint16_t active_fault_bits = diag_last_active_fault_bits;
 
@@ -955,7 +965,7 @@ static void sendFaultStatusData() {
 
   uint8_t primary_fault_code = 0xFF;
   uint8_t source_id = 0xFF;
-  for (uint8_t bit = 0; bit < 16; ++bit) {
+  for (uint8_t bit = 0; bit < DIAG_FAULT_COUNT; ++bit) {
     const uint16_t mask = (uint16_t)1u << bit;
     if (active_fault_bits & mask) {
       primary_fault_code = bit;
@@ -964,7 +974,7 @@ static void sendFaultStatusData() {
     }
   }
   if (primary_fault_code == 0xFF && diag_latched_fault_bits != 0) {
-    for (uint8_t bit = 0; bit < 16; ++bit) {
+    for (uint8_t bit = 0; bit < DIAG_FAULT_COUNT; ++bit) {
       const uint16_t mask = (uint16_t)1u << bit;
       if (diag_latched_fault_bits & mask) {
         primary_fault_code = bit;
@@ -1094,14 +1104,19 @@ void diag_note_encoder_invalid(uint8_t dof) {
       diagComputePhaseCode());
 }
 
-void diag_note_safety_violation(uint8_t dof, const String &message) {
+void diag_note_safety_violation(uint8_t dof, SafetyViolationType violation_type) {
   DiagFaultCode fault_code = DIAG_FAULT_SAFETY_LIMIT;
-  if (message.indexOf("MAPPING LIMIT") >= 0) {
-    fault_code = DIAG_FAULT_MAPPING_LIMIT;
-  } else if (message.indexOf("POSSIBLE TENDON BREAKAGE") >= 0 ||
-             message.indexOf("motor") >= 0 ||
-             message.indexOf("MOTOR") >= 0) {
-    fault_code = DIAG_FAULT_MOTOR_RANGE;
+  switch (violation_type) {
+    case SAFETY_VIOLATION_MAPPING_LIMIT:
+      fault_code = DIAG_FAULT_MAPPING_LIMIT;
+      break;
+    case SAFETY_VIOLATION_MOTOR_RANGE:
+      fault_code = DIAG_FAULT_MOTOR_RANGE;
+      break;
+    case SAFETY_VIOLATION_LIMIT:
+    default:
+      fault_code = DIAG_FAULT_SAFETY_LIMIT;
+      break;
   }
 
   diagSetTransientFault(fault_code, dof, 2000, true);
@@ -2715,6 +2730,7 @@ void core1_loop() {
       diag_boot_complete_queued = true;
     }
 
+    diagRefreshRuntimeFaults();
     sendHealthStatusData();
     sendFaultStatusData();
     sendEventNoticeData();

@@ -751,8 +751,12 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
 }
 
 bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
-                                        String &violation_message, bool check_motors) {
+                                        String &violation_message, bool check_motors,
+                                        SafetyViolationType *violation_type) {
   violation_message = "";
+  if (violation_type != nullptr) {
+    *violation_type = SAFETY_VIOLATION_LIMIT;
+  }
 
   if (dof_index >= config.dof_count) {
     violation_message = "DOF index out of range";
@@ -761,6 +765,9 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
 
   if (!isAngleInLimits(dof_index, current_angle)) {
     const DofConfig &dof_config = config.dofs[dof_index];
+    if (violation_type != nullptr) {
+      *violation_type = SAFETY_VIOLATION_LIMIT;
+    }
     violation_message           = "JOINT LIMIT VIOLATED - DOF " + String(dof_index) +
                         ": angle=" + String(current_angle, 2) + " deg " +
                         "[physical range: " + String(dof_config.limits.min_angle, 1) + " / " +
@@ -771,6 +778,9 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
   if (!isAngleInMappingLimits(dof_index, current_angle)) {
     float min_safe;
     float max_safe;
+    if (violation_type != nullptr) {
+      *violation_type = SAFETY_VIOLATION_MAPPING_LIMIT;
+    }
 
     if (hasValidEquations(dof_index)) {
       min_safe = linear_equations[dof_index].joint_safe_min;
@@ -789,6 +799,9 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
 
   if (check_motors && config.dofs[dof_index].drive_type != DRIVE_DIRECT_DRIVE) {
     if (!checkMotorsInRange(dof_index, violation_message)) {
+      if (violation_type != nullptr) {
+        *violation_type = SAFETY_VIOLATION_MOTOR_RANGE;
+      }
       return false;
     }
   }

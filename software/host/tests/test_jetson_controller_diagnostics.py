@@ -187,3 +187,15 @@ def test_can_bus_logger_decodes_fault_snapshot_frames():
     assert decoded.startswith("FAULT_SNAPSHOT_DATA j=1")
     assert "chunk=0" in decoded
     assert high_freq is False
+
+
+def test_jetson_telemetry_expires_stale_snapshot_pending_state():
+    telemetry = TelemetryManager(_build_config())
+    meta_frame, _, _ = _snapshot_frames()
+
+    telemetry._dispatch(CAN_ID_FAULT_SNAPSHOT_META + 1, meta_frame, 10.0)
+    assert 1 in telemetry._fault_snapshot_pending
+
+    telemetry._expire_fault_snapshot_pending(16.0)
+
+    assert 1 not in telemetry._fault_snapshot_pending

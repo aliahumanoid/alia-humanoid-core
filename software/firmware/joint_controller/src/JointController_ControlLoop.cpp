@@ -1119,6 +1119,7 @@ bool JointController::executeControlLoop() {
         uint32_t safety_start_us = time_us_32();
 #endif
         String safety_message;
+        SafetyViolationType safety_violation_type = SAFETY_VIOLATION_LIMIT;
         // Check motors (tendon breakage) only in HOLDING mode periodically
         // NOT immediately when entering HOLDING - motors need time to settle
         bool check_motors = is_holding && (safety_check_counter >= 10);
@@ -1127,7 +1128,12 @@ bool JointController::executeControlLoop() {
         // String concatenation + Serial.print was causing ~2ms overhead per call,
         // which exceeded the 2ms cycle budget and caused control loop jitter.
         
-        bool safety_ok = checkSafetyForDof(dof, q_curr, safety_message, check_motors);
+        bool safety_ok = checkSafetyForDof(
+            dof,
+            q_curr,
+            safety_message,
+            check_motors,
+            &safety_violation_type);
 #if CONTROLLER_DEBUG
         {
           uint32_t safety_dt = time_us_32() - safety_start_us;
@@ -1142,7 +1148,7 @@ bool JointController::executeControlLoop() {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
           LOG_C1_ERROR("[Safety] MOVEMENT STOPPED: " + safety_message);
-          diag_note_safety_violation(dof, safety_message);
+          diag_note_safety_violation(dof, safety_violation_type);
 
           float hold_ref = dof_data.valid[dof] ? q_curr : getImpedanceHoldReference(dof);
           if (impedance_active) {

@@ -140,3 +140,15 @@ def test_fault_snapshot_request_helpers_send_expected_frames(tmp_path, monkeypat
     assert result["sub_cmd"] == "BEGIN_DUMP"
     assert sent[0][0] == CAN_ID_FAULT_SNAPSHOT_CTRL
     assert sent[0][1] == bytes([0x01, 1, 0xFF, 2, 0, 0, 0, result["seq"]])
+
+
+def test_fault_snapshot_pending_state_expires_after_timeout(tmp_path, monkeypatch):
+    manager = _build_manager(tmp_path, monkeypatch)
+    meta_frame, _, _ = _snapshot_frames()
+
+    manager._handle_fault_snapshot_meta(meta_frame, 10.0, joint_id=1)
+    assert 1 in manager._fault_snapshot_pending
+
+    manager._expire_fault_snapshot_pending(16.0)
+
+    assert 1 not in manager._fault_snapshot_pending

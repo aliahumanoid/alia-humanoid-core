@@ -64,6 +64,7 @@ FAULT_SNAPSHOT_UNUSED_I16 = 0x7FFF
 
 # Inter-frame delay for multi-frame sequences (3 ms = ~1.5 control loops @ 500 Hz)
 MULTI_FRAME_DELAY_S = 0.003
+FAULT_SNAPSHOT_PENDING_TIMEOUT_S = 5.0
 
 FAULT_SNAPSHOT_CTRL_SUBCMDS = {
     0x00: "QUERY_META",
@@ -330,11 +331,11 @@ class FaultStatus:
 
     @property
     def active_fault_names(self) -> list[str]:
-        return _decode_fault_mask(self.active_fault_bits)
+        return decode_fault_mask(self.active_fault_bits)
 
     @property
     def latched_fault_names(self) -> list[str]:
-        return _decode_fault_mask(self.latched_fault_bits)
+        return decode_fault_mask(self.latched_fault_bits)
 
     @property
     def primary_fault_name(self) -> Optional[str]:
@@ -344,15 +345,15 @@ class FaultStatus:
 
     @property
     def source_kind(self) -> str:
-        return _decode_source_id(self.source_id)["source_kind"]
+        return decode_source_id(self.source_id)["source_kind"]
 
     @property
     def source_name(self) -> str:
-        return _decode_source_id(self.source_id)["source"]
+        return decode_source_id(self.source_id)["source"]
 
     @property
     def source_index(self) -> Optional[int]:
-        return _decode_source_id(self.source_id)["source_index"]
+        return decode_source_id(self.source_id)["source_index"]
 
 
 @dataclass
@@ -468,11 +469,11 @@ class EncoderData:
     t_offset_ms: int
 
 
-def _decode_fault_mask(mask: int) -> list[str]:
+def decode_fault_mask(mask: int) -> list[str]:
     return [name for bit, name in DIAG_FAULT_NAMES.items() if mask & (1 << bit)]
 
 
-def _decode_source_id(source_id: int) -> dict[str, object]:
+def decode_source_id(source_id: int) -> dict[str, object]:
     if source_id <= 0x0F:
         return {"source": f"DOF_{source_id}", "source_kind": "DOF", "source_index": source_id}
     if 0x80 <= source_id <= 0x8F:
@@ -903,9 +904,9 @@ def decode_fault_snapshot_blob(data: bytes) -> dict[str, object]:
         "snapshot_flags": _decode_snapshot_controller_flags(snapshot_flags),
         "snapshot_flags_raw": snapshot_flags,
         "active_fault_bits": active_fault_bits,
-        "active_faults": _decode_fault_mask(active_fault_bits),
+        "active_faults": decode_fault_mask(active_fault_bits),
         "latched_fault_bits": latched_fault_bits,
-        "latched_faults": _decode_fault_mask(latched_fault_bits),
+        "latched_faults": decode_fault_mask(latched_fault_bits),
         "freeze_uptime_s": freeze_uptime_s,
         "counters": {
             "host_can_tx_error_count": host_can_tx_error_count,

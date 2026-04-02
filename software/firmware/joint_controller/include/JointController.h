@@ -60,6 +60,12 @@
 // Forward declaration
 class JointController;
 
+enum SafetyViolationType : uint8_t {
+  SAFETY_VIOLATION_LIMIT = 0,
+  SAFETY_VIOLATION_MAPPING_LIMIT = 1,
+  SAFETY_VIOLATION_MOTOR_RANGE = 2,
+};
+
 // Movement callback type
 typedef bool (*MovementCallback)(JointController *controller, int dof_index, float progress);
 
@@ -244,7 +250,8 @@ public:
    * @return true if DOF is within limits, false otherwise
    */
   bool checkSafetyForDof(uint8_t dof_index, float current_angle, String &violation_message,
-                         bool check_motors = false);
+                         bool check_motors = false,
+                         SafetyViolationType *violation_type = nullptr);
 
   // ==========================================================================
   // MOTOR & PID CONTROL

@@ -32,6 +32,7 @@ from .protocol import (
     CAN_ID_RETENSION_PROBE_RESULT,
     CAN_ID_STARTUP_STATUS,
     DIAG_FAULT_NAMES,
+    FAULT_SNAPSHOT_PENDING_TIMEOUT_S,
     DIAG_PHASE_NAMES,
     DIAG_REBOOT_REASON_NAMES,
     STARTUP_REASON_NAMES,
@@ -151,6 +152,7 @@ class TelemetryManager:
 
     def _dispatch(self, arb_id: int, data: bytes, timestamp: float) -> None:
         """Route incoming CAN frame to appropriate handler."""
+        self._expire_fault_snapshot_pending(timestamp)
         # Encoder stream (0x410-0x41F)
         if 0x410 <= arb_id <= 0x41F and len(data) >= 8:
             joint_id = arb_id - CAN_ID_ENCODER_STREAM_DATA
@@ -632,6 +634,7 @@ class TelemetryManager:
                     "total_chunks": meta.total_chunks,
                     "payload_bytes": meta.payload_bytes,
                     "meta_payload": payload,
+                    "last_timestamp": timestamp,
                 }
             )
         else:
@@ -687,6 +690,16 @@ class TelemetryManager:
             f"SNAPSHOT_DUMP [{key}] snapshot={chunk.snapshot_id} bytes={payload_bytes} "
             f"fault={decoded_snapshot.get('primary_fault')}"
         )
+
+    def _expire_fault_snapshot_pending(self, now_timestamp: float) -> None:
+        stale_joint_ids = [
+            joint_id
+            for joint_id, pending in self._fault_snapshot_pending.items()
+            if isinstance(pending.get("last_timestamp"), (int, float))
+            and (now_timestamp - float(pending["last_timestamp"])) > FAULT_SNAPSHOT_PENDING_TIMEOUT_S
+        ]
+        for joint_id in stale_joint_ids:
+            self._fault_snapshot_pending.pop(joint_id, None)
 
     def _handle_encoder(self, data: bytes, joint_id: int) -> None:
         enc = decode_encoder_stream(data, joint_id)
