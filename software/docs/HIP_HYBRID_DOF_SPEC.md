@@ -43,20 +43,20 @@ If the current model is reused as-is, the system will make incorrect assumptions
 
 ## 2. Current Software Mismatch
 
-The current firmware configuration in [config_presets.h](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h) defines:
+The current firmware configuration in [config_presets.h](software/firmware/joint_controller/include/config_presets.h) defines:
 - `HIP_LEFT_CONFIG.motor_count = 6`
 - `HIP_RIGHT_CONFIG.motor_count = 6`
 - DOF 2 as a tendon-style internal/external rotation pair with 2 motors
 
 Examples:
-- [config_presets.h:413](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h:413)
-- [config_presets.h:486](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h:486)
-- [config_presets.h:570](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h:570)
-- [config_presets.h:597](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h:597)
-- [config_presets.h:671](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h:671)
-- [config_presets.h:755](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h:755)
+- [config_presets.h:413](software/firmware/joint_controller/include/config_presets.h:413)
+- [config_presets.h:486](software/firmware/joint_controller/include/config_presets.h:486)
+- [config_presets.h:570](software/firmware/joint_controller/include/config_presets.h:570)
+- [config_presets.h:597](software/firmware/joint_controller/include/config_presets.h:597)
+- [config_presets.h:671](software/firmware/joint_controller/include/config_presets.h:671)
+- [config_presets.h:755](software/firmware/joint_controller/include/config_presets.h:755)
 
-The host also inherits the same assumption because `joint_config.json` is generated from firmware config as documented in [JOINT_CONFIG_SYNC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/JOINT_CONFIG_SYNC.md).
+The host also inherits the same assumption because `joint_config.json` is generated from firmware config as documented in [JOINT_CONFIG_SYNC.md](software/docs/JOINT_CONFIG_SYNC.md).
 
 So today the mismatch exists in both:
 - firmware runtime behavior
@@ -199,9 +199,9 @@ Pick one canonical name and keep it consistent across:
 ## 6.1 Configuration Layer
 
 Files impacted:
-- [config_presets.h](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h)
+- [config_presets.h](software/firmware/joint_controller/include/config_presets.h)
 - `JointConfig.h` / config structs
-- JSON extraction/generation path described in [JOINT_CONFIG_SYNC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/JOINT_CONFIG_SYNC.md)
+- JSON extraction/generation path described in [JOINT_CONFIG_SYNC.md](software/docs/JOINT_CONFIG_SYNC.md)
 
 Required changes:
 1. Add `drive_type` and capability flags to the per-DOF config struct.
@@ -220,8 +220,8 @@ Current firmware assumes tendon workflows on a per-DOF basis in multiple places,
 - saved offset application
 
 Relevant files include:
-- [core1.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/core1.cpp)
-- [JointController.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/JointController.cpp)
+- [core1.cpp](software/firmware/joint_controller/src/core1.cpp)
+- [JointController.cpp](software/firmware/joint_controller/src/JointController.cpp)
 
 Required behavior for direct-drive DOF:
 - no pretension command
@@ -236,14 +236,14 @@ Minimum requirement before HIP test:
 
 This is currently a hard blocker for HIP-as-hybrid.
 
-[JointController_AutoMapping.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/JointController_AutoMapping.cpp) currently validates each DOF as if it must have:
+[JointController_AutoMapping.cpp](software/firmware/joint_controller/src/JointController_AutoMapping.cpp) currently validates each DOF as if it must have:
 - at least 2 motors
 - one agonist
 - one antagonist
 
 Example logic:
-- [JointController_AutoMapping.cpp:47](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/JointController_AutoMapping.cpp:47)
-- [JointController_AutoMapping.cpp:62](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/JointController_AutoMapping.cpp:62)
+- [JointController_AutoMapping.cpp:47](software/firmware/joint_controller/src/JointController_AutoMapping.cpp:47)
+- [JointController_AutoMapping.cpp:62](software/firmware/joint_controller/src/JointController_AutoMapping.cpp:62)
 
 That must change before HIP can be represented honestly.
 
@@ -329,7 +329,7 @@ Without this, the host UI will continue rendering the wrong controls.
 
 Current UI assumes tendon workflows for every DOF in a joint panel.
 
-Examples in [scripts.js](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/static/js/scripts.js):
+Examples in [scripts.js](software/host/static/js/scripts.js):
 - per-DOF `Pretension`
 - per-DOF `Release`
 - per-DOF `Recalc Offset`
@@ -436,15 +436,15 @@ This section translates the design into concrete code work. The goal is to avoid
 **Goal:** make the hybrid topology representable in the single source of truth.
 
 **Files:**
-- [JointConfig.h](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/JointConfig.h)
+- [JointConfig.h](software/firmware/joint_controller/include/JointConfig.h)
   - add per-DOF `drive_type`
   - add per-DOF capability flags
   - replace or extend `is_agonist` with an explicit motor role model
-- [config_presets.h](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/include/config_presets.h)
+- [config_presets.h](software/firmware/joint_controller/include/config_presets.h)
   - change `HIP_LEFT_CONFIG` and `HIP_RIGHT_CONFIG` from `6 motors / 3 tendon pairs` to `5 motors / hybrid`
   - define canonical DOF2 name
   - assign the direct-drive motor to DOF2 explicitly
-- [JOINT_CONFIG_SYNC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/JOINT_CONFIG_SYNC.md)
+- [JOINT_CONFIG_SYNC.md](software/docs/JOINT_CONFIG_SYNC.md)
   - update the documented generated JSON schema with `drive_type` and capability flags
 
 **Definition of done:**
@@ -457,16 +457,16 @@ This section translates the design into concrete code work. The goal is to avoid
 **Goal:** stop executing tendon-only workflows on direct-drive DOFs.
 
 **Files:**
-- [JointController.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/JointController.cpp)
+- [JointController.cpp](software/firmware/joint_controller/src/JointController.cpp)
   - gate pretension/recalc/startup sub-steps by per-DOF capabilities
   - define the minimal direct-drive init behavior for DOF2
-- [JointController_AutoMapping.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/JointController_AutoMapping.cpp)
+- [JointController_AutoMapping.cpp](software/firmware/joint_controller/src/JointController_AutoMapping.cpp)
   - stop requiring `agonist + antagonist` for every DOF
   - skip or reject direct-drive DOFs cleanly
-- [core1.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/core1.cpp)
+- [core1.cpp](software/firmware/joint_controller/src/core1.cpp)
   - reject unsupported CAN commands on direct-drive DOFs with explicit logging
   - ensure startup and pretension command handlers branch correctly on `drive_type`
-- [RuntimeProvisioning.cpp](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/firmware/joint_controller/src/RuntimeProvisioning.cpp)
+- [RuntimeProvisioning.cpp](software/firmware/joint_controller/src/RuntimeProvisioning.cpp)
   - no semantic change expected, but verify hybrid HIP profiles load correctly after provisioning
 
 **Definition of done:**
@@ -479,13 +479,13 @@ This section translates the design into concrete code work. The goal is to avoid
 **Goal:** host/UI renders only meaningful controls for each DOF.
 
 **Files:**
-- [software/host/config.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/config.py)
+- [software/host/config.py](software/host/config.py)
   - load and expose new per-DOF topology fields from generated config
-- [software/host/routes.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/routes.py)
+- [software/host/routes.py](software/host/routes.py)
   - keep API responses topology-aware where joint metadata is returned
-- [software/host/can_manager.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/can_manager.py)
+- [software/host/can_manager.py](software/host/can_manager.py)
   - ensure host does not assume tendon diagnostics exist on every DOF
-- [software/host/static/js/scripts.js](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/static/js/scripts.js)
+- [software/host/static/js/scripts.js](software/host/static/js/scripts.js)
   - hide or disable `Pretension`, `Release`, `Recalc Offset`, slack/probe tools on DOF2 roll
   - keep move/hold controls available if roll supports them
 
@@ -498,15 +498,15 @@ This section translates the design into concrete code work. The goal is to avoid
 **Goal:** Jetson consumes the same hybrid model without inventing a second abstraction.
 
 **Files:**
-- [software/host/jetson_controller/config.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/config.py)
+- [software/host/jetson_controller/config.py](software/host/jetson_controller/config.py)
   - load and surface new per-DOF metadata
-- [software/host/jetson_controller/config/controller.yaml](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/config/controller.yaml)
+- [software/host/jetson_controller/config/controller.yaml](software/host/jetson_controller/config/controller.yaml)
   - no permanent HIP-specific workaround if generated config already contains the truth
-- [software/host/jetson_controller/protocol.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/protocol.py)
+- [software/host/jetson_controller/protocol.py](software/host/jetson_controller/protocol.py)
   - no new production frame required for phase 1, but keep room for future capability announce if needed
-- [software/host/jetson_controller/telemetry.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/telemetry.py)
+- [software/host/jetson_controller/telemetry.py](software/host/jetson_controller/telemetry.py)
   - treat tendon diagnostics as conditional on DOF capability, not universal
-- [software/host/jetson_controller/tui.py](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/tui.py)
+- [software/host/jetson_controller/tui.py](software/host/jetson_controller/tui.py)
   - do not expose tendon-only actions on roll if/when those controls are added
 
 **Definition of done:**
@@ -518,9 +518,9 @@ This section translates the design into concrete code work. The goal is to avoid
 **Goal:** close the loop between model, code and first hardware test.
 
 **Files:**
-- [HIP_HYBRID_DOF_SPEC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/HIP_HYBRID_DOF_SPEC.md)
+- [HIP_HYBRID_DOF_SPEC.md](software/docs/HIP_HYBRID_DOF_SPEC.md)
   - update status from draft to implementation-ready once Phase A-D are scoped and agreed
-- [HARDWARE_VALIDATION_ROADMAP.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/HARDWARE_VALIDATION_ROADMAP.md)
+- [HARDWARE_VALIDATION_ROADMAP.md](software/docs/HARDWARE_VALIDATION_ROADMAP.md)
   - move `L3 HIP` from blocked to active only after Phase B and C are complete
 
 **Definition of done:**
@@ -533,7 +533,7 @@ If the work must be broken into the smallest non-destructive slice, do it in thi
 
 1. `JointConfig.h`
 2. `config_presets.h`
-3. generated config schema / [JOINT_CONFIG_SYNC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/JOINT_CONFIG_SYNC.md)
+3. generated config schema / [JOINT_CONFIG_SYNC.md](software/docs/JOINT_CONFIG_SYNC.md)
 4. command rejection/gating in `JointController.cpp` and `core1.cpp`
 5. webapp capability-driven UI hiding
 

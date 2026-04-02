@@ -92,7 +92,7 @@
 - il modello corretto è un joint ibrido:
   - 2 DOF tendon-driven antagonistic
   - 1 DOF roll direct-drive single motor
-- prima del test singolo HIP va corretta l'astrazione software, come descritto in [HIP_HYBRID_DOF_SPEC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/HIP_HYBRID_DOF_SPEC.md)
+- prima del test singolo HIP va corretta l'astrazione software, come descritto in [HIP_HYBRID_DOF_SPEC.md](software/docs/HIP_HYBRID_DOF_SPEC.md)
 
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi
@@ -379,7 +379,7 @@ Ordine raccomandato, dato lo stato reale del banco:
 
 3. **Aprire il refactor `HIP` come binario separato**
    - non usare il banco `knee + ankle` per "simulare" la `HIP`
-   - implementare invece il modello ibrido come da [HIP_HYBRID_DOF_SPEC.md](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/docs/HIP_HYBRID_DOF_SPEC.md)
+   - implementare invece il modello ibrido come da [HIP_HYBRID_DOF_SPEC.md](software/docs/HIP_HYBRID_DOF_SPEC.md)
 
 4. **Solo dopo il refactor `HIP`, fare il primo bring-up `HIP` singolo**
    - non prima

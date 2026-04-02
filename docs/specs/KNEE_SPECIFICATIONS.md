@@ -15,7 +15,7 @@ The knee is a **1-DOF joint** using **antagonistic tendon-driven actuation** wit
 | Degrees of Freedom | 1 |
 | Total Motors | 2 (antagonistic pair) |
 | Actuation Type | Antagonistic tendon-driven |
-| Control | Position control with waypoint support |
+| Control | Impedance control (SET_IMPEDANCE) |
 
 ---
 
@@ -104,7 +104,7 @@ The knee is a **1-DOF joint** using **antagonistic tendon-driven actuation** wit
 | Position control | Functional | ✅ |
 | Tendon-driven actuation | Validated | ✅ |
 | CAN communication | Working | ✅ |
-| Waypoint movement | Operational | ✅ |
+| Impedance control | Operational | ✅ |
 
 ---
 

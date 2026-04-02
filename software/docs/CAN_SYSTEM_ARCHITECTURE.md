@@ -796,21 +796,21 @@ The host behavior is frozen as follows:
 Any protocol or host change that claims to preserve the frozen baseline should
 continue to pass this bench checklist:
 
-1. [run_knee_right_can_only.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_knee_right_can_only.sh)
+1. [run_knee_right_can_only.sh](software/host/jetson_controller/run_knee_right_can_only.sh)
    - startup succeeds
    - home succeeds
    - manual nudge works
 
-2. [run_ankle_right_can_only.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_ankle_right_can_only.sh)
+2. [run_ankle_right_can_only.sh](software/host/jetson_controller/run_ankle_right_can_only.sh)
    - startup succeeds
    - both DOFs nudge correctly
 
-3. [run_knee_right_ankle_right_can_only.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_knee_right_ankle_right_can_only.sh)
+3. [run_knee_right_ankle_right_can_only.sh](software/host/jetson_controller/run_knee_right_ankle_right_can_only.sh)
    - both joints discovered
    - startup succeeds for both
    - manual nudge works on all DOFs
 
-4. [run_knee_right_ankle_right_exercise.sh](/Users/SimeSrl/Project%20Alia/alia-humanoid-core/software/host/jetson_controller/run_knee_right_ankle_right_exercise.sh)
+4. [run_knee_right_ankle_right_exercise.sh](software/host/jetson_controller/run_knee_right_ankle_right_exercise.sh)
    - centering succeeds
    - full run completes
    - no automatic `EMERGENCY_STOP` on exit unless explicitly requested
