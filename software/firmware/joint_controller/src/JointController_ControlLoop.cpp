@@ -153,8 +153,8 @@ static void finalizeMovementMetricsForDof(uint8_t dof) {
     return;
   }
 
-  // Final target may differ from the first streamed waypoint. Finalize against the
-  // actual hold target (or the original desired target if the move stalled).
+  // Final target may differ from the first streamed impedance command. Finalize against
+  // the actual hold target (or the original desired target if the move stalled).
   float original_target = mt.target_angle_deg;
   float metrics_target = dof_hold_angle[dof];
   if (mt.aborted_by_stall) {

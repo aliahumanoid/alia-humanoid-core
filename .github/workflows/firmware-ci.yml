@@ -22,7 +22,6 @@ jobs:
           - name: joint_controller (pico2_debug)
             path: software/firmware/joint_controller
             env: pico2_debug
-          # joint_encoders removed - encoder reading now integrated into joint_controller (Dec 2024)
 
     steps:
       - name: Checkout

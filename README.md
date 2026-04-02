@@ -73,7 +73,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 <table>
 <tr>
 <td width="50%">
-<img src="docs/media/gallery/prototype-photo-full-leg.png" alt="Physical Prototype">
+<img src="docs/media/gallery/prototype-photo-full-leg.jpg" alt="Physical Prototype">
 <p align="center"><i>Physical prototype assembly (Phase 0)</i></p>
 </td>
 <td width="50%">
