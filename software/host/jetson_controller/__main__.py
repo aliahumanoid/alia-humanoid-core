@@ -16,6 +16,7 @@ from .can_bus import CanBus
 from .config import load_config
 from .fsm import StartupFSM
 from .impedance_loop import ImpedanceLoop
+from .protocol import encode_fault_snapshot_ctrl
 from .safety import SafetyManager
 from .serial_monitor import discover_ports, preflight_boot
 from .session_log import setup_session_logging, get_log_path
@@ -187,6 +188,67 @@ async def main(config_path: str = None, verbose: bool = False,
                 f"Nudge {joint_key} DOF{dof} ({dof_label}) {delta_deg:+.1f}° -> {clamped_q:+.1f}°"
             )
 
+    snapshot_seq = 0
+
+    def _next_snapshot_seq() -> int:
+        nonlocal snapshot_seq
+        snapshot_seq = (snapshot_seq + 1) & 0xFF
+        return snapshot_seq
+
+    async def on_snapshot(joint_key: str):
+        """Query metadata and, if available, request a fault snapshot dump."""
+        if not can_bus.connected:
+            logger.warning("Cannot request fault snapshot: CAN not connected")
+            return
+
+        jcfg = config.joints[joint_key]
+        state = telemetry.states.get(joint_key)
+        previous_meta = getattr(state, "fault_snapshot_meta", None) if state is not None else None
+        previous_timestamp = (
+            previous_meta.get("timestamp")
+            if isinstance(previous_meta, dict)
+            else None
+        )
+
+        arb_id, data = encode_fault_snapshot_ctrl(
+            jcfg.joint_id,
+            sub_cmd=0x00,
+            seq=_next_snapshot_seq(),
+        )
+        await can_bus.send(arb_id, data)
+        logger.info(f"Fault snapshot query sent for {joint_key}")
+
+        deadline = asyncio.get_running_loop().time() + 0.25
+        meta_payload = previous_meta if isinstance(previous_meta, dict) else None
+        while asyncio.get_running_loop().time() < deadline:
+            state = telemetry.states.get(joint_key)
+            current_meta = getattr(state, "fault_snapshot_meta", None) if state is not None else None
+            if isinstance(current_meta, dict):
+                meta_payload = current_meta
+                if current_meta.get("timestamp") != previous_timestamp:
+                    break
+            await asyncio.sleep(0.05)
+
+        if not isinstance(meta_payload, dict):
+            logger.warning(f"No fault snapshot metadata available for {joint_key}")
+            return
+
+        meta_state = meta_payload.get("state", {})
+        if not isinstance(meta_state, dict) or not meta_state.get("snapshot_present"):
+            logger.info(f"No stored fault snapshot available for {joint_key}")
+            return
+
+        snapshot_id = int(meta_payload.get("snapshot_id", 0xFF))
+        arb_id, data = encode_fault_snapshot_ctrl(
+            jcfg.joint_id,
+            sub_cmd=0x01,
+            snapshot_id=snapshot_id,
+            arg0=0,
+            seq=_next_snapshot_seq(),
+        )
+        await can_bus.send(arb_id, data)
+        logger.info(f"Fault snapshot dump requested for {joint_key} snapshot={snapshot_id}")
+
     async def on_toggle_loop():
         """Pause/resume the impedance loop."""
         if impedance.running:
@@ -201,6 +263,7 @@ async def main(config_path: str = None, verbose: bool = False,
     tui.on_startup(on_startup)
     tui.on_discover(on_discover)
     tui.on_nudge(on_nudge)
+    tui.on_snapshot(on_snapshot)
     tui.on_toggle_loop(on_toggle_loop)
 
     # ------------------------------------------------------------------

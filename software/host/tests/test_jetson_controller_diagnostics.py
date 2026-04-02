@@ -199,3 +199,24 @@ def test_jetson_telemetry_expires_stale_snapshot_pending_state():
     telemetry._expire_fault_snapshot_pending(16.0)
 
     assert 1 not in telemetry._fault_snapshot_pending
+
+
+def test_jetson_telemetry_accepts_out_of_order_and_duplicate_snapshot_chunks(tmp_path: Path):
+    telemetry = TelemetryManager(_build_config())
+    telemetry._diagnostic_history = DiagnosticHistoryWriter(tmp_path, source="test_suite")
+    meta_frame, chunk_frames, raw = _snapshot_frames()
+
+    telemetry._dispatch(CAN_ID_FAULT_SNAPSHOT_META + 1, meta_frame, 3000.0)
+    telemetry._dispatch(CAN_ID_FAULT_SNAPSHOT_DATA + 1, chunk_frames[1], 3000.1)
+    telemetry._dispatch(CAN_ID_FAULT_SNAPSHOT_DATA + 1, chunk_frames[0], 3000.2)
+    telemetry._dispatch(CAN_ID_FAULT_SNAPSHOT_DATA + 1, chunk_frames[1], 3000.3)
+
+    assert telemetry.states["KNEE_LEFT"].fault_snapshot_dump is None
+
+    for index, frame in enumerate(chunk_frames[2:], start=2):
+        telemetry._dispatch(CAN_ID_FAULT_SNAPSHOT_DATA + 1, frame, 3000.3 + index * 0.01)
+
+    dump_payload = telemetry.states["KNEE_LEFT"].fault_snapshot_dump
+    assert dump_payload is not None
+    assert dump_payload["payload_bytes"] == len(raw)
+    assert dump_payload["snapshot"]["primary_fault"] == "HOST_WATCHDOG_TIMEOUT"

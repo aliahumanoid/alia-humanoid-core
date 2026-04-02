@@ -152,3 +152,23 @@ def test_fault_snapshot_pending_state_expires_after_timeout(tmp_path, monkeypatc
     manager._expire_fault_snapshot_pending(16.0)
 
     assert 1 not in manager._fault_snapshot_pending
+
+
+def test_fault_snapshot_chunks_accept_out_of_order_and_duplicate_delivery(tmp_path, monkeypatch):
+    manager = _build_manager(tmp_path, monkeypatch)
+    meta_frame, chunk_frames, raw = _snapshot_frames()
+
+    manager._handle_fault_snapshot_meta(meta_frame, 3000.0, joint_id=1)
+    manager._handle_fault_snapshot_chunk(chunk_frames[1], 3000.1, joint_id=1)
+    manager._handle_fault_snapshot_chunk(chunk_frames[0], 3000.2, joint_id=1)
+    manager._handle_fault_snapshot_chunk(chunk_frames[1], 3000.3, joint_id=1)
+
+    connection_state = manager.get_connection_state()
+    assert "KNEE_LEFT" not in connection_state["diagnostics"]["fault_snapshots"]
+
+    for index, frame in enumerate(chunk_frames[2:], start=2):
+        manager._handle_fault_snapshot_chunk(frame, 3000.3 + index * 0.01, joint_id=1)
+
+    dump_payload = manager.get_connection_state()["diagnostics"]["fault_snapshots"]["KNEE_LEFT"]
+    assert dump_payload["payload_bytes"] == len(raw)
+    assert dump_payload["snapshot"]["primary_fault"] == "HOST_WATCHDOG_TIMEOUT"

@@ -257,6 +257,26 @@ def test_tui_selected_diag_summary_includes_last_event_and_counters():
     assert counters_style == "dim"
 
 
+def test_tui_snapshot_key_uses_selected_joint():
+    TUI = _load_tui_class()
+    telemetry = types.SimpleNamespace(states={"KNEE_LEFT": types.SimpleNamespace()})
+    tui = TUI(_DiagConfig(), telemetry, _DummyImpedance(), _DummyBus())
+    requested: list[str] = []
+
+    async def snapshot(joint_key: str):
+        requested.append(joint_key)
+
+    tui.on_snapshot(snapshot)
+
+    async def scenario():
+        await tui._handle_key("r")
+
+    asyncio.run(scenario())
+
+    assert requested == ["KNEE_LEFT"]
+    assert tui._status_line == "Requesting fault snapshot for KNEE_LEFT..."
+
+
 def test_run_sh_forwards_single_mode_args_and_rejects_ambiguous_dual_mode(
     tmp_path,
 ):

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # Type alias for async callbacks
 AsyncCallback = Callable[[], Coroutine]
 NudgeCallback = Callable[[float, str, int], Coroutine]
+SnapshotCallback = Callable[[str], Coroutine]
 
 
 class TUI:
@@ -85,6 +86,7 @@ class TUI:
         self._cb_startup: Optional[AsyncCallback] = None
         self._cb_discover: Optional[AsyncCallback] = None
         self._cb_nudge: Optional[NudgeCallback] = None
+        self._cb_snapshot: Optional[SnapshotCallback] = None
         self._cb_toggle_loop: Optional[AsyncCallback] = None
 
     def set_fsm_state(self, state: FSMState, message: str = "") -> None:
@@ -107,6 +109,9 @@ class TUI:
     def on_nudge(self, cb) -> None:
         """cb(delta_deg: float, joint_key: str, dof: int) -> coroutine"""
         self._cb_nudge = cb
+
+    def on_snapshot(self, cb: SnapshotCallback) -> None:
+        self._cb_snapshot = cb
 
     def _selected_joint_key(self) -> str:
         return self._joint_keys[self._selected_joint_idx]
@@ -197,6 +202,8 @@ class TUI:
         health = getattr(state, "health_status", None) or {}
         fault = getattr(state, "fault_status", None)
         events = getattr(state, "diagnostic_events", None) or []
+        snapshot_meta = getattr(state, "fault_snapshot_meta", None) or {}
+        snapshot_dump = getattr(state, "fault_snapshot_dump", None) or {}
 
         parts: list[str] = [f"Diag {key}:"]
         style = "dim"
@@ -228,6 +235,17 @@ class TUI:
                 style = "yellow"
         else:
             parts.append("faults=none")
+
+        if snapshot_meta:
+            snapshot_state = snapshot_meta.get("state", {})
+            snapshot_id = snapshot_meta.get("snapshot_id", "?")
+            if isinstance(snapshot_state, dict) and snapshot_state.get("snapshot_present"):
+                if isinstance(snapshot_dump, dict) and snapshot_dump.get("snapshot_id") == snapshot_id:
+                    parts.append(f"snapshot=dump:{snapshot_id}")
+                else:
+                    parts.append(f"snapshot=ready:{snapshot_id}")
+            else:
+                parts.append("snapshot=none")
 
         if events:
             event = events[0]
@@ -435,6 +453,8 @@ class TUI:
         keys.append(" DOF  ", style="dim")
         keys.append("[L]", style="bold magenta")
         keys.append("og  ", style="dim")
+        keys.append("[R]", style="bold magenta")
+        keys.append(" Snapshot  ", style="dim")
         keys.append("[Space]", style="bold")
         keys.append(" Pause  ", style="dim")
         keys.append("[Q]", style="bold")
@@ -543,6 +563,12 @@ class TUI:
                     self._status_line = "Sending discover (time_sync + identify)..."
                 else:
                     self._status_line = "Busy — wait for current operation"
+
+        elif k == 'r':
+            joint_key = self._selected_joint_key()
+            self._status_line = f"Requesting fault snapshot for {joint_key}..."
+            if self._cb_snapshot:
+                await self._cb_snapshot(joint_key)
 
         elif k == 'h' or k == '0':
             self._status_line = "Moving to home (0\u00b0 all DOFs)..."
