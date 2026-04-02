@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import gc
 import importlib
 import json
@@ -113,6 +114,16 @@ class _DummyBus:
     errors = 0
 
 
+class _DiagJointCfg:
+    dof_count = 1
+    dof_names = ["flexion_extension"]
+
+
+class _DiagConfig:
+    can_interface = "slcan"
+    joints = {"KNEE_LEFT": _DiagJointCfg()}
+
+
 def _load_tui_class():
     _install_fake_rich()
     _install_fake_yaml()
@@ -159,6 +170,91 @@ def test_tui_rejected_long_op_does_not_warn():
             assert not caught
 
     asyncio.run(scenario())
+
+
+def test_tui_diag_label_prefers_active_faults():
+    TUI = _load_tui_class()
+    from jetson_controller.protocol import FaultStatus
+
+    state = types.SimpleNamespace(
+        health_status={"phase": "READY"},
+        fault_status=FaultStatus(
+            joint_id=1,
+            seq=1,
+            active_fault_bits=(1 << 3),
+            latched_fault_bits=(1 << 3),
+            primary_fault_code=3,
+            source_id=0,
+            fault_epoch=2,
+        ),
+        diagnostic_events=deque(),
+        is_online=True,
+        angles_deg={0: 0.0},
+        rx_count=1,
+    )
+    telemetry = types.SimpleNamespace(states={"KNEE_LEFT": state})
+    tui = TUI(_DiagConfig(), telemetry, _DummyImpedance(), _DummyBus())
+
+    label, style = tui._joint_diag_label(state)
+
+    assert label == "READY ACT:WATCHDOG"
+    assert style == "bold red"
+
+
+def test_tui_selected_diag_summary_includes_last_event_and_counters():
+    TUI = _load_tui_class()
+    from jetson_controller.protocol import EventNotice, FaultStatus
+
+    event = EventNotice(
+        joint_id=1,
+        event_seq=33,
+        event_code=0x08,
+        flags=0x46,
+        source_kind_code=1,
+        source_index=0,
+        detail0=12,
+        detail1=4,
+    )
+    state = types.SimpleNamespace(
+        health_status={
+            "phase": "READY",
+            "reboot_reason": "WATCHDOG_RESET",
+            "state": {"watchdog_warning": True},
+            "host_can_tx_error_count": 1,
+            "host_can_rx_error_count": 2,
+            "motor_can_tx_error_count": 3,
+            "loop_overrun_count": 4,
+            "watchdog_trip_count": 5,
+            "fault_epoch": 9,
+        },
+        fault_status=FaultStatus(
+            joint_id=1,
+            seq=1,
+            active_fault_bits=(1 << 3),
+            latched_fault_bits=(1 << 3),
+            primary_fault_code=3,
+            source_id=0,
+            fault_epoch=9,
+        ),
+        diagnostic_events=deque([event]),
+        is_online=True,
+        angles_deg={0: 0.0},
+        rx_count=1,
+    )
+    telemetry = types.SimpleNamespace(states={"KNEE_LEFT": state})
+    tui = TUI(_DiagConfig(), telemetry, _DummyImpedance(), _DummyBus())
+
+    summary, summary_style = tui._selected_diag_summary()
+    counters, counters_style = tui._selected_health_counters()
+
+    assert "Diag KNEE_LEFT:" in summary
+    assert "phase=READY" in summary
+    assert "reboot=WATCHDOG_RESET" in summary
+    assert "active=WATCHDOG" in summary
+    assert "last=WATCHDOG_TIMEOUT/ERROR@DOF:0" in summary
+    assert summary_style == "bold red"
+    assert counters == "Health ctrs: can=1/2/3 overrun=4 watchdog=5 epoch=9"
+    assert counters_style == "dim"
 
 
 def test_run_sh_forwards_single_mode_args_and_rejects_ambiguous_dual_mode(

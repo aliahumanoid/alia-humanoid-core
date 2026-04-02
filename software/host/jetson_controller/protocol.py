@@ -12,6 +12,7 @@ CAN ID allocation:
   0x009  Startup Sequence
   0x01D  SET_IMPEDANCE (1-4 frames)
   0x01E  IMPEDANCE_CTRL
+  0x01F  FAULT_SNAPSHOT_CTRL
 
 Feedback (controller → host):
   0x410+joint  Encoder Stream Data (50 Hz)
@@ -19,6 +20,11 @@ Feedback (controller → host):
   0x4A0+joint  Joint Announce
   0x4F0+joint  Joint State (impedance feedback, 50 Hz)
   0x500+joint  Retension Probe Result
+  0x510+joint  Health Status
+  0x520+joint  Fault Status
+  0x530+joint  Event Notice
+  0x540+joint  Fault Snapshot Meta
+  0x550+joint  Fault Snapshot Data
 """
 from __future__ import annotations
 
@@ -39,18 +45,133 @@ CAN_ID_PRETENSION = 0x00C
 CAN_ID_PRETENSION_ALL = 0x00D
 CAN_ID_SET_IMPEDANCE = 0x01D
 CAN_ID_IMPEDANCE_CTRL = 0x01E
+CAN_ID_FAULT_SNAPSHOT_CTRL = 0x01F
 
 CAN_ID_ENCODER_STREAM_DATA = 0x410
 CAN_ID_STARTUP_STATUS = 0x490
 CAN_ID_JOINT_ANNOUNCE = 0x4A0
 CAN_ID_JOINT_STATE = 0x4F0
 CAN_ID_RETENSION_PROBE_RESULT = 0x500
+CAN_ID_HEALTH_STATUS = 0x510
+CAN_ID_FAULT_STATUS = 0x520
+CAN_ID_EVENT_NOTICE = 0x530
+CAN_ID_FAULT_SNAPSHOT_META = 0x540
+CAN_ID_FAULT_SNAPSHOT_DATA = 0x550
 
 # Sentinel for unused DOF slots
 UNUSED_DOF = 0x7FFF
+FAULT_SNAPSHOT_UNUSED_I16 = 0x7FFF
 
 # Inter-frame delay for multi-frame sequences (3 ms = ~1.5 control loops @ 500 Hz)
 MULTI_FRAME_DELAY_S = 0.003
+
+FAULT_SNAPSHOT_CTRL_SUBCMDS = {
+    0x00: "QUERY_META",
+    0x01: "BEGIN_DUMP",
+    0x02: "REQUEST_CHUNK",
+    0x03: "CLEAR_SNAPSHOT",
+}
+
+FAULT_SNAPSHOT_LAYOUT_NAMES = {
+    1: "FIXED_V1",
+}
+
+FAULT_SNAPSHOT_DOF_STATE_NAMES = {
+    0: "IDLE",
+    1: "MOVING",
+    2: "HOLDING",
+}
+
+DIAG_FAULT_NAMES = {
+    0: "HOST_CAN_WARN",
+    1: "MOTOR_CAN_WARN",
+    2: "LOOP_OVERRUN",
+    3: "HOST_WATCHDOG_TIMEOUT",
+    4: "ENCODER_INVALID",
+    5: "ENCODER_STALE",
+    6: "MOTOR_TIMEOUT",
+    7: "SAFETY_LIMIT",
+    8: "MAPPING_LIMIT",
+    9: "MOTOR_RANGE",
+    10: "STARTUP_FAILED",
+    11: "CONFIG_INVALID",
+    12: "FLASH_ERROR",
+    13: "BAD_COMMAND",
+    14: "ESTOP_LATCHED",
+    15: "INTERNAL_ERROR",
+}
+
+DIAG_EVENT_NAMES = {
+    0x01: "BOOT_COMPLETE",
+    0x02: "READY_ASSERTED",
+    0x03: "READY_CLEARED",
+    0x04: "STARTUP_BEGIN",
+    0x05: "STARTUP_COMPLETE",
+    0x06: "STARTUP_FAILED",
+    0x07: "WATCHDOG_WARNING",
+    0x08: "WATCHDOG_TIMEOUT",
+    0x09: "ESTOP_ASSERTED",
+    0x0A: "ESTOP_CLEARED",
+    0x0B: "FAULT_SET",
+    0x0C: "FAULT_CLEARED",
+    0x0D: "ENCODER_INVALID",
+    0x0E: "MOTOR_TIMEOUT",
+    0x0F: "LOOP_OVERRUN_BURST",
+    0x10: "SNAPSHOT_FROZEN",
+    0x11: "SNAPSHOT_AVAILABLE",
+}
+
+DIAG_SOURCE_NAMES = {
+    0: "GLOBAL",
+    1: "DOF",
+    2: "MOTOR",
+    3: "HOST_CAN",
+    4: "MOTOR_CAN",
+    5: "STARTUP",
+    6: "CONFIG",
+    7: "SAFETY",
+}
+
+DIAG_PHASE_NAMES = {
+    0: "BOOT",
+    1: "SAFE_MODE_UNPROVISIONED",
+    2: "IDLE_NOT_READY",
+    3: "STARTUP_RUNNING",
+    4: "READY",
+    5: "LOCAL_HOLD",
+    6: "FAULT_LOCKOUT",
+    7: "SERVICE_ONLY",
+}
+
+DIAG_REBOOT_REASON_NAMES = {
+    0: "POWER_ON",
+    1: "SOFT_RESET_CMD",
+    2: "WATCHDOG_RESET",
+    3: "BROWNOUT_OR_POWER_DIP",
+    4: "CAN_FAULT_RECOVERY",
+    5: "FLASH_RECOVERY",
+    6: "UNKNOWN",
+    7: "RESERVED",
+}
+
+DIAG_SEVERITY_NAMES = {
+    0: "INFO",
+    1: "WARN",
+    2: "ERROR",
+    3: "CRITICAL",
+}
+
+STARTUP_REASON_NAMES = {
+    0: "OK",
+    1: "NO_CONTROLLER",
+    2: "NO_EQUATIONS",
+    3: "ENCODER_TIMEOUT",
+    4: "POSITION_RANGE",
+    5: "RECALC_ERROR",
+    6: "GLOBAL_TIMEOUT",
+    7: "PARTIAL_HOLD",
+    8: "REFERENCE_REQUIRED",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -75,12 +196,7 @@ class StartupStatus:
     elapsed_ms: int
 
     EVENT_NAMES = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAILED", 3: "COMPLETE", 4: "FAILED"}
-    REASON_NAMES = {
-        0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
-        4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT",
-        7: "PARTIAL_HOLD",
-        8: "REFERENCE_REQUIRED",
-    }
+    REASON_NAMES = STARTUP_REASON_NAMES
 
     @property
     def event_name(self) -> str:
@@ -138,10 +254,266 @@ class RetensionProbeResult:
 
 
 @dataclass
+class HealthStatusSummary:
+    joint_id: int
+    seq: int
+    state_bits: int
+    phase_code: int
+    reboot_reason_code: int
+    uptime_s: int
+    fault_epoch: int
+
+    @property
+    def phase_name(self) -> str:
+        return DIAG_PHASE_NAMES.get(self.phase_code, f"CODE_{self.phase_code}")
+
+    @property
+    def reboot_reason_name(self) -> str:
+        return DIAG_REBOOT_REASON_NAMES.get(
+            self.reboot_reason_code, f"CODE_{self.reboot_reason_code}"
+        )
+
+    @property
+    def config_valid(self) -> bool:
+        return bool(self.state_bits & 0x01)
+
+    @property
+    def controller_ready(self) -> bool:
+        return bool(self.state_bits & 0x02)
+
+    @property
+    def motion_ready(self) -> bool:
+        return bool(self.state_bits & 0x04)
+
+    @property
+    def motor_power_enabled(self) -> bool:
+        return bool(self.state_bits & 0x08)
+
+    @property
+    def impedance_enabled(self) -> bool:
+        return bool(self.state_bits & 0x10)
+
+    @property
+    def watchdog_armed(self) -> bool:
+        return bool(self.state_bits & 0x20)
+
+    @property
+    def watchdog_warning(self) -> bool:
+        return bool(self.state_bits & 0x40)
+
+    @property
+    def snapshot_available(self) -> bool:
+        return bool(self.state_bits & 0x80)
+
+
+@dataclass
+class HealthStatusCounters:
+    joint_id: int
+    seq: int
+    host_can_tx_error_count: int
+    host_can_rx_error_count: int
+    motor_can_tx_error_count: int
+    loop_overrun_count: int
+    watchdog_trip_count: int
+    can_recovery_count: int
+
+
+@dataclass
+class FaultStatus:
+    joint_id: int
+    seq: int
+    active_fault_bits: int
+    latched_fault_bits: int
+    primary_fault_code: Optional[int]
+    source_id: int
+    fault_epoch: int
+
+    @property
+    def active_fault_names(self) -> list[str]:
+        return _decode_fault_mask(self.active_fault_bits)
+
+    @property
+    def latched_fault_names(self) -> list[str]:
+        return _decode_fault_mask(self.latched_fault_bits)
+
+    @property
+    def primary_fault_name(self) -> Optional[str]:
+        if self.primary_fault_code is None:
+            return None
+        return DIAG_FAULT_NAMES.get(self.primary_fault_code, f"CODE_{self.primary_fault_code}")
+
+    @property
+    def source_kind(self) -> str:
+        return _decode_source_id(self.source_id)["source_kind"]
+
+    @property
+    def source_name(self) -> str:
+        return _decode_source_id(self.source_id)["source"]
+
+    @property
+    def source_index(self) -> Optional[int]:
+        return _decode_source_id(self.source_id)["source_index"]
+
+
+@dataclass
+class EventNotice:
+    joint_id: int
+    event_seq: int
+    event_code: int
+    flags: int
+    source_kind_code: int
+    source_index: int
+    detail0: int
+    detail1: int
+
+    @property
+    def event_name(self) -> str:
+        return DIAG_EVENT_NAMES.get(self.event_code, f"CODE_{self.event_code}")
+
+    @property
+    def severity_code(self) -> int:
+        return self.flags & 0x03
+
+    @property
+    def severity_name(self) -> str:
+        return DIAG_SEVERITY_NAMES.get(self.severity_code, f"CODE_{self.severity_code}")
+
+    @property
+    def is_assert(self) -> bool:
+        return bool(self.flags & 0x04)
+
+    @property
+    def is_clear(self) -> bool:
+        return bool(self.flags & 0x08)
+
+    @property
+    def latched_changed(self) -> bool:
+        return bool(self.flags & 0x10)
+
+    @property
+    def snapshot_frozen(self) -> bool:
+        return bool(self.flags & 0x20)
+
+    @property
+    def host_attention(self) -> bool:
+        return bool(self.flags & 0x40)
+
+    @property
+    def source_kind(self) -> str:
+        return DIAG_SOURCE_NAMES.get(self.source_kind_code, f"CODE_{self.source_kind_code}")
+
+    @property
+    def source_index_value(self) -> Optional[int]:
+        return None if self.source_index == 0xFF else self.source_index
+
+
+@dataclass
+class FaultSnapshotMeta:
+    joint_id: int
+    snapshot_id: int
+    freeze_event_code: int
+    primary_fault_code: Optional[int]
+    flags: int
+    total_chunks: int
+    payload_bytes: int
+    seq: int
+
+    @property
+    def freeze_event_name(self) -> str:
+        return DIAG_EVENT_NAMES.get(self.freeze_event_code, f"CODE_{self.freeze_event_code}")
+
+    @property
+    def primary_fault_name(self) -> Optional[str]:
+        if self.primary_fault_code is None:
+            return None
+        return DIAG_FAULT_NAMES.get(self.primary_fault_code, f"CODE_{self.primary_fault_code}")
+
+    @property
+    def snapshot_present(self) -> bool:
+        return bool(self.flags & 0x01)
+
+    @property
+    def frozen_on_critical_fault(self) -> bool:
+        return bool(self.flags & 0x02)
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.flags & 0x04)
+
+    @property
+    def dumped_once(self) -> bool:
+        return bool(self.flags & 0x08)
+
+    @property
+    def checksum_available(self) -> bool:
+        return bool(self.flags & 0x10)
+
+    @property
+    def fixed_layout_v1(self) -> bool:
+        return bool(self.flags & 0x20)
+
+
+@dataclass
+class FaultSnapshotChunk:
+    joint_id: int
+    snapshot_id: int
+    chunk_index: int
+    payload: bytes
+
+
+@dataclass
 class EncoderData:
     joint_id: int
     angles_deg: list[Optional[float]]   # up to 3 DOFs, None = unused
     t_offset_ms: int
+
+
+def _decode_fault_mask(mask: int) -> list[str]:
+    return [name for bit, name in DIAG_FAULT_NAMES.items() if mask & (1 << bit)]
+
+
+def _decode_source_id(source_id: int) -> dict[str, object]:
+    if source_id <= 0x0F:
+        return {"source": f"DOF_{source_id}", "source_kind": "DOF", "source_index": source_id}
+    if 0x80 <= source_id <= 0x8F:
+        return {
+            "source": f"MOTOR_{source_id - 0x80}",
+            "source_kind": "MOTOR",
+            "source_index": source_id - 0x80,
+        }
+    if source_id == 0xE0:
+        return {"source": "HOST_CAN", "source_kind": "HOST_CAN", "source_index": None}
+    if source_id == 0xE1:
+        return {"source": "MOTOR_CAN", "source_kind": "MOTOR_CAN", "source_index": None}
+    return {"source": "GLOBAL", "source_kind": "GLOBAL", "source_index": None}
+
+
+def _decode_snapshot_controller_flags(flags: int) -> dict[str, bool]:
+    return {
+        "motor_power_enabled": bool(flags & 0x01),
+        "impedance_enabled": bool(flags & 0x02),
+        "estop_latched": bool(flags & 0x04),
+        "config_valid": bool(flags & 0x08),
+        "controller_ready": bool(flags & 0x10),
+        "frozen_on_critical_fault": bool(flags & 0x20),
+    }
+
+
+def _decode_snapshot_dof_flags(flags: int) -> dict[str, bool]:
+    return {
+        "q_valid": bool(flags & 0x01),
+        "impedance_valid": bool(flags & 0x02),
+        "watchdog_timed_out": bool(flags & 0x04),
+        "holding": bool(flags & 0x08),
+        "motor_angles_valid": bool(flags & 0x10),
+        "direct_drive": bool(flags & 0x20),
+    }
+
+
+def _decode_optional_i16(value: int, *, scale: float = 1.0) -> Optional[float]:
+    if value == FAULT_SNAPSHOT_UNUSED_I16:
+        return None
+    return value / scale
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +538,33 @@ def encode_emergency_stop(reason: int = 0) -> tuple[int, bytes]:
 def encode_identify_request() -> tuple[int, bytes]:
     """Encode joint identification broadcast (0x008)."""
     return CAN_ID_IDENTIFY_REQUEST, bytes(8)
+
+
+def encode_fault_snapshot_ctrl(
+    joint_id: int,
+    *,
+    sub_cmd: int,
+    snapshot_id: int = 0xFF,
+    arg0: int = 0,
+    arg1: int = 0,
+    arg2: int = 0,
+    arg3: int = 0,
+    seq: int = 0,
+) -> tuple[int, bytes]:
+    """Encode FAULT_SNAPSHOT_CTRL (0x01F)."""
+    payload = bytes(
+        [
+            sub_cmd & 0xFF,
+            joint_id & 0xFF,
+            snapshot_id & 0xFF,
+            arg0 & 0xFF,
+            arg1 & 0xFF,
+            arg2 & 0xFF,
+            arg3 & 0xFF,
+            seq & 0xFF,
+        ]
+    )
+    return CAN_ID_FAULT_SNAPSHOT_CTRL, payload
 
 
 def encode_startup_sequence(joint_id: int, torque: int = 0,
@@ -333,3 +732,188 @@ def decode_joint_state(data: bytes, joint_id: int) -> JointState:
         holding=bool(status & 0x02),
         watchdog_warning=bool(status & 0x04),
     )
+
+
+def decode_health_status_summary(data: bytes, joint_id: int) -> HealthStatusSummary:
+    """Decode summary half of HEALTH_STATUS (0x510+joint, frame kind 0x00)."""
+    return HealthStatusSummary(
+        joint_id=joint_id,
+        seq=data[7],
+        state_bits=data[1],
+        phase_code=data[2],
+        reboot_reason_code=data[3],
+        uptime_s=struct.unpack_from("<H", data, 4)[0],
+        fault_epoch=data[6],
+    )
+
+
+def decode_health_status_counters(data: bytes, joint_id: int) -> HealthStatusCounters:
+    """Decode counter half of HEALTH_STATUS (0x510+joint, frame kind 0x40)."""
+    return HealthStatusCounters(
+        joint_id=joint_id,
+        seq=data[7],
+        host_can_tx_error_count=data[1],
+        host_can_rx_error_count=data[2],
+        motor_can_tx_error_count=data[3],
+        loop_overrun_count=data[4],
+        watchdog_trip_count=data[5],
+        can_recovery_count=data[6],
+    )
+
+
+def decode_fault_status(data: bytes, joint_id: int) -> FaultStatus:
+    """Decode FAULT_STATUS (0x520+joint)."""
+    seq, active_bits, latched_bits, primary_fault_code, source_id, fault_epoch = struct.unpack(
+        "<BHHBBB", data[:8]
+    )
+    return FaultStatus(
+        joint_id=joint_id,
+        seq=seq,
+        active_fault_bits=active_bits,
+        latched_fault_bits=latched_bits,
+        primary_fault_code=None if primary_fault_code == 0xFF else primary_fault_code,
+        source_id=source_id,
+        fault_epoch=fault_epoch,
+    )
+
+
+def decode_event_notice(data: bytes, joint_id: int) -> EventNotice:
+    """Decode EVENT_NOTICE (0x530+joint)."""
+    event_code, flags, source_kind, source_index, detail0, detail1, event_seq = struct.unpack(
+        "<BBBBBBH", data[:8]
+    )
+    return EventNotice(
+        joint_id=joint_id,
+        event_seq=event_seq,
+        event_code=event_code,
+        flags=flags,
+        source_kind_code=source_kind,
+        source_index=source_index,
+        detail0=detail0,
+        detail1=detail1,
+    )
+
+
+def decode_fault_snapshot_meta(data: bytes, joint_id: int) -> FaultSnapshotMeta:
+    """Decode FAULT_SNAPSHOT_META (0x540+joint)."""
+    snapshot_id, freeze_event_code, primary_fault_code, flags, total_chunks, size_lo, size_hi, seq = struct.unpack(
+        "<BBBBBBBB", data[:8]
+    )
+    payload_bytes = size_lo | (size_hi << 8)
+    return FaultSnapshotMeta(
+        joint_id=joint_id,
+        snapshot_id=snapshot_id,
+        freeze_event_code=freeze_event_code,
+        primary_fault_code=None if primary_fault_code == 0xFF else primary_fault_code,
+        flags=flags,
+        total_chunks=total_chunks,
+        payload_bytes=payload_bytes,
+        seq=seq,
+    )
+
+
+def decode_fault_snapshot_chunk(data: bytes, joint_id: int) -> FaultSnapshotChunk:
+    """Decode FAULT_SNAPSHOT_DATA (0x550+joint)."""
+    return FaultSnapshotChunk(
+        joint_id=joint_id,
+        snapshot_id=data[0],
+        chunk_index=data[1],
+        payload=bytes(data[2:8]),
+    )
+
+
+def decode_fault_snapshot_blob(data: bytes) -> dict[str, object]:
+    """Decode the fixed-layout v0.1 fault snapshot payload."""
+    if len(data) < 20:
+        raise ValueError(f"Fault snapshot too short: {len(data)} bytes")
+
+    (
+        layout_version,
+        freeze_event_code,
+        phase_code,
+        primary_fault_code_raw,
+        dof_count,
+        motor_count,
+        fault_epoch,
+        snapshot_flags,
+        active_fault_bits,
+        latched_fault_bits,
+        freeze_uptime_s,
+        host_can_tx_error_count,
+        host_can_rx_error_count,
+        motor_can_tx_error_count,
+        loop_overrun_count,
+        watchdog_trip_count,
+        can_recovery_count,
+    ) = struct.unpack_from("<BBBBBBBBHHHBBBBBB", data, 0)
+
+    offset = 20
+    dof_records: list[dict[str, object]] = []
+    for dof_index in range(dof_count):
+        if len(data) < offset + 18:
+            raise ValueError(
+                f"Fault snapshot truncated in DOF record {dof_index}: {len(data)} bytes"
+            )
+        (
+            q_x100,
+            dq_x10,
+            q_target_x100,
+            hold_q_x100,
+            stiffness_x10,
+            motor_a_x100,
+            motor_b_x100,
+            tau_ff,
+            state_code,
+            flags,
+        ) = struct.unpack_from("<hhhhhhhhBB", data, offset)
+        offset += 18
+        dof_records.append(
+            {
+                "dof_index": dof_index,
+                "q_deg": _decode_optional_i16(q_x100, scale=100.0),
+                "dq_deg_s": _decode_optional_i16(dq_x10, scale=10.0),
+                "q_target_deg": _decode_optional_i16(q_target_x100, scale=100.0),
+                "hold_q_deg": _decode_optional_i16(hold_q_x100, scale=100.0),
+                "stiffness_deg": _decode_optional_i16(stiffness_x10, scale=10.0),
+                "motor_agonist_angle_deg": _decode_optional_i16(motor_a_x100, scale=100.0),
+                "motor_antagonist_angle_deg": _decode_optional_i16(motor_b_x100, scale=100.0),
+                "tau_ff": None if tau_ff == FAULT_SNAPSHOT_UNUSED_I16 else int(tau_ff),
+                "state_code": state_code,
+                "state": FAULT_SNAPSHOT_DOF_STATE_NAMES.get(state_code, f"CODE_{state_code}"),
+                "flags": _decode_snapshot_dof_flags(flags),
+                "raw_flags": flags,
+            }
+        )
+
+    primary_fault_code = None if primary_fault_code_raw == 0xFF else primary_fault_code_raw
+    return {
+        "layout_version": layout_version,
+        "layout": FAULT_SNAPSHOT_LAYOUT_NAMES.get(layout_version, f"CODE_{layout_version}"),
+        "freeze_event_code": freeze_event_code,
+        "freeze_event": DIAG_EVENT_NAMES.get(freeze_event_code, f"CODE_{freeze_event_code}"),
+        "phase_code": phase_code,
+        "phase": DIAG_PHASE_NAMES.get(phase_code, f"CODE_{phase_code}"),
+        "primary_fault_code": primary_fault_code,
+        "primary_fault": None
+        if primary_fault_code is None
+        else DIAG_FAULT_NAMES.get(primary_fault_code, f"CODE_{primary_fault_code}"),
+        "dof_count": dof_count,
+        "motor_count": motor_count,
+        "fault_epoch": fault_epoch,
+        "snapshot_flags": _decode_snapshot_controller_flags(snapshot_flags),
+        "snapshot_flags_raw": snapshot_flags,
+        "active_fault_bits": active_fault_bits,
+        "active_faults": _decode_fault_mask(active_fault_bits),
+        "latched_fault_bits": latched_fault_bits,
+        "latched_faults": _decode_fault_mask(latched_fault_bits),
+        "freeze_uptime_s": freeze_uptime_s,
+        "counters": {
+            "host_can_tx_error_count": host_can_tx_error_count,
+            "host_can_rx_error_count": host_can_rx_error_count,
+            "motor_can_tx_error_count": motor_can_tx_error_count,
+            "loop_overrun_count": loop_overrun_count,
+            "watchdog_trip_count": watchdog_trip_count,
+            "can_recovery_count": can_recovery_count,
+        },
+        "dofs": dof_records,
+    }

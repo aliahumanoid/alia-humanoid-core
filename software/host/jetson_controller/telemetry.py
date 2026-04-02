@@ -7,6 +7,7 @@ updating JointState objects that other modules can query.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import logging
 import struct
 import time
@@ -14,20 +15,42 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from diagnostic_history import DiagnosticHistoryWriter
 from probe_history import ProbeHistoryWriter
 
 from .can_bus import CanBus
 from .config import ControllerConfig
 from .protocol import (
     CAN_ID_ENCODER_STREAM_DATA,
+    CAN_ID_EVENT_NOTICE,
+    CAN_ID_FAULT_STATUS,
+    CAN_ID_FAULT_SNAPSHOT_DATA,
+    CAN_ID_FAULT_SNAPSHOT_META,
+    CAN_ID_HEALTH_STATUS,
     CAN_ID_JOINT_ANNOUNCE,
     CAN_ID_JOINT_STATE,
     CAN_ID_RETENSION_PROBE_RESULT,
     CAN_ID_STARTUP_STATUS,
+    DIAG_FAULT_NAMES,
+    DIAG_PHASE_NAMES,
+    DIAG_REBOOT_REASON_NAMES,
+    STARTUP_REASON_NAMES,
+    EventNotice,
+    FaultStatus,
+    FaultSnapshotMeta,
+    HealthStatusCounters,
+    HealthStatusSummary,
     JointAnnounce,
     RetensionProbeResult,
     StartupStatus,
+    decode_fault_snapshot_blob,
+    decode_fault_snapshot_chunk,
+    decode_fault_snapshot_meta,
+    decode_event_notice,
     decode_encoder_stream,
+    decode_fault_status,
+    decode_health_status_counters,
+    decode_health_status_summary,
     decode_joint_announce,
     decode_joint_state,
     decode_startup_status,
@@ -45,6 +68,13 @@ class JointState:
     torques_antagonist: dict[int, int] = field(default_factory=dict)
     holding: dict[int, bool] = field(default_factory=dict)
     probe_results: dict[int, RetensionProbeResult] = field(default_factory=dict)
+    health_status: Optional[dict[str, object]] = None
+    fault_status: Optional[FaultStatus] = None
+    fault_snapshot_meta: Optional[dict[str, object]] = None
+    fault_snapshot_dump: Optional[dict[str, object]] = None
+    diagnostic_events: deque[EventNotice] = field(
+        default_factory=lambda: deque(maxlen=32)
+    )
     last_update: float = 0.0           # time.monotonic()
     is_online: bool = False
     announce: Optional[JointAnnounce] = None
@@ -75,8 +105,21 @@ class TelemetryManager:
 
         self._running = False
         self._retension_probe_pending: dict[tuple[int, int], dict[str, object]] = {}
+        self._health_status_pending: dict[
+            tuple[int, int], tuple[Optional[HealthStatusSummary], Optional[HealthStatusCounters], float]
+        ] = {}
+        self.health_status: dict[int, dict[str, object]] = {}
+        self.fault_status: dict[int, FaultStatus] = {}
+        self.fault_snapshot_meta: dict[int, FaultSnapshotMeta] = {}
+        self.fault_snapshot_dumps: dict[int, dict[str, object]] = {}
+        self.diagnostic_events: deque[EventNotice] = deque(maxlen=256)
+        self._fault_snapshot_pending: dict[int, dict[str, object]] = {}
         self._probe_history = ProbeHistoryWriter(
             Path(__file__).resolve().parent.parent / "logs" / "probe_history",
+            source="jetson_telemetry",
+        )
+        self._diagnostic_history = DiagnosticHistoryWriter(
+            Path(__file__).resolve().parent.parent / "logs" / "diagnostic_history",
             source="jetson_telemetry",
         )
 
@@ -136,6 +179,36 @@ class TelemetryManager:
         if CAN_ID_RETENSION_PROBE_RESULT <= arb_id <= CAN_ID_RETENSION_PROBE_RESULT + 0x0F and len(data) >= 8:
             joint_id = arb_id - CAN_ID_RETENSION_PROBE_RESULT
             self._handle_retension_probe(data, joint_id, timestamp)
+            return
+
+        # Health status summary/counters (0x510-0x51F)
+        if CAN_ID_HEALTH_STATUS <= arb_id <= CAN_ID_HEALTH_STATUS + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_HEALTH_STATUS
+            self._handle_health_status(data, joint_id, timestamp)
+            return
+
+        # Fault status (0x520-0x52F)
+        if CAN_ID_FAULT_STATUS <= arb_id <= CAN_ID_FAULT_STATUS + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_FAULT_STATUS
+            self._handle_fault_status(data, joint_id, timestamp)
+            return
+
+        # Event notices (0x530-0x53F)
+        if CAN_ID_EVENT_NOTICE <= arb_id <= CAN_ID_EVENT_NOTICE + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_EVENT_NOTICE
+            self._handle_event_notice(data, joint_id, timestamp)
+            return
+
+        # Fault snapshot metadata (0x540-0x54F)
+        if CAN_ID_FAULT_SNAPSHOT_META <= arb_id <= CAN_ID_FAULT_SNAPSHOT_META + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_FAULT_SNAPSHOT_META
+            self._handle_fault_snapshot_meta(data, joint_id, timestamp)
+            return
+
+        # Fault snapshot chunk data (0x550-0x55F)
+        if CAN_ID_FAULT_SNAPSHOT_DATA <= arb_id <= CAN_ID_FAULT_SNAPSHOT_DATA + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_FAULT_SNAPSHOT_DATA
+            self._handle_fault_snapshot_chunk(data, joint_id, timestamp)
             return
 
     def _handle_joint_state(self, data: bytes, joint_id: int) -> None:
@@ -254,6 +327,366 @@ class TelemetryManager:
             f"dR={result.delta_ratio:.3f} dMinN={result.recruit_norm:.3f}"
         )
         self._retension_probe_pending.pop(pending_key, None)
+
+    def _joint_state_for_id(self, joint_id: int) -> tuple[Optional[str], Optional[JointState]]:
+        key = self._config._id_to_key.get(joint_id)
+        if key is None:
+            return None, None
+        return key, self.states.get(key)
+
+    def _record_diagnostic(self, payload: dict[str, object]) -> None:
+        try:
+            self._diagnostic_history.append(payload)
+        except Exception:
+            logger.warning("Failed to persist diagnostic history", exc_info=True)
+
+    @staticmethod
+    def _health_status_payload(
+        joint_id: int,
+        joint_name: str,
+        summary: HealthStatusSummary,
+        counters: HealthStatusCounters,
+        timestamp: float,
+    ) -> dict[str, object]:
+        return {
+            "type": "health_status",
+            "joint_id": joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "seq": summary.seq,
+            "state_bits": summary.state_bits,
+            "state": {
+                "config_valid": summary.config_valid,
+                "controller_ready": summary.controller_ready,
+                "motion_ready": summary.motion_ready,
+                "motor_power_enabled": summary.motor_power_enabled,
+                "impedance_enabled": summary.impedance_enabled,
+                "watchdog_armed": summary.watchdog_armed,
+                "watchdog_warning": summary.watchdog_warning,
+                "snapshot_available": summary.snapshot_available,
+            },
+            "phase_code": summary.phase_code,
+            "phase": summary.phase_name,
+            "reboot_reason_code": summary.reboot_reason_code,
+            "reboot_reason": summary.reboot_reason_name,
+            "uptime_s": summary.uptime_s,
+            "fault_epoch": summary.fault_epoch,
+            "host_can_tx_error_count": counters.host_can_tx_error_count,
+            "host_can_rx_error_count": counters.host_can_rx_error_count,
+            "motor_can_tx_error_count": counters.motor_can_tx_error_count,
+            "loop_overrun_count": counters.loop_overrun_count,
+            "watchdog_trip_count": counters.watchdog_trip_count,
+            "can_recovery_count": counters.can_recovery_count,
+        }
+
+    @staticmethod
+    def _fault_status_payload(
+        joint_name: str,
+        fault: FaultStatus,
+        timestamp: float,
+    ) -> dict[str, object]:
+        return {
+            "type": "fault_status",
+            "joint_id": fault.joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "seq": fault.seq,
+            "active_fault_bits": fault.active_fault_bits,
+            "latched_fault_bits": fault.latched_fault_bits,
+            "active_faults": fault.active_fault_names,
+            "latched_faults": fault.latched_fault_names,
+            "primary_fault_code": fault.primary_fault_code,
+            "primary_fault": fault.primary_fault_name,
+            "source_id": fault.source_id,
+            "source": fault.source_name,
+            "source_kind": fault.source_kind,
+            "source_index": fault.source_index,
+            "fault_epoch": fault.fault_epoch,
+        }
+
+    @staticmethod
+    def _event_notice_payload(
+        joint_name: str,
+        event: EventNotice,
+        timestamp: float,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "type": "event_notice",
+            "joint_id": event.joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "event_seq": event.event_seq,
+            "event_code": event.event_code,
+            "event": event.event_name,
+            "flags": event.flags,
+            "severity_code": event.severity_code,
+            "severity": event.severity_name,
+            "is_assert": event.is_assert,
+            "is_clear": event.is_clear,
+            "latched_changed": event.latched_changed,
+            "snapshot_frozen": event.snapshot_frozen,
+            "host_attention": event.host_attention,
+            "source_kind_code": event.source_kind_code,
+            "source_kind": event.source_kind,
+            "source_index": event.source_index_value,
+            "detail0": event.detail0,
+            "detail1": event.detail1,
+        }
+
+        if event.event_code == 0x01:
+            payload["reboot_reason_code"] = event.detail0
+            payload["reboot_reason"] = DIAG_REBOOT_REASON_NAMES.get(
+                event.detail0, f"CODE_{event.detail0}"
+            )
+            payload["phase_code"] = event.detail1
+            payload["phase"] = DIAG_PHASE_NAMES.get(event.detail1, f"CODE_{event.detail1}")
+        elif event.event_code in {0x02, 0x03}:
+            payload["previous_phase_code"] = event.detail0
+            payload["previous_phase"] = DIAG_PHASE_NAMES.get(
+                event.detail0, f"CODE_{event.detail0}"
+            )
+            payload["phase_code"] = event.detail1
+            payload["phase"] = DIAG_PHASE_NAMES.get(event.detail1, f"CODE_{event.detail1}")
+        elif event.event_code in {0x05, 0x06}:
+            payload["startup_reason_code"] = event.detail0
+            payload["startup_reason"] = STARTUP_REASON_NAMES.get(
+                event.detail0, f"CODE_{event.detail0}"
+            )
+            payload["elapsed_ms_approx"] = event.detail1
+        elif event.event_code in {0x04, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11}:
+            payload["phase_code"] = event.detail1
+            payload["phase"] = DIAG_PHASE_NAMES.get(event.detail1, f"CODE_{event.detail1}")
+
+        if event.event_code in {0x0B, 0x0C, 0x0D}:
+            payload["fault_code"] = event.detail0
+            payload["fault_name"] = DIAG_FAULT_NAMES.get(event.detail0, f"CODE_{event.detail0}")
+        elif event.event_code == 0x08:
+            payload["elapsed_10ms"] = event.detail0
+        elif event.event_code == 0x0F:
+            payload["loop_overrun_count"] = event.detail0
+        elif event.event_code == 0x10:
+            payload["fault_code"] = event.detail0
+            payload["fault_name"] = DIAG_FAULT_NAMES.get(event.detail0, f"CODE_{event.detail0}")
+
+        return payload
+
+    @staticmethod
+    def _fault_snapshot_meta_payload(
+        joint_name: str,
+        meta: FaultSnapshotMeta,
+        timestamp: float,
+    ) -> dict[str, object]:
+        return {
+            "type": "fault_snapshot_meta",
+            "joint_id": meta.joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "snapshot_id": meta.snapshot_id,
+            "freeze_event_code": meta.freeze_event_code,
+            "freeze_event": meta.freeze_event_name,
+            "primary_fault_code": meta.primary_fault_code,
+            "primary_fault": meta.primary_fault_name,
+            "flags": meta.flags,
+            "state": {
+                "snapshot_present": meta.snapshot_present,
+                "frozen_on_critical_fault": meta.frozen_on_critical_fault,
+                "truncated": meta.truncated,
+                "dumped_once": meta.dumped_once,
+                "checksum_available": meta.checksum_available,
+                "fixed_layout_v1": meta.fixed_layout_v1,
+            },
+            "total_chunks": meta.total_chunks,
+            "payload_bytes": meta.payload_bytes,
+            "seq": meta.seq,
+        }
+
+    @staticmethod
+    def _fault_snapshot_dump_payload(
+        joint_name: str,
+        meta_payload: dict[str, object],
+        decoded_snapshot: dict[str, object],
+        *,
+        timestamp: float,
+        raw_bytes: bytes,
+    ) -> dict[str, object]:
+        return {
+            "type": "fault_snapshot_dump",
+            "joint_name": joint_name,
+            "joint_id": meta_payload["joint_id"],
+            "timestamp": timestamp,
+            "snapshot_id": meta_payload["snapshot_id"],
+            "freeze_event_code": meta_payload["freeze_event_code"],
+            "freeze_event": meta_payload["freeze_event"],
+            "primary_fault_code": meta_payload["primary_fault_code"],
+            "primary_fault": meta_payload["primary_fault"],
+            "payload_bytes": len(raw_bytes),
+            "total_chunks": meta_payload["total_chunks"],
+            "snapshot": decoded_snapshot,
+            "raw_hex": raw_bytes.hex(),
+        }
+
+    def _handle_health_status(self, data: bytes, joint_id: int, timestamp: float) -> None:
+        key, state = self._joint_state_for_id(joint_id)
+        if key is None or state is None:
+            return
+
+        frame_kind = data[0] & 0xC0
+        seq = data[7]
+        for pending_key in [key for key in self._health_status_pending if key[0] == joint_id and key[1] != seq]:
+            self._health_status_pending.pop(pending_key, None)
+        summary, counters, _ = self._health_status_pending.get((joint_id, seq), (None, None, timestamp))
+        if frame_kind == 0x00:
+            summary = decode_health_status_summary(data, joint_id)
+        elif frame_kind == 0x40:
+            counters = decode_health_status_counters(data, joint_id)
+        else:
+            return
+
+        self._health_status_pending[(joint_id, seq)] = (summary, counters, timestamp)
+        if summary is None or counters is None:
+            return
+
+        payload = self._health_status_payload(joint_id, key, summary, counters, timestamp)
+        state.health_status = payload
+        self.health_status[joint_id] = payload
+        state.last_update = time.monotonic()
+        state.is_online = True
+        self._health_status_pending.pop((joint_id, seq), None)
+        self._record_diagnostic(payload)
+        logger.debug(
+            f"HEALTH [{key}] phase={summary.phase_name} reboot={summary.reboot_reason_name} "
+            f"can=({counters.host_can_tx_error_count},{counters.host_can_rx_error_count},"
+            f"{counters.motor_can_tx_error_count}) overrun={counters.loop_overrun_count}"
+        )
+
+    def _handle_fault_status(self, data: bytes, joint_id: int, timestamp: float) -> None:
+        key, state = self._joint_state_for_id(joint_id)
+        if key is None or state is None:
+            return
+
+        fault = decode_fault_status(data, joint_id)
+        payload = self._fault_status_payload(key, fault, timestamp)
+        state.fault_status = fault
+        self.fault_status[joint_id] = fault
+        state.last_update = time.monotonic()
+        state.is_online = True
+        self._record_diagnostic(payload)
+
+        if fault.active_fault_names:
+            logger.warning(
+                f"FAULT [{key}] active={fault.active_fault_names} "
+                f"latched={fault.latched_fault_names} source={fault.source_name}"
+            )
+        else:
+            logger.info(f"FAULT [{key}] cleared latched={fault.latched_fault_names}")
+
+    def _handle_event_notice(self, data: bytes, joint_id: int, timestamp: float) -> None:
+        key, state = self._joint_state_for_id(joint_id)
+        if key is None or state is None:
+            return
+
+        event = decode_event_notice(data, joint_id)
+        payload = self._event_notice_payload(key, event, timestamp)
+        state.diagnostic_events.appendleft(event)
+        self.diagnostic_events.appendleft(event)
+        state.last_update = time.monotonic()
+        state.is_online = True
+        self._record_diagnostic(payload)
+
+        log_message = (
+            f"EVENT [{key}] {event.event_name} src={event.source_kind}"
+            + (
+                f":{event.source_index_value}"
+                if event.source_index_value is not None
+                else ""
+            )
+        )
+        if event.severity_code >= 3:
+            logger.critical(log_message)
+        elif event.severity_code >= 2:
+            logger.warning(log_message)
+        else:
+            logger.info(log_message)
+
+    def _handle_fault_snapshot_meta(self, data: bytes, joint_id: int, timestamp: float) -> None:
+        key, state = self._joint_state_for_id(joint_id)
+        if key is None or state is None:
+            return
+
+        meta = decode_fault_snapshot_meta(data, joint_id)
+        payload = self._fault_snapshot_meta_payload(key, meta, timestamp)
+        state.fault_snapshot_meta = payload
+        self.fault_snapshot_meta[joint_id] = meta
+        state.last_update = time.monotonic()
+        state.is_online = True
+        self._record_diagnostic(payload)
+
+        if meta.snapshot_present and meta.total_chunks > 0 and meta.payload_bytes > 0:
+            pending = self._fault_snapshot_pending.get(joint_id)
+            if pending is None or pending.get("snapshot_id") != meta.snapshot_id:
+                pending = {"chunks": {}}
+                self._fault_snapshot_pending[joint_id] = pending
+            pending.update(
+                {
+                    "snapshot_id": meta.snapshot_id,
+                    "total_chunks": meta.total_chunks,
+                    "payload_bytes": meta.payload_bytes,
+                    "meta_payload": payload,
+                }
+            )
+        else:
+            self._fault_snapshot_pending.pop(joint_id, None)
+
+        logger.info(
+            f"SNAPSHOT_META [{key}] present={meta.snapshot_present} snapshot={meta.snapshot_id} "
+            f"chunks={meta.total_chunks} bytes={meta.payload_bytes}"
+        )
+
+    def _handle_fault_snapshot_chunk(self, data: bytes, joint_id: int, timestamp: float) -> None:
+        key, state = self._joint_state_for_id(joint_id)
+        if key is None or state is None:
+            return
+
+        chunk = decode_fault_snapshot_chunk(data, joint_id)
+        pending = self._fault_snapshot_pending.setdefault(joint_id, {"chunks": {}})
+        if pending.get("snapshot_id") not in (None, chunk.snapshot_id):
+            pending.clear()
+            pending["chunks"] = {}
+        pending["snapshot_id"] = chunk.snapshot_id
+        pending.setdefault("chunks", {})[chunk.chunk_index] = chunk.payload
+        pending["last_timestamp"] = timestamp
+        state.last_update = time.monotonic()
+        state.is_online = True
+
+        total_chunks = pending.get("total_chunks")
+        payload_bytes = pending.get("payload_bytes")
+        meta_payload = pending.get("meta_payload")
+        if not isinstance(total_chunks, int) or not isinstance(payload_bytes, int) or not isinstance(meta_payload, dict):
+            return
+
+        chunks: dict[int, bytes] = pending["chunks"]  # type: ignore[assignment]
+        if len(chunks) < total_chunks:
+            return
+        if any(index not in chunks for index in range(total_chunks)):
+            return
+
+        raw = b"".join(chunks[index] for index in range(total_chunks))[:payload_bytes]
+        decoded_snapshot = decode_fault_snapshot_blob(raw)
+        dump_payload = self._fault_snapshot_dump_payload(
+            key,
+            meta_payload,
+            decoded_snapshot,
+            timestamp=timestamp,
+            raw_bytes=raw,
+        )
+        state.fault_snapshot_dump = dump_payload
+        self.fault_snapshot_dumps[joint_id] = dump_payload
+        self._record_diagnostic(dump_payload)
+        self._fault_snapshot_pending.pop(joint_id, None)
+        logger.warning(
+            f"SNAPSHOT_DUMP [{key}] snapshot={chunk.snapshot_id} bytes={payload_bytes} "
+            f"fault={decoded_snapshot.get('primary_fault')}"
+        )
 
     def _handle_encoder(self, data: bytes, joint_id: int) -> None:
         enc = decode_encoder_stream(data, joint_id)

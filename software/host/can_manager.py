@@ -10,7 +10,7 @@ CAN ID allocation is documented in docs/CAN_SYSTEM_ARCHITECTURE.md.
 Key ranges:
 - 0x000-0x01D: System control + operational commands (Host → Controller)
 - 0x140-0x280: Motor commands (Controller → Motors, internal)
-- 0x400-0x500: Status feedback (Controller → Host)
+- 0x400-0x550: Status feedback + diagnostics (Controller → Host)
 """
 from __future__ import annotations
 
@@ -23,7 +23,24 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from config import CAN_ID_RETENSION_PROBE_RESULT, JOINTS
+from config import (
+    CAN_ID_EVENT_NOTICE,
+    CAN_ID_FAULT_STATUS,
+    CAN_ID_FAULT_SNAPSHOT_CTRL,
+    CAN_ID_FAULT_SNAPSHOT_DATA,
+    CAN_ID_FAULT_SNAPSHOT_META,
+    CAN_ID_HEALTH_STATUS,
+    CAN_ID_RETENSION_PROBE_RESULT,
+    JOINTS,
+)
+from diagnostic_history import DiagnosticHistoryWriter
+from jetson_controller.protocol import (
+    FaultSnapshotMeta,
+    decode_fault_snapshot_blob,
+    decode_fault_snapshot_chunk,
+    decode_fault_snapshot_meta,
+    encode_fault_snapshot_ctrl,
+)
 from motor_can_bench import (
     CONTROL_COMMANDS,
     DEFAULT_MOTOR_ID,
@@ -55,6 +72,131 @@ except ImportError:  # pragma: no cover - optional dependency
     can = None  # type: ignore
 
 
+DIAG_FAULT_NAMES = {
+    0: "HOST_CAN_WARN",
+    1: "MOTOR_CAN_WARN",
+    2: "LOOP_OVERRUN",
+    3: "HOST_WATCHDOG_TIMEOUT",
+    4: "ENCODER_INVALID",
+    5: "ENCODER_STALE",
+    6: "MOTOR_TIMEOUT",
+    7: "SAFETY_LIMIT",
+    8: "MAPPING_LIMIT",
+    9: "MOTOR_RANGE",
+    10: "STARTUP_FAILED",
+    11: "CONFIG_INVALID",
+    12: "FLASH_ERROR",
+    13: "BAD_COMMAND",
+    14: "ESTOP_LATCHED",
+    15: "INTERNAL_ERROR",
+}
+
+DIAG_EVENT_NAMES = {
+    0x01: "BOOT_COMPLETE",
+    0x02: "READY_ASSERTED",
+    0x03: "READY_CLEARED",
+    0x04: "STARTUP_BEGIN",
+    0x05: "STARTUP_COMPLETE",
+    0x06: "STARTUP_FAILED",
+    0x07: "WATCHDOG_WARNING",
+    0x08: "WATCHDOG_TIMEOUT",
+    0x09: "ESTOP_ASSERTED",
+    0x0A: "ESTOP_CLEARED",
+    0x0B: "FAULT_SET",
+    0x0C: "FAULT_CLEARED",
+    0x0D: "ENCODER_INVALID",
+    0x0E: "MOTOR_TIMEOUT",
+    0x0F: "LOOP_OVERRUN_BURST",
+    0x10: "SNAPSHOT_FROZEN",
+    0x11: "SNAPSHOT_AVAILABLE",
+}
+
+DIAG_SOURCE_NAMES = {
+    0: "GLOBAL",
+    1: "DOF",
+    2: "MOTOR",
+    3: "HOST_CAN",
+    4: "MOTOR_CAN",
+    5: "STARTUP",
+    6: "CONFIG",
+    7: "SAFETY",
+}
+
+DIAG_PHASE_NAMES = {
+    0: "BOOT",
+    1: "SAFE_MODE_UNPROVISIONED",
+    2: "IDLE_NOT_READY",
+    3: "STARTUP_RUNNING",
+    4: "READY",
+    5: "LOCAL_HOLD",
+    6: "FAULT_LOCKOUT",
+    7: "SERVICE_ONLY",
+}
+
+DIAG_REBOOT_REASON_NAMES = {
+    0: "POWER_ON",
+    1: "SOFT_RESET_CMD",
+    2: "WATCHDOG_RESET",
+    3: "BROWNOUT_OR_POWER_DIP",
+    4: "CAN_FAULT_RECOVERY",
+    5: "FLASH_RECOVERY",
+    6: "UNKNOWN",
+    7: "RESERVED",
+}
+
+DIAG_SEVERITY_NAMES = {
+    0: "INFO",
+    1: "WARN",
+    2: "ERROR",
+    3: "CRITICAL",
+}
+
+STARTUP_REASON_NAMES = {
+    0: "OK",
+    1: "NO_CONTROLLER",
+    2: "NO_EQUATIONS",
+    3: "ENCODER_TIMEOUT",
+    4: "POSITION_RANGE",
+    5: "RECALC_ERROR",
+    6: "GLOBAL_TIMEOUT",
+    7: "PARTIAL_HOLD",
+    8: "REFERENCE_REQUIRED",
+}
+
+
+def _decode_fault_mask(mask: int) -> list[str]:
+    return [name for bit, name in DIAG_FAULT_NAMES.items() if mask & (1 << bit)]
+
+
+def _decode_state_bits(state_bits: int) -> Dict[str, bool]:
+    return {
+        "config_valid": bool(state_bits & 0x01),
+        "controller_ready": bool(state_bits & 0x02),
+        "motion_ready": bool(state_bits & 0x04),
+        "motor_power_enabled": bool(state_bits & 0x08),
+        "impedance_enabled": bool(state_bits & 0x10),
+        "watchdog_armed": bool(state_bits & 0x20),
+        "watchdog_warning": bool(state_bits & 0x40),
+        "snapshot_available": bool(state_bits & 0x80),
+    }
+
+
+def _decode_source_id(source_id: int) -> Dict[str, Any]:
+    if source_id <= 0x0F:
+        return {"source": f"DOF_{source_id}", "source_kind": "DOF", "source_index": source_id}
+    if 0x80 <= source_id <= 0x8F:
+        return {
+            "source": f"MOTOR_{source_id - 0x80}",
+            "source_kind": "MOTOR",
+            "source_index": source_id - 0x80,
+        }
+    if source_id == 0xE0:
+        return {"source": "HOST_CAN", "source_kind": "HOST_CAN", "source_index": None}
+    if source_id == 0xE1:
+        return {"source": "MOTOR_CAN", "source_kind": "MOTOR_CAN", "source_index": None}
+    return {"source": "GLOBAL", "source_kind": "GLOBAL", "source_index": None}
+
+
 class CanManager:
     """High-level helper that manages python-can Bus lifecycle and protocol helpers."""
 
@@ -62,6 +204,7 @@ class CanManager:
     MOTOR_ID_BASE = 0x140
     MOTOR_TEST_LOG_DIR = Path(__file__).resolve().parent / "logs" / "motor_can_bench"
     PROBE_HISTORY_DIR = Path(__file__).resolve().parent / "logs" / "probe_history"
+    DIAGNOSTIC_HISTORY_DIR = Path(__file__).resolve().parent / "logs" / "diagnostic_history"
 
     def __init__(self, socketio=None, comm_logger: Optional[SerialLogger] = None) -> None:
         if can is None:
@@ -122,9 +265,20 @@ class CanManager:
         # Format: {joint_name: {dof: {"q_deg": float, "dq_deg_s": float,
         #          "tau_a": int, "tau_b": int, "status": int, "timestamp": float}}}
         self._joint_state: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self._health_status: Dict[str, Dict[str, Any]] = {}
+        self._fault_status: Dict[str, Dict[str, Any]] = {}
+        self._fault_snapshot_meta: Dict[str, Dict[str, Any]] = {}
+        self._fault_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._diagnostic_events: deque[Dict[str, Any]] = deque(maxlen=500)
+        self._health_status_pending: Dict[tuple[int, int], Dict[str, Any]] = {}
+        self._fault_snapshot_pending: Dict[int, Dict[str, Any]] = {}
+        self._fault_snapshot_request_seq = 0
         self._retension_probe_state: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self._retension_probe_pending: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._probe_history = ProbeHistoryWriter(self.PROBE_HISTORY_DIR, source="flask_can_manager")
+        self._diagnostic_history = DiagnosticHistoryWriter(
+            self.DIAGNOSTIC_HISTORY_DIR, source="flask_can_manager"
+        )
 
         # Configuration persistence
         self._config_file = "can_config.json"
@@ -302,6 +456,95 @@ class CanManager:
         self._send_frame(0x008, payload, context="Joint identify request")
         self._log_can_info("Joint identification broadcast requested")
         return {"requested": True}
+
+    def _next_fault_snapshot_seq(self) -> int:
+        self._fault_snapshot_request_seq = (self._fault_snapshot_request_seq + 1) & 0xFF
+        return self._fault_snapshot_request_seq
+
+    def request_fault_snapshot_meta(self, joint_name: str) -> Dict[str, Any]:
+        """Query whether a controller-local fault snapshot is available."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        seq = self._next_fault_snapshot_seq()
+        arb_id, payload = encode_fault_snapshot_ctrl(joint_id, sub_cmd=0x00, seq=seq)
+        self._send_frame(arb_id, payload, context=f"FAULT_SNAPSHOT QUERY_META joint={joint_name}")
+        return {"joint_name": joint_name, "joint_id": joint_id, "sub_cmd": "QUERY_META", "seq": seq}
+
+    def begin_fault_snapshot_dump(self, joint_name: str, *, first_chunk: int = 0) -> Dict[str, Any]:
+        """Request a full fault snapshot dump starting from the given chunk."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        seq = self._next_fault_snapshot_seq()
+        arb_id, payload = encode_fault_snapshot_ctrl(
+            joint_id,
+            sub_cmd=0x01,
+            arg0=first_chunk,
+            seq=seq,
+        )
+        self._send_frame(
+            arb_id,
+            payload,
+            context=f"FAULT_SNAPSHOT BEGIN_DUMP joint={joint_name} chunk={first_chunk}",
+        )
+        return {
+            "joint_name": joint_name,
+            "joint_id": joint_id,
+            "sub_cmd": "BEGIN_DUMP",
+            "first_chunk": first_chunk,
+            "seq": seq,
+        }
+
+    def request_fault_snapshot_chunk(
+        self,
+        joint_name: str,
+        *,
+        chunk_index: int,
+        snapshot_id: int = 0xFF,
+    ) -> Dict[str, Any]:
+        """Request one fault snapshot chunk again."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        seq = self._next_fault_snapshot_seq()
+        arb_id, payload = encode_fault_snapshot_ctrl(
+            joint_id,
+            sub_cmd=0x02,
+            snapshot_id=snapshot_id,
+            arg0=chunk_index,
+            seq=seq,
+        )
+        self._send_frame(
+            arb_id,
+            payload,
+            context=f"FAULT_SNAPSHOT REQUEST_CHUNK joint={joint_name} chunk={chunk_index}",
+        )
+        return {
+            "joint_name": joint_name,
+            "joint_id": joint_id,
+            "sub_cmd": "REQUEST_CHUNK",
+            "snapshot_id": snapshot_id,
+            "chunk_index": chunk_index,
+            "seq": seq,
+        }
+
+    def clear_fault_snapshot(self, joint_name: str, *, snapshot_id: int = 0xFF) -> Dict[str, Any]:
+        """Clear the stored controller-local fault snapshot."""
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        seq = self._next_fault_snapshot_seq()
+        arb_id, payload = encode_fault_snapshot_ctrl(
+            joint_id,
+            sub_cmd=0x03,
+            snapshot_id=snapshot_id,
+            seq=seq,
+        )
+        self._send_frame(arb_id, payload, context=f"FAULT_SNAPSHOT CLEAR joint={joint_name}")
+        return {
+            "joint_name": joint_name,
+            "joint_id": joint_id,
+            "sub_cmd": "CLEAR_SNAPSHOT",
+            "snapshot_id": snapshot_id,
+            "seq": seq,
+        }
 
     def send_startup_sequence(self, joint_name: str, torque: int = 0,
                                duration: int = 0) -> Dict[str, Any]:
@@ -1088,6 +1331,11 @@ class CanManager:
             status_copy = {k: dict(v) for k, v in self._last_status_by_joint.items()}
             stats_copy = dict(self._stats)
             last_rx = self._last_rx_timestamp
+            health_copy = {k: dict(v) for k, v in self._health_status.items()}
+            fault_copy = {k: dict(v) for k, v in self._fault_status.items()}
+            snapshot_meta_copy = {k: dict(v) for k, v in self._fault_snapshot_meta.items()}
+            snapshot_dump_copy = {k: dict(v) for k, v in self._fault_snapshots.items()}
+            events_copy = [dict(event) for event in self._diagnostic_events]
 
         return {
             "connected": self.is_connected(),
@@ -1096,6 +1344,13 @@ class CanManager:
             "last_rx_timestamp": last_rx,
             "stats": stats_copy,
             "status_messages": list(self._status_messages),
+            "diagnostics": {
+                "health_status": health_copy,
+                "fault_status": fault_copy,
+                "fault_snapshot_meta": snapshot_meta_copy,
+                "fault_snapshots": snapshot_dump_copy,
+                "events": events_copy,
+            },
         }
 
     # ------------------------------------------------------------------
@@ -1932,6 +2187,36 @@ class CanManager:
             self._handle_retension_probe_result(data, message.timestamp, joint_id)
             return
 
+        # Diagnostic health summary/counters (0x510-0x51F)
+        if CAN_ID_HEALTH_STATUS <= arb_id <= CAN_ID_HEALTH_STATUS + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_HEALTH_STATUS
+            self._handle_health_status(data, message.timestamp, joint_id)
+            return
+
+        # Diagnostic fault state (0x520-0x52F)
+        if CAN_ID_FAULT_STATUS <= arb_id <= CAN_ID_FAULT_STATUS + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_FAULT_STATUS
+            self._handle_fault_status(data, message.timestamp, joint_id)
+            return
+
+        # Diagnostic event timeline (0x530-0x53F)
+        if CAN_ID_EVENT_NOTICE <= arb_id <= CAN_ID_EVENT_NOTICE + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_EVENT_NOTICE
+            self._handle_event_notice(data, message.timestamp, joint_id)
+            return
+
+        # Fault snapshot metadata (0x540-0x54F)
+        if CAN_ID_FAULT_SNAPSHOT_META <= arb_id <= CAN_ID_FAULT_SNAPSHOT_META + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_FAULT_SNAPSHOT_META
+            self._handle_fault_snapshot_meta(data, message.timestamp, joint_id)
+            return
+
+        # Fault snapshot payload chunks (0x550-0x55F)
+        if CAN_ID_FAULT_SNAPSHOT_DATA <= arb_id <= CAN_ID_FAULT_SNAPSHOT_DATA + 0x0F and len(data) >= 8:
+            joint_id = arb_id - CAN_ID_FAULT_SNAPSHOT_DATA
+            self._handle_fault_snapshot_chunk(data, message.timestamp, joint_id)
+            return
+
         # Debug: log any received CAN frame (throttled)
         if arb_id >= 0x400:
             self._log_can_received(arb_id, data, context=f"Status frame 0x{arb_id:03X}")
@@ -2542,6 +2827,282 @@ class CanManager:
                 except Exception:
                     pass
 
+    def _publish_diagnostic(self, payload: Dict[str, Any], socket_event: str) -> None:
+        try:
+            self._diagnostic_history.append(payload)
+        except Exception:
+            self.logger.warning("Failed to persist diagnostic history", exc_info=True)
+
+        with self._lock:
+            self._status_messages.appendleft({"type": payload["type"], "data": payload})
+
+        if self.socketio:
+            try:
+                self.socketio.emit(socket_event, payload, namespace="/movement")
+            except Exception:
+                pass
+
+    def _handle_health_status(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        frame_kind = data[0] & 0xC0
+        seq = data[7]
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+        key = (joint_id, seq)
+
+        with self._lock:
+            for stale_key in [item for item in self._health_status_pending if item[0] == joint_id and item != key]:
+                self._health_status_pending.pop(stale_key, None)
+            pending = self._health_status_pending.setdefault(
+                key,
+                {
+                    "joint": joint_name,
+                    "joint_name": joint_name,
+                    "joint_id": joint_id,
+                    "timestamp": timestamp,
+                    "seq": seq,
+                },
+            )
+            pending["timestamp"] = timestamp
+            if frame_kind == 0x00:
+                pending["summary"] = {
+                    "state_bits": data[1],
+                    "phase_code": data[2],
+                    "reboot_reason_code": data[3],
+                    "uptime_s": struct.unpack_from("<H", data, 4)[0],
+                    "fault_epoch": data[6],
+                }
+            elif frame_kind == 0x40:
+                pending["counters"] = {
+                    "host_can_tx_error_count": data[1],
+                    "host_can_rx_error_count": data[2],
+                    "motor_can_tx_error_count": data[3],
+                    "loop_overrun_count": data[4],
+                    "watchdog_trip_count": data[5],
+                    "can_recovery_count": data[6],
+                }
+            else:
+                return
+
+            summary = pending.get("summary")
+            counters = pending.get("counters")
+            if not summary or not counters:
+                return
+
+            payload = {
+                "type": "health_status",
+                "joint": joint_name,
+                "joint_name": joint_name,
+                "joint_id": joint_id,
+                "timestamp": pending["timestamp"],
+                "seq": seq,
+                "state_bits": summary["state_bits"],
+                "state": _decode_state_bits(summary["state_bits"]),
+                "phase_code": summary["phase_code"],
+                "phase": DIAG_PHASE_NAMES.get(summary["phase_code"], f"CODE_{summary['phase_code']}"),
+                "reboot_reason_code": summary["reboot_reason_code"],
+                "reboot_reason": DIAG_REBOOT_REASON_NAMES.get(
+                    summary["reboot_reason_code"], f"CODE_{summary['reboot_reason_code']}"
+                ),
+                "uptime_s": summary["uptime_s"],
+                "fault_epoch": summary["fault_epoch"],
+                **counters,
+            }
+            self._health_status[joint_name] = dict(payload)
+            self._health_status_pending.pop(key, None)
+
+        self._publish_diagnostic(payload, "health_status")
+
+    def _handle_fault_status(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        seq, active_bits, latched_bits, primary_fault_code, source_id, fault_epoch = struct.unpack(
+            "<BHHBBB", data[:8]
+        )
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+        source_info = _decode_source_id(source_id)
+
+        payload = {
+            "type": "fault_status",
+            "joint": joint_name,
+            "joint_name": joint_name,
+            "joint_id": joint_id,
+            "timestamp": timestamp,
+            "seq": seq,
+            "active_fault_bits": active_bits,
+            "latched_fault_bits": latched_bits,
+            "active_faults": _decode_fault_mask(active_bits),
+            "latched_faults": _decode_fault_mask(latched_bits),
+            "primary_fault_code": None if primary_fault_code == 0xFF else primary_fault_code,
+            "primary_fault": None
+            if primary_fault_code == 0xFF
+            else DIAG_FAULT_NAMES.get(primary_fault_code, f"CODE_{primary_fault_code}"),
+            "source_id": source_id,
+            "fault_epoch": fault_epoch,
+            **source_info,
+        }
+
+        with self._lock:
+            self._fault_status[joint_name] = dict(payload)
+
+        self._publish_diagnostic(payload, "fault_status")
+
+    def _handle_event_notice(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        event_code, flags, source_kind, source_index, detail0, detail1, event_seq = struct.unpack(
+            "<BBBBBBH", data[:8]
+        )
+        severity_code = flags & 0x03
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+
+        payload: Dict[str, Any] = {
+            "type": "event_notice",
+            "joint": joint_name,
+            "joint_name": joint_name,
+            "joint_id": joint_id,
+            "timestamp": timestamp,
+            "event_seq": event_seq,
+            "event_code": event_code,
+            "event": DIAG_EVENT_NAMES.get(event_code, f"CODE_{event_code}"),
+            "flags": flags,
+            "severity_code": severity_code,
+            "severity": DIAG_SEVERITY_NAMES.get(severity_code, f"CODE_{severity_code}"),
+            "is_assert": bool(flags & 0x04),
+            "is_clear": bool(flags & 0x08),
+            "latched_changed": bool(flags & 0x10),
+            "snapshot_frozen": bool(flags & 0x20),
+            "host_attention": bool(flags & 0x40),
+            "source_kind_code": source_kind,
+            "source_kind": DIAG_SOURCE_NAMES.get(source_kind, f"CODE_{source_kind}"),
+            "source_index": None if source_index == 0xFF else source_index,
+            "detail0": detail0,
+            "detail1": detail1,
+        }
+
+        if event_code in {0x01}:
+            payload["reboot_reason_code"] = detail0
+            payload["reboot_reason"] = DIAG_REBOOT_REASON_NAMES.get(detail0, f"CODE_{detail0}")
+            payload["phase_code"] = detail1
+            payload["phase"] = DIAG_PHASE_NAMES.get(detail1, f"CODE_{detail1}")
+        elif event_code in {0x02, 0x03}:
+            payload["previous_phase_code"] = detail0
+            payload["previous_phase"] = DIAG_PHASE_NAMES.get(detail0, f"CODE_{detail0}")
+            payload["phase_code"] = detail1
+            payload["phase"] = DIAG_PHASE_NAMES.get(detail1, f"CODE_{detail1}")
+        elif event_code in {0x04, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11}:
+            payload["phase_code"] = detail1
+            payload["phase"] = DIAG_PHASE_NAMES.get(detail1, f"CODE_{detail1}")
+
+        if event_code in {0x0B, 0x0C, 0x0D}:
+            payload["fault_code"] = detail0
+            payload["fault_name"] = DIAG_FAULT_NAMES.get(detail0, f"CODE_{detail0}")
+        elif event_code in {0x05, 0x06}:
+            payload["startup_reason_code"] = detail0
+            payload["startup_reason"] = STARTUP_REASON_NAMES.get(detail0, f"CODE_{detail0}")
+            payload["elapsed_ms_approx"] = detail1
+        elif event_code == 0x08:
+            payload["elapsed_10ms"] = detail0
+        elif event_code == 0x0F:
+            payload["loop_overrun_count"] = detail0
+        elif event_code == 0x10:
+            payload["fault_code"] = detail0
+            payload["fault_name"] = DIAG_FAULT_NAMES.get(detail0, f"CODE_{detail0}")
+
+        with self._lock:
+            self._diagnostic_events.appendleft(dict(payload))
+
+        self._publish_diagnostic(payload, "event_notice")
+
+    def _handle_fault_snapshot_meta(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        meta = decode_fault_snapshot_meta(data, joint_id)
+        joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
+        payload = {
+            "type": "fault_snapshot_meta",
+            "joint": joint_name,
+            "joint_name": joint_name,
+            "joint_id": joint_id,
+            "timestamp": timestamp,
+            "snapshot_id": meta.snapshot_id,
+            "freeze_event_code": meta.freeze_event_code,
+            "freeze_event": meta.freeze_event_name,
+            "primary_fault_code": meta.primary_fault_code,
+            "primary_fault": meta.primary_fault_name,
+            "flags": meta.flags,
+            "state": {
+                "snapshot_present": meta.snapshot_present,
+                "frozen_on_critical_fault": meta.frozen_on_critical_fault,
+                "truncated": meta.truncated,
+                "dumped_once": meta.dumped_once,
+                "checksum_available": meta.checksum_available,
+                "fixed_layout_v1": meta.fixed_layout_v1,
+            },
+            "total_chunks": meta.total_chunks,
+            "payload_bytes": meta.payload_bytes,
+            "seq": meta.seq,
+        }
+
+        with self._lock:
+            self._fault_snapshot_meta[joint_name] = dict(payload)
+
+        if meta.snapshot_present and meta.total_chunks > 0 and meta.payload_bytes > 0:
+            pending = self._fault_snapshot_pending.get(joint_id)
+            if pending is None or pending.get("snapshot_id") != meta.snapshot_id:
+                pending = {"chunks": {}}
+                self._fault_snapshot_pending[joint_id] = pending
+            pending.update(
+                {
+                    "snapshot_id": meta.snapshot_id,
+                    "total_chunks": meta.total_chunks,
+                    "payload_bytes": meta.payload_bytes,
+                    "meta_payload": payload,
+                }
+            )
+        else:
+            self._fault_snapshot_pending.pop(joint_id, None)
+
+        self._publish_diagnostic(payload, "fault_snapshot_meta")
+
+    def _handle_fault_snapshot_chunk(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
+        chunk = decode_fault_snapshot_chunk(data, joint_id)
+        pending = self._fault_snapshot_pending.setdefault(joint_id, {"chunks": {}})
+        if pending.get("snapshot_id") not in (None, chunk.snapshot_id):
+            pending.clear()
+            pending["chunks"] = {}
+        pending["snapshot_id"] = chunk.snapshot_id
+        pending.setdefault("chunks", {})[chunk.chunk_index] = chunk.payload
+        pending["last_timestamp"] = timestamp
+
+        total_chunks = pending.get("total_chunks")
+        payload_bytes = pending.get("payload_bytes")
+        meta_payload = pending.get("meta_payload")
+        if not isinstance(total_chunks, int) or not isinstance(payload_bytes, int) or not isinstance(meta_payload, dict):
+            return
+
+        chunks: Dict[int, bytes] = pending["chunks"]  # type: ignore[assignment]
+        if len(chunks) < total_chunks:
+            return
+        if any(index not in chunks for index in range(total_chunks)):
+            return
+
+        raw = b"".join(chunks[index] for index in range(total_chunks))[:payload_bytes]
+        decoded_snapshot = decode_fault_snapshot_blob(raw)
+        payload = {
+            "type": "fault_snapshot_dump",
+            "joint": meta_payload["joint_name"],
+            "joint_name": meta_payload["joint_name"],
+            "joint_id": joint_id,
+            "timestamp": timestamp,
+            "snapshot_id": meta_payload["snapshot_id"],
+            "freeze_event_code": meta_payload["freeze_event_code"],
+            "freeze_event": meta_payload["freeze_event"],
+            "primary_fault_code": meta_payload["primary_fault_code"],
+            "primary_fault": meta_payload["primary_fault"],
+            "payload_bytes": len(raw),
+            "total_chunks": total_chunks,
+            "snapshot": decoded_snapshot,
+            "raw_hex": raw.hex(),
+        }
+
+        with self._lock:
+            self._fault_snapshots[meta_payload["joint_name"]] = dict(payload)
+        self._fault_snapshot_pending.pop(joint_id, None)
+        self._publish_diagnostic(payload, "fault_snapshot_dump")
+
     def get_joint_state(self) -> Dict[str, Any]:
         """Return current joint state data for all joints/DOFs in impedance mode."""
         with self._lock:
@@ -2801,13 +3362,9 @@ class CanManager:
         elapsed_ms = struct.unpack_from("<H", data, 3)[0]
 
         event_names = {0: "BEGIN", 1: "DOF_READY", 2: "DOF_FAILED", 3: "COMPLETE", 4: "FAILED"}
-        reason_names = {0: "OK", 1: "NO_CONTROLLER", 2: "NO_EQUATIONS", 3: "ENCODER_TIMEOUT",
-                        4: "POSITION_RANGE", 5: "RECALC_ERROR", 6: "GLOBAL_TIMEOUT",
-                        7: "PARTIAL_HOLD", 8: "REFERENCE_REQUIRED"}
-
         joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id}")
         evt_name = event_names.get(event_type, f"UNKNOWN_{event_type}")
-        reason_name = reason_names.get(reason_code, f"CODE_{reason_code}")
+        reason_name = STARTUP_REASON_NAMES.get(reason_code, f"CODE_{reason_code}")
 
         payload = {
             "joint": joint_name,

@@ -20,6 +20,7 @@
 #include "main_common.h"
 #include "RuntimeProvisioning.h"
 #include "hardware/sync.h"
+#include "hardware/watchdog.h"
 
 #undef ACTIVE_JOINT
 #define ACTIVE_JOINT getRuntimeJointId()
@@ -92,12 +93,18 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
 #define CAN_ID_SET_IMPEDANCE    0x01D     // Impedance target (Host → Controller, 1-4 frame accumulator)
 #define CAN_ID_IMPEDANCE_CTRL   0x01E     // Impedance control command (Host → Controller)
+#define CAN_ID_FAULT_SNAPSHOT_CTRL 0x01F  // Fault snapshot retrieval control (Host → Controller)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 #define CAN_ID_DIAG_HOLD_DATA    0x4D0   // Holding diagnostics (Controller → Host, + joint_id)
 #define CAN_ID_SAFE_LIMITS_DATA  0x4E0   // Safe limits per DOF (Controller → Host, + joint_id)
 #define CAN_ID_JOINT_STATE_BASE  0x4F0   // Joint state broadcast (Controller → Host, + joint_id)
 #define CAN_ID_RETENSION_PROBE_RESULT 0x500 // Probe summary result (Controller → Host, + joint_id)
+#define CAN_ID_HEALTH_STATUS 0x510       // Health summary + counters (Controller → Host, + joint_id)
+#define CAN_ID_FAULT_STATUS 0x520        // Active/latched fault mask (Controller → Host, + joint_id)
+#define CAN_ID_EVENT_NOTICE 0x530        // Event notice timeline (Controller → Host, + joint_id)
+#define CAN_ID_FAULT_SNAPSHOT_META 0x540 // Fault snapshot metadata (Controller → Host, + joint_id)
+#define CAN_ID_FAULT_SNAPSHOT_DATA 0x550 // Fault snapshot data chunks (Controller → Host, + joint_id)
 
 // Encoder streaming configuration
 #define ENCODER_STREAM_INTERVAL_US 20000  // 20ms = 50Hz (reduced for SLCAN compatibility)
@@ -137,6 +144,987 @@ struct ImpAccum {
   bool seen_seq0 = false;
 };
 static ImpAccum imp_acc[MAX_DOFS];
+
+static constexpr uint32_t DIAG_HEALTH_PERIOD_MS = 1000;
+static constexpr uint32_t DIAG_FAULT_REPEAT_MS = 1000;
+static constexpr uint32_t DIAG_ENCODER_INVALID_HOLD_MS = 250;
+static constexpr uint32_t DIAG_LOOP_OVERRUN_HOLD_MS = 1000;
+static constexpr uint32_t DIAG_BAD_COMMAND_HOLD_MS = 500;
+static constexpr uint8_t DIAG_CAN_WARN_THRESHOLD = 32;
+static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 1;
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_QUERY_META = 0x00;
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_BEGIN_DUMP = 0x01;
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_REQUEST_CHUNK = 0x02;
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_CLEAR = 0x03;
+static constexpr int16_t DIAG_SNAPSHOT_UNUSED_I16 = 0x7FFF;
+static constexpr uint16_t DIAG_SNAPSHOT_CHUNK_BYTES = 6;
+static constexpr uint16_t DIAG_SNAPSHOT_MAX_BYTES = 96;
+
+enum DiagPhaseCode : uint8_t {
+  DIAG_PHASE_BOOT = 0,
+  DIAG_PHASE_SAFE_MODE_UNPROVISIONED = 1,
+  DIAG_PHASE_IDLE_NOT_READY = 2,
+  DIAG_PHASE_STARTUP_RUNNING = 3,
+  DIAG_PHASE_READY = 4,
+  DIAG_PHASE_LOCAL_HOLD = 5,
+  DIAG_PHASE_FAULT_LOCKOUT = 6,
+  DIAG_PHASE_SERVICE_ONLY = 7,
+};
+
+enum DiagRebootReason : uint8_t {
+  DIAG_REBOOT_POWER_ON = 0,
+  DIAG_REBOOT_SOFT_RESET_CMD = 1,
+  DIAG_REBOOT_WATCHDOG_RESET = 2,
+  DIAG_REBOOT_BROWNOUT_OR_POWER_DIP = 3,
+  DIAG_REBOOT_CAN_FAULT_RECOVERY = 4,
+  DIAG_REBOOT_FLASH_RECOVERY = 5,
+  DIAG_REBOOT_UNKNOWN = 6,
+  DIAG_REBOOT_RESERVED = 7,
+};
+
+static uint8_t diag_reboot_reason = DIAG_REBOOT_POWER_ON;
+static uint8_t diag_health_seq = 0;
+static uint8_t diag_fault_seq = 0;
+static uint8_t diag_fault_epoch = 0;
+static uint16_t diag_event_seq = 0;
+static uint16_t diag_persistent_fault_bits = 0;
+static uint16_t diag_latched_fault_bits = 0;
+static uint16_t diag_last_active_fault_bits = 0;
+static uint8_t diag_fault_source_hint[16] = {};
+static uint32_t diag_transient_fault_until_ms[16] = {};
+static uint8_t diag_watchdog_trip_count = 0;
+static uint8_t diag_can_recovery_count = 0;
+static uint8_t diag_loop_overrun_count = 0;
+static bool diag_snapshot_available = false;
+static bool diag_startup_in_progress = false;
+static bool diag_estop_latched = false;
+static bool diag_boot_complete_queued = false;
+static bool diag_ready_last = false;
+static uint8_t diag_phase_last = DIAG_PHASE_BOOT;
+static uint32_t diag_last_health_status_ms = 0;
+static uint32_t diag_last_fault_status_ms = 0;
+static bool diag_force_fault_status_send = true;
+static uint32_t diag_last_loop_overrun_event_ms = 0;
+static uint32_t diag_last_host_can_warn_sample_ms = 0;
+static uint8_t diag_last_host_can_tx_error_count = 0;
+static uint8_t diag_last_host_can_rx_error_count = 0;
+static uint8_t diag_last_motor_can_tx_error_count = 0;
+
+struct __attribute__((packed)) DiagSnapshotHeaderV1 {
+  uint8_t layout_version;
+  uint8_t freeze_event_code;
+  uint8_t phase_code;
+  uint8_t primary_fault_code;
+  uint8_t dof_count;
+  uint8_t motor_count;
+  uint8_t fault_epoch;
+  uint8_t snapshot_flags;
+  uint16_t active_fault_bits;
+  uint16_t latched_fault_bits;
+  uint16_t freeze_uptime_s;
+  uint8_t host_can_tx_error_count;
+  uint8_t host_can_rx_error_count;
+  uint8_t motor_can_tx_error_count;
+  uint8_t loop_overrun_count;
+  uint8_t watchdog_trip_count;
+  uint8_t can_recovery_count;
+};
+
+struct __attribute__((packed)) DiagSnapshotDofRecordV1 {
+  int16_t q_x100;
+  int16_t dq_x10;
+  int16_t q_target_x100;
+  int16_t hold_q_x100;
+  int16_t stiffness_x10;
+  int16_t motor_a_angle_x100;
+  int16_t motor_b_angle_x100;
+  int16_t tau_ff;
+  uint8_t state_code;
+  uint8_t flags;
+};
+
+static uint8_t diag_snapshot_buffer[DIAG_SNAPSHOT_MAX_BYTES] = {};
+static uint16_t diag_snapshot_payload_bytes = 0;
+static uint8_t diag_snapshot_total_chunks = 0;
+static uint8_t diag_snapshot_id = 0;
+static uint8_t diag_snapshot_freeze_event_code = 0xFF;
+static uint8_t diag_snapshot_primary_fault_code = 0xFF;
+static bool diag_snapshot_truncated = false;
+static bool diag_snapshot_dumped_once = false;
+static bool diag_snapshot_dump_active = false;
+static uint8_t diag_snapshot_dump_next_chunk = 0;
+
+static constexpr uint8_t STARTUP_EVT_BEGIN = 0;
+static constexpr uint8_t STARTUP_EVT_DOF_READY = 1;
+static constexpr uint8_t STARTUP_EVT_DOF_FAILED = 2;
+static constexpr uint8_t STARTUP_EVT_COMPLETE = 3;
+static constexpr uint8_t STARTUP_EVT_FAILED = 4;
+
+static inline uint16_t diagFaultMask(DiagFaultCode code) {
+  return (uint16_t)1u << static_cast<uint8_t>(code);
+}
+
+static inline bool diagTimeBefore(uint32_t now_ms, uint32_t target_ms) {
+  return (int32_t)(now_ms - target_ms) < 0;
+}
+
+static void diagInitSourceHints() {
+  for (uint8_t i = 0; i < 16; ++i) {
+    diag_fault_source_hint[i] = 0xFF;
+  }
+}
+
+static uint8_t diagEventSeverityForFault(uint8_t fault_code) {
+  switch (fault_code) {
+    case DIAG_FAULT_HOST_CAN_WARN:
+    case DIAG_FAULT_MOTOR_CAN_WARN:
+    case DIAG_FAULT_BAD_COMMAND:
+      return 1;  // WARN
+    case DIAG_FAULT_HOST_WATCHDOG_TIMEOUT:
+    case DIAG_FAULT_STARTUP_FAILED:
+    case DIAG_FAULT_ESTOP_LATCHED:
+    case DIAG_FAULT_INTERNAL_ERROR:
+      return 3;  // CRITICAL
+    default:
+      return 2;  // ERROR
+  }
+}
+
+static uint8_t diagSourceKindForFault(uint8_t fault_code, uint8_t source_id) {
+  if (source_id <= 0x02) return DIAG_SRC_DOF;
+  if (source_id >= 0x80 && source_id <= 0x83) return DIAG_SRC_MOTOR;
+  if (source_id == 0xE0) return DIAG_SRC_HOST_CAN;
+  if (source_id == 0xE1) return DIAG_SRC_MOTOR_CAN;
+
+  switch (fault_code) {
+    case DIAG_FAULT_HOST_CAN_WARN:
+      return DIAG_SRC_HOST_CAN;
+    case DIAG_FAULT_MOTOR_CAN_WARN:
+      return DIAG_SRC_MOTOR_CAN;
+    case DIAG_FAULT_STARTUP_FAILED:
+      return DIAG_SRC_STARTUP;
+    case DIAG_FAULT_CONFIG_INVALID:
+      return DIAG_SRC_CONFIG;
+    case DIAG_FAULT_SAFETY_LIMIT:
+    case DIAG_FAULT_MAPPING_LIMIT:
+    case DIAG_FAULT_MOTOR_RANGE:
+      return DIAG_SRC_SAFETY;
+    default:
+      return DIAG_SRC_GLOBAL;
+  }
+}
+
+static uint8_t diagSourceIndexForEvent(uint8_t source_id) {
+  if (source_id <= 0x02) return source_id;
+  if (source_id >= 0x80 && source_id <= 0x83) return source_id - 0x80;
+  return 0xFF;
+}
+
+static uint8_t diagComputePhaseCode();
+static uint8_t diagBuildEventFlags(uint8_t severity, bool is_assert, bool is_clear,
+                                   bool latched_changed, bool snapshot_frozen,
+                                   bool host_attention);
+static void diagQueueEvent(uint8_t event_code, uint8_t flags, uint8_t source_kind,
+                           uint8_t source_index, uint8_t detail0, uint8_t detail1);
+
+static bool diagSnapshotShouldFreezeForFault(uint8_t fault_code) {
+  switch (fault_code) {
+    case DIAG_FAULT_HOST_WATCHDOG_TIMEOUT:
+    case DIAG_FAULT_ENCODER_INVALID:
+    case DIAG_FAULT_MOTOR_TIMEOUT:
+    case DIAG_FAULT_STARTUP_FAILED:
+    case DIAG_FAULT_INTERNAL_ERROR:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static uint8_t diagSnapshotFreezeEventForFault(uint8_t fault_code) {
+  switch (fault_code) {
+    case DIAG_FAULT_HOST_WATCHDOG_TIMEOUT:
+      return DIAG_EVENT_WATCHDOG_TIMEOUT;
+    case DIAG_FAULT_ENCODER_INVALID:
+      return DIAG_EVENT_ENCODER_INVALID;
+    case DIAG_FAULT_MOTOR_TIMEOUT:
+      return DIAG_EVENT_MOTOR_TIMEOUT;
+    case DIAG_FAULT_STARTUP_FAILED:
+      return DIAG_EVENT_STARTUP_FAILED;
+    default:
+      return DIAG_EVENT_FAULT_SET;
+  }
+}
+
+static int16_t diagScaleToInt16(float value, float scale) {
+  const long scaled = lroundf(value * scale);
+  return (int16_t)constrain(scaled, -32768L, 32767L);
+}
+
+static int16_t diagOptionalScaledInt16(bool valid, float value, float scale) {
+  if (!valid) return DIAG_SNAPSHOT_UNUSED_I16;
+  return diagScaleToInt16(value, scale);
+}
+
+static uint8_t diagBuildSnapshotControllerFlags() {
+  uint8_t flags = 0;
+  bool impedance_enabled = false;
+  for (uint8_t d = 0; d < MAX_DOFS; ++d) {
+    impedance_enabled |= impedance_target[d].valid;
+  }
+  if (safety_is_motor_power_enabled()) flags |= 0x01;
+  if (impedance_enabled) flags |= 0x02;
+  if (diag_estop_latched) flags |= 0x04;
+  if (runtimeJointProfileProvisioned() && ACTIVE_JOINT != JOINT_NONE) flags |= 0x08;
+  if (active_joint_controller != nullptr) flags |= 0x10;
+  flags |= 0x20;  // frozen on critical fault in v0.1
+  return flags;
+}
+
+static void diagClearSnapshotData() {
+  diag_snapshot_available = false;
+  diag_snapshot_payload_bytes = 0;
+  diag_snapshot_total_chunks = 0;
+  diag_snapshot_freeze_event_code = 0xFF;
+  diag_snapshot_primary_fault_code = 0xFF;
+  diag_snapshot_truncated = false;
+  diag_snapshot_dumped_once = false;
+  diag_snapshot_dump_active = false;
+  diag_snapshot_dump_next_chunk = 0;
+  memset(diag_snapshot_buffer, 0, sizeof(diag_snapshot_buffer));
+  diag_last_health_status_ms = millis() - DIAG_HEALTH_PERIOD_MS;
+}
+
+static void diagBuildSnapshotPayload(uint8_t freeze_event_code, uint8_t primary_fault_code,
+                                     uint16_t active_fault_bits) {
+  SharedDofAngles dof_snapshot = {};
+  readSharedDofAnglesSnapshot(dof_snapshot);
+
+  uint8_t dof_count = 0;
+  uint8_t motor_count = 0;
+  if (active_joint_controller != nullptr) {
+    dof_count = min<uint8_t>(active_joint_controller->getConfig().dof_count, MAX_DOFS);
+    motor_count = min<uint8_t>(active_joint_controller->getConfig().motor_count, 255);
+  }
+
+  diag_last_host_can_tx_error_count = CAN_HOST.errorCountTX();
+  diag_last_host_can_rx_error_count = CAN_HOST.errorCountRX();
+  diag_last_motor_can_tx_error_count = CAN.errorCountTX();
+
+  DiagSnapshotHeaderV1 header = {};
+  header.layout_version = DIAG_SNAPSHOT_LAYOUT_VERSION;
+  header.freeze_event_code = freeze_event_code;
+  header.phase_code = diagComputePhaseCode();
+  header.primary_fault_code = primary_fault_code;
+  header.dof_count = dof_count;
+  header.motor_count = motor_count;
+  header.fault_epoch = diag_fault_epoch;
+  header.snapshot_flags = diagBuildSnapshotControllerFlags();
+  header.active_fault_bits = active_fault_bits;
+  header.latched_fault_bits = diag_latched_fault_bits;
+  header.freeze_uptime_s = (uint16_t)min<uint32_t>(millis() / 1000UL, 65535UL);
+  header.host_can_tx_error_count = diag_last_host_can_tx_error_count;
+  header.host_can_rx_error_count = diag_last_host_can_rx_error_count;
+  header.motor_can_tx_error_count = diag_last_motor_can_tx_error_count;
+  header.loop_overrun_count = diag_loop_overrun_count;
+  header.watchdog_trip_count = diag_watchdog_trip_count;
+  header.can_recovery_count = diag_can_recovery_count;
+
+  uint16_t offset = 0;
+  memcpy(&diag_snapshot_buffer[offset], &header, sizeof(header));
+  offset += sizeof(header);
+
+  for (uint8_t d = 0; d < dof_count; ++d) {
+    float q_deg = 0.0f;
+    float dq_deg_s = 0.0f;
+    bool q_valid = false;
+    const bool direct_drive =
+        active_joint_controller != nullptr && active_joint_controller->isDirectDriveDof(d);
+    if (direct_drive) {
+      q_valid = active_joint_controller->getDirectDriveFeedback(d, q_deg, dq_deg_s);
+    } else if (dof_snapshot.valid[d]) {
+      q_valid = true;
+      q_deg = dof_snapshot.angles[d];
+      dq_deg_s = dof_snapshot.velocities[d];
+    }
+
+    const bool motor_angles_valid = cached_motor_angles.valid[d];
+    const bool holding = dof_state[d] == DofState::HOLDING;
+    const bool impedance_valid = impedance_target[d].valid;
+    const bool watchdog_timed_out = impedance_target[d].watchdog_timed_out;
+    const bool hold_valid = holding || dof_hold_time[d] != 0;
+
+    DiagSnapshotDofRecordV1 record = {};
+    record.q_x100 = diagOptionalScaledInt16(q_valid, q_deg, 100.0f);
+    record.dq_x10 = diagOptionalScaledInt16(q_valid, dq_deg_s, 10.0f);
+    record.q_target_x100 = impedance_valid
+                               ? diagScaleToInt16(impedance_target[d].q_target_deg, 100.0f)
+                               : DIAG_SNAPSHOT_UNUSED_I16;
+    record.hold_q_x100 = diagOptionalScaledInt16(hold_valid, dof_hold_angle[d], 100.0f);
+    record.stiffness_x10 = impedance_valid
+                               ? diagScaleToInt16(impedance_target[d].stiffness_deg, 10.0f)
+                               : 0;
+    record.motor_a_angle_x100 = diagOptionalScaledInt16(
+        motor_angles_valid, cached_motor_angles.agonist[d], 100.0f);
+    record.motor_b_angle_x100 = diagOptionalScaledInt16(
+        motor_angles_valid, cached_motor_angles.antagonist[d], 100.0f);
+    record.tau_ff = impedance_valid ? impedance_target[d].tau_ff : 0;
+    record.state_code = static_cast<uint8_t>(dof_state[d]);
+    record.flags = 0;
+    if (q_valid) record.flags |= 0x01;
+    if (impedance_valid) record.flags |= 0x02;
+    if (watchdog_timed_out) record.flags |= 0x04;
+    if (holding) record.flags |= 0x08;
+    if (motor_angles_valid) record.flags |= 0x10;
+    if (direct_drive) record.flags |= 0x20;
+
+    memcpy(&diag_snapshot_buffer[offset], &record, sizeof(record));
+    offset += sizeof(record);
+  }
+
+  diag_snapshot_payload_bytes = min<uint16_t>(offset, DIAG_SNAPSHOT_MAX_BYTES);
+  diag_snapshot_total_chunks =
+      (uint8_t)((diag_snapshot_payload_bytes + DIAG_SNAPSHOT_CHUNK_BYTES - 1) /
+                DIAG_SNAPSHOT_CHUNK_BYTES);
+  diag_snapshot_truncated = offset > DIAG_SNAPSHOT_MAX_BYTES;
+}
+
+static bool diagSnapshotRequestMatches(uint8_t requested_snapshot_id) {
+  if (!diag_snapshot_available) return false;
+  return requested_snapshot_id == 0xFF || requested_snapshot_id == diag_snapshot_id;
+}
+
+static void diagSendSnapshotMeta(uint8_t seq) {
+  uint8_t frame[8] = {0};
+  frame[0] = diag_snapshot_available ? diag_snapshot_id : 0;
+  frame[1] = diag_snapshot_available ? diag_snapshot_freeze_event_code : 0xFF;
+  frame[2] = diag_snapshot_available ? diag_snapshot_primary_fault_code : 0xFF;
+  frame[3] = 0;
+  if (diag_snapshot_available) frame[3] |= 0x01;
+  if (diag_snapshot_available) frame[3] |= 0x02;
+  if (diag_snapshot_truncated) frame[3] |= 0x04;
+  if (diag_snapshot_dumped_once) frame[3] |= 0x08;
+  if (diag_snapshot_available) frame[3] |= 0x20;
+  frame[4] = diag_snapshot_total_chunks;
+  frame[5] = (uint8_t)(diag_snapshot_payload_bytes & 0xFF);
+  frame[6] = (uint8_t)((diag_snapshot_payload_bytes >> 8) & 0xFF);
+  frame[7] = seq;
+  CAN_HOST.sendMsgBuf(CAN_ID_FAULT_SNAPSHOT_META + ACTIVE_JOINT, 0, 8, frame);
+}
+
+static void diagSendSnapshotChunk(uint8_t chunk_index) {
+  if (!diag_snapshot_available) return;
+  if (chunk_index >= diag_snapshot_total_chunks) return;
+
+  uint8_t frame[8] = {0};
+  frame[0] = diag_snapshot_id;
+  frame[1] = chunk_index;
+  const uint16_t offset = chunk_index * DIAG_SNAPSHOT_CHUNK_BYTES;
+  const uint16_t remaining = (offset < diag_snapshot_payload_bytes)
+                                 ? (diag_snapshot_payload_bytes - offset)
+                                 : 0;
+  const uint8_t copy_len = min<uint16_t>(remaining, DIAG_SNAPSHOT_CHUNK_BYTES);
+  if (copy_len > 0) {
+    memcpy(&frame[2], &diag_snapshot_buffer[offset], copy_len);
+  }
+  CAN_HOST.sendMsgBuf(CAN_ID_FAULT_SNAPSHOT_DATA + ACTIVE_JOINT, 0, 8, frame);
+  diag_snapshot_dumped_once = true;
+}
+
+static void diagTickSnapshotDump() {
+  if (suspend_host_can_polling) return;
+  if (!diag_snapshot_dump_active || !diag_snapshot_available) return;
+  if (diag_snapshot_dump_next_chunk >= diag_snapshot_total_chunks) {
+    diag_snapshot_dump_active = false;
+    return;
+  }
+
+  diagSendSnapshotChunk(diag_snapshot_dump_next_chunk++);
+  if (diag_snapshot_dump_next_chunk >= diag_snapshot_total_chunks) {
+    diag_snapshot_dump_active = false;
+  }
+}
+
+static void diagFreezeSnapshotForFault(uint8_t fault_code, uint16_t active_fault_bits) {
+  if (diag_snapshot_available) return;
+  if (!diagSnapshotShouldFreezeForFault(fault_code)) return;
+
+  diag_snapshot_id = (uint8_t)(diag_snapshot_id + 1);
+  diag_snapshot_freeze_event_code = diagSnapshotFreezeEventForFault(fault_code);
+  diag_snapshot_primary_fault_code = fault_code;
+  diag_snapshot_dumped_once = false;
+  diag_snapshot_dump_active = false;
+  diag_snapshot_dump_next_chunk = 0;
+  diagBuildSnapshotPayload(diag_snapshot_freeze_event_code, fault_code, active_fault_bits);
+  diag_snapshot_available = true;
+  diag_last_health_status_ms = millis() - DIAG_HEALTH_PERIOD_MS;
+  diagQueueEvent(
+      DIAG_EVENT_SNAPSHOT_FROZEN,
+      diagBuildEventFlags(3, true, false, false, true, true),
+      diagSourceKindForFault(fault_code, diag_fault_source_hint[fault_code]),
+      diagSourceIndexForEvent(diag_fault_source_hint[fault_code]),
+      fault_code,
+      diagComputePhaseCode());
+}
+
+static void diagHandleSnapshotCtrl(const unsigned char *buf, unsigned char len) {
+  if (len < 8) {
+    diag_note_bad_command(DIAG_SRC_HOST_CAN, 0x1F);
+    return;
+  }
+  if (buf[1] != ACTIVE_JOINT) return;
+
+  const uint8_t sub_cmd = buf[0];
+  const uint8_t requested_snapshot_id = buf[2];
+  const uint8_t arg0 = buf[3];
+  const uint8_t seq = buf[7];
+
+  switch (sub_cmd) {
+    case DIAG_SNAPSHOT_CTRL_QUERY_META:
+      diagSendSnapshotMeta(seq);
+      break;
+    case DIAG_SNAPSHOT_CTRL_BEGIN_DUMP:
+      diagSendSnapshotMeta(seq);
+      if (diagSnapshotRequestMatches(requested_snapshot_id)) {
+        diag_snapshot_dump_next_chunk = min<uint8_t>(arg0, diag_snapshot_total_chunks);
+        diag_snapshot_dump_active = diag_snapshot_dump_next_chunk < diag_snapshot_total_chunks;
+      }
+      break;
+    case DIAG_SNAPSHOT_CTRL_REQUEST_CHUNK:
+      if (diagSnapshotRequestMatches(requested_snapshot_id)) {
+        diagSendSnapshotChunk(arg0);
+      }
+      break;
+    case DIAG_SNAPSHOT_CTRL_CLEAR:
+      if (diagSnapshotRequestMatches(requested_snapshot_id)) {
+        diagClearSnapshotData();
+      }
+      break;
+    default:
+      diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
+      break;
+  }
+}
+
+static uint8_t diagBuildEventFlags(uint8_t severity, bool is_assert, bool is_clear,
+                                   bool latched_changed, bool snapshot_frozen,
+                                   bool host_attention) {
+  uint8_t flags = severity & 0x03;
+  if (is_assert) flags |= 0x04;
+  if (is_clear) flags |= 0x08;
+  if (latched_changed) flags |= 0x10;
+  if (snapshot_frozen) flags |= 0x20;
+  if (host_attention) flags |= 0x40;
+  return flags;
+}
+
+static void diagQueueEvent(uint8_t event_code, uint8_t flags, uint8_t source_kind,
+                           uint8_t source_index, uint8_t detail0, uint8_t detail1) {
+  DiagnosticEventNoticePending evt = {
+      .event_code = event_code,
+      .flags = flags,
+      .source_kind = source_kind,
+      .source_index = source_index,
+      .detail0 = detail0,
+      .detail1 = detail1,
+  };
+  if (!queue_try_add(&diag_event_notice_queue, &evt)) {
+    LOG_C1_WARN("[DIAG] Event queue full, dropping event code=" + String(event_code));
+  }
+}
+
+static uint8_t diagComputePhaseCode() {
+  if (!runtimeJointProfileProvisioned() || ACTIVE_JOINT == JOINT_NONE || active_joint_controller == nullptr) {
+    return DIAG_PHASE_SAFE_MODE_UNPROVISIONED;
+  }
+  if (diag_estop_latched) {
+    return DIAG_PHASE_FAULT_LOCKOUT;
+  }
+  if (diag_startup_in_progress) {
+    return DIAG_PHASE_STARTUP_RUNNING;
+  }
+  if (active_joint_controller->isSystemReadyForMovement()) {
+    bool any_impedance = false;
+    bool any_holding = false;
+    for (uint8_t d = 0; d < active_joint_controller->getConfig().dof_count && d < MAX_DOFS; ++d) {
+      any_impedance |= impedance_target[d].valid;
+      any_holding |= (dof_state[d] == DofState::HOLDING);
+    }
+    if (any_holding && !any_impedance) {
+      return DIAG_PHASE_LOCAL_HOLD;
+    }
+    return DIAG_PHASE_READY;
+  }
+  return DIAG_PHASE_IDLE_NOT_READY;
+}
+
+static uint8_t diagComputeStateBits() {
+  uint8_t bits = 0;
+  const bool config_valid = runtimeJointProfileProvisioned() && ACTIVE_JOINT != JOINT_NONE;
+  const bool controller_ready = active_joint_controller != nullptr;
+  const bool motion_ready = controller_ready && active_joint_controller->isSystemReadyForMovement();
+
+  bool impedance_enabled = false;
+  bool watchdog_armed = false;
+  bool watchdog_warning = false;
+  for (uint8_t d = 0; d < MAX_DOFS; ++d) {
+    if (!impedance_target[d].valid) continue;
+    impedance_enabled = true;
+    watchdog_armed = true;
+    if (!impedance_target[d].watchdog_timed_out) {
+      const uint32_t elapsed = millis() - impedance_target[d].last_update_ms;
+      if (elapsed > impedance_watchdog_ms * 4 / 5) {
+        watchdog_warning = true;
+      }
+    }
+  }
+
+  if (config_valid) bits |= 0x01;
+  if (controller_ready) bits |= 0x02;
+  if (motion_ready) bits |= 0x04;
+  if (safety_is_motor_power_enabled()) bits |= 0x08;
+  if (impedance_enabled) bits |= 0x10;
+  if (watchdog_armed) bits |= 0x20;
+  if (watchdog_warning) bits |= 0x40;
+  if (diag_snapshot_available) bits |= 0x80;
+  return bits;
+}
+
+static void diagMarkLatchedFault(DiagFaultCode code, uint8_t source_id) {
+  const uint16_t mask = diagFaultMask(code);
+  diag_fault_source_hint[static_cast<uint8_t>(code)] = source_id;
+  if ((diag_latched_fault_bits & mask) == 0) {
+    diag_latched_fault_bits |= mask;
+    ++diag_fault_epoch;
+    diag_force_fault_status_send = true;
+  }
+}
+
+static void diagSetPersistentFaultActive(DiagFaultCode code, uint8_t source_id) {
+  const uint16_t mask = diagFaultMask(code);
+  diag_fault_source_hint[static_cast<uint8_t>(code)] = source_id;
+  if ((diag_persistent_fault_bits & mask) == 0) {
+    diag_persistent_fault_bits |= mask;
+    diag_force_fault_status_send = true;
+  }
+}
+
+static void diagClearPersistentFaultActive(DiagFaultCode code) {
+  const uint16_t mask = diagFaultMask(code);
+  if (diag_persistent_fault_bits & mask) {
+    diag_persistent_fault_bits &= ~mask;
+    diag_force_fault_status_send = true;
+  }
+}
+
+static void diagSetTransientFault(DiagFaultCode code, uint8_t source_id, uint32_t hold_ms, bool latch) {
+  const uint8_t idx = static_cast<uint8_t>(code);
+  diag_fault_source_hint[idx] = source_id;
+  diag_transient_fault_until_ms[idx] = millis() + hold_ms;
+  if (latch) {
+    diagMarkLatchedFault(code, source_id);
+  } else {
+    diag_force_fault_status_send = true;
+  }
+}
+
+static uint16_t diagComputeActiveFaultMask(uint32_t now_ms) {
+  uint16_t active_mask = diag_persistent_fault_bits;
+  for (uint8_t i = 0; i < 16; ++i) {
+    const uint32_t until_ms = diag_transient_fault_until_ms[i];
+    if (until_ms != 0 && diagTimeBefore(now_ms, until_ms)) {
+      active_mask |= (uint16_t)1u << i;
+    }
+  }
+  return active_mask;
+}
+
+static void diagQueueFaultTransitionEvent(uint8_t event_code, uint8_t fault_code,
+                                          uint8_t source_id, bool latched_changed) {
+  const uint8_t severity = diagEventSeverityForFault(fault_code);
+  const bool is_assert = event_code == DIAG_EVENT_FAULT_SET;
+  const bool is_clear = event_code == DIAG_EVENT_FAULT_CLEARED;
+  const bool host_attention = severity >= 2;
+  diagQueueEvent(
+      event_code,
+      diagBuildEventFlags(severity, is_assert, is_clear, latched_changed, false, host_attention),
+      diagSourceKindForFault(fault_code, source_id),
+      diagSourceIndexForEvent(source_id),
+      fault_code,
+      diagComputePhaseCode());
+}
+
+static void diagSampleCanHealthCounters() {
+  diag_last_host_can_tx_error_count = CAN_HOST.errorCountTX();
+  diag_last_host_can_rx_error_count = CAN_HOST.errorCountRX();
+  diag_last_motor_can_tx_error_count = CAN.errorCountTX();
+  diag_last_host_can_warn_sample_ms = millis();
+
+  const bool host_warn = diag_last_host_can_tx_error_count >= DIAG_CAN_WARN_THRESHOLD ||
+                         diag_last_host_can_rx_error_count >= DIAG_CAN_WARN_THRESHOLD;
+  const bool motor_warn = diag_last_motor_can_tx_error_count >= DIAG_CAN_WARN_THRESHOLD;
+
+  if (host_warn) {
+    diagSetPersistentFaultActive(DIAG_FAULT_HOST_CAN_WARN, 0xE0);
+    diagMarkLatchedFault(DIAG_FAULT_HOST_CAN_WARN, 0xE0);
+  } else {
+    diagClearPersistentFaultActive(DIAG_FAULT_HOST_CAN_WARN);
+  }
+
+  if (motor_warn) {
+    diagSetPersistentFaultActive(DIAG_FAULT_MOTOR_CAN_WARN, 0xE1);
+    diagMarkLatchedFault(DIAG_FAULT_MOTOR_CAN_WARN, 0xE1);
+  } else {
+    diagClearPersistentFaultActive(DIAG_FAULT_MOTOR_CAN_WARN);
+  }
+}
+
+static void diagRefreshRuntimeFaults() {
+  if (!runtimeJointProfileProvisioned() || ACTIVE_JOINT == JOINT_NONE || active_joint_controller == nullptr) {
+    diagSetPersistentFaultActive(DIAG_FAULT_CONFIG_INVALID, 0xFF);
+    diagMarkLatchedFault(DIAG_FAULT_CONFIG_INVALID, 0xFF);
+  } else {
+    diagClearPersistentFaultActive(DIAG_FAULT_CONFIG_INVALID);
+  }
+
+  bool watchdog_fault_active = false;
+  uint8_t watchdog_source = 0xFF;
+  if (active_joint_controller != nullptr) {
+    for (uint8_t d = 0; d < active_joint_controller->getConfig().dof_count && d < MAX_DOFS; ++d) {
+      if (impedance_target[d].watchdog_timed_out) {
+        watchdog_fault_active = true;
+        watchdog_source = d;
+        break;
+      }
+    }
+  }
+  if (watchdog_fault_active) {
+    diagSetPersistentFaultActive(DIAG_FAULT_HOST_WATCHDOG_TIMEOUT, watchdog_source);
+  } else {
+    diagClearPersistentFaultActive(DIAG_FAULT_HOST_WATCHDOG_TIMEOUT);
+  }
+
+  if (diag_estop_latched) {
+    diagSetPersistentFaultActive(DIAG_FAULT_ESTOP_LATCHED, 0xFF);
+    diagMarkLatchedFault(DIAG_FAULT_ESTOP_LATCHED, 0xFF);
+  } else {
+    diagClearPersistentFaultActive(DIAG_FAULT_ESTOP_LATCHED);
+  }
+
+  const uint32_t now_ms = millis();
+  const uint16_t active_fault_bits = diagComputeActiveFaultMask(now_ms);
+  const uint16_t newly_active = active_fault_bits & ~diag_last_active_fault_bits;
+  const uint16_t newly_cleared = diag_last_active_fault_bits & ~active_fault_bits;
+  int8_t snapshot_freeze_fault = -1;
+
+  for (uint8_t bit = 0; bit < 16; ++bit) {
+    const uint16_t mask = (uint16_t)1u << bit;
+    if (newly_active & mask) {
+      diagQueueFaultTransitionEvent(DIAG_EVENT_FAULT_SET, bit, diag_fault_source_hint[bit],
+                                    (diag_latched_fault_bits & mask) != 0);
+      if (snapshot_freeze_fault < 0 && diagSnapshotShouldFreezeForFault(bit)) {
+        snapshot_freeze_fault = static_cast<int8_t>(bit);
+      }
+    } else if (newly_cleared & mask) {
+      diagQueueFaultTransitionEvent(DIAG_EVENT_FAULT_CLEARED, bit, diag_fault_source_hint[bit], false);
+    }
+  }
+  if (snapshot_freeze_fault >= 0) {
+    diagFreezeSnapshotForFault(static_cast<uint8_t>(snapshot_freeze_fault), active_fault_bits);
+  }
+  if (active_fault_bits != diag_last_active_fault_bits) {
+    diag_force_fault_status_send = true;
+  }
+  diag_last_active_fault_bits = active_fault_bits;
+
+  const uint8_t phase_code = diagComputePhaseCode();
+  const bool ready_now = active_joint_controller != nullptr && active_joint_controller->isSystemReadyForMovement();
+  if (ready_now != diag_ready_last) {
+    diagQueueEvent(
+        ready_now ? DIAG_EVENT_READY_ASSERTED : DIAG_EVENT_READY_CLEARED,
+        diagBuildEventFlags(ready_now ? 0 : 1, ready_now, !ready_now, false, false, false),
+        DIAG_SRC_GLOBAL,
+        0xFF,
+        diag_phase_last,
+        phase_code);
+    diag_ready_last = ready_now;
+  }
+  diag_phase_last = phase_code;
+}
+
+static void sendEventNoticeData() {
+  if (suspend_host_can_polling) return;
+
+  DiagnosticEventNoticePending evt;
+  while (queue_try_remove(&diag_event_notice_queue, &evt)) {
+    struct __attribute__((packed)) {
+      uint8_t event_code;
+      uint8_t flags;
+      uint8_t source_kind;
+      uint8_t source_index;
+      uint8_t detail0;
+      uint8_t detail1;
+      uint16_t event_seq;
+    } frame;
+
+    frame.event_code = evt.event_code;
+    frame.flags = evt.flags;
+    frame.source_kind = evt.source_kind;
+    frame.source_index = evt.source_index;
+    frame.detail0 = evt.detail0;
+    frame.detail1 = evt.detail1;
+    frame.event_seq = ++diag_event_seq;
+
+    CAN_HOST.sendMsgBuf(CAN_ID_EVENT_NOTICE + ACTIVE_JOINT, 0, sizeof(frame), (uint8_t *)&frame);
+  }
+}
+
+static void sendHealthStatusData() {
+  if (suspend_host_can_polling) return;
+
+  const uint32_t now_ms = millis();
+  if ((now_ms - diag_last_health_status_ms) < DIAG_HEALTH_PERIOD_MS) {
+    return;
+  }
+  diag_last_health_status_ms = now_ms;
+
+  diagSampleCanHealthCounters();
+  diagRefreshRuntimeFaults();
+
+  const uint8_t seq = ++diag_health_seq;
+
+  struct __attribute__((packed)) {
+    uint8_t frame_kind;
+    uint8_t state_bits;
+    uint8_t phase_code;
+    uint8_t reboot_reason;
+    uint16_t uptime_s;
+    uint8_t fault_epoch;
+    uint8_t seq;
+  } frame1;
+
+  frame1.frame_kind = 0x00;
+  frame1.state_bits = diagComputeStateBits();
+  frame1.phase_code = diagComputePhaseCode();
+  frame1.reboot_reason = diag_reboot_reason;
+  frame1.uptime_s = (uint16_t)min<uint32_t>(millis() / 1000UL, 65535UL);
+  frame1.fault_epoch = diag_fault_epoch;
+  frame1.seq = seq;
+  CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame1), (uint8_t *)&frame1);
+
+  struct __attribute__((packed)) {
+    uint8_t frame_kind;
+    uint8_t host_can_tx_error_count;
+    uint8_t host_can_rx_error_count;
+    uint8_t motor_can_tx_error_count;
+    uint8_t loop_overrun_count;
+    uint8_t watchdog_trip_count;
+    uint8_t can_recovery_count;
+    uint8_t seq;
+  } frame2;
+
+  frame2.frame_kind = 0x40;
+  frame2.host_can_tx_error_count = diag_last_host_can_tx_error_count;
+  frame2.host_can_rx_error_count = diag_last_host_can_rx_error_count;
+  frame2.motor_can_tx_error_count = diag_last_motor_can_tx_error_count;
+  frame2.loop_overrun_count = diag_loop_overrun_count;
+  frame2.watchdog_trip_count = diag_watchdog_trip_count;
+  frame2.can_recovery_count = diag_can_recovery_count;
+  frame2.seq = seq;
+  CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t *)&frame2);
+}
+
+static void sendFaultStatusData() {
+  if (suspend_host_can_polling) return;
+
+  diagRefreshRuntimeFaults();
+  const uint32_t now_ms = millis();
+  const uint16_t active_fault_bits = diag_last_active_fault_bits;
+
+  if (!diag_force_fault_status_send &&
+      (active_fault_bits == 0) &&
+      (diag_latched_fault_bits == 0)) {
+    return;
+  }
+  if (!diag_force_fault_status_send &&
+      ((now_ms - diag_last_fault_status_ms) < DIAG_FAULT_REPEAT_MS)) {
+    return;
+  }
+
+  diag_last_fault_status_ms = now_ms;
+  diag_force_fault_status_send = false;
+
+  uint8_t primary_fault_code = 0xFF;
+  uint8_t source_id = 0xFF;
+  for (uint8_t bit = 0; bit < 16; ++bit) {
+    const uint16_t mask = (uint16_t)1u << bit;
+    if (active_fault_bits & mask) {
+      primary_fault_code = bit;
+      source_id = diag_fault_source_hint[bit];
+      break;
+    }
+  }
+  if (primary_fault_code == 0xFF && diag_latched_fault_bits != 0) {
+    for (uint8_t bit = 0; bit < 16; ++bit) {
+      const uint16_t mask = (uint16_t)1u << bit;
+      if (diag_latched_fault_bits & mask) {
+        primary_fault_code = bit;
+        source_id = diag_fault_source_hint[bit];
+        break;
+      }
+    }
+  }
+
+  struct __attribute__((packed)) {
+    uint8_t seq;
+    uint16_t active_fault_bits;
+    uint16_t latched_fault_bits;
+    uint8_t primary_fault_code;
+    uint8_t source_id;
+    uint8_t fault_epoch;
+  } frame;
+
+  frame.seq = ++diag_fault_seq;
+  frame.active_fault_bits = active_fault_bits;
+  frame.latched_fault_bits = diag_latched_fault_bits;
+  frame.primary_fault_code = primary_fault_code;
+  frame.source_id = source_id;
+  frame.fault_epoch = diag_fault_epoch;
+
+  CAN_HOST.sendMsgBuf(CAN_ID_FAULT_STATUS + ACTIVE_JOINT, 0, sizeof(frame), (uint8_t *)&frame);
+}
+
+static uint8_t diagSourceIdForEventSource(uint8_t source_kind, uint8_t source_index) {
+  switch (source_kind) {
+    case DIAG_SRC_DOF:
+      return source_index;
+    case DIAG_SRC_MOTOR:
+      return (source_index == 0xFF) ? 0xFF : static_cast<uint8_t>(0x80 + source_index);
+    case DIAG_SRC_HOST_CAN:
+      return 0xE0;
+    case DIAG_SRC_MOTOR_CAN:
+      return 0xE1;
+    default:
+      return 0xFF;
+  }
+}
+
+void diag_init_boot_reason() {
+  diagInitSourceHints();
+  diagClearSnapshotData();
+  diag_reboot_reason =
+      (watchdog_caused_reboot() && watchdog_enable_caused_reboot())
+          ? DIAG_REBOOT_WATCHDOG_RESET
+          : DIAG_REBOOT_POWER_ON;
+  diag_force_fault_status_send = true;
+}
+
+void diag_set_startup_in_progress(bool active) {
+  if (active == diag_startup_in_progress) return;
+
+  diag_startup_in_progress = active;
+  diag_force_fault_status_send = true;
+  if (active) {
+    diagClearPersistentFaultActive(DIAG_FAULT_STARTUP_FAILED);
+    diagQueueEvent(
+        DIAG_EVENT_STARTUP_BEGIN,
+        diagBuildEventFlags(0, true, false, false, false, false),
+        DIAG_SRC_STARTUP,
+        0xFF,
+        0,
+        diagComputePhaseCode());
+  }
+}
+
+void diag_set_estop_latched(bool latched) {
+  if (latched == diag_estop_latched) return;
+
+  diag_estop_latched = latched;
+  diag_force_fault_status_send = true;
+  diagQueueEvent(
+      latched ? DIAG_EVENT_ESTOP_ASSERTED : DIAG_EVENT_ESTOP_CLEARED,
+      diagBuildEventFlags(latched ? 3 : 0, latched, !latched, latched, false, latched),
+      DIAG_SRC_GLOBAL,
+      0xFF,
+      0,
+      diagComputePhaseCode());
+}
+
+void diag_note_watchdog_timeout(uint8_t dof, uint32_t elapsed_ms) {
+  if (diag_watchdog_trip_count < 255) {
+    ++diag_watchdog_trip_count;
+  }
+  diagMarkLatchedFault(DIAG_FAULT_HOST_WATCHDOG_TIMEOUT, dof);
+  diagSetPersistentFaultActive(DIAG_FAULT_HOST_WATCHDOG_TIMEOUT, dof);
+  diagQueueEvent(
+      DIAG_EVENT_WATCHDOG_TIMEOUT,
+      diagBuildEventFlags(2, true, false, true, false, true),
+      DIAG_SRC_DOF,
+      dof,
+      static_cast<uint8_t>(min<uint32_t>(elapsed_ms / 10UL, 255UL)),
+      diagComputePhaseCode());
+}
+
+void diag_note_loop_overrun() {
+  if (diag_loop_overrun_count < 255) {
+    ++diag_loop_overrun_count;
+  }
+  diagSetTransientFault(DIAG_FAULT_LOOP_OVERRUN, 0xFF, DIAG_LOOP_OVERRUN_HOLD_MS, true);
+
+  const uint32_t now_ms = millis();
+  if ((now_ms - diag_last_loop_overrun_event_ms) >= DIAG_LOOP_OVERRUN_HOLD_MS) {
+    diag_last_loop_overrun_event_ms = now_ms;
+    diagQueueEvent(
+        DIAG_EVENT_LOOP_OVERRUN_BURST,
+        diagBuildEventFlags(1, true, false, true, false, false),
+        DIAG_SRC_GLOBAL,
+        0xFF,
+        diag_loop_overrun_count,
+        diagComputePhaseCode());
+  }
+}
+
+void diag_note_encoder_invalid(uint8_t dof) {
+  diagSetTransientFault(DIAG_FAULT_ENCODER_INVALID, dof, DIAG_ENCODER_INVALID_HOLD_MS, true);
+  diagQueueEvent(
+      DIAG_EVENT_ENCODER_INVALID,
+      diagBuildEventFlags(2, true, false, true, false, true),
+      DIAG_SRC_DOF,
+      dof,
+      DIAG_FAULT_ENCODER_INVALID,
+      diagComputePhaseCode());
+}
+
+void diag_note_safety_violation(uint8_t dof, const String &message) {
+  DiagFaultCode fault_code = DIAG_FAULT_SAFETY_LIMIT;
+  if (message.indexOf("MAPPING LIMIT") >= 0) {
+    fault_code = DIAG_FAULT_MAPPING_LIMIT;
+  } else if (message.indexOf("POSSIBLE TENDON BREAKAGE") >= 0 ||
+             message.indexOf("motor") >= 0 ||
+             message.indexOf("MOTOR") >= 0) {
+    fault_code = DIAG_FAULT_MOTOR_RANGE;
+  }
+
+  diagSetTransientFault(fault_code, dof, 2000, true);
+  diagQueueEvent(
+      DIAG_EVENT_FAULT_SET,
+      diagBuildEventFlags(2, true, false, true, false, true),
+      DIAG_SRC_SAFETY,
+      dof,
+      static_cast<uint8_t>(fault_code),
+      diagComputePhaseCode());
+}
+
+void diag_note_bad_command(uint8_t source_kind, uint8_t source_index) {
+  const uint8_t source_id = diagSourceIdForEventSource(source_kind, source_index);
+  diagSetTransientFault(DIAG_FAULT_BAD_COMMAND, source_id, DIAG_BAD_COMMAND_HOLD_MS, true);
+  diagQueueEvent(
+      DIAG_EVENT_FAULT_SET,
+      diagBuildEventFlags(1, true, false, true, false, false),
+      source_kind,
+      source_index,
+      DIAG_FAULT_BAD_COMMAND,
+      diagComputePhaseCode());
+}
 
 /**
  * @brief Convert host timestamp to local time
@@ -1049,6 +2037,7 @@ void pollHostCan() {
           can_startup_duration = duration;
           can_startup_joint_id = joint_id;
           can_startup_requested = true;
+          diag_set_startup_in_progress(true);
 
           LOG_C1_INFO("[CAN_HOST] Startup sequence requested: torque=" + String(torque) +
                       " duration=" + String(duration));
@@ -1093,6 +2082,7 @@ void pollHostCan() {
         } else {
         if (!safety_is_motor_power_enabled()) {
           safety_motor_power_enable();
+          diag_set_estop_latched(false);
         }
         bool invert = cfg.dofs[dof].zero_mapping.auto_mapping_invert_direction;
         if (invert) {
@@ -1108,6 +2098,7 @@ void pollHostCan() {
       if (len >= 1 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
         if (!safety_is_motor_power_enabled()) {
           safety_motor_power_enable();
+          diag_set_estop_latched(false);
         }
         active_joint_controller->pretensionAll();
         LOG_C1_INFO("[CAN_HOST] Pretension ALL");
@@ -1587,9 +2578,12 @@ void pollHostCan() {
           }
           default:
             LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL: unknown sub_cmd=" + String(sub_cmd));
+            diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
             break;
         }
       }
+    } else if (rx_id == CAN_ID_FAULT_SNAPSHOT_CTRL) {
+      diagHandleSnapshotCtrl(buf, len);
     }
     // Note: Motor responses (0x140+) are on the Motor CAN bus, not here
 
@@ -1650,6 +2644,7 @@ void core1_loop() {
 
       // Cut motor power at hardware level (Rev B: <10µs via MOSFET gate)
       safety_motor_power_disable();
+      diag_set_estop_latched(true);
 
       // Stop all motors via CAN (software stop — belt-and-suspenders with HW cutoff)
       if (active_joint_controller != nullptr) {
@@ -1708,6 +2703,22 @@ void core1_loop() {
     // === RETENSION PROBE SUMMARY VIA CAN ===
     // Send generic probe metrics for host-side longitudinal logging/policy.
     sendRetensionProbeResultData();
+
+    if (!diag_boot_complete_queued) {
+      diagQueueEvent(
+          DIAG_EVENT_BOOT_COMPLETE,
+          diagBuildEventFlags(0, true, false, false, false, false),
+          DIAG_SRC_GLOBAL,
+          0xFF,
+          diag_reboot_reason,
+          diagComputePhaseCode());
+      diag_boot_complete_queued = true;
+    }
+
+    sendHealthStatusData();
+    sendFaultStatusData();
+    sendEventNoticeData();
+    diagTickSnapshotDump();
 
     // === ENCODER OFFSET NOTIFICATION VIA CAN ===
     // Core0 sets this flag after zero (saveOffsetsToFlash) or boot (loadOffsetsFromFlash)
@@ -1778,6 +2789,29 @@ void core1_loop() {
         frame[4] = (uint8_t)((evt.elapsed_ms >> 8) & 0xFF);
 
         CAN_HOST.sendMsgBuf(CAN_ID_STARTUP_STATUS + ACTIVE_JOINT, 0, 8, frame);
+
+        if (evt.event_type == STARTUP_EVT_COMPLETE) {
+          diag_set_startup_in_progress(false);
+          diagClearPersistentFaultActive(DIAG_FAULT_STARTUP_FAILED);
+          diagQueueEvent(
+              DIAG_EVENT_STARTUP_COMPLETE,
+              diagBuildEventFlags(0, true, false, false, false, false),
+              DIAG_SRC_STARTUP,
+              0xFF,
+              evt.reason_code,
+              static_cast<uint8_t>(min<uint16_t>(evt.elapsed_ms, 255u)));
+        } else if (evt.event_type == STARTUP_EVT_DOF_FAILED || evt.event_type == STARTUP_EVT_FAILED) {
+          diag_set_startup_in_progress(false);
+          diagMarkLatchedFault(DIAG_FAULT_STARTUP_FAILED, evt.dof_index);
+          diagSetPersistentFaultActive(DIAG_FAULT_STARTUP_FAILED, evt.dof_index);
+          diagQueueEvent(
+              DIAG_EVENT_STARTUP_FAILED,
+              diagBuildEventFlags(3, true, false, true, false, true),
+              DIAG_SRC_STARTUP,
+              evt.dof_index,
+              evt.reason_code,
+              static_cast<uint8_t>(min<uint16_t>(evt.elapsed_ms, 255u)));
+        }
       }
     }
 
@@ -1952,6 +2986,7 @@ void core1_loop() {
       // Re-enable motor power if it was cut by emergency stop (Rev B HW gate)
       if (!safety_is_motor_power_enabled()) {
         safety_motor_power_enable();
+        diag_set_estop_latched(false);
       }
       // Pretension the motors of the specific DOF
       // Check for inverted logic (e.g. Knee joint)
@@ -1970,6 +3005,7 @@ void core1_loop() {
       // Re-enable motor power if it was cut by emergency stop (Rev B HW gate)
       if (!safety_is_motor_power_enabled()) {
         safety_motor_power_enable();
+        diag_set_estop_latched(false);
       }
       // Pretension all DOFs of the joint
       // Note: This assumes all DOFs share the same logic or controller handles it.

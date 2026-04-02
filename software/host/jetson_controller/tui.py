@@ -39,6 +39,24 @@ class TUI:
     """Terminal UI for the Jetson controller."""
 
     STEP_DEG = 5.0  # Degrees per +/- keypress
+    _FAULT_SHORT_NAMES = {
+        "HOST_CAN_WARN": "HOST_CAN",
+        "MOTOR_CAN_WARN": "MOTOR_CAN",
+        "LOOP_OVERRUN": "OVERRUN",
+        "HOST_WATCHDOG_TIMEOUT": "WATCHDOG",
+        "ENCODER_INVALID": "ENC_INV",
+        "ENCODER_STALE": "ENC_STALE",
+        "MOTOR_TIMEOUT": "MOTOR_TO",
+        "SAFETY_LIMIT": "SAFETY",
+        "MAPPING_LIMIT": "MAPPING",
+        "MOTOR_RANGE": "MOTOR_RANGE",
+        "STARTUP_FAILED": "STARTUP",
+        "CONFIG_INVALID": "CONFIG",
+        "FLASH_ERROR": "FLASH",
+        "BAD_COMMAND": "BAD_CMD",
+        "ESTOP_LATCHED": "ESTOP",
+        "INTERNAL_ERROR": "INTERNAL",
+    }
 
     def __init__(self, config: ControllerConfig, telemetry: TelemetryManager,
                  impedance: ImpedanceLoop, can_bus: CanBus):
@@ -123,6 +141,128 @@ class TUI:
         jcfg = self._selected_joint_cfg()
         self._selected_dof = (self._selected_dof + 1) % max(jcfg.dof_count, 1)
 
+    @classmethod
+    def _short_fault_name(cls, name: str | None) -> str:
+        if not name:
+            return "NONE"
+        return cls._FAULT_SHORT_NAMES.get(name, name)
+
+    @classmethod
+    def _fault_summary(cls, names: list[str]) -> str:
+        if not names:
+            return "none"
+        primary = cls._short_fault_name(names[0])
+        extra = len(names) - 1
+        return f"{primary}+{extra}" if extra > 0 else primary
+
+    @staticmethod
+    def _phase_style(phase: str) -> str:
+        return {
+            "READY": "green",
+            "FAULT_LOCKOUT": "red",
+            "STARTUP_RUNNING": "yellow",
+            "LOCAL_HOLD": "yellow",
+            "IDLE_NOT_READY": "cyan",
+            "SAFE_MODE_UNPROVISIONED": "magenta",
+            "BOOT": "cyan",
+            "SERVICE_ONLY": "magenta",
+        }.get(phase, "dim")
+
+    def _joint_diag_label(self, state) -> tuple[str, str]:
+        health = getattr(state, "health_status", None) or {}
+        phase = str(health.get("phase", "--"))
+        fault = getattr(state, "fault_status", None)
+        active_faults = list(getattr(fault, "active_fault_names", []) or [])
+        latched_faults = list(getattr(fault, "latched_fault_names", []) or [])
+
+        if active_faults:
+            label = f"{phase} ACT:{self._fault_summary(active_faults)}"
+            return label, "bold red"
+        if latched_faults:
+            label = f"{phase} LAT:{self._fault_summary(latched_faults)}"
+            return label, "yellow"
+        if health:
+            return phase, self._phase_style(phase)
+        return "--", "dim"
+
+    def _selected_diag_summary(self) -> tuple[str, str]:
+        if not self._joint_keys:
+            return "Diag: no joints configured", "dim"
+
+        key = self._selected_joint_key()
+        state = self._telemetry.states.get(key)
+        if state is None:
+            return f"Diag {key}: no telemetry state", "dim"
+
+        health = getattr(state, "health_status", None) or {}
+        fault = getattr(state, "fault_status", None)
+        events = getattr(state, "diagnostic_events", None) or []
+
+        parts: list[str] = [f"Diag {key}:"]
+        style = "dim"
+
+        if health:
+            phase = str(health.get("phase", "--"))
+            parts.append(f"phase={phase}")
+            parts.append(f"reboot={health.get('reboot_reason', '--')}")
+            if health.get("state", {}).get("watchdog_warning"):
+                parts.append("watchdog=warning")
+            style = self._phase_style(phase)
+        else:
+            parts.append("phase=--")
+
+        if fault and getattr(fault, "active_fault_names", None):
+            parts.append(
+                "active=" + ",".join(
+                    self._short_fault_name(name) for name in fault.active_fault_names[:2]
+                )
+            )
+            style = "bold red"
+        elif fault and getattr(fault, "latched_fault_names", None):
+            parts.append(
+                "latched=" + ",".join(
+                    self._short_fault_name(name) for name in fault.latched_fault_names[:2]
+                )
+            )
+            if style != "bold red":
+                style = "yellow"
+        else:
+            parts.append("faults=none")
+
+        if events:
+            event = events[0]
+            source = event.source_kind
+            if event.source_index_value is not None:
+                source = f"{source}:{event.source_index_value}"
+            parts.append(f"last={event.event_name}/{event.severity_name}@{source}")
+            if event.severity_code >= 3:
+                style = "bold red"
+            elif event.severity_code >= 2 and style != "bold red":
+                style = "yellow"
+
+        return " | ".join(parts), style
+
+    def _selected_health_counters(self) -> tuple[str, str]:
+        if not self._joint_keys:
+            return "", "dim"
+
+        key = self._selected_joint_key()
+        state = self._telemetry.states.get(key)
+        health = getattr(state, "health_status", None) if state is not None else None
+        if not health:
+            return "Health: waiting for HEALTH_STATUS frames", "dim"
+
+        return (
+            "Health ctrs: "
+            f"can={health.get('host_can_tx_error_count', 0)}/"
+            f"{health.get('host_can_rx_error_count', 0)}/"
+            f"{health.get('motor_can_tx_error_count', 0)} "
+            f"overrun={health.get('loop_overrun_count', 0)} "
+            f"watchdog={health.get('watchdog_trip_count', 0)} "
+            f"epoch={health.get('fault_epoch', 0)}",
+            "dim",
+        )
+
     def on_toggle_loop(self, cb: AsyncCallback) -> None:
         self._cb_toggle_loop = cb
 
@@ -198,6 +338,7 @@ class TUI:
         for dof in range(max_dofs):
             table.add_column(f"DOF{dof}", width=10, justify="right")
             table.add_column(f"Target{dof}", width=10, justify="right")
+        table.add_column("Diag", width=24)
         table.add_column("RX", width=6, justify="right")
 
         for key, jcfg in self._config.joints.items():
@@ -236,7 +377,14 @@ class TUI:
                     target_cell = f"[bold yellow]{target_cell}[/]"
                 rendered_cells.extend([current_cell, target_cell])
 
-            table.add_row(joint_label, online, *rendered_cells, str(state.rx_count))
+            diag_label, diag_style = self._joint_diag_label(state)
+            table.add_row(
+                joint_label,
+                online,
+                *rendered_cells,
+                f"[{diag_style}]{diag_label}[/]",
+                str(state.rx_count),
+            )
 
         # CAN stats
         can_info = Text()
@@ -250,6 +398,15 @@ class TUI:
             can_info.append(f"  Loop: {self._impedance.avg_cycle_time_ms:.1f}ms", style="dim")
             effective_hz = 1000.0 / max(self._impedance.avg_period_ms, 0.1)
             can_info.append(f" ({effective_hz:.0f}Hz)", style="dim")
+
+        diag_summary_text = Text()
+        diag_summary, diag_style = self._selected_diag_summary()
+        diag_summary_text.append(diag_summary, style=diag_style)
+
+        health_counters_text = Text()
+        health_counters, health_style = self._selected_health_counters()
+        if health_counters:
+            health_counters_text.append(health_counters, style=health_style)
 
         # Status line (transient messages from key commands)
         status = Text()
@@ -283,7 +440,18 @@ class TUI:
         keys.append("[Q]", style="bold")
         keys.append("uit", style="dim")
 
-        group = Group(header, "", table, "", can_info, status, "", keys)
+        group = Group(
+            header,
+            "",
+            table,
+            "",
+            diag_summary_text,
+            health_counters_text,
+            can_info,
+            status,
+            "",
+            keys,
+        )
         return Panel(group, border_style="blue", expand=True)
 
     # ------------------------------------------------------------------

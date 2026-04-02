@@ -20,10 +20,14 @@ from .protocol import (
     CAN_ID_EMERGENCY_STOP, CAN_ID_TIME_SYNC, CAN_ID_ENCODER_STREAM_CTRL,
     CAN_ID_IDENTIFY_REQUEST, CAN_ID_STARTUP_SEQUENCE,
     CAN_ID_PRETENSION_ALL,
-    CAN_ID_SET_IMPEDANCE, CAN_ID_IMPEDANCE_CTRL,
+    CAN_ID_SET_IMPEDANCE, CAN_ID_IMPEDANCE_CTRL, CAN_ID_FAULT_SNAPSHOT_CTRL,
     CAN_ID_ENCODER_STREAM_DATA, CAN_ID_STARTUP_STATUS, CAN_ID_JOINT_ANNOUNCE,
-    CAN_ID_JOINT_STATE,
+    CAN_ID_JOINT_STATE, CAN_ID_HEALTH_STATUS, CAN_ID_FAULT_STATUS, CAN_ID_EVENT_NOTICE,
+    CAN_ID_FAULT_SNAPSHOT_META, CAN_ID_FAULT_SNAPSHOT_DATA,
+    FAULT_SNAPSHOT_CTRL_SUBCMDS,
     UNUSED_DOF,
+    decode_event_notice, decode_fault_status, decode_health_status_counters,
+    decode_health_status_summary, decode_fault_snapshot_meta, decode_fault_snapshot_chunk,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +75,18 @@ def _decode_tx(arb_id: int, data: bytes) -> str:
         sub_names = {0x00: "DISABLE", 0x01: "ENABLE", 0x02: "WATCHDOG"}
         sub = sub_names.get(sub_cmd, f"sub=0x{sub_cmd:02X}")
         return f"IMPEDANCE_CTRL joint={joint_id} {sub} param={param}"
+
+    if arb_id == CAN_ID_FAULT_SNAPSHOT_CTRL and len(data) >= 8:
+        sub_cmd = data[0]
+        joint_id = data[1]
+        snapshot_id = data[2]
+        args = list(data[3:7])
+        seq = data[7]
+        sub_name = FAULT_SNAPSHOT_CTRL_SUBCMDS.get(sub_cmd, f"sub=0x{sub_cmd:02X}")
+        return (
+            f"FAULT_SNAPSHOT_CTRL joint={joint_id} {sub_name} snapshot={snapshot_id} "
+            f"args={args} seq={seq}"
+        )
 
     return f"0x{arb_id:03X} [{data.hex(' ')}]"
 
@@ -190,6 +206,83 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
                     f"τA={tau_a * 4} τB={tau_b * 4}{flag_str}",
                     True)
         return f"JOINT_STATE j={joint_id} [{data.hex(' ')}]", True
+
+    # Health status (1 Hz)
+    if CAN_ID_HEALTH_STATUS <= arb_id < CAN_ID_HEALTH_STATUS + 16:
+        joint_id = arb_id - CAN_ID_HEALTH_STATUS
+        if len(data) >= 8:
+            frame_kind = data[0] & 0xC0
+            if frame_kind == 0x00:
+                summary = decode_health_status_summary(data, joint_id)
+                return (
+                    f"HEALTH_SUMMARY j={joint_id} seq={summary.seq} phase={summary.phase_name} "
+                    f"reboot={summary.reboot_reason_name} uptime={summary.uptime_s}s "
+                    f"epoch={summary.fault_epoch}",
+                    False,
+                )
+            if frame_kind == 0x40:
+                counters = decode_health_status_counters(data, joint_id)
+                return (
+                    f"HEALTH_COUNTERS j={joint_id} seq={counters.seq} "
+                    f"can=({counters.host_can_tx_error_count},{counters.host_can_rx_error_count},"
+                    f"{counters.motor_can_tx_error_count}) overrun={counters.loop_overrun_count} "
+                    f"wdg={counters.watchdog_trip_count}",
+                    False,
+                )
+        return f"HEALTH j={joint_id} [{data.hex(' ')}]", False
+
+    # Fault status
+    if CAN_ID_FAULT_STATUS <= arb_id < CAN_ID_FAULT_STATUS + 16:
+        joint_id = arb_id - CAN_ID_FAULT_STATUS
+        if len(data) >= 8:
+            fault = decode_fault_status(data, joint_id)
+            return (
+                f"FAULT_STATUS j={joint_id} seq={fault.seq} active={fault.active_fault_names} "
+                f"latched={fault.latched_fault_names} primary={fault.primary_fault_name} "
+                f"src={fault.source_name}",
+                False,
+            )
+        return f"FAULT_STATUS j={joint_id} [{data.hex(' ')}]", False
+
+    # Event notice
+    if CAN_ID_EVENT_NOTICE <= arb_id < CAN_ID_EVENT_NOTICE + 16:
+        joint_id = arb_id - CAN_ID_EVENT_NOTICE
+        if len(data) >= 8:
+            event = decode_event_notice(data, joint_id)
+            return (
+                f"EVENT_NOTICE j={joint_id} seq={event.event_seq} {event.event_name} "
+                f"sev={event.severity_name} src={event.source_kind}"
+                + (
+                    f":{event.source_index_value}"
+                    if event.source_index_value is not None
+                    else ""
+                ),
+                False,
+            )
+        return f"EVENT_NOTICE j={joint_id} [{data.hex(' ')}]", False
+
+    if CAN_ID_FAULT_SNAPSHOT_META <= arb_id < CAN_ID_FAULT_SNAPSHOT_META + 16:
+        joint_id = arb_id - CAN_ID_FAULT_SNAPSHOT_META
+        if len(data) >= 8:
+            meta = decode_fault_snapshot_meta(data, joint_id)
+            return (
+                f"FAULT_SNAPSHOT_META j={joint_id} snapshot={meta.snapshot_id} "
+                f"present={meta.snapshot_present} chunks={meta.total_chunks} "
+                f"bytes={meta.payload_bytes} freeze={meta.freeze_event_name}",
+                False,
+            )
+        return f"FAULT_SNAPSHOT_META j={joint_id} [{data.hex(' ')}]", False
+
+    if CAN_ID_FAULT_SNAPSHOT_DATA <= arb_id < CAN_ID_FAULT_SNAPSHOT_DATA + 16:
+        joint_id = arb_id - CAN_ID_FAULT_SNAPSHOT_DATA
+        if len(data) >= 8:
+            chunk = decode_fault_snapshot_chunk(data, joint_id)
+            return (
+                f"FAULT_SNAPSHOT_DATA j={joint_id} snapshot={chunk.snapshot_id} "
+                f"chunk={chunk.chunk_index}",
+                False,
+            )
+        return f"FAULT_SNAPSHOT_DATA j={joint_id} [{data.hex(' ')}]", False
 
     # Unknown
     hex_data = data.hex(" ") if data else ""

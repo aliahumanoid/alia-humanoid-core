@@ -103,6 +103,14 @@ class StartupFSM:
         try:
             all_ready_on_entry = self._all_joints_ready(config, telemetry)
             recovering_after_estop = all_ready_on_entry and safety.estop_latched
+            self._assert_no_blocking_diagnostics(
+                config,
+                telemetry,
+                safety,
+                mode="prestart",
+                allow_estop_recovery=recovering_after_estop,
+                context="Startup precheck",
+            )
             await self._startup(can_bus, config, telemetry)
 
             # After a host-side E-stop the firmware keeps announcing ready=True,
@@ -113,6 +121,15 @@ class StartupFSM:
 
             await self._stream(can_bus, config, telemetry)
             await self._init_gains(can_bus, config, telemetry, safety)
+            await asyncio.sleep(0.15)
+            self._assert_no_blocking_diagnostics(
+                config,
+                telemetry,
+                safety,
+                mode="movement",
+                allow_estop_recovery=False,
+                context="Movement enable",
+            )
 
             if recovering_after_estop and config.startup_recovery_settle_s > 0.0:
                 await self._settle_current_pose(
@@ -133,6 +150,15 @@ class StartupFSM:
                 return True
 
             await self._home(can_bus, config, telemetry)
+            await asyncio.sleep(0.15)
+            self._assert_no_blocking_diagnostics(
+                config,
+                telemetry,
+                safety,
+                mode="movement",
+                allow_estop_recovery=False,
+                context="Homing completion",
+            )
 
             self._set_state(FSMState.READY, "All joints at home position")
             safety.clear_estop_latch()
@@ -150,6 +176,27 @@ class StartupFSM:
             if state is None or state.announce is None or not state.announce.ready:
                 return False
         return True
+
+    @staticmethod
+    def _assert_no_blocking_diagnostics(
+        config: ControllerConfig,
+        telemetry: TelemetryManager,
+        safety: SafetyManager,
+        *,
+        mode: str,
+        allow_estop_recovery: bool,
+        context: str,
+    ) -> None:
+        blockers = safety.diagnostic_blockers(
+            telemetry,
+            joint_keys=config.joints.keys(),
+            mode=mode,
+            allow_estop_recovery=allow_estop_recovery,
+        )
+        if blockers:
+            raise StartupError(
+                f"{context} blocked by diagnostics: {safety.format_diagnostic_blockers(blockers)}"
+            )
 
     async def _recover_ready_joints_after_estop(self, can_bus: CanBus,
                                                 config: ControllerConfig) -> None:

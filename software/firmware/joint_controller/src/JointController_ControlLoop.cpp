@@ -685,6 +685,7 @@ bool JointController::executeControlLoop() {
                                               : getImpedanceHoldReference(dof);
         freezeImpedanceToLocalHold(dof, q_curr_wd, t_now, true);
         cur_dof_state = DofState::HOLDING;
+        diag_note_watchdog_timeout(dof, elapsed);
         LOG_C1_WARN("[IMPEDANCE] DOF" + String(dof) + " watchdog timeout (" +
                     String(elapsed) + "ms > " + String((uint32_t)impedance_watchdog_ms) +
                     "ms) → LOCAL HOLD at " + String(q_curr_wd, 2) +
@@ -1141,6 +1142,7 @@ bool JointController::executeControlLoop() {
           // Safety violation detected - stop all motors immediately
           stopAllMotors();
           LOG_C1_ERROR("[Safety] MOVEMENT STOPPED: " + safety_message);
+          diag_note_safety_violation(dof, safety_message);
 
           float hold_ref = dof_data.valid[dof] ? q_curr : getImpedanceHoldReference(dof);
           if (impedance_active) {
@@ -1786,6 +1788,7 @@ bool JointController::executeControlLoop() {
     bool invalid_B = (theta_B_curr < -100000.0f || theta_B_curr > 100000.0f || isnan(theta_B_curr));
     
     if (invalid_A || invalid_B) {
+      diag_note_encoder_invalid(dof);
       static uint32_t last_invalid_log = 0;
       if (millis() - last_invalid_log > 100) { // Log max every 100ms
         LOG_C1_ERROR("[Control] DOF " + String(dof) + " INVALID CAN READ: A=" + 
@@ -2546,7 +2549,11 @@ bool JointController::executeControlLoop() {
     
     // Exponential moving average (α = 0.1 for smoothing)
     cycle_time_us_avg = (cycle_time_us_avg * 9 + cycle_time_us_last) / 10;
-    
+
+    if (cycle_time_us_last > inner_loop_period_us) {
+      diag_note_loop_overrun();
+    }
+
     // Log only when over budget (every 5 seconds = 2500 cycles @ 500Hz)
     // This avoids logging overhead during normal operation
     static uint16_t profiling_log_counter = 0;

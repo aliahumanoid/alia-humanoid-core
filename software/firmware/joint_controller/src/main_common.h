@@ -189,6 +189,19 @@ struct StartupStatusEvent {
 #define STARTUP_EVENT_QUEUE_DEPTH 8
 extern queue_t startup_event_queue;
 
+// Diagnostic event queue (Core1 producers → Core1 CAN sender)
+struct DiagnosticEventNoticePending {
+  uint8_t event_code;
+  uint8_t flags;
+  uint8_t source_kind;
+  uint8_t source_index;
+  uint8_t detail0;
+  uint8_t detail1;
+};
+
+#define DIAG_EVENT_QUEUE_DEPTH 16
+extern queue_t diag_event_notice_queue;
+
 // ============================================================================
 // CONTROL LOOP TIMING (configurable)
 // ============================================================================
@@ -504,6 +517,69 @@ extern RetensionProbeResultData retension_probe_result_data[MAX_DOFS];
 // Reset session-local diagnostics (proposed_trim, EMA, samples) for a DOF.
 // Defined in JointController_ControlLoop.cpp, callable from core1 E-Stop path.
 void resetDiagHoldState(uint8_t dof);
+
+// ============================================================================
+// DIAGNOSTIC PLANE (CAN-first observability)
+// ============================================================================
+
+enum DiagFaultCode : uint8_t {
+  DIAG_FAULT_HOST_CAN_WARN = 0,
+  DIAG_FAULT_MOTOR_CAN_WARN = 1,
+  DIAG_FAULT_LOOP_OVERRUN = 2,
+  DIAG_FAULT_HOST_WATCHDOG_TIMEOUT = 3,
+  DIAG_FAULT_ENCODER_INVALID = 4,
+  DIAG_FAULT_ENCODER_STALE = 5,
+  DIAG_FAULT_MOTOR_TIMEOUT = 6,
+  DIAG_FAULT_SAFETY_LIMIT = 7,
+  DIAG_FAULT_MAPPING_LIMIT = 8,
+  DIAG_FAULT_MOTOR_RANGE = 9,
+  DIAG_FAULT_STARTUP_FAILED = 10,
+  DIAG_FAULT_CONFIG_INVALID = 11,
+  DIAG_FAULT_FLASH_ERROR = 12,
+  DIAG_FAULT_BAD_COMMAND = 13,
+  DIAG_FAULT_ESTOP_LATCHED = 14,
+  DIAG_FAULT_INTERNAL_ERROR = 15,
+};
+
+enum DiagEventCode : uint8_t {
+  DIAG_EVENT_BOOT_COMPLETE = 0x01,
+  DIAG_EVENT_READY_ASSERTED = 0x02,
+  DIAG_EVENT_READY_CLEARED = 0x03,
+  DIAG_EVENT_STARTUP_BEGIN = 0x04,
+  DIAG_EVENT_STARTUP_COMPLETE = 0x05,
+  DIAG_EVENT_STARTUP_FAILED = 0x06,
+  DIAG_EVENT_WATCHDOG_WARNING = 0x07,
+  DIAG_EVENT_WATCHDOG_TIMEOUT = 0x08,
+  DIAG_EVENT_ESTOP_ASSERTED = 0x09,
+  DIAG_EVENT_ESTOP_CLEARED = 0x0A,
+  DIAG_EVENT_FAULT_SET = 0x0B,
+  DIAG_EVENT_FAULT_CLEARED = 0x0C,
+  DIAG_EVENT_ENCODER_INVALID = 0x0D,
+  DIAG_EVENT_MOTOR_TIMEOUT = 0x0E,
+  DIAG_EVENT_LOOP_OVERRUN_BURST = 0x0F,
+  DIAG_EVENT_SNAPSHOT_FROZEN = 0x10,
+  DIAG_EVENT_SNAPSHOT_AVAILABLE = 0x11,
+};
+
+enum DiagEventSourceKind : uint8_t {
+  DIAG_SRC_GLOBAL = 0,
+  DIAG_SRC_DOF = 1,
+  DIAG_SRC_MOTOR = 2,
+  DIAG_SRC_HOST_CAN = 3,
+  DIAG_SRC_MOTOR_CAN = 4,
+  DIAG_SRC_STARTUP = 5,
+  DIAG_SRC_CONFIG = 6,
+  DIAG_SRC_SAFETY = 7,
+};
+
+void diag_init_boot_reason();
+void diag_set_startup_in_progress(bool active);
+void diag_set_estop_latched(bool latched);
+void diag_note_watchdog_timeout(uint8_t dof, uint32_t elapsed_ms);
+void diag_note_loop_overrun();
+void diag_note_encoder_invalid(uint8_t dof);
+void diag_note_safety_violation(uint8_t dof, const String &message);
+void diag_note_bad_command(uint8_t source_kind, uint8_t source_index);
 
 // ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)

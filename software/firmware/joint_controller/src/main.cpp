@@ -160,6 +160,9 @@ volatile uint16_t can_auto_start_duration = 0;
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 queue_t startup_event_queue;
 
+// Diagnostic event queue (Core1 producers, Core1 CAN sender)
+queue_t diag_event_notice_queue;
+
 // PID diagnostics for tuning (updated by Core1 control loop)
 PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
@@ -687,6 +690,10 @@ void setup() {
 
   // Startup event queue (Core0 → Core1 for CAN status frames)
   queue_init(&startup_event_queue, sizeof(StartupStatusEvent), STARTUP_EVENT_QUEUE_DEPTH);
+  queue_init(&diag_event_notice_queue, sizeof(DiagnosticEventNoticePending), DIAG_EVENT_QUEUE_DEPTH);
+
+  // Initialize diagnostic boot metadata after the queues are ready.
+  diag_init_boot_reason();
 
   // Core1 log queue already initialized early in setup (before safety_init)
 
