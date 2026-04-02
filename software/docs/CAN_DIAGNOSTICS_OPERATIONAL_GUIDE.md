@@ -153,6 +153,10 @@ Goal:
 - confirm that CAN-only bring-up is diagnosable without serial
 - confirm that one controller writes usable health and event history
 
+Primary operator checklist:
+
+- `software/docs/JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md`
+
 Checks:
 
 - `HEALTH_STATUS`, `FAULT_STATUS`, and `EVENT_NOTICE` visible end-to-end
@@ -209,5 +213,7 @@ For each validation session, preserve:
   - authoritative wire-level CAN architecture and protocol documentation
 - `software/docs/HARDWARE_VALIDATION_ROADMAP.md`
   - stage-by-stage hardware bring-up gates
+- `software/docs/JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md`
+  - first real hardware validation checklist for CAN-first diagnostics
 - `software/docs/SET_IMPEDANCE_OPERATIONAL_GUIDE.md`
   - motion-command semantics for the impedance path

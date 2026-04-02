@@ -163,6 +163,8 @@
 - **L3.5 protocol freeze completato**
 - Jetson controller software funzionante per invio comandi impedance
 - Almeno knee + ankle controller flashati e funzionanti singolarmente
+- Single-controller CAN-first bring-up eseguito con checklist:
+  [JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md](software/docs/JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md)
 
 **Metriche da raccogliere:**
 - Loop rate effettivo del Jetson (target 50Hz)
