@@ -14,6 +14,11 @@ Current Status
 - Repository structure consolidated for public development
 - Build system and tooling fully configured
 
+Operational docs
+- `docs/CAN_SYSTEM_ARCHITECTURE.md` - wire-level host↔controller protocol and transport architecture
+- `docs/CAN_DIAGNOSTICS_OPERATIONAL_GUIDE.md` - CAN-first observability workflow for integrated experiments
+- `docs/SET_IMPEDANCE_OPERATIONAL_GUIDE.md` - operational semantics for impedance commands
+
 Dev Runner
 
 Use the Makefile to switch between running the host app and building firmware.

@@ -96,6 +96,8 @@ The system accepts serial commands from a host (PC/Raspberry Pi). See `src/comma
 - `SET_PID`, `GET_PID`, `SET_PID_OUTER`, `GET_PID_OUTER`
 Notes:
 - Lines that start with `EVT:` are events parsed by the host — do not rename without versioned Decision.
+- In integrated experiments, structured CAN diagnostics are the authoritative observability path;
+  USB serial remains service-only. See `software/docs/CAN_DIAGNOSTICS_OPERATIONAL_GUIDE.md`.
 
 ### Flash & Persistence
 - Compact linear equations and limits stored in flash

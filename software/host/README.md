@@ -10,6 +10,7 @@ Web-based control interface for the Alia humanoid joint controller system. This 
 - **Multi-DOF Movements**: Coordinated movements with different path types and synchronization strategies
 - **Encoder Testing**: Real-time encoder data streaming and visualization
 - **Serial Management**: Multi-device serial communication with automatic port detection
+- **Structured CAN Diagnostics**: Per-joint health, fault, event, and snapshot history persisted as JSONL
 
 ## Quick Start
 
@@ -35,11 +36,15 @@ The host application automatically loads joint definitions from `software/joint_
 
 See `software/docs/JOINT_CONFIG_SYNC.md` for details.
 
+For integrated experiments and Jetson bring-up, see
+`software/docs/CAN_DIAGNOSTICS_OPERATIONAL_GUIDE.md`.
+
 ## Project Structure
 
 - `main.py` - Application entry point
 - `config.py` - Configuration (loaded from joint_config.json)
 - `routes.py` - Flask API routes
+- `diagnostic_history.py` - JSONL persistence for structured CAN diagnostics
 - `serial_handler.py` - Serial protocol implementation
 - `serial_manager.py` - Multi-device serial management
 - `templates/` - HTML templates (Alia Joint Controller UI)
@@ -90,6 +95,7 @@ Use PlatformIO extension in VS Code:
 ## Notes
 
 - Logs are written under `logs/` (gitignored)
+- Structured diagnostic histories are written under `logs/diagnostic_history/` (gitignored)
 - `mapping_data/` stores auto-mapping results (gitignored)
 - `can_config.json` is created after a successful CAN connection and remains local (gitignored)
 - Dev server uses `allow_unsafe_werkzeug=True` for Flask-SocketIO compatibility (local dev only)
