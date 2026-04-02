@@ -10,7 +10,7 @@
 This directory contains authoritative technical specifications for all mechanical subsystems of the Alia humanoid robot.
 
 **Purpose**:
-- Internal documentation consistency
+- Documentation consistency across public specs and implementation
 - Public technical reference and content creation
 - Future collaborator onboarding
 - BOM management

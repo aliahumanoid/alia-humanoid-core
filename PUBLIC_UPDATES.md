@@ -76,7 +76,7 @@ This is the first of 8 planned joint design logs documenting the full humanoid r
 
 **License:** Hardware under CC BY-NC-ND 4.0, Software under MIT
 
-**Status:** Phase 0 internal validation — right ankle prototype functional, left ankle + foot in development
+**Status:** Phase 0 active validation — right ankle prototype functional, left ankle + foot in development
 
 ---
 

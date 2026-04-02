@@ -2,8 +2,6 @@
 
 Web-based control interface for the Alia humanoid joint controller system. This application provides real-time monitoring, PID tuning, auto-mapping, and multi-DOF movement control.
 
-> **Note**: This application was migrated and integrated from a private motion-suite repository.
-
 ## Features
 
 - **Real-time Joint Control**: Web UI for controlling multiple joints with up to 3 DOF each
@@ -60,11 +58,9 @@ make run MODE=host
 ```
 This automatically creates venv, installs dependencies, and runs the server.
 
-### VS Code Launch (One-Click)
+### VS Code
 
-1. Open the multi-root workspace: `alia-multi-root.code-workspace`
-2. Use debug configuration: **Host (core): Debug Flask**
-3. PreLaunchTask prepares venv + dependencies automatically
+Open the repository root or `software/host/`, select the local `.venv` interpreter, and run `main.py`.
 
 ### Firmware Builds (Optional)
 

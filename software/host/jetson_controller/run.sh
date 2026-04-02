@@ -7,7 +7,6 @@
 #   ./run.sh              # both panels (CAN TUI + Serial monitor)
 #   ./run.sh --no-serial  # CAN TUI only
 #   ./run.sh --serial     # Serial monitor only
-#   ./run.sh --joint ankle_right
 #   ./run.sh --no-serial --preflight-auto --joint knee_right
 # ────────────────────────────────────────────────────────────────────
 
@@ -50,11 +49,11 @@ Launcher options:
   -h, --help    Show this help
 
 Pass-through:
-  Remaining arguments are forwarded to the CAN controller.
-  In --serial mode, remaining arguments are forwarded to the serial monitor.
+  Remaining arguments are forwarded only in explicit single-mode launches.
+  Use --no-serial to target the CAN controller.
+  Use --serial to target the serial monitor.
   Examples:
     ./run.sh --no-serial --joint ankle_right
-    ./run.sh --joint knee_right --joint ankle_right
     ./run.sh --no-serial --config /path/to/controller.yaml
     ./run.sh --no-serial --preflight-auto --joint knee_right
     ./run.sh --no-serial --preflight-serial /dev/cu.usbmodem21301 --joint knee_right
@@ -93,6 +92,11 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$MODE" = "both" ] && [ "${#APP_ARGS[@]}" -gt 0 ]; then
+    echo "error: pass-through arguments require --no-serial or --serial" >&2
+    exit 2
+fi
 
 # --- Ensure venv & deps ---
 cd "$HOST_DIR"

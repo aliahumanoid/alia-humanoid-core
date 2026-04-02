@@ -55,6 +55,15 @@ This asserts you have the right to contribute under the project license ([Develo
 
 **Why DCO?** It ensures clean licensing and protects both you and the project. It's a simple line added automatically with `-s` flag.
 
+## Commit Attribution Policy
+
+Commits in this repository must be attributed only to human maintainers or approved project identities.
+
+- Do not add `Co-authored-by` trailers for AI tools, coding assistants, editors, or agent products
+- This includes systems such as Cursor, Claude, ChatGPT, Codex, or similar tools
+- Tool usage can be acknowledged in pull request descriptions, issues, or documentation when useful, but not in commit authorship metadata
+- Before pushing, check commit messages for unintended `Co-authored-by` trailers and remove them if present
+
 ---
 
 ## Branches

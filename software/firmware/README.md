@@ -1,6 +1,6 @@
 # Firmware Projects
 
-Embedded firmware for the Alia humanoid joint control system, migrated and integrated from a private motion-suite repository.
+Embedded firmware for the Alia humanoid joint control system, maintained as part of the public repository.
 
 ## Projects
 

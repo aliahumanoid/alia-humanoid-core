@@ -11,7 +11,7 @@ software/
 
 Current Status
 - Firmware and host application integrated and operational
-- Migration from private repository completed
+- Repository structure consolidated for public development
 - Build system and tooling fully configured
 
 Dev Runner

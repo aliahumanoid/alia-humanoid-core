@@ -1,6 +1,6 @@
 # Tendon Specifications — Alia Humanoid
 
-> **Status**: Phase 0 Internal Reference  
+> **Status**: Phase 0 Reference  
 > **Last Updated**: 2026-03-07  
 > **Robot**: H = 175 cm, m = **25 kg**
 

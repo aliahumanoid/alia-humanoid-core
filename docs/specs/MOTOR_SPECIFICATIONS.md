@@ -1,6 +1,6 @@
 # Motor Specifications — Alia Humanoid
 
-> **Status**: Phase 0 Internal Reference  
+> **Status**: Phase 0 Reference  
 > **Last Updated**: 2025-12-16  
 > **Note**: Brand names disclosed in Phase 1 BOM release
 
@@ -174,4 +174,3 @@ In Phase 1, the following will be released:
 - Version: 1.0
 - Source: project-specs-master.md (sections 1.2 Motor Specifications)
 - Next Review: Phase 1 release
-

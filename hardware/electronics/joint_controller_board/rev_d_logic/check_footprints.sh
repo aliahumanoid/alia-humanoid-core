@@ -7,9 +7,18 @@ PCB_FILE="joint_controller_board_rev_d_logic.kicad_pcb"
 BOM_FILE="BOM_fabrication_combined.csv"
 XML_FILE="rev_d_logic_current.xml"
 
-KICAD_CLI="/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
-if [[ ! -x "$KICAD_CLI" ]]; then
-  echo "ERROR: kicad-cli not found at $KICAD_CLI"
+if [[ -n "${KICAD_CLI:-}" ]]; then
+  :
+elif command -v kicad-cli >/dev/null 2>&1; then
+  KICAD_CLI="$(command -v kicad-cli)"
+elif [[ -x "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli" ]]; then
+  KICAD_CLI="/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+else
+  KICAD_CLI=""
+fi
+
+if [[ -z "$KICAD_CLI" || ! -x "$KICAD_CLI" ]]; then
+  echo "ERROR: kicad-cli not found. Set KICAD_CLI or add it to PATH."
   exit 2
 fi
 
