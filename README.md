@@ -85,7 +85,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 
 ---
 
-## Current Status (Phase 0 — March 2026)
+## Current Status (Phase 0 — April 2026)
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
@@ -238,6 +238,6 @@ This asserts compliance with the [Developer Certificate of Origin](https://devel
 
 ---
 
-**Project Status:** Phase 0 active development | Last updated: March 2026
+**Project Status:** Phase 0 active development | Last updated: April 2026
 
 ---

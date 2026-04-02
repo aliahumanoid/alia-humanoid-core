@@ -29,3 +29,11 @@ cd joint_controller && ~/.platformio/penv/bin/pio run
 ```
 
 See `joint_controller/README.md` for detailed build instructions, protocol documentation, and safety considerations.
+
+## Third-Party Libraries
+
+| Library | License | Source |
+|---------|---------|--------|
+| **mcp_can** v1.5.1 | LGPL-3.0 | [coryjfowler/MCP_CAN_lib](https://github.com/coryjfowler/MCP_CAN_lib) |
+
+The `mcp_can` library is vendored in `joint_controller/lib/mcp_can/` with its original license file.
