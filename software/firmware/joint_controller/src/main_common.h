@@ -579,6 +579,7 @@ void diag_set_startup_in_progress(bool active);
 void diag_set_estop_latched(bool latched);
 void diag_note_watchdog_timeout(uint8_t dof, uint32_t elapsed_ms);
 void diag_note_loop_overrun();
+void diag_note_motor_timeout(uint8_t dof, uint8_t motor_index);
 void diag_note_encoder_invalid(uint8_t dof);
 void diag_note_safety_violation(uint8_t dof, SafetyViolationType violation_type);
 void diag_note_bad_command(uint8_t source_kind, uint8_t source_index);

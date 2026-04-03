@@ -490,10 +490,12 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
 
   if (config.dofs[dof_index].drive_type == DRIVE_DIRECT_DRIVE) {
     LKM_Motor *direct_motor = nullptr;
+    int direct_motor_idx = -1;
     for (int i = 0; i < config.motor_count; i++) {
       if (config.motors[i].dof_index == dof_index &&
           config.motors[i].role == MOTOR_ROLE_DIRECT) {
         direct_motor = motors[i];
+        direct_motor_idx = i;
         break;
       }
     }
@@ -506,6 +508,8 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
     float reference_angle = config.dofs[dof_index].zero_mapping.zero_angle_offset;
     LKM_Motor::MultiAngleData current_angle = direct_motor->getSingleAngleSync();
     if (isnan(current_angle.angle)) {
+      diag_note_motor_timeout(dof_index,
+                              direct_motor_idx >= 0 ? static_cast<uint8_t>(direct_motor_idx) : 0xFF);
       LOG_C1_ERROR("Set Reference failed: no single-turn angle from direct-drive motor DOF " +
                    String(dof_index));
       return false;

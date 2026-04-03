@@ -44,6 +44,9 @@ static float expected_velocity_cache[MAX_DOFS] = {0}; // Cached expected velocit
 static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 static float direct_drive_last_angle[MAX_DOFS] = {0};
 static uint32_t direct_drive_last_update_us[MAX_DOFS] = {0};
+static uint32_t direct_drive_next_probe_ms[MAX_DOFS] = {0};
+static const uint16_t DIRECT_DRIVE_TIMEOUT_BACKOFF_MS = 20;
+static const uint16_t DIRECT_DRIVE_UNREFERENCED_PROBE_MS = 250;
 
 // === SLACK MONITOR: delta_theta bias tracking during HOLDING ===
 // Exponential moving average of delta_theta while in HOLDING state.
@@ -499,11 +502,26 @@ bool JointController::executeControlLoop() {
       continue;
     }
 
+    // Do not spend the 2 ms control-loop budget on blocking direct-drive
+    // CAN reads while the DOF is idle. Idle probing is service/startup work,
+    // not real-time control work, and on a no-motor bench it was the source
+    // of repeated LOOP_OVERRUN bursts.
+    if (dof_state[dof] == DofState::IDLE) {
+      dof_snapshot.valid[dof] = false;
+      dof_snapshot.velocities[dof] = 0.0f;
+      direct_drive_last_update_us[dof] = 0;
+      direct_drive_next_probe_ms[dof] = 0;
+      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      continue;
+    }
+
     LKM_Motor *direct_motor = nullptr;
+    int direct_motor_idx = -1;
     for (int i = 0; i < config.motor_count; i++) {
       if (config.motors[i].dof_index == dof &&
           config.motors[i].role == MOTOR_ROLE_DIRECT) {
         direct_motor = motors[i];
+        direct_motor_idx = i;
         break;
       }
     }
@@ -512,18 +530,44 @@ bool JointController::executeControlLoop() {
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
       direct_drive_last_update_us[dof] = 0;
+      direct_drive_next_probe_ms[dof] = 0;
       updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
       continue;
     }
 
-    LKM_Motor::MultiAngleData raw_angle = direct_motor->getSingleAngleSync();
-    if (isnan(raw_angle.angle) || !_saved_offsets[dof].valid) {
+    const uint32_t now_ms = millis();
+    if (direct_drive_next_probe_ms[dof] != 0 &&
+        (int32_t)(now_ms - direct_drive_next_probe_ms[dof]) < 0) {
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
       direct_drive_last_update_us[dof] = 0;
       updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
       continue;
     }
+
+    const bool have_saved_reference = _saved_offsets[dof].valid;
+    LKM_Motor::MultiAngleData raw_angle = direct_motor->getSingleAngleSync();
+    if (isnan(raw_angle.angle)) {
+      diag_note_motor_timeout(dof, direct_motor_idx >= 0 ? static_cast<uint8_t>(direct_motor_idx) : 0xFF);
+      direct_drive_next_probe_ms[dof] =
+          now_ms + (have_saved_reference ? DIRECT_DRIVE_TIMEOUT_BACKOFF_MS
+                                         : DIRECT_DRIVE_UNREFERENCED_PROBE_MS);
+      dof_snapshot.valid[dof] = false;
+      dof_snapshot.velocities[dof] = 0.0f;
+      direct_drive_last_update_us[dof] = 0;
+      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      continue;
+    }
+
+    if (!have_saved_reference) {
+      direct_drive_next_probe_ms[dof] = now_ms + DIRECT_DRIVE_UNREFERENCED_PROBE_MS;
+      dof_snapshot.valid[dof] = false;
+      dof_snapshot.velocities[dof] = 0.0f;
+      direct_drive_last_update_us[dof] = 0;
+      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      continue;
+    }
+    direct_drive_next_probe_ms[dof] = 0;
 
     const float calibrated_angle = raw_angle.angle - _saved_offsets[dof].agonist_offset;
 

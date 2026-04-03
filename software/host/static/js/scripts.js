@@ -947,10 +947,7 @@ $(document).ready(function() {
         
         // Send command to select joint and load PIDs
         sendCommand('select-joint', { joint: joint });
-        setTimeout(() => {
-            requestOuterPidForDof(0);
-        }, 150);
-        
+
         // Show expected mapping grid for new joint
         showExpectedMappingGrid(joint);
     });
@@ -2266,10 +2263,14 @@ function discoverJoints() {
                     refreshBoardIdentity({ showStatus: false });
                 }
                 
-                // Load PID and configuration for discovered joint
-                setTimeout(() => {
-                    sendCommand('select-joint', { joint: firstJoint || currentJoint });
-                }, 200);
+                // If the dropdown actually changed, the change handler already
+                // refreshes board identity and requests PIDs for the selected joint.
+                // Only force a refresh when discovery resolves to the already-selected joint.
+                if (!firstJoint || firstJoint === currentJoint) {
+                    setTimeout(() => {
+                        sendCommand('select-joint', { joint: firstJoint || currentJoint });
+                    }, 200);
+                }
                 
                 // Build discovery message
                 let msg = `Discovery complete: found ${count} joint(s):\n`;

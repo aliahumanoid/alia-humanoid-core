@@ -149,6 +149,7 @@ static constexpr uint32_t DIAG_HEALTH_PERIOD_MS = 1000;
 static constexpr uint32_t DIAG_FAULT_REPEAT_MS = 1000;
 static constexpr uint32_t DIAG_ENCODER_INVALID_HOLD_MS = 250;
 static constexpr uint32_t DIAG_LOOP_OVERRUN_HOLD_MS = 1000;
+static constexpr uint32_t DIAG_MOTOR_TIMEOUT_HOLD_MS = 1000;
 static constexpr uint32_t DIAG_BAD_COMMAND_HOLD_MS = 500;
 static constexpr uint8_t DIAG_CAN_WARN_THRESHOLD = 32;
 static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 1;
@@ -205,6 +206,7 @@ static uint32_t diag_last_health_status_ms = 0;
 static uint32_t diag_last_fault_status_ms = 0;
 static bool diag_force_fault_status_send = true;
 static uint32_t diag_last_loop_overrun_event_ms = 0;
+static uint32_t diag_last_motor_timeout_event_ms[MAX_MOTORS] = {};
 static uint32_t diag_last_host_can_warn_sample_ms = 0;
 static uint8_t diag_last_host_can_tx_error_count = 0;
 static uint8_t diag_last_host_can_rx_error_count = 0;
@@ -296,7 +298,9 @@ static uint8_t diagEventSeverityForFault(uint8_t fault_code) {
 
 static uint8_t diagSourceKindForFault(uint8_t fault_code, uint8_t source_id) {
   if (source_id <= 0x02) return DIAG_SRC_DOF;
-  if (source_id >= 0x80 && source_id <= 0x83) return DIAG_SRC_MOTOR;
+  if (source_id >= 0x80 && source_id < static_cast<uint8_t>(0x80 + MAX_MOTORS)) {
+    return DIAG_SRC_MOTOR;
+  }
   if (source_id == 0xE0) return DIAG_SRC_HOST_CAN;
   if (source_id == 0xE1) return DIAG_SRC_MOTOR_CAN;
 
@@ -320,7 +324,9 @@ static uint8_t diagSourceKindForFault(uint8_t fault_code, uint8_t source_id) {
 
 static uint8_t diagSourceIndexForEvent(uint8_t source_id) {
   if (source_id <= 0x02) return source_id;
-  if (source_id >= 0x80 && source_id <= 0x83) return source_id - 0x80;
+  if (source_id >= 0x80 && source_id < static_cast<uint8_t>(0x80 + MAX_MOTORS)) {
+    return source_id - 0x80;
+  }
   return 0xFF;
 }
 
@@ -1008,7 +1014,8 @@ static uint8_t diagSourceIdForEventSource(uint8_t source_kind, uint8_t source_in
     case DIAG_SRC_DOF:
       return source_index;
     case DIAG_SRC_MOTOR:
-      return (source_index == 0xFF) ? 0xFF : static_cast<uint8_t>(0x80 + source_index);
+      if (source_index == 0xFF || source_index >= MAX_MOTORS) return 0xFF;
+      return static_cast<uint8_t>(0x80 + source_index);
     case DIAG_SRC_HOST_CAN:
       return 0xE0;
     case DIAG_SRC_MOTOR_CAN:
@@ -1089,6 +1096,28 @@ void diag_note_loop_overrun() {
         DIAG_SRC_GLOBAL,
         0xFF,
         diag_loop_overrun_count,
+        diagComputePhaseCode());
+  }
+}
+
+void diag_note_motor_timeout(uint8_t dof, uint8_t motor_index) {
+  const uint8_t source_index = (motor_index < MAX_MOTORS) ? motor_index : 0xFF;
+  const uint8_t source_id = diagSourceIdForEventSource(DIAG_SRC_MOTOR, source_index);
+
+  diagSetTransientFault(DIAG_FAULT_MOTOR_TIMEOUT, source_id, DIAG_MOTOR_TIMEOUT_HOLD_MS, true);
+
+  const uint32_t now_ms = millis();
+  if (motor_index >= MAX_MOTORS ||
+      (now_ms - diag_last_motor_timeout_event_ms[motor_index]) >= DIAG_MOTOR_TIMEOUT_HOLD_MS) {
+    if (motor_index < MAX_MOTORS) {
+      diag_last_motor_timeout_event_ms[motor_index] = now_ms;
+    }
+    diagQueueEvent(
+        DIAG_EVENT_MOTOR_TIMEOUT,
+        diagBuildEventFlags(2, true, false, true, false, true),
+        DIAG_SRC_MOTOR,
+        source_index,
+        dof,
         diagComputePhaseCode());
   }
 }

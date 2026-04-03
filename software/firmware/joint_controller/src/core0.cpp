@@ -1171,7 +1171,7 @@ void core0_main_loop() {
                           }
                         }
 
-                        if (motor_index == 1 || motor_index == 2) {
+                        if (motor_index == 1 || motor_index == 2 || motor_index == 3) {
                           float kp, ki, kd, tau;
                           if (active_joint_controller->getPid(parsed_cmd.dof_index, motor_index, kp, ki, kd, tau)) {
                             SERIAL_COM_LN("EVT:PID:" + String(parsed_cmd.dof_index) + ":" + String(motor_index) + ":" +
@@ -1181,7 +1181,7 @@ void core0_main_loop() {
                             SERIAL_COM_LN("RSP:ERROR: Failed to get PID parameters");
                           }
                         } else {
-                          SERIAL_COM_LN("RSP:ERROR: Invalid or missing motor index (expected 1 or 2)");
+                          SERIAL_COM_LN("RSP:ERROR: Invalid or missing motor index (expected 1, 2, or 3)");
                         }
                       } else {
                         SERIAL_COM_LN("RSP:ERROR: Controller not initialized or invalid DOF");
@@ -1194,7 +1194,7 @@ void core0_main_loop() {
                       // Set PID parameters for specified DOF and motor
                       if (active_joint_controller != nullptr && parsed_cmd.dof_index < MAX_DOFS) {
                         uint8_t motor_index = parsed_cmd.params[0]; // 1=agonist, 2=antagonist
-                        if ((motor_index == 1 || motor_index == 2) && parsed_cmd.param_count >= 5) {
+                        if ((motor_index == 1 || motor_index == 2 || motor_index == 3) && parsed_cmd.param_count >= 5) {
                           float kp  = parsed_cmd.params[1];
                           float ki  = parsed_cmd.params[2];
                           float kd  = parsed_cmd.params[3];

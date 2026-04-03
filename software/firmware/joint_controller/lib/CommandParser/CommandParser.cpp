@@ -61,7 +61,7 @@ bool CommandParser::parseCommand(const char *cmd, ParsedCommand &result) {
   strncpy(result.original_command, cmd, sizeof(result.original_command) - 1);
 
   // Temporary buffers for string tokens
-  char joint_str[16]   = {0};
+  char joint_str[32]   = {0};
   char dof_str[16]     = {0};
   char command_str[32] = {0};
 

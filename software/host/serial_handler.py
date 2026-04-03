@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import serial
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from config import BAUD_RATE, tsample, COMMANDS, JOINTS
 import logging
@@ -55,6 +56,7 @@ class SerialHandler:
         self.listening = threading.Event()
         self.listening.set()
         self.serial_lock = threading.Lock()
+        self.listener_serial_active = threading.Event()
         self.movement_web_data: Dict = {}
         self.joint_status: Dict[str, Any] = {"position": 0, "message": "Ready"}
         self.status_message: List[str] = []
@@ -110,18 +112,40 @@ class SerialHandler:
 
     def pause_listening(self):
         self.listening.clear()  # Suspend listening thread
-        time.sleep(0.001)  # Reduced from 10ms to 1ms
+        deadline = time.time() + 0.25
+        while self.listener_serial_active.is_set() and time.time() < deadline:
+            time.sleep(0.001)
+        time.sleep(0.001)  # Give the listener a final chance to drop the port cleanly
 
     def resume_listening(self):
         self.listening.set()  # Resume listening thread
         time.sleep(0.001)  # Reduced from 10ms to 1ms
+
+    @contextmanager
+    def _exclusive_serial_session(self, timeout: float = 1.0):
+        """
+        Serialize temporary command sessions so they cannot overlap the
+        background listener or each other on the same USB serial device.
+        """
+        self.pause_listening()
+        acquired = self.serial_lock.acquire(timeout=1.0)
+        if not acquired:
+            self.resume_listening()
+            raise TimeoutError(f"Timed out waiting for serial access on {self.serial_port}")
+
+        try:
+            with serial.Serial(self.serial_port, BAUD_RATE, timeout=timeout) as ser:
+                yield ser
+        finally:
+            self.serial_lock.release()
+            self.resume_listening()
 
     def send_serial_command(self, command):
         """
         Legacy method for compatibility - now automatically uses CMD: prefix
         """
         try:
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
+            with self._exclusive_serial_session(timeout=1) as ser:
                 self.send_command_with_prefix(command, ser)
         except serial.SerialException as e:
             error_msg = f"Serial communication error: {e}"
@@ -138,20 +162,29 @@ class SerialHandler:
             try:
                 # Wait here if listening is paused before attempting to open the port
                 self.listening.wait()
+                if not self.listening.is_set():
+                    continue
 
-                with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
-                    while self.listening.is_set():
-                        raw_line = ser.readline()
+                with self.serial_lock:
+                    if not self.listening.is_set():
+                        continue
+                    with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
+                        self.listener_serial_active.set()
+                        try:
+                            while self.listening.is_set():
+                                raw_line = ser.readline()
 
-                        if not raw_line:
-                            continue
+                                if not raw_line:
+                                    continue
 
-                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                                line = raw_line.decode("utf-8", errors="ignore").strip()
 
-                        if not line:
-                            continue
+                                if not line:
+                                    continue
 
-                        self.handle_serial_message(line, ser)
+                                self.handle_serial_message(line, ser)
+                        finally:
+                            self.listener_serial_active.clear()
 
             except serial.SerialException as e:
                 error_msg = f"Serial communication error: {e}"
@@ -162,6 +195,7 @@ class SerialHandler:
                 logger.error(error_msg)
                 self.serial_logger.log_error(error_msg)
             finally:
+                self.listener_serial_active.clear()
                 # If listening has been paused, wait until it is resumed before reopening the port
                 if not self.listening.is_set():
                     self.listening.wait()
@@ -2698,8 +2732,7 @@ class SerialHandler:
                     # Keep information until new test starts, so UI can read last data
                     logger.debug("Last encoder test joint unchanged")
 
-            self.pause_listening()
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
+            with self._exclusive_serial_session(timeout=1) as ser:
                 self.send_command_with_prefix(cmd, ser)
 
                 # If we're stopping a test or mapping command, also send STOP command
@@ -2716,8 +2749,6 @@ class SerialHandler:
         except Exception as e:
             logger.error(f"Error sending command {cmd}: {e}")
             return False
-        finally:
-            self.resume_listening()
 
         return True
 
@@ -2951,9 +2982,7 @@ class SerialHandler:
         matched_line: Optional[str] = None
 
         try:
-            self.pause_listening()
-            time.sleep(0.05)
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
+            with self._exclusive_serial_session(timeout=0.05) as ser:
                 try:
                     ser.reset_input_buffer()
                 except Exception:
@@ -3007,8 +3036,6 @@ class SerialHandler:
                 f"Error sending command {command} with direct capture: {exc}"
             )
             return None
-        finally:
-            self.resume_listening()
 
     def get_board_identity(self) -> Optional[Dict[str, Any]]:
         """
@@ -3083,14 +3110,11 @@ class SerialHandler:
             joint, dof_to_use, COMMANDS["SET_PID"], [motor_type, kp, ki, kd, tau]
         )
         try:
-            self.pause_listening()
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
+            with self._exclusive_serial_session(timeout=1) as ser:
                 self.send_command_with_prefix(cmd, ser)
                 logger.info(f"PID setting sent: CMD:{cmd}")
         except Exception as e:
             logger.error(f"Error setting PID {cmd}: {e}")
-        finally:
-            self.resume_listening()
 
     def set_outer_pid_for_joint_dof(self, joint, dof, kp, ki, kd, stiffness_deg, cascade_influence):
         """Sets outer loop parameters for a specific DOF."""
@@ -3104,14 +3128,11 @@ class SerialHandler:
         )
 
         try:
-            self.pause_listening()
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=1) as ser:
+            with self._exclusive_serial_session(timeout=1) as ser:
                 self.send_command_with_prefix(cmd, ser)
                 logger.info(f"Outer PID setting sent: CMD:{cmd}")
         except Exception as e:
             logger.error(f"Error setting outer PID {cmd}: {e}")
-        finally:
-            self.resume_listening()
 
     def add_cmd_prefix(self, command: str) -> str:
         """
@@ -3202,9 +3223,7 @@ class SerialHandler:
         expected_received = False
 
         try:
-            self.pause_listening()
-            time.sleep(0.05)  # Ensure listener loop releases the serial port
-            with serial.Serial(self.serial_port, BAUD_RATE, timeout=0.05) as ser:
+            with self._exclusive_serial_session(timeout=0.05) as ser:
                 try:
                     ser.reset_input_buffer()
                 except Exception:
@@ -3266,5 +3285,3 @@ class SerialHandler:
                 f"Error sending command {command} with direct response handling: {exc}"
             )
             return False
-        finally:
-            self.resume_listening()
