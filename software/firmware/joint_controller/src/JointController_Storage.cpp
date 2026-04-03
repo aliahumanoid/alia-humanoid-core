@@ -259,7 +259,18 @@ bool JointController::loadLinearEquationsFromFlash() {
 
   LinearEquationsDeviceData equations_data;
   if (!load_linear_equations_data(&equations_data)) {
-    LOG_C1_WARN("No linear equations found in flash - run auto-mapping");
+    bool requires_equations = false;
+    for (int i = 0; i < config.dof_count; i++) {
+      if (config.dofs[i].drive_type != DRIVE_DIRECT_DRIVE) {
+        requires_equations = true;
+        break;
+      }
+    }
+    if (requires_equations) {
+      LOG_C1_WARN("No linear equations found in flash - run auto-mapping");
+    } else {
+      LOG_C1_INFO("No linear equations found in flash - direct-drive-only joint does not require auto-mapping");
+    }
     return false;
   }
 

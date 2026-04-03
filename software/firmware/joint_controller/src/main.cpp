@@ -612,6 +612,17 @@ void setup() {
     // Register controller in global array for core1 access
     active_controllers[ACTIVE_JOINT] = active_joint_controller;
 
+    bool joint_has_tendon_dof = false;
+    bool joint_has_recalc_offset = false;
+    for (uint8_t dof = 0; dof < ACTIVE_JOINT_CONFIG.dof_count; dof++) {
+      if (ACTIVE_JOINT_CONFIG.dofs[dof].drive_type != DRIVE_DIRECT_DRIVE) {
+        joint_has_tendon_dof = true;
+      }
+      if (ACTIVE_JOINT_CONFIG.dofs[dof].capabilities.supports_recalc_offset) {
+        joint_has_recalc_offset = true;
+      }
+    }
+
     // Attempt to load PID parameters from flash (safe system)
     LOG_INFO("------------------------------------");
     LOG_INFO("Attempting to load PID parameters from flash...");
@@ -649,8 +660,12 @@ void setup() {
       // Brief blink: equations loaded from flash
       led_blink(2, 100, 100);
     } else {
-      LOG_INFO("No linear equations found in flash — auto-mapping required");
-      LOG_INFO("Equations will be computed and saved automatically after the first auto-mapping");
+      if (joint_has_tendon_dof) {
+        LOG_INFO("No linear equations found in flash — auto-mapping required");
+        LOG_INFO("Equations will be computed and saved automatically after the first auto-mapping");
+      } else {
+        LOG_INFO("No linear equations found in flash — direct-drive-only joint does not require auto-mapping");
+      }
 
       // Brief blink: no equations in flash
       led_blink(1, 100, 0);
@@ -662,11 +677,19 @@ void setup() {
     if (active_joint_controller->loadMotorOffsetsFromFlash()) {
       LOG_INFO("Motor offsets loaded — will validate at startup to check if recalc needed");
     } else {
-      LOG_INFO("No motor offsets in flash — recalc_offset required");
+      if (joint_has_recalc_offset) {
+        LOG_INFO("No motor offsets in flash — recalc_offset required");
+      } else {
+        LOG_INFO("No saved direct-drive reference in flash — Set Reference required before startup");
+      }
     }
 
     // SAFETY: Movement is controlled by isSystemReadyForMovement()
-    LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
+    if (joint_has_tendon_dof) {
+      LOG_INFO("SAFETY: System initialized — movement controlled by linear equations + calibrated offsets");
+    } else {
+      LOG_INFO("SAFETY: System initialized — movement controlled by saved direct-drive reference + motor feedback");
+    }
     LOG_INFO("Mapping data will be sent to the client for visualization/diagnostics only");
 
     // Setup complete: distinctive double-blink

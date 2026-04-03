@@ -8,6 +8,21 @@
 #include "LKM_Motor.h"
 #include <debug.h>
 
+namespace {
+
+static bool shouldLogMotorReadFailure(uint32_t *last_log_ms, unsigned int motor_id,
+                                      uint32_t throttle_ms = 1000) {
+  const unsigned int idx = motor_id & 0xFF;
+  const uint32_t now = millis();
+  if (now - last_log_ms[idx] < throttle_ms) {
+    return false;
+  }
+  last_log_ms[idx] = now;
+  return true;
+}
+
+}  // namespace
+
 // ===================================================================
 // GLOBAL VARIABLES
 // ===================================================================
@@ -880,6 +895,9 @@ uint16_t LKM_Motor::getEncoderRawSync() {
  * Read single-loop angle synchronously (blocking)
  */
 LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
+  static uint32_t last_send_error_log_ms[256] = {0};
+  static uint32_t last_timeout_log_ms[256] = {0};
+
   MultiAngleData data;
   data.angle    = NAN;
   data.waitTime = 0;
@@ -901,7 +919,8 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
   const int MAX_RETRIES = 2;
   for (int retry = 0; retry < MAX_RETRIES; retry++) {
     if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
-      if (retry == MAX_RETRIES - 1) {
+      if (retry == MAX_RETRIES - 1 &&
+          shouldLogMotorReadFailure(last_send_error_log_ms, _motorID)) {
         LOG_C1_ERROR("ERROR sending READ_SL_ANGLE (after " + String(MAX_RETRIES) + " retries).");
       }
       delayMicroseconds(100);
@@ -934,7 +953,9 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
     }
   }
 
-  LOG_C1_WARN("Timeout: no response from READ_SL_ANGLE.");
+  if (shouldLogMotorReadFailure(last_timeout_log_ms, _motorID)) {
+    LOG_C1_WARN("Timeout: no response from READ_SL_ANGLE (motor " + String(_motorID) + ").");
+  }
   return data;
 }
 
@@ -950,6 +971,9 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
  *    - Apply inversion if active
  */
 LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
+  static uint32_t last_send_error_log_ms[256] = {0};
+  static uint32_t last_timeout_log_ms[256] = {0};
+
   MultiAngleData data;
   data.angle    = NAN;  // Use NAN to indicate error (distinguishable from valid angles)
   data.waitTime = 0;
@@ -989,7 +1013,8 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   
   for (int retry = 0; retry < MAX_RETRIES; retry++) {
     if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
-      if (retry == MAX_RETRIES - 1) {
+      if (retry == MAX_RETRIES - 1 &&
+          shouldLogMotorReadFailure(last_send_error_log_ms, _motorID)) {
         LOG_C1_ERROR("ERROR sending READ_ML_ANGLE (after " + String(MAX_RETRIES) + " retries).");
       }
       delayMicroseconds(100);  // Brief pause before retry
@@ -1036,7 +1061,9 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   }
   
   // All retries failed
-  LOG_C1_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
+  if (shouldLogMotorReadFailure(last_timeout_log_ms, _motorID)) {
+    LOG_C1_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
+  }
   return data;  // Returns NAN angle to indicate error
 }
 
