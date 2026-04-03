@@ -42,20 +42,27 @@ Most humanoid projects scale UP for easier engineering — more space for motors
 
 The result? A robot that can fit human environments, wear human clothing, and interact at human scale — using tendon-driven actuation, custom motor placement, and tight mechanical integration.
 
-**Current Phase 0 Focus:** Lower leg assembly (knee + ankle + foot) with tendon-driven actuation.
+**Current Phase 0 Focus:** Lower body (hip + knee + ankle) — tendon-driven and direct-drive actuation.
 
 ### Latest Updates
+- 2026-04: Hip hybrid firmware (3 DOF) complete — bench bring-up in progress
 - 2026-01-26: Joint Design Log #002 (Knee) published — [YouTube](https://youtu.be/4jU5Na2z-s8) · [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
 - 2025-11-13: Joint Design Log #001 (Ankle) published — [YouTube](https://youtu.be/1Z9GlTnYEFs)
 - 2025-10-31: Phase 0 public release — [PUBLIC_UPDATES.md](PUBLIC_UPDATES.md)
 
 ### Key Features
 
-- 🦶 **2-DOF Ankle Joint**  
+- 🦶 **2-DOF Ankle Joint**
   Plantarflexion/dorsiflexion (-50° to +25°) + inversion/eversion (±25°)
 
-- 🧵 **Tendon-Driven Actuation**  
-  4 motors per joint with antagonistic control, counter-rotating for momentum cancellation
+- 🦵 **1-DOF Knee Joint**
+  Full flexion/extension (0° to 100°) with antagonistic tendon pair
+
+- 🦴 **3-DOF Hip Joint (Hybrid)**
+  Flexion/extension + abduction/adduction (tendon-driven) + axial roll (direct-drive), 5 motors
+
+- 🧵 **Tendon-Driven Actuation**
+  Antagonistic motor pairs with cascade PID, plus single direct-drive for hip roll
 
 - 📏 **Human-Scaled Design**  
   Designed inside real human leg envelope — not scaled up
@@ -63,7 +70,10 @@ The result? A robot that can fit human environments, wear human clothing, and in
 - ⚙️ **Real Hardware Iteration**  
   PA12 nylon structure (multi jet fusion), pin-and-bushing joints, UHMWPE tendons
 
-- 📂 **Progressive Open Source**  
+- 🖥️ **Jetson Multi-Joint Controller**
+  CAN-direct impedance streaming at 50Hz, automated exercise patterns, CAN-first diagnostics
+
+- 📂 **Progressive Open Source**
   Phased licensing roadmap: STL → STEP → CAD source
 
 ---
@@ -114,27 +124,30 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 
 We document **both successes and failures** transparently.
 
-**Current validation snapshot: ankle and knee mechanics validated individually; integrated lower-body work still in progress**
+**Current validation snapshot: knee and ankle closed as architecture baselines; hip firmware complete, bench bring-up in progress**
 
 ### ✅ Validated (Phase 0)
 
+- Knee and ankle validated as architecture baselines (L1/L2 closed — all exit criteria met)
+- Multi-joint Jetson coordination operational (knee + ankle automated exercise runner)
+- Protocol v1.0 frozen (SET_IMPEDANCE 50Hz, startup FSM, telemetry contract)
+- CAN-first diagnostics plane (health heartbeat, fault tracking, post-mortem snapshots)
+- Hip hybrid model in firmware (DriveType, DofCapabilityFlags, direct-drive control loop)
 - Ankle kinematics achieve target ROM (2 DOF within human envelope)
 - Knee ROM and tendon-driven position control validated (0-100 degrees)
-- Flat-braided 3-strand UHMWPE tendons (1mm diameter each) validated for load capacity and pulley compatibility
-- Motor pulleys engineered for minimal footprint and closest distance to motor flange (reduces bearing wear)
-- Tendon routing functional with minimal friction losses
+- UHMWPE tendons validated for load capacity and pulley compatibility
 - PA12 structure passes current static/load validation
 - Peak torque matches biomechanics requirements
-- Auto joint mapping with linear equations
-- Simultaneous control of both DOF (coupled plantarflexion/dorsiflexion + inversion/eversion)
+- Auto joint mapping with linear equations (hybrid-aware: skips direct-drive DOFs)
 - Rolling impedance control via CAN with cascade PID (documented in Joint Design Log #002)
 
 ### ⚠️ Still Iterating
 
-- Walking gait as an integrated lower-body system remains in progress
-- Intelligent adaptive joint mapping and calibration adjustment in progress
-- Real-time trajectory control refinement ongoing
-- Multi-joint coordination (knee + ankle + foot) in progress
+- Hip roll bench bring-up and per-DOF gain tuning
+- Full hip 3-DOF integrated validation (L3)
+- Multi-controller integrated test (L4: hip + knee + ankle on Jetson)
+- Walking gait as integrated lower-body system
+- Sim2real pipeline (URDF model, RL training, policy deployment)
 
 
 ---
@@ -142,7 +155,7 @@ We document **both successes and failures** transparently.
 ## Project Roadmap
 
 ### Phase 0 (Current) — Prove the Concept
-- **Focus:** Lower leg (knee + ankle + foot) validation
+- **Focus:** Lower body (hip + knee + ankle) validation
 - **Release:** Software (MIT), Hardware docs (CC BY-NC-ND)
 - **Timeline:** In progress
 
