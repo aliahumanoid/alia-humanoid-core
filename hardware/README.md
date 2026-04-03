@@ -11,6 +11,12 @@
 
 This directory contains all mechanical design assets for the Alia humanoid robot. CAD files, STL exports, URDF models, and manufacturing documentation are organized following ROS/URDF naming conventions for seamless simulation integration.
 
+If you just want the currently released printable parts, start here:
+
+- [Mechanical Release Guide](mechanical/README.md)
+- [Electronics Hardware](electronics/)
+- [Hardware License](LICENSE.md)
+
 ## Directory Structure
 
 ```

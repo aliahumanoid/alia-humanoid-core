@@ -120,31 +120,31 @@
 
 ## L3.5 — Protocol Freeze Gate
 
-**Stato:** 🔲
+**Stato:** ✅
 
 **Obiettivo:** Congelare il protocollo CAN host↔controller prima di sviluppare il path Jetson definitivo. Evita di testare L4 con un protocollo in movimento.
 
 **Da congelare:**
-- [ ] Command cadence: 50Hz confermato come target production
-- [ ] Watchdog policy: valore nominale (100ms Jetson), valore rilassato (500ms webapp), hold watchdog configurabile
-- [ ] Telemetria production vs debug: quali stream attivi per default, quali su richiesta
-- [ ] Sequence counters: formato e posizione nei frame
-- [ ] Error handling: cosa fa il controller quando perde N comandi consecutivi
-- [ ] JOINT_STATE: contenuto e rate confermati
-- [ ] DIAG_HOLD / RPROBE: rate production confermato
+- [x] Command cadence: 50Hz confermato come target production
+- [x] Watchdog policy: valore nominale, valore rilassato webapp, hold watchdog configurabile
+- [x] Telemetria production vs debug: stream production/documentation separati
+- [x] Sequence counters: formato e posizione documentati dove usati
+- [x] Error handling nominale: startup, already-ready resume, post-`E-stop` same-session
+- [x] JOINT_STATE: contenuto e rate production confermati
+- [x] DIAG_HOLD / RPROBE: trattati come telemetria non critica al freeze production
 
 **Deliverable:** Sezione "Protocol v1.0" in CAN_SYSTEM_ARCHITECTURE.md con tutti i valori congelati e versionati.
 
 **Exit criteria:**
-- [ ] Documento protocol freeze approvato
-- [ ] Nessun campo "TBD" nei frame production
-- [ ] Jetson controller software può essere sviluppato contro questa specifica senza ambiguità
+- [x] Documento protocol freeze approvato
+- [x] Nessun campo "TBD" nei frame production congelati
+- [x] Jetson controller software può essere sviluppato contro questa specifica senza ambiguità
 
 ---
 
 ## L4 — Two-Controller Bench (Jetson)
 
-**Stato:** 🟡 Bench-validated on current protocol, formal freeze still pending
+**Stato:** 🟡 Bench-validated, extended recovery edge cases still pending
 
 **Obiettivo:** Prima validazione multi-controller coordinato via Jetson. Knee + Ankle su banco (non assemblati meccanicamente).
 
@@ -195,7 +195,7 @@
 
 **Ancora aperto su L4:**
 - recovery automatico se il processo Jetson viene riavviato dopo `E-stop`
-- formalizzazione del protocol freeze `L3.5` prima di dichiarare L4 "closed" anche a livello documentale
+- sessione lunga con criteri formali di close-out documentati
 
 ---
 
@@ -341,8 +341,8 @@ Decisione rimandata a dopo i dati di L5. Non scegliere per prudenza astratta —
 L1    Knee single        ✅  Closed (baseline)
 L2    Ankle single       ✅  Closed (baseline)
 L3    Hip single         ⏸  Blocked by hybrid model
-L3.5  Protocol freeze    🔲  Next documentation gate
-L4    2-ctrl bench       🟡  Bench-validated, formal close after L3.5
+L3.5  Protocol freeze    ✅  Closed
+L4    2-ctrl bench       🟡  Bench-validated, extended recovery pending
 L5    3-ctrl stress      🔲  Dopo L4
 L6    Half leg           🔲  Dopo L5
 L7    Two legs           🔲  Dopo L6
@@ -350,8 +350,8 @@ L7    Two legs           🔲  Dopo L6
 
 **Parallelismo possibile:**
 - L3 (HIP) è bloccato da refactor architetturale, non da disponibilità CAN/Jetson
-- L3.5 può partire subito come lavoro documentale/protocol freeze
-- L4 ha già evidenza di banco, ma non va "chiuso" formalmente senza L3.5
+- L3.5 è chiuso e può essere usato come baseline stabile
+- L4 ha già evidenza di banco, ma non va ancora "chiuso" senza risolvere le edge case di recovery rimaste
 - L5 richiede:
   - L4 consolidato
   - oppure decisione esplicita di usare l'attuale protocollo come baseline temporanea per stress test

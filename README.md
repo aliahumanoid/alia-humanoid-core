@@ -24,13 +24,24 @@
 </tr>
 </table>
 
-<p align="center">
+<table>
+<tr>
+<td width="65%">
   <a href="https://youtu.be/4jU5Na2z-s8">
     <img src="https://aliahumanoid.com/assets/knee-human-scale-overlay-annotated.png" alt="Knee joint overlay (Joint Design Log #002)" width="100%">
   </a>
-  <br />
-  <i>Knee joint overlay — Joint Design Log #002</i>
-</p>
+</td>
+<td width="35%">
+  <a href="https://youtu.be/4jU5Na2z-s8">
+    <img src="docs/media/hero/knee-motion-demo.gif" alt="Knee motion demo (1 DOF)" width="100%">
+  </a>
+</td>
+</tr>
+<tr>
+<td align="center"><i>Knee joint overlay — Joint Design Log #002</i></td>
+<td align="center"><i>Right knee prototype — 1-DOF motion test</i></td>
+</tr>
+</table>
 
 ---
 
@@ -45,7 +56,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 **Current Phase 0 Focus:** Lower body (hip + knee + ankle) — tendon-driven and direct-drive actuation.
 
 ### Latest Updates
-- 2026-04: Hip hybrid firmware (3 DOF) complete — bench bring-up in progress
+- 2026-04: Hip hybrid firmware path implemented (3 DOF / 5 motors) — roll bench bring-up in progress
 - 2026-01-26: Joint Design Log #002 (Knee) published — [YouTube](https://youtu.be/4jU5Na2z-s8) · [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
 - 2025-11-13: Joint Design Log #001 (Ankle) published — [YouTube](https://youtu.be/1Z9GlTnYEFs)
 - 2025-10-31: Phase 0 public release — [PUBLIC_UPDATES.md](PUBLIC_UPDATES.md)
@@ -126,20 +137,26 @@ We document **both successes and failures** transparently.
 
 **Current validation snapshot: knee and ankle closed as architecture baselines; hip firmware complete, bench bring-up in progress**
 
-### ✅ Validated (Phase 0)
+### ✅ Validated On Hardware (Phase 0)
 
-- Knee and ankle validated as architecture baselines (L1/L2 closed — all exit criteria met)
-- Multi-joint Jetson coordination operational (knee + ankle automated exercise runner)
-- Protocol v1.0 frozen (SET_IMPEDANCE 50Hz, startup FSM, telemetry contract)
-- CAN-first diagnostics plane (health heartbeat, fault tracking, post-mortem snapshots)
-- Hip hybrid model in firmware (DriveType, DofCapabilityFlags, direct-drive control loop)
+- Knee validated as single-controller baseline (`L1` closed)
+- Ankle validated as single-controller baseline (`L2` closed)
+- Multi-joint Jetson coordination operational on bench (`KNEE_RIGHT + ANKLE_RIGHT`)
+- Protocol v1.0 freeze documented for the current knee+ankle bench baseline
 - Ankle kinematics achieve target ROM (2 DOF within human envelope)
 - Knee ROM and tendon-driven position control validated (0-100 degrees)
 - UHMWPE tendons validated for load capacity and pulley compatibility
 - PA12 structure passes current static/load validation
 - Peak torque matches biomechanics requirements
-- Auto joint mapping with linear equations (hybrid-aware: skips direct-drive DOFs)
-- Rolling impedance control via CAN with cascade PID (documented in Joint Design Log #002)
+- Rolling impedance control via CAN with cascade PID on the validated tendon-driven joints
+
+### 🛠️ Implemented In Firmware, Pending Hip Bench Validation
+
+- Hip hybrid model in firmware (`3 DOF / 5 motors`)
+- Per-DOF `DriveType` / `DofCapabilityFlags`
+- Direct-drive runtime path for hip axial roll
+- Hybrid-aware auto-mapping path (tendon DOFs only)
+- `HIP_ROLL_BENCH_*` single-motor bench profiles
 
 ### ⚠️ Still Iterating
 
