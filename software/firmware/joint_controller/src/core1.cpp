@@ -2452,21 +2452,23 @@ void pollHostCan() {
             float ki_inner = constrain((float)acc.stg_ki_inner_x100 / 100.0f, 0.0f, 20.0f);
             float kd_inner = constrain((float)acc.stg_kd_inner_x100 / 100.0f, 0.0f, 20.0f);
 
-            // Validate and clamp q_target against mapping-safe range
-            // Validate against physical + mapping limits
+            // Validate and clamp q_target against the active safe range.
+            // For tendon DOFs this is equation-derived; for direct-drive DOFs it
+            // falls back to the conservative physical range used by runtime safety.
             if (!active_joint_controller->isAngleInLimits(dof, q_deg) ||
                 !active_joint_controller->isAngleInMappingLimits(dof, q_deg)) {
-              DofLinearEquations *eq = active_joint_controller->getLinearEquations(dof);
-              if (eq && eq->limits_valid) {
+              float safe_min = 0.0f;
+              float safe_max = 0.0f;
+              if (active_joint_controller->getMappingSafeRange(dof, safe_min, safe_max)) {
                 float old_q = q_deg;
-                q_deg = constrain(q_deg, eq->joint_safe_min, eq->joint_safe_max);
+                q_deg = constrain(q_deg, safe_min, safe_max);
                 LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
                             " q=" + String(old_q, 2) + "° clamped to safe [" +
-                            String(eq->joint_safe_min, 1) + "," +
-                            String(eq->joint_safe_max, 1) + "] → " + String(q_deg, 2) + "°");
+                            String(safe_min, 1) + "," + String(safe_max, 1) +
+                            "] → " + String(q_deg, 2) + "°");
               } else {
                 LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                            " q=" + String(q_deg, 2) + "° outside limits (no eq for clamp)");
+                            " q=" + String(q_deg, 2) + "° outside limits (no clamp range)");
               }
             }
 
@@ -2969,6 +2971,8 @@ void core1_loop() {
     // Save active controller and DOFs for this cycle
     current_joint_id  = joint_id;
     current_dof_index = dof_index;
+    shared_data_ext.joint_id = joint_id;
+    shared_data_ext.dof_index = dof_index;
 
     // Ensure the command targets the active joint
     if (joint_id != ACTIVE_JOINT && joint_id != 0) {
@@ -3089,6 +3093,7 @@ void core1_loop() {
     case CMD_SET_ZERO_CURRENT_POS:
       // Legacy: Now handled by Core0, but keep for compatibility
       if (controller->setZeroCurrentPos(dof_index)) {
+        shared_data_ext.joint_id  = joint_id != 0 ? joint_id : ACTIVE_JOINT;
         shared_data_ext.dof_index = dof_index;
         shared_data_ext.flag      = CMD1_END_ZERO;
         strcpy(shared_data_ext.message, "Current position set as zero for DOF");

@@ -36,6 +36,8 @@ let impedanceStagedTarget = null;  // { dofs: [{ dof, angle }] } — staged when
 let impedanceMoveStream = null;    // setInterval handle for 50Hz move keepalive
 let impedanceMoveHolding = {};     // per-DOF holding flag from JOINT_STATE
 let impedanceMovePosition = {};    // per-DOF q_deg from JOINT_STATE
+let impedanceHoldingTarget = {};   // per-DOF target angle from HOLDING_TARGET events
+let pendingAutoNudge = null;       // queued 1-DOF nudge waiting for first live angle
 
 // UI configuration for Set Zero and Recalc Offset buttons for each joint/DOF
 const JOINT_DOF_UI_CONFIG = {
@@ -134,6 +136,8 @@ const MAX_SAFE_VELOCITY_DEG_S = 150;
 const ENCODER_FRESHNESS_MS = 2000;  // Max age before data is considered stale
 const encoderLastUpdateMs = {};
 const IMPEDANCE_NUDGE_DEFAULT_STEP_DEG = 5;
+const DIRECT_DRIVE_CONSERVATIVE_MARGIN_DEG = 2.0;
+const DIRECT_DRIVE_LIMIT_TOLERANCE_DEG = 0.5;
 
 function formatDofName(name, fallback = '') {
     if (!name) return fallback;
@@ -245,8 +249,25 @@ function getFirmwareSafeLimitsForJoint(jointName, dofIndex) {
     return { min: minValue, max: maxValue, source: 'firmware-safe' };
 }
 
+function getConservativeDirectDriveLimits(jointName, dofIndex) {
+    if (!isDirectDriveDof(jointName, dofIndex)) return null;
+
+    const baseRange = getPhysicalLimitsForJoint(jointName, dofIndex)
+        || getConfigLimitsForDof(jointName, dofIndex);
+    if (!baseRange) return null;
+
+    const minValue = baseRange.min + DIRECT_DRIVE_CONSERVATIVE_MARGIN_DEG - DIRECT_DRIVE_LIMIT_TOLERANCE_DEG;
+    const maxValue = baseRange.max - DIRECT_DRIVE_CONSERVATIVE_MARGIN_DEG + DIRECT_DRIVE_LIMIT_TOLERANCE_DEG;
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || maxValue <= minValue) {
+        return null;
+    }
+
+    return { min: minValue, max: maxValue, source: 'direct-drive-conservative' };
+}
+
 function getImpedanceNudgeRange(jointName, dofIndex) {
     return getFirmwareSafeLimitsForJoint(jointName, dofIndex)
+        || getConservativeDirectDriveLimits(jointName, dofIndex)
         || getPhysicalLimitsForJoint(jointName, dofIndex)
         || getConfigLimitsForDof(jointName, dofIndex);
 }
@@ -265,6 +286,30 @@ function clampImpedanceNudgeTarget(jointName, dofIndex, targetDeg) {
     };
 }
 
+function executeImpedanceNudgeFromCurrentPos(joint, dofIndex, currentPos, direction, stepDeg) {
+    const requestedTarget = currentPos + (direction >= 0 ? stepDeg : -stepDeg);
+    const clamped = clampImpedanceNudgeTarget(joint, dofIndex, requestedTarget);
+
+    if (clamped.clamped && clamped.range) {
+        appendStatusMessage(
+            `⚠️ ${joint} DOF ${dofIndex} nudge clamped to ${clamped.target.toFixed(1)}° ` +
+            `within [${clamped.range.min.toFixed(1)}°, ${clamped.range.max.toFixed(1)}°].`
+        );
+    }
+
+    setImpedanceQuickAngle(dofIndex, Number(clamped.target.toFixed(2)));
+}
+
+function getCurrentJointStateAngle(dofIndex) {
+    const qDeg = impedanceMovePosition[dofIndex];
+    return Number.isFinite(qDeg) ? qDeg : null;
+}
+
+function getCurrentHoldingTargetAngle(dofIndex) {
+    const qDeg = impedanceHoldingTarget[dofIndex];
+    return Number.isFinite(qDeg) ? qDeg : null;
+}
+
 /**
  * Get current encoder angle from LIVE streaming data only.
  * If streaming is not active, attempts to start it automatically.
@@ -276,12 +321,61 @@ function clampImpedanceNudgeTarget(jointName, dofIndex, targetDeg) {
  */
 function getCurrentEncoderAngle(joint, dofIndex) {
     const jointType = joint.split('_')[0].toLowerCase();
-    const freshnessKey = `${jointType}_${dofIndex}`;
     const freshAngle = readFreshEncoderAngle(joint, dofIndex);
     if (freshAngle !== null) {
         return freshAngle;
     }
-    
+
+    const stateAngle = getCurrentJointStateAngle(dofIndex);
+    if (stateAngle !== null) {
+        if (!encoderTestActive || currentEncoderJointType !== jointType) {
+            console.log(`[Encoder] Using JOINT_STATE fallback for ${joint} DOF${dofIndex} while starting stream...`);
+            $.ajax({
+                url: '/can/encoder_stream/start',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ joint: joint }),
+                async: true,
+                success: function(response) {
+                    if (response.status === 'success') {
+                        encoderTestActive = true;
+                        currentEncoderJointType = jointType;
+                        appendStatusMessage(`🔄 Encoder streaming auto-started for ${joint}`);
+                    }
+                },
+                error: function() {
+                    appendStatusMessage(`❌ Failed to auto-start encoder streaming`);
+                }
+            });
+        }
+        return stateAngle;
+    }
+
+    const holdAngle = getCurrentHoldingTargetAngle(dofIndex);
+    if (holdAngle !== null) {
+        if (!encoderTestActive || currentEncoderJointType !== jointType) {
+            console.log(`[Encoder] Using HOLDING_TARGET fallback for ${joint} DOF${dofIndex} while starting stream...`);
+            $.ajax({
+                url: '/can/encoder_stream/start',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ joint: joint }),
+                async: true,
+                success: function(response) {
+                    if (response.status === 'success') {
+                        encoderTestActive = true;
+                        currentEncoderJointType = jointType;
+                        appendStatusMessage(`🔄 Encoder streaming auto-started for ${joint}`);
+                    }
+                },
+                error: function() {
+                    appendStatusMessage(`❌ Failed to auto-start encoder streaming`);
+                }
+            });
+        }
+        return holdAngle;
+    }
+
     // No live data available - try to auto-start encoder streaming
     console.log(`[Encoder] No live data for ${joint} DOF${dofIndex}, attempting auto-start...`);
 
@@ -311,36 +405,7 @@ function getCurrentEncoderAngle(joint, dofIndex) {
     // Without these, the listener (line ~463) silently drops incoming frames.
     encoderTestActive = true;
     currentEncoderJointType = jointType;
-
-    // Wait for FRESH data (max 500ms) — check encoderLastUpdateMs, not stale DOM text
-    const autoStartTime = Date.now();
-    let liveAngle = null;
-    for (let attempt = 0; attempt < 10; attempt++) {
-        // Small delay
-        const start = Date.now();
-        while (Date.now() - start < 50) { /* busy wait */ }
-
-        // Check freshness timestamp — only accept data updated AFTER we started the stream
-        const freshTs = encoderLastUpdateMs[freshnessKey];
-        if (freshTs && freshTs > autoStartTime) {
-            const freshText = $(`#${jointType}EncoderDof${dofIndex}`).text();
-            if (freshText && freshText !== '-' && freshText.trim() !== '') {
-                const parsed = parseFloat(freshText.replace('°', ''));
-                if (!isNaN(parsed)) {
-                    liveAngle = parsed;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (liveAngle !== null) {
-        console.log(`[Encoder] Live data acquired: DOF${dofIndex} = ${liveAngle.toFixed(2)}°`);
-    } else {
-        appendStatusMessage(`❌ Encoder streaming started but no data received - check CAN connection`);
-    }
-
-    return liveAngle;
+    return null;
 }
     // Main function executed when DOM is ready
 $(document).ready(function() {
@@ -629,6 +694,25 @@ $(document).ready(function() {
         if (data && data.angles_deg) {
             updateEncoderChartFromCanStream(data);
             refreshImpedancePerDofNudgeReadouts();
+
+            if (pendingAutoNudge && data.joint_name === pendingAutoNudge.joint) {
+                const liveAngle = readFreshEncoderAngle(pendingAutoNudge.joint, pendingAutoNudge.dofIndex);
+                if (liveAngle !== null) {
+                    const queued = pendingAutoNudge;
+                    pendingAutoNudge = null;
+                    appendStatusMessage(
+                        `↪️ First live angle received for ${queued.joint} DOF ${queued.dofIndex}: ` +
+                        `${liveAngle.toFixed(2)}° — executing queued nudge`
+                    );
+                    executeImpedanceNudgeFromCurrentPos(
+                        queued.joint,
+                        queued.dofIndex,
+                        liveAngle,
+                        queued.direction,
+                        queued.stepDeg
+                    );
+                }
+            }
             
             // Also store in data buffer for history
             const timestamp = Date.now();
@@ -658,6 +742,9 @@ $(document).ready(function() {
     // Listener for holding target updates (when DOF enters HOLDING mode)
     socket.on('holding_target', function(data) {
         if (data && data.dof !== undefined && data.angle !== undefined) {
+            if (Number.isFinite(data.angle)) {
+                impedanceHoldingTarget[data.dof] = data.angle;
+            }
             // Update holding target display for this DOF
             updateHoldingTargetDisplay(data.dof, data.angle);
             
@@ -2054,6 +2141,16 @@ function sendCommand(command, additionalData = {}) {
     // Remove dof from additionalData to avoid duplication, then spread the rest
     const { dof: _, ...otherData } = additionalData;
     const data = { cmd: command, joint: joint, dof: dof, ...otherData };
+
+    // Startup must begin from a clean host state. If a 50Hz move stream is still
+    // active, it will keep sending stale SET_IMPEDANCE frames while the firmware
+    // is trying to re-arm movement, producing misleading "System not ready"
+    // noise right after startup.
+    if (command === 'startup-sequence') {
+        stopImpedanceMoveStream(true);
+        impedanceStagedTarget = null;
+        pendingAutoNudge = null;
+    }
     
     $.ajax({
         url: "/command", method: "POST", data: JSON.stringify(data), contentType: "application/json; charset=utf-8", dataType: "json",
@@ -4101,7 +4198,7 @@ function sendImpedanceFastTarget(dof, qTarget, dqCruise, stiffness) {
  * Relax impedance watchdog for webapp streaming (HTTP has more jitter than direct CAN).
  * Restores to configured hold watchdog when streaming stops.
  */
-const WATCHDOG_STREAM_MS = 500;   // relaxed for webapp (HTTP jitter)
+const WATCHDOG_STREAM_MS = 1500;   // relaxed for webapp (HTTP jitter + browser event loop)
 const WATCHDOG_DEFAULT_MS = 60000;  // webapp default hold watchdog
 const HOLD_WATCHDOG_STORAGE_KEY = 'impedanceHoldWatchdogMs';
 const IMPEDANCE_MOVE_ARRIVAL_TOL_DEG = 0.5;
@@ -4259,22 +4356,21 @@ function nudgeImpedanceDof(dofIndex, direction) {
 
     const currentPos = getCurrentEncoderAngle(joint, dofIndex);
     if (!Number.isFinite(currentPos)) {
-        appendStatusMessage(`⚠️ No live encoder data for ${joint} DOF ${dofIndex} — cannot nudge.`);
+        pendingAutoNudge = {
+            joint,
+            dofIndex,
+            direction,
+            stepDeg: getImpedanceNudgeStepDeg()
+        };
+        appendStatusMessage(
+            `⏳ Waiting for first live angle on ${joint} DOF ${dofIndex} — nudge queued automatically.`
+        );
         return;
     }
 
     const stepDeg = getImpedanceNudgeStepDeg();
-    const requestedTarget = currentPos + (direction >= 0 ? stepDeg : -stepDeg);
-    const clamped = clampImpedanceNudgeTarget(joint, dofIndex, requestedTarget);
-
-    if (clamped.clamped && clamped.range) {
-        appendStatusMessage(
-            `⚠️ ${joint} DOF ${dofIndex} nudge clamped to ${clamped.target.toFixed(1)}° ` +
-            `within [${clamped.range.min.toFixed(1)}°, ${clamped.range.max.toFixed(1)}°].`
-        );
-    }
-
-    setImpedanceQuickAngle(dofIndex, Number(clamped.target.toFixed(2)));
+    pendingAutoNudge = null;
+    executeImpedanceNudgeFromCurrentPos(joint, dofIndex, currentPos, direction, stepDeg);
 }
 
 /**

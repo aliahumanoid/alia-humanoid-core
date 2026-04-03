@@ -531,6 +531,8 @@ class CanManager:
             Dict mapping encoder_index → offset_rad
         """
         self._ensure_connection()
+        if expected_count <= 0:
+            return {}
         joint_id = JOINTS[joint_name]["id"]
 
         # Prepare buffer
@@ -556,6 +558,14 @@ class CanManager:
 
         return result
 
+    def _get_external_encoder_count(self, joint_name: str) -> int:
+        joint_info = JOINTS.get(joint_name, {})
+        return sum(
+            1
+            for dof in joint_info.get("dofs", [])
+            if dof.get("drive_type", "antagonistic_tendon") != "direct_drive"
+        )
+
     def validate_encoder_offsets(self, joint_name: str) -> Dict[str, Any]:
         """Query firmware encoder offsets and validate against saved host copy.
 
@@ -566,7 +576,15 @@ class CanManager:
         import os
         import json as _json
 
-        firmware_offsets = self.query_encoder_offsets(joint_name)
+        expected_count = self._get_external_encoder_count(joint_name)
+        if expected_count == 0:
+            return {
+                "valid": True,
+                "details": ["Joint has no external encoders — skipping offset validation"],
+                "firmware_offsets": {},
+            }
+
+        firmware_offsets = self.query_encoder_offsets(joint_name, expected_count=expected_count)
         if not firmware_offsets:
             return {"valid": False, "details": ["No response from firmware"], "firmware_offsets": {}}
 

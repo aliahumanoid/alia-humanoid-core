@@ -204,32 +204,28 @@ JointController::~JointController() {
 
 void JointController::applyDefaultPidTunings(bool log_details) {
   if (log_details) {
-    LOG_C1_INFO("Applying default PID for all motors...");
+    LOG_C1_INFO("Applying configured default PID for all motors...");
   }
 
   for (int i = 0; i < config.motor_count; i++) {
-    float tau = config.motors[i].pid.tau;
-
-    config.motors[i].pid.kp = DEFAULT_INNER_LOOP_KP;
-    config.motors[i].pid.ki = DEFAULT_INNER_LOOP_KI;
-    config.motors[i].pid.kd = DEFAULT_INNER_LOOP_KD;
+    const float kp = config.motors[i].pid.kp;
+    const float ki = config.motors[i].pid.ki;
+    const float kd = config.motors[i].pid.kd;
+    const float tau = config.motors[i].pid.tau;
 
     if (pid_controllers && pid_controllers[i] != nullptr) {
-      pid_controllers[i]->setTunings(DEFAULT_INNER_LOOP_KP, DEFAULT_INNER_LOOP_KI,
-                                     DEFAULT_INNER_LOOP_KD, tau);
+      pid_controllers[i]->setTunings(kp, ki, kd, tau);
     }
 
     if (log_details) {
-      LOG_C1_DEBUG("  Motor " + String(i) + ": kp=" + String(DEFAULT_INNER_LOOP_KP, 3) +
-                ", ki=" + String(DEFAULT_INNER_LOOP_KI, 3) + ", kd=" +
-                String(DEFAULT_INNER_LOOP_KD, 3) + ", tau=" + String(tau, 4));
+      LOG_C1_DEBUG("  Motor " + String(i) + ": kp=" + String(kp, 3) +
+                ", ki=" + String(ki, 3) + ", kd=" +
+                String(kd, 3) + ", tau=" + String(tau, 4));
     }
   }
 
   if (log_details) {
-    LOG_C1_INFO("Default PID applied (kp=" + String(DEFAULT_INNER_LOOP_KP, 3) +
-             ", ki=" + String(DEFAULT_INNER_LOOP_KI, 3) + ", kd=" +
-             String(DEFAULT_INNER_LOOP_KD, 3) + ")");
+    LOG_C1_INFO("Configured default PID applied");
   }
 }
 
@@ -636,41 +632,73 @@ bool JointController::isAngleInLimits(uint8_t dof_index, float angle) {
 // Check if an angle is within safety limits derived from equations
 // Small tolerance to account for encoder noise and floating point precision
 static const float LIMIT_TOLERANCE = 0.5f;  // Allow 0.5° beyond limits
+static const float CONSERVATIVE_MARGIN = 2.0f;
+
+bool JointController::getMappingSafeRange(uint8_t dof_index, float &min_safe, float &max_safe) {
+  if (dof_index >= config.dof_count) {
+    return false;
+  }
+
+  if (hasValidEquations(dof_index)) {
+    min_safe = linear_equations[dof_index].joint_safe_min - LIMIT_TOLERANCE;
+    max_safe = linear_equations[dof_index].joint_safe_max + LIMIT_TOLERANCE;
+    return true;
+  }
+
+  min_safe = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN - LIMIT_TOLERANCE;
+  max_safe = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN + LIMIT_TOLERANCE;
+  return true;
+}
 
 bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
   if (dof_index >= config.dof_count) {
     return false;
   }
 
-  if (hasValidEquations(dof_index)) {
-    float min_angle = linear_equations[dof_index].joint_safe_min - LIMIT_TOLERANCE;
-    float max_angle = linear_equations[dof_index].joint_safe_max + LIMIT_TOLERANCE;
-
-    bool in_limits = (angle >= min_angle && angle <= max_angle);
-
-    if (!in_limits) {
-      LOG_C1_WARN("Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
-               " outside safe limits [" + String(min_angle, 2) + "°, " +
-               String(max_angle, 2) + "°] (from equations)");
-    }
-
-    return in_limits;
+  float min_angle = 0.0f;
+  float max_angle = 0.0f;
+  if (!getMappingSafeRange(dof_index, min_angle, max_angle)) {
+    return false;
   }
 
-  // Conservative fallback: use physical limits with margin if equations are unavailable
-  const float CONSERVATIVE_MARGIN = 2.0f;
-  float joint_min                 = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN - LIMIT_TOLERANCE;
-  float joint_max                 = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN + LIMIT_TOLERANCE;
-
-  bool in_limits = (angle >= joint_min && angle <= joint_max);
+  bool in_limits = (angle >= min_angle && angle <= max_angle);
 
   if (!in_limits) {
+    const bool has_equations = hasValidEquations(dof_index);
     LOG_C1_WARN("Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
-             " outside conservative limits [" + String(joint_min, 2) + "°, " +
-             String(joint_max, 2) + "°] (equations unavailable)");
+             (has_equations ? " outside safe limits [" : " outside conservative limits [") +
+             String(min_angle, 2) + "°, " + String(max_angle, 2) + "°]" +
+             (has_equations ? " (from equations)" : " (equations unavailable)"));
   }
 
   return in_limits;
+}
+
+bool JointController::canDirectDriveRecoverTowardSafeRange(uint8_t dof_index, float current_angle,
+                                                           float target_angle) {
+  if (!isDirectDriveDof(dof_index)) {
+    return false;
+  }
+
+  if (!isAngleInLimits(dof_index, current_angle)) {
+    return false;
+  }
+
+  float min_safe = 0.0f;
+  float max_safe = 0.0f;
+  if (!getMappingSafeRange(dof_index, min_safe, max_safe)) {
+    return false;
+  }
+
+  if (current_angle < min_safe) {
+    return target_angle > current_angle;
+  }
+
+  if (current_angle > max_safe) {
+    return target_angle < current_angle;
+  }
+
+  return false;
 }
 
 // Check if a DOF's motors are within their mapping ranges
@@ -790,7 +818,6 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
       min_safe = linear_equations[dof_index].joint_safe_min;
       max_safe = linear_equations[dof_index].joint_safe_max;
     } else {
-      const float CONSERVATIVE_MARGIN = 2.0f;
       min_safe = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN;
       max_safe = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN;
     }

@@ -936,13 +936,14 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
         if (_can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK) {
           if (canId == expectedResponseID && rcvBuf[0] == 0x94) {
             data.waitTime = micros() - startTime;
-            uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
-                            ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
-                            ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
-                            ((uint64_t)rcvBuf[1]);
-            int64_t motorAngle = ((int64_t)temp << 8) >> 8;
-            data.rawMotorAngle_centideg = motorAngle;
-            data.angle = (motorAngle / 100.0) / _reductionGear;
+            // 0x94 returns a single-turn absolute angle as a 32-bit unsigned
+            // centidegree value in bytes 4..7 of the CAN payload.
+            uint32_t motorAngle = ((uint32_t)rcvBuf[7] << 24) |
+                                  ((uint32_t)rcvBuf[6] << 16) |
+                                  ((uint32_t)rcvBuf[5] << 8)  |
+                                  ((uint32_t)rcvBuf[4]);
+            data.rawMotorAngle_centideg = static_cast<int64_t>(motorAngle);
+            data.angle = (static_cast<float>(motorAngle) / 100.0f) / _reductionGear;
             if (invertEncoder) {
               data.angle = -data.angle;
             }

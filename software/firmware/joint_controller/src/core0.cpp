@@ -353,8 +353,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
     if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
       LOG_INFO("DOF " + String(dof) + " (" + String(cfg.dofs[dof].name) +
-               ") uses motor-internal feedback — skipping Core0 position sanity check");
-      continue;
+               ") uses motor-internal feedback for position sanity check");
     }
     if (!shared_dof_angles.valid[dof]) {
       LOG_ERROR("DOF " + String(dof) + " encoder invalid during position check");
@@ -754,8 +753,16 @@ void updateSharedDofAngles() {
   for (uint8_t dof = 0; dof < dof_count; dof++) {
     if (controller->getConfig().dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
       consecutive_errors[dof] = 0;
-      shared_dof_angles.valid[dof] = false;
-      shared_dof_angles.velocities[dof] = 0.0f;
+      float direct_angle = 0.0f;
+      float direct_velocity = 0.0f;
+      if (controller->getDirectDriveFeedback(dof, direct_angle, direct_velocity)) {
+        shared_dof_angles.angles[dof] = direct_angle;
+        shared_dof_angles.velocities[dof] = direct_velocity;
+        shared_dof_angles.valid[dof] = true;
+      } else {
+        shared_dof_angles.valid[dof] = false;
+        shared_dof_angles.velocities[dof] = 0.0f;
+      }
       continue;
     }
 
@@ -914,25 +921,37 @@ void core0_main_loop() {
     if (ctrl != nullptr) {
       const JointConfig& cfg = ctrl->getConfig();
       if (dof < cfg.dof_count) {
-        uint8_t enc_channel = cfg.dofs[dof].encoder_channel;
-        float zero_offset = cfg.dofs[dof].zero_mapping.zero_angle_offset;
-
-        // 1. Reset joint encoder (MT6835) - Core0
-        directEncoders.requestReset(enc_channel, zero_offset);
-        LOG_INFO_F("[CAN] Set Zero: DOF %d → joint encoder target %.2f°", dof, zero_offset);
-
-        // 2. Delegate motor encoder zeroing to Core1 (requires CAN access)
         int next_buffer = (active_buffer + 1) % 2;
         command_buffer[next_buffer].joint_id = ACTIVE_JOINT;
         command_buffer[next_buffer].dof_index = dof;
-        pending_command_type = CMD_ZERO_MOTOR_ENCODERS;
-        buffer_ready[next_buffer] = true;
-        active_buffer = next_buffer;
+        if (cfg.dofs[dof].drive_type == DRIVE_DIRECT_DRIVE) {
+          // Direct-drive DOFs use the motor-internal single-turn absolute reference.
+          // Delegate the full reference capture to Core1 and emit ZERO_COMPLETE only
+          // after the controller-side offset has been saved to flash.
+          pending_command_type = CMD_SET_ZERO_CURRENT_POS;
+          buffer_ready[next_buffer] = true;
+          active_buffer = next_buffer;
+          LOG_INFO_F("[CAN] Set Reference: DOF %d → motor-internal target %.2f°",
+                     dof, cfg.dofs[dof].zero_mapping.zero_angle_offset);
+        } else {
+          uint8_t enc_channel = cfg.dofs[dof].encoder_channel;
+          float zero_offset = cfg.dofs[dof].zero_mapping.zero_angle_offset;
 
-        // Signal completion (Core1 will do motor zeroing async)
-        shared_data_ext.dof_index = dof;
-        shared_data_ext.flag = CMD1_END_ZERO;
-        strcpy(shared_data_ext.message, "Zero position set (CAN)");
+          // 1. Reset joint encoder (MT6835) - Core0
+          directEncoders.requestReset(enc_channel, zero_offset);
+          LOG_INFO_F("[CAN] Set Zero: DOF %d → joint encoder target %.2f°", dof, zero_offset);
+
+          // 2. Delegate motor encoder zeroing to Core1 (requires CAN access)
+          pending_command_type = CMD_ZERO_MOTOR_ENCODERS;
+          buffer_ready[next_buffer] = true;
+          active_buffer = next_buffer;
+
+          // Signal completion (Core1 will do motor zeroing async)
+          shared_data_ext.joint_id = ACTIVE_JOINT;
+          shared_data_ext.dof_index = dof;
+          shared_data_ext.flag = CMD1_END_ZERO;
+          strcpy(shared_data_ext.message, "Zero position set (CAN)");
+        }
       }
     }
   }
@@ -1562,6 +1581,7 @@ void core0_main_loop() {
       if (active_joint_controller != nullptr && active_joint_controller->isPendingOffsetsSave()) {
         if (active_joint_controller->saveMotorOffsetsToFlash()) {
           LOG_INFO("Motor offsets saved to flash after set-reference");
+          can_encoder_offsets_notify = true;
         } else {
           LOG_WARN("Failed to save motor offsets after set-reference");
         }

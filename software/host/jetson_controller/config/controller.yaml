@@ -55,13 +55,10 @@ joints:
       outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
-    # Optional per-DOF overrides can be added after hardware tuning, e.g.:
-    # dof_overrides:
-    #   2:
-    #     stiffness_deg: 12.0
-    #     gains:
-    #       outer: { kp: 6.0, ki: 4.0, kd: 0.05 }
-    #       inner: { kp: 8.0, ki: 0.5, kd: 0.15 }
+    dof_overrides:
+      2:
+        gains:
+          inner: { kp: 60.0, ki: 50.0, kd: 1.0 }
     home_position_deg:
       0: 0.0              # flexion-extension
       1: 0.0              # abduction-adduction
@@ -72,13 +69,10 @@ joints:
       outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
-    # Optional per-DOF overrides can be added after hardware tuning, e.g.:
-    # dof_overrides:
-    #   2:
-    #     stiffness_deg: 12.0
-    #     gains:
-    #       outer: { kp: 6.0, ki: 4.0, kd: 0.05 }
-    #       inner: { kp: 8.0, ki: 0.5, kd: 0.15 }
+    dof_overrides:
+      2:
+        gains:
+          inner: { kp: 60.0, ki: 50.0, kd: 1.0 }
     home_position_deg:
       0: 0.0              # flexion-extension
       1: 0.0              # abduction-adduction
@@ -87,7 +81,7 @@ joints:
   hip_roll_bench_right:
     gains:
       outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
-      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+      inner: { kp: 60.0, ki: 50.0, kd: 1.0 }
     stiffness_deg: 25.0
     home_position_deg:
       0: 0.0              # axial-roll
@@ -95,7 +89,7 @@ joints:
   hip_roll_bench_left:
     gains:
       outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
-      inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
+      inner: { kp: 60.0, ki: 50.0, kd: 1.0 }
     stiffness_deg: 25.0
     home_position_deg:
       0: 0.0              # axial-roll

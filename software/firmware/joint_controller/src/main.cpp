@@ -632,7 +632,7 @@ void setup() {
       // Brief blink: PID loaded from flash
       led_blink(2, 100, 100);
     } else {
-      LOG_INFO("No PID parameters found in flash - applying default PID values (kp=" + String(PID_DEFAULT_INNER_KP, 2) + ", ki=" + String(PID_DEFAULT_INNER_KI, 2) + ", kd=" + String(PID_DEFAULT_INNER_KD, 2) + ")");
+      LOG_INFO("No PID parameters found in flash - applying configured per-motor default PID values");
 
       // Brief blink: using default PID
       led_blink(1, 100, 0);

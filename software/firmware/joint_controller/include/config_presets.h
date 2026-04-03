@@ -35,6 +35,11 @@
 #define PI 3.14159265358979323846
 #endif
 
+static constexpr float HIP_ROLL_DIRECT_INNER_KP = 60.0f;
+static constexpr float HIP_ROLL_DIRECT_INNER_KI = 50.0f;
+static constexpr float HIP_ROLL_DIRECT_INNER_KD = 1.0f;
+static constexpr float HIP_ROLL_DIRECT_INNER_TAU = 0.005f;
+
 // Configuration for left knee joint (1 DOF, 2 motors)
 const JointConfig KNEE_LEFT_CONFIG = {
     .name        = "knee_left",
@@ -619,10 +624,10 @@ const JointConfig HIP_LEFT_CONFIG = {
                 .role           = MOTOR_ROLE_DIRECT, // Direct-drive roll motor
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
-                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
-                                    .ki  = PID_DEFAULT_INNER_KI,
-                                    .kd  = PID_DEFAULT_INNER_KD,
-                                    .tau = 0.005f}}}};
+                 .pid            = {.kp  = HIP_ROLL_DIRECT_INNER_KP,
+                                    .ki  = HIP_ROLL_DIRECT_INNER_KI,
+                                    .kd  = HIP_ROLL_DIRECT_INNER_KD,
+                                    .tau = HIP_ROLL_DIRECT_INNER_TAU}}}};
 
 // Configuration for right hip joint (3 DOF, 5 motors)
 const JointConfig HIP_RIGHT_CONFIG = {
@@ -804,10 +809,10 @@ const JointConfig HIP_RIGHT_CONFIG = {
                 .role           = MOTOR_ROLE_DIRECT, // Direct-drive roll motor
                  .max_torque     = 1500.0f,
                  .reduction_gear = 10.0f,
-                 .pid            = {.kp  = PID_DEFAULT_INNER_KP,
-                                    .ki  = PID_DEFAULT_INNER_KI,
-                                    .kd  = PID_DEFAULT_INNER_KD,
-                                    .tau = 0.005f}}}};
+                 .pid            = {.kp  = HIP_ROLL_DIRECT_INNER_KP,
+                                    .ki  = HIP_ROLL_DIRECT_INNER_KI,
+                                    .kd  = HIP_ROLL_DIRECT_INNER_KD,
+                                    .tau = HIP_ROLL_DIRECT_INNER_TAU}}}};
 
 // Configuration for left hip roll bench (1 DOF, 1 motor direct-drive)
 // Purpose: bench bring-up of the real HIP axial-roll path without requiring
@@ -860,10 +865,10 @@ const JointConfig HIP_ROLL_BENCH_LEFT_CONFIG = {
                 .role           = MOTOR_ROLE_DIRECT,
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
-                .pid            = {.kp  = PID_DEFAULT_INNER_KP,
-                                   .ki  = PID_DEFAULT_INNER_KI,
-                                   .kd  = PID_DEFAULT_INNER_KD,
-                                   .tau = 0.005f}}}};
+                .pid            = {.kp  = HIP_ROLL_DIRECT_INNER_KP,
+                                   .ki  = HIP_ROLL_DIRECT_INNER_KI,
+                                   .kd  = HIP_ROLL_DIRECT_INNER_KD,
+                                   .tau = HIP_ROLL_DIRECT_INNER_TAU}}}};
 
 // Configuration for right hip roll bench (1 DOF, 1 motor direct-drive)
 const JointConfig HIP_ROLL_BENCH_RIGHT_CONFIG = {
@@ -914,10 +919,10 @@ const JointConfig HIP_ROLL_BENCH_RIGHT_CONFIG = {
                 .role           = MOTOR_ROLE_DIRECT,
                 .max_torque     = 1500.0f,
                 .reduction_gear = 10.0f,
-                .pid            = {.kp  = PID_DEFAULT_INNER_KP,
-                                   .ki  = PID_DEFAULT_INNER_KI,
-                                   .kd  = PID_DEFAULT_INNER_KD,
-                                   .tau = 0.005f}}}};
+                .pid            = {.kp  = HIP_ROLL_DIRECT_INNER_KP,
+                                   .ki  = HIP_ROLL_DIRECT_INNER_KI,
+                                   .kd  = HIP_ROLL_DIRECT_INNER_KD,
+                                   .tau = HIP_ROLL_DIRECT_INNER_TAU}}}};
 
 /**
  * @brief Lookup table entry mapping joint name/ID to configuration

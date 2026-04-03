@@ -252,6 +252,9 @@ public:
   bool checkSafetyForDof(uint8_t dof_index, float current_angle, String &violation_message,
                          bool check_motors = false,
                          SafetyViolationType *violation_type = nullptr);
+  bool getMappingSafeRange(uint8_t dof_index, float &min_safe, float &max_safe);
+  bool canDirectDriveRecoverTowardSafeRange(uint8_t dof_index, float current_angle,
+                                            float target_angle);
 
   // ==========================================================================
   // MOTOR & PID CONTROL

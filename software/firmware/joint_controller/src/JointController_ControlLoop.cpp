@@ -45,8 +45,14 @@ static uint32_t last_anti_slack_log_ms[MAX_DOFS] = {0};
 static float direct_drive_last_angle[MAX_DOFS] = {0};
 static uint32_t direct_drive_last_update_us[MAX_DOFS] = {0};
 static uint32_t direct_drive_next_probe_ms[MAX_DOFS] = {0};
+static uint8_t direct_drive_invalid_streak[MAX_DOFS] = {0};
+static bool direct_drive_feedback_fault_active[MAX_DOFS] = {false};
+static uint32_t direct_drive_feedback_fault_log_ms[MAX_DOFS] = {0};
+static uint32_t direct_drive_feedback_zero_torque_ms[MAX_DOFS] = {0};
 static const uint16_t DIRECT_DRIVE_TIMEOUT_BACKOFF_MS = 20;
 static const uint16_t DIRECT_DRIVE_UNREFERENCED_PROBE_MS = 250;
+static const uint16_t DIRECT_DRIVE_IDLE_PROBE_MS = 20;
+static const uint8_t DIRECT_DRIVE_INVALID_STREAK_LIMIT = 3;
 
 // === SLACK MONITOR: delta_theta bias tracking during HOLDING ===
 // Exponential moving average of delta_theta while in HOLDING state.
@@ -502,18 +508,7 @@ bool JointController::executeControlLoop() {
       continue;
     }
 
-    // Do not spend the 2 ms control-loop budget on blocking direct-drive
-    // CAN reads while the DOF is idle. Idle probing is service/startup work,
-    // not real-time control work, and on a no-motor bench it was the source
-    // of repeated LOOP_OVERRUN bursts.
-    if (dof_state[dof] == DofState::IDLE) {
-      dof_snapshot.valid[dof] = false;
-      dof_snapshot.velocities[dof] = 0.0f;
-      direct_drive_last_update_us[dof] = 0;
-      direct_drive_next_probe_ms[dof] = 0;
-      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
-      continue;
-    }
+    const bool idle_probe_mode = (dof_state[dof] == DofState::IDLE);
 
     LKM_Motor *direct_motor = nullptr;
     int direct_motor_idx = -1;
@@ -529,6 +524,7 @@ bool JointController::executeControlLoop() {
     if (direct_motor == nullptr) {
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
+      direct_drive_invalid_streak[dof] = DIRECT_DRIVE_INVALID_STREAK_LIMIT;
       direct_drive_last_update_us[dof] = 0;
       direct_drive_next_probe_ms[dof] = 0;
       updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
@@ -536,12 +532,18 @@ bool JointController::executeControlLoop() {
     }
 
     const uint32_t now_ms = millis();
-    if (direct_drive_next_probe_ms[dof] != 0 &&
+    // Idle probe backoff must not leak into the first active cycle after
+    // startup/recovery. Once the DOF leaves IDLE we need an immediate fresh
+    // motor-internal read, otherwise the control loop can falsely fault on the
+    // first HOLDING/MOVING iteration using an old idle-throttling deadline.
+    if (!idle_probe_mode) {
+      direct_drive_next_probe_ms[dof] = 0;
+    }
+    if (idle_probe_mode &&
+        direct_drive_next_probe_ms[dof] != 0 &&
         (int32_t)(now_ms - direct_drive_next_probe_ms[dof]) < 0) {
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
-      direct_drive_last_update_us[dof] = 0;
-      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
       continue;
     }
 
@@ -549,17 +551,29 @@ bool JointController::executeControlLoop() {
     LKM_Motor::MultiAngleData raw_angle = direct_motor->getSingleAngleSync();
     if (isnan(raw_angle.angle)) {
       diag_note_motor_timeout(dof, direct_motor_idx >= 0 ? static_cast<uint8_t>(direct_motor_idx) : 0xFF);
+      if (direct_drive_invalid_streak[dof] < 0xFF) {
+        direct_drive_invalid_streak[dof]++;
+      }
       direct_drive_next_probe_ms[dof] =
           now_ms + (have_saved_reference ? DIRECT_DRIVE_TIMEOUT_BACKOFF_MS
                                          : DIRECT_DRIVE_UNREFERENCED_PROBE_MS);
-      dof_snapshot.valid[dof] = false;
-      dof_snapshot.velocities[dof] = 0.0f;
-      direct_drive_last_update_us[dof] = 0;
-      updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      if (direct_drive_invalid_streak[dof] < DIRECT_DRIVE_INVALID_STREAK_LIMIT &&
+          direct_drive_last_update_us[dof] > 0) {
+        dof_snapshot.angles[dof] = direct_drive_last_angle[dof];
+        dof_snapshot.velocities[dof] = 0.0f;
+        dof_snapshot.valid[dof] = true;
+        updateDirectDriveFeedback(dof, direct_drive_last_angle[dof], 0.0f, true);
+      } else {
+        dof_snapshot.valid[dof] = false;
+        dof_snapshot.velocities[dof] = 0.0f;
+        direct_drive_last_update_us[dof] = 0;
+        updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
+      }
       continue;
     }
 
     if (!have_saved_reference) {
+      direct_drive_invalid_streak[dof] = DIRECT_DRIVE_INVALID_STREAK_LIMIT;
       direct_drive_next_probe_ms[dof] = now_ms + DIRECT_DRIVE_UNREFERENCED_PROBE_MS;
       dof_snapshot.valid[dof] = false;
       dof_snapshot.velocities[dof] = 0.0f;
@@ -567,7 +581,8 @@ bool JointController::executeControlLoop() {
       updateDirectDriveFeedback(dof, 0.0f, 0.0f, false);
       continue;
     }
-    direct_drive_next_probe_ms[dof] = 0;
+    direct_drive_invalid_streak[dof] = 0;
+    direct_drive_next_probe_ms[dof] = idle_probe_mode ? (now_ms + DIRECT_DRIVE_IDLE_PROBE_MS) : 0;
 
     const float calibrated_angle = raw_angle.angle - _saved_offsets[dof].agonist_offset;
 
@@ -789,13 +804,57 @@ bool JointController::executeControlLoop() {
         q_des = dof_hold_angle[dof];
       }
       
-      // Read current angle from shared state (updated by Core0)
+      const bool direct_drive_dof = isDirectDriveDof(dof);
+
+      if (direct_drive_dof && direct_drive_feedback_fault_active[dof] && dof_data.valid[dof]) {
+        float q_recovered = dof_data.angles[dof];
+        direct_drive_feedback_fault_active[dof] = false;
+        direct_drive_feedback_fault_log_ms[dof] = t_now;
+        LOG_C1_WARN("[Control] DOF " + String(dof) +
+                    " direct-drive feedback restored at " + String(q_recovered, 2) +
+                    "° — startup required to re-arm movement");
+      }
+
+      // Read current angle from shared state (updated by Core0, or overridden locally for direct-drive)
       if (!dof_data.valid[dof]) {
+        if (direct_drive_dof) {
+          if (t_now - direct_drive_feedback_fault_log_ms[dof] > 250) {
+            LOG_C1_ERROR("[Control] DOF " + String(dof) +
+                         " direct-drive feedback lost — zero torque, clearing impedance, entering IDLE");
+            direct_drive_feedback_fault_log_ms[dof] = t_now;
+          }
+
+          if (t_now - direct_drive_feedback_zero_torque_ms[dof] > 20) {
+            for (int i = 0; i < config.motor_count; i++) {
+              if (config.motors[i].dof_index == dof &&
+                  config.motors[i].role == MOTOR_ROLE_DIRECT &&
+                  motors[i] != nullptr) {
+                motors[i]->setTorque(0);
+                break;
+              }
+            }
+            direct_drive_feedback_zero_torque_ms[dof] = t_now;
+          }
+
+          if (impedance_target[dof].valid) {
+            clearImpedanceControlState(dof, this);
+          }
+          setMovementReadyForDof(dof, false);
+          dof_state[dof] = DofState::IDLE;
+          cur_dof_state = DofState::IDLE;
+          prev_dof_state[dof] = DofState::IDLE;
+          pid_reset_needed[dof] = true;
+          inner_pid_init_needed[dof] = false;
+          expected_velocity_cache[dof] = 0.0f;
+          direct_drive_feedback_fault_active[dof] = true;
+          continue;
+        }
+
         LOG_C1_WARN("[Control] Invalid encoder reading for DOF " + String(dof));
         continue;
       }
       float q_curr = dof_data.angles[dof];
-      
+
       // === COMPLIANCE DETECTION (Deflection / Stall) ===
       ComplianceState &cs = compliance_state[dof];
       float error = q_des - q_curr;
@@ -1178,6 +1237,22 @@ bool JointController::executeControlLoop() {
             safety_message,
             check_motors,
             &safety_violation_type);
+        if (!safety_ok && direct_drive_dof &&
+            safety_violation_type == SAFETY_VIOLATION_MAPPING_LIMIT &&
+            canDirectDriveRecoverTowardSafeRange(dof, q_curr, q_des)) {
+          static uint32_t last_inward_recovery_log_ms[MAX_DOFS] = {0};
+          if (t_now - last_inward_recovery_log_ms[dof] > 250) {
+            float safe_min = 0.0f;
+            float safe_max = 0.0f;
+            getMappingSafeRange(dof, safe_min, safe_max);
+            LOG_C1_WARN("[Safety] DOF " + String(dof) +
+                        " outside conservative range [" + String(safe_min, 2) + ", " +
+                        String(safe_max, 2) + "] at " + String(q_curr, 2) +
+                        "° — allowing inward-only recovery toward " + String(q_des, 2) + "°");
+            last_inward_recovery_log_ms[dof] = t_now;
+          }
+          safety_ok = true;
+        }
 #if CONTROLLER_DEBUG
         {
           uint32_t safety_dt = time_us_32() - safety_start_us;
