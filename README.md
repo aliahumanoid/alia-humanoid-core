@@ -15,7 +15,9 @@
 <img src="docs/media/hero/lower-leg-human-scale.png" alt="Lower Leg Human Scale" width="100%">
 </td>
 <td width="30%">
-<img src="docs/media/hero/ankle-motion-demo.gif" alt="Ankle motion demo (2 DOF)" width="100%">
+<a href="https://youtu.be/1Z9GlTnYEFs">
+  <img src="docs/media/hero/ankle-motion-demo.gif" alt="Ankle motion demo (2 DOF)" width="100%">
+</a>
 </td>
 </tr>
 <tr>
