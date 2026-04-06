@@ -96,6 +96,16 @@ class SafetyManager:
     def _fault_hint(cls, fault_name: str) -> str | None:
         return cls._FAULT_RECOVERY_HINTS.get(fault_name)
 
+    # Faults that are expected when resuming a session where the previous host
+    # disconnected without sending E-stop.  The controller kept running, the
+    # watchdog timed out, and the control loop may have accumulated overruns
+    # while idling without host commands.  These clear automatically once the
+    # new host starts streaming SET_IMPEDANCE frames.
+    _SESSION_RESUME_IGNORABLE_ACTIVE = frozenset({
+        "HOST_WATCHDOG_TIMEOUT",
+        "LOOP_OVERRUN",
+    })
+
     def diagnostic_blockers(
         self,
         telemetry: TelemetryManager,
@@ -103,12 +113,19 @@ class SafetyManager:
         *,
         mode: str = "movement",
         allow_estop_recovery: bool = False,
+        allow_session_resume: bool = False,
     ) -> dict[str, dict[str, object]]:
         """Return blocking diagnostic faults by joint for the requested mode.
 
         Modes:
           - ``prestart``: block only on non-recoverable controller faults
           - ``movement``: block on active motion-safety faults and persistent hard faults
+
+        Flags:
+          - ``allow_estop_recovery``: exclude ESTOP_LATCHED from blockers
+          - ``allow_session_resume``: exclude HOST_WATCHDOG_TIMEOUT and
+            LOOP_OVERRUN from active blockers (expected when resuming after a
+            previous host disconnected without E-stop)
         """
         if mode == "prestart":
             blocking_active = self._PRESTART_BLOCKING_ACTIVE_FAULTS
@@ -139,6 +156,12 @@ class SafetyManager:
             if allow_estop_recovery:
                 active_faults = [name for name in active_faults if name != "ESTOP_LATCHED"]
                 latched_faults = [name for name in latched_faults if name != "ESTOP_LATCHED"]
+
+            if allow_session_resume:
+                active_faults = [
+                    name for name in active_faults
+                    if name not in self._SESSION_RESUME_IGNORABLE_ACTIVE
+                ]
 
             if not active_faults and not latched_faults:
                 continue

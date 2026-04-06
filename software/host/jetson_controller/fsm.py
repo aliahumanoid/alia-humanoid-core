@@ -85,8 +85,13 @@ class StartupFSM:
         try:
             await self._connect(can_bus, config)
             await self._discover(can_bus, config, telemetry)
-            self._set_state(FSMState.DISCOVERED,
-                            "Press [S] to start motors")
+            all_ready = self._all_joints_ready(config, telemetry)
+            if all_ready:
+                self._set_state(FSMState.DISCOVERED,
+                                "Joints already active — press [S] to resume control")
+            else:
+                self._set_state(FSMState.DISCOVERED,
+                                "Press [S] to start motors")
             return True
         except StartupError as e:
             self._set_state(FSMState.ERROR, str(e))
@@ -128,6 +133,7 @@ class StartupFSM:
                 safety,
                 mode="movement",
                 allow_estop_recovery=False,
+                allow_session_resume=all_ready_on_entry,
                 context="Movement enable",
             )
 
@@ -185,6 +191,7 @@ class StartupFSM:
         *,
         mode: str,
         allow_estop_recovery: bool,
+        allow_session_resume: bool = False,
         context: str,
     ) -> None:
         blockers = safety.diagnostic_blockers(
@@ -192,6 +199,7 @@ class StartupFSM:
             joint_keys=config.joints.keys(),
             mode=mode,
             allow_estop_recovery=allow_estop_recovery,
+            allow_session_resume=allow_session_resume,
         )
         if blockers:
             raise StartupError(
