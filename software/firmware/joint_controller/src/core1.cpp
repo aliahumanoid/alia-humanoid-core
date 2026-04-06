@@ -950,6 +950,11 @@ static void sendHealthStatusData() {
   CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t *)&frame2);
 
   // Frame 3: loop timing (optional, same 1Hz cadence, zero impact on control loop)
+  // DISABLED pending investigation of startup timeout regression.
+  // The extra CAN_HOST.sendMsgBuf may interfere with SPI1 during
+  // recalc offset, or the 3-frame burst may overflow the SLCAN adapter.
+  // TODO: re-enable after confirming root cause
+#if 0
   uint32_t prof_last_us, prof_avg_us, prof_max_us;
   getLoopProfilingStats(prof_last_us, prof_avg_us, prof_max_us);
 
@@ -967,6 +972,7 @@ static void sendHealthStatusData() {
   frame3.max_us = (uint16_t)min<uint32_t>(prof_max_us, 65535UL);
   frame3.budget_us = inner_loop_period_us;
   CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t *)&frame3);
+#endif
 }
 
 static void sendFaultStatusData() {
@@ -2092,6 +2098,20 @@ void pollHostCan() {
       if (len >= 6) {
         uint8_t joint_id = buf[0];
         if (joint_id == ACTIVE_JOINT) {
+          // Guard: reject if already ready, startup pending, or startup in progress.
+          // A duplicate STARTUP_SEQUENCE (e.g. CAN retry or stale buffer frame)
+          // would trigger a redundant recalc that blocks Core1 and prevents
+          // the first STARTUP_STATUS COMPLETE from being transmitted via CAN.
+          if (active_joint_controller != nullptr &&
+              active_joint_controller->isSystemReadyForMovement()) {
+            LOG_C1_INFO("[CAN_HOST] Startup sequence ignored: system already ready");
+            break;
+          }
+          if (can_startup_requested || diag_startup_in_progress) {
+            LOG_C1_INFO("[CAN_HOST] Startup sequence ignored: startup already in progress");
+            break;
+          }
+
           int16_t torque = (int16_t)(buf[2] | (buf[3] << 8));
           int16_t duration = (int16_t)(buf[4] | (buf[5] << 8));
 
