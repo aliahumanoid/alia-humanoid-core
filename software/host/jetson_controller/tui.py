@@ -299,7 +299,7 @@ class TUI:
             and not isinstance(h, logging.FileHandler)
         ]
         for h in console_handlers:
-            h.setLevel(logging.WARNING)
+            h.setLevel(logging.CRITICAL + 1)
 
         try:
             with Live(self._render(), console=self._console,
