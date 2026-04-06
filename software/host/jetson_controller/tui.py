@@ -72,6 +72,10 @@ class TUI:
         self._start_time = time.monotonic()
         self._loop_paused = False
         self._status_line = ""  # Transient status message from key commands
+        self._alert_line = ""  # Recent warning/error from any joint
+        self._alert_time = 0.0  # monotonic timestamp of last alert
+        self._alert_ttl = 8.0  # seconds to show an alert
+        self._last_seen_event_seqs: dict[str, int] = {}  # per-joint last processed event seq
         self._joint_keys = list(config.joints.keys())
         self._selected_joint_idx = 0
         self._selected_dof = 0
@@ -281,6 +285,33 @@ class TUI:
             "dim",
         )
 
+    def _poll_alerts(self) -> None:
+        """Scan all joints for new warning+ diagnostic events and update the alert line."""
+        now = time.monotonic()
+        for key in self._joint_keys:
+            state = self._telemetry.states.get(key)
+            if state is None:
+                continue
+            events = getattr(state, "diagnostic_events", None) or []
+            if not events:
+                continue
+            latest = events[0]
+            seq = getattr(latest, "seq", None)
+            if seq is None:
+                continue
+            prev_seq = self._last_seen_event_seqs.get(key, -1)
+            if seq == prev_seq:
+                continue
+            self._last_seen_event_seqs[key] = seq
+            severity = getattr(latest, "severity_code", 0)
+            if severity < 2:  # INFO=1, WARN=2, ERROR=3, CRITICAL=4
+                continue
+            sev_name = getattr(latest, "severity_name", "WARN")
+            event_name = getattr(latest, "event_name", "?")
+            src = getattr(latest, "source_kind", "")
+            self._alert_line = f"[{key}] {sev_name}: {event_name} src={src}"
+            self._alert_time = now
+
     def on_toggle_loop(self, cb: AsyncCallback) -> None:
         self._cb_toggle_loop = cb
 
@@ -319,6 +350,7 @@ class TUI:
 
     def _render(self) -> Panel:
         """Build the TUI display."""
+        self._poll_alerts()
         elapsed = time.monotonic() - self._start_time
         minutes, seconds = divmod(int(elapsed), 60)
 
@@ -426,6 +458,11 @@ class TUI:
         if health_counters:
             health_counters_text.append(health_counters, style=health_style)
 
+        # Alert line (recent warning+ events from any joint)
+        alert = Text()
+        if self._alert_line and (time.monotonic() - self._alert_time) < self._alert_ttl:
+            alert.append(f"\u26a0 {self._alert_line}", style="bold red")
+
         # Status line (transient messages from key commands)
         status = Text()
         if self._status_line:
@@ -468,6 +505,7 @@ class TUI:
             diag_summary_text,
             health_counters_text,
             can_info,
+            alert,
             status,
             "",
             keys,
