@@ -584,6 +584,9 @@ void diag_note_encoder_invalid(uint8_t dof);
 void diag_note_safety_violation(uint8_t dof, SafetyViolationType violation_type);
 void diag_note_bad_command(uint8_t source_kind, uint8_t source_index);
 
+// Control loop cycle time profiling (Core1, read by health sender)
+void getLoopProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& max_us);
+
 // ============================================================================
 // MOTOR ANGLE CACHE (for safety checks without redundant CAN reads)
 // ============================================================================

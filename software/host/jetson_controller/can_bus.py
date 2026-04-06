@@ -229,6 +229,13 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
                     f"wdg={counters.watchdog_trip_count}",
                     False,
                 )
+            if frame_kind == 0x80 and len(data) >= 8:
+                import struct
+                avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
+                return (
+                    f"HEALTH_LOOP j={joint_id} avg={avg_us}us max={max_us}us budget={budget_us}us",
+                    False,
+                )
         return f"HEALTH j={joint_id} [{data.hex(' ')}]", False
 
     # Fault status

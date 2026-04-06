@@ -281,7 +281,11 @@ class TUI:
             f"{health.get('motor_can_tx_error_count', 0)} "
             f"overrun={health.get('loop_overrun_count', 0)} "
             f"watchdog={health.get('watchdog_trip_count', 0)} "
-            f"epoch={health.get('fault_epoch', 0)}",
+            f"epoch={health.get('fault_epoch', 0)}"
+            + (f"  loop={health['loop_avg_us']}/"
+               f"{health['loop_max_us']}us "
+               f"(budget={health['loop_budget_us']}us)"
+               if "loop_avg_us" in health else ""),
             "dim",
         )
 

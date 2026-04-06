@@ -948,6 +948,25 @@ static void sendHealthStatusData() {
   frame2.can_recovery_count = diag_can_recovery_count;
   frame2.seq = seq;
   CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t *)&frame2);
+
+  // Frame 3: loop timing (optional, same 1Hz cadence, zero impact on control loop)
+  uint32_t prof_last_us, prof_avg_us, prof_max_us;
+  getLoopProfilingStats(prof_last_us, prof_avg_us, prof_max_us);
+
+  struct __attribute__((packed)) {
+    uint8_t frame_kind;    // 0x80
+    uint8_t seq;
+    uint16_t avg_us;       // EMA cycle time
+    uint16_t max_us;       // Max since last health report
+    uint16_t budget_us;    // inner_loop_period_us
+  } frame3;
+
+  frame3.frame_kind = 0x80;
+  frame3.seq = seq;
+  frame3.avg_us = (uint16_t)min<uint32_t>(prof_avg_us, 65535UL);
+  frame3.max_us = (uint16_t)min<uint32_t>(prof_max_us, 65535UL);
+  frame3.budget_us = inner_loop_period_us;
+  CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t *)&frame3);
 }
 
 static void sendFaultStatusData() {

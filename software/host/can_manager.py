@@ -2795,6 +2795,13 @@ class CanManager:
                     "watchdog_trip_count": data[5],
                     "can_recovery_count": data[6],
                 }
+            elif frame_kind == 0x80:
+                avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
+                diag = self._diagnostics.setdefault(joint_name, {})
+                diag["loop_avg_us"] = avg_us
+                diag["loop_max_us"] = max_us
+                diag["loop_budget_us"] = budget_us
+                return
             else:
                 return
 

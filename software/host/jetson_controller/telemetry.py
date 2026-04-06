@@ -533,7 +533,7 @@ class TelemetryManager:
             return
 
         frame_kind = data[0] & 0xC0
-        seq = data[7]
+        seq = data[7] if frame_kind != 0x80 else data[1]
         for pending_key in [key for key in self._health_status_pending if key[0] == joint_id and key[1] != seq]:
             self._health_status_pending.pop(pending_key, None)
         summary, counters, _ = self._health_status_pending.get((joint_id, seq), (None, None, timestamp))
@@ -541,6 +541,15 @@ class TelemetryManager:
             summary = decode_health_status_summary(data, joint_id)
         elif frame_kind == 0x40:
             counters = decode_health_status_counters(data, joint_id)
+        elif frame_kind == 0x80 and len(data) >= 8:
+            # Loop timing frame — attach to current joint state directly
+            import struct
+            avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
+            if state is not None and isinstance(state.health_status, dict):
+                state.health_status["loop_avg_us"] = avg_us
+                state.health_status["loop_max_us"] = max_us
+                state.health_status["loop_budget_us"] = budget_us
+            return
         else:
             return
 
