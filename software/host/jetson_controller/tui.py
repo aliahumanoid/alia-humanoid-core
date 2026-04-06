@@ -303,7 +303,7 @@ class TUI:
 
         try:
             with Live(self._render(), console=self._console,
-                      refresh_per_second=10, screen=False) as live:
+                      refresh_per_second=10, screen=True) as live:
                 while not self._quit_event.is_set():
                     live.update(self._render())
                     await asyncio.sleep(0.1)
