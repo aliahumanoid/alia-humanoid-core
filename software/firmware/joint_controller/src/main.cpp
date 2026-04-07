@@ -16,7 +16,12 @@
  */
 
 #include "main_common.h"
+#include "BootUpdateBreadcrumb.h"
+#include "FirmwareUpdateMetadata.h"
 #include "RuntimeProvisioning.h"
+
+extern "C" uint8_t __flash_binary_start;
+extern "C" uint8_t __flash_binary_end;
 
 //----------------------------------------------------------------------------
 // RUNTIME JOINT CONFIGURATION
@@ -34,6 +39,7 @@ bool init_prg = true;
 // volatile prevents compiler from caching values across loop iterations.
 volatile bool flash_operation_in_progress = false;  // Core0 writes, Core1 reads
 volatile bool core1_flash_acknowledged = false;     // Core1 writes, Core0 reads
+volatile bool core1_runtime_started = false;        // Core1 writes once loop is alive
 volatile bool movement_in_progress = false;         // Core1 writes, Core0 reads
 volatile bool suspend_host_can_polling = false;     // Core0 writes, Core1 reads
 // System settings (loaded from flash at boot)
@@ -156,6 +162,12 @@ volatile bool can_set_auto_start_requested = false;
 volatile uint8_t can_auto_start_enabled = 0;
 volatile int16_t can_auto_start_torque = 0;
 volatile uint16_t can_auto_start_duration = 0;
+
+// CAN firmware update flash operations
+FirmwareUpdateCoreRequest fw_update_core_request = {};
+FirmwareUpdateCoreResponse fw_update_core_response = {};
+volatile bool fw_update_metadata_snapshot_valid = false;
+FirmwareUpdateMetadataRecord fw_update_metadata_snapshot = {};
 
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 queue_t startup_event_queue;
@@ -503,6 +515,24 @@ void setup() {
            ", Host CAN (GP" + String(CAN_HOST_CS_PIN) + ")=" + String(digitalRead(CAN_HOST_CS_PIN)));
 
   LOG_INFO("Joint firmware starting!");
+  LOG_INFO_F("Firmware link target: %s flash=[0x%08lX..0x%08lX)",
+             firmware_update_compiled_link_target_name(),
+             static_cast<unsigned long>(reinterpret_cast<uintptr_t>(&__flash_binary_start)),
+             static_cast<unsigned long>(reinterpret_cast<uintptr_t>(&__flash_binary_end)));
+
+  const BootUpdateBreadcrumbData boot_update_breadcrumb = readBootUpdateBreadcrumb();
+  if (boot_update_breadcrumb.present) {
+    LOG_INFO_F("Boot-update breadcrumb: reason=%u decision=%u active=%u pending=%u state=%u attempts=%u flags=0x%02lX seq=%lu",
+               static_cast<unsigned>(boot_update_breadcrumb.reason),
+               static_cast<unsigned>(boot_update_breadcrumb.decision_slot),
+               static_cast<unsigned>(boot_update_breadcrumb.active_slot),
+               static_cast<unsigned>(boot_update_breadcrumb.pending_slot),
+               static_cast<unsigned>(boot_update_breadcrumb.boot_state),
+               static_cast<unsigned>(boot_update_breadcrumb.attempts_remaining),
+               static_cast<unsigned long>(boot_update_breadcrumb.flags),
+               static_cast<unsigned long>(boot_update_breadcrumb.record_seq));
+    clearBootUpdateBreadcrumb();
+  }
 
   // Load persisted system settings before any joint-specific initialization.
   // A board without a valid stored profile stays in JOINT_NONE unprovisioned safe mode.
@@ -535,6 +565,38 @@ void setup() {
     setRuntimeJointProfile(JOINT_NONE, false);
     system_settings_loaded = true;
   }
+
+  FirmwareUpdateMetadataRecord update_metadata = {};
+  if (ensure_firmware_update_metadata_initialized(&update_metadata)) {
+    if (firmware_update_metadata_matches_local_board(&update_metadata)) {
+      bool metadata_changed_on_boot = false;
+      if (!reconcile_firmware_update_metadata_on_boot(&update_metadata, &metadata_changed_on_boot)) {
+        LOG_WARN("Firmware update metadata boot reconciliation failed");
+      } else if (metadata_changed_on_boot) {
+        LOG_INFO("Firmware update metadata reconciled on boot");
+      }
+    } else {
+      const uint32_t local_board_uid_crc32 = firmware_update_local_board_uid_crc32();
+      LOG_WARN_F("Firmware update metadata UID CRC mismatch: stored=0x%08lX local=0x%08lX",
+                 static_cast<unsigned long>(update_metadata.board_uid_crc32),
+                 static_cast<unsigned long>(local_board_uid_crc32));
+    }
+
+    LOG_INFO_F("Firmware update metadata: seq=%lu active=%s pending=%s state=%s attempts=%u",
+               static_cast<unsigned long>(update_metadata.record_seq),
+               firmware_update_slot_name(update_metadata.active_slot),
+               firmware_update_slot_name(update_metadata.pending_slot),
+               firmware_update_boot_state_name(update_metadata.boot_state),
+               update_metadata.attempts_remaining);
+  } else {
+    LOG_WARN("Firmware update metadata unavailable");
+    LOG_DEBUG_F("Local board UID CRC32: 0x%08lX",
+                static_cast<unsigned long>(firmware_update_local_board_uid_crc32()));
+    update_metadata = make_default_firmware_update_metadata_record();
+  }
+  fw_update_metadata_snapshot_valid = false;
+  fw_update_metadata_snapshot = update_metadata;
+  fw_update_metadata_snapshot_valid = true;
 
   LOG_INFO("Active runtime joint profile: " + String(ACTIVE_JOINT_CONFIG.name) +
            (runtimeJointProfileFromFlash() ? " (flash)" :

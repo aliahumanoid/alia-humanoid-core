@@ -22,6 +22,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <MagneticSensorMT6835.h>
+#include <flash_map.h>
 #include <global.h>
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -38,7 +39,6 @@
 // Flash storage constants
 #define ENCODER_FLASH_MAGIC_NUMBER 0xE5C0FFEE    // Magic number for validation ("ESCOFFEE")
 #define ENCODER_FLASH_STRUCT_VERSION 1            // Structure version
-#define ENCODER_FLASH_TARGET_OFFSET (512 * 1024)  // 512KB offset (separate from other data)
 
 /**
  * @brief Flash storage structure for encoder calibration data
@@ -313,4 +313,3 @@ private:
 
 // Global instance
 extern DirectEncoders directEncoders;
-

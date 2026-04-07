@@ -5,15 +5,19 @@
  * This module provides essential utility functions for the joint controller:
  * 
  * Flash Storage:
- * - Persistent storage of PID parameters and linear calibration equations
- * - Two separate flash regions with different data formats
+ * - Persistent storage of PID parameters, calibration equations, system settings,
+ *   and motor offsets
+ * - Current records live in dedicated top-of-flash sectors defined in flash_map.h
+ * - Legacy offsets remain readable for one-time migration after reflashing
  * - Versioning and checksum validation for data integrity
  * - Automatic recovery from corrupted data
  * 
  * Flash Memory Layout:
- * - Base offset: 256 KB from start of SPI flash
- * - PID data slot: Base + 0 KB (compact format, version 4)
- * - Linear equations slot: Base + 64 KB (calibration data, version 5)
+ * - PID slot: FLASH_PID_OFFSET
+ * - Linear equations slot: FLASH_LINEAR_EQ_OFFSET
+ * - System settings slot: FLASH_SYSTEM_SETTINGS_OFFSET
+ * - Motor offsets slot: FLASH_MOTOR_OFFSETS_OFFSET
+ * - See flash_map.h for the authoritative layout contract
  * 
  * Data Versioning:
  * - Version 4: PID-only data (motor PID gains, outer loop PID)
@@ -32,6 +36,7 @@
 #define UTILS_H
 
 #include <global.h>
+#include <flash_map.h>
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include <algorithm>
@@ -102,7 +107,7 @@ bool load_pid_only_data(struct PIDOnlyDeviceData *data);
  * 
  * @param data Linear equations structure to save
  * 
- * @note Stored in separate flash region from PID data (base + 64KB)
+ * @note Stored in a dedicated top-of-flash slot separate from PID data
  */
 void save_linear_equations_data(struct LinearEquationsDeviceData data);
 
@@ -157,7 +162,7 @@ bool load_system_settings_data(struct SystemSettingsData *data);
  * 
  * @param data Motor offsets structure to save
  * 
- * @note Stored at base + 192KB in flash
+ * @note Stored in a dedicated top-of-flash slot
  */
 void save_motor_offsets_data(struct MotorOffsetsDeviceData data);
 

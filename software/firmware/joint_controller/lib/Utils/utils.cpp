@@ -16,6 +16,7 @@
 // External flags for flash operation synchronization with Core1
 extern volatile bool flash_operation_in_progress;
 extern volatile bool core1_flash_acknowledged;
+extern volatile bool core1_runtime_started;
 
 /**
  * @brief Handshake with Core1 before flash operations.
@@ -28,6 +29,10 @@ extern volatile bool core1_flash_acknowledged;
  * (boot) or is stuck — the flash operation proceeds anyway.
  */
 static void wait_for_core1_flash_ready() {
+  if (!core1_runtime_started) {
+    return;
+  }
+
   // Reset ack from any previous operation (safe: Core1 is not in the
   // wait loop because flash_operation_in_progress is still false)
   core1_flash_acknowledged = false;
@@ -45,17 +50,6 @@ static void wait_for_core1_flash_ready() {
     tight_loop_contents();
   }
 }
-
-// ===================================================================
-// FLASH MEMORY CONFIGURATION
-// ===================================================================
-
-// Flash storage layout in SPI flash memory
-#define FLASH_STORAGE_BASE_OFFSET (256 * 1024)  ///< Start at 256 KB offset
-#define FLASH_PID_OFFSET (FLASH_STORAGE_BASE_OFFSET)  ///< PID data at base
-#define FLASH_LINEAR_EQ_OFFSET (FLASH_STORAGE_BASE_OFFSET + 64 * 1024)  ///< Equations at base + 64KB
-#define FLASH_SYSTEM_SETTINGS_OFFSET (FLASH_STORAGE_BASE_OFFSET + 128 * 1024)  ///< System settings at base + 128KB
-#define FLASH_MOTOR_OFFSETS_OFFSET (FLASH_STORAGE_BASE_OFFSET + 192 * 1024)   ///< Motor offsets at base + 192KB
 
 // Data format versions
 static constexpr uint16_t PID_FLASH_VERSION            = 4;  ///< PID-only format version
@@ -154,6 +148,166 @@ static bool read_linear_equations_blob(uint32_t flash_offset, const char *slot_l
   return true;
 }
 
+static bool read_pid_blob(uint32_t flash_offset, const char *slot_label,
+                          struct PIDOnlyDeviceData *data, bool log_errors) {
+  if (data == NULL) {
+    if (log_errors) {
+      LOG_ERROR("Invalid PID pointer");
+    }
+    return false;
+  }
+
+  uint8_t *data_ptr        = reinterpret_cast<uint8_t *>(data);
+  size_t data_size         = sizeof(struct PIDOnlyDeviceData);
+  size_t offset            = 0;
+  const uint8_t *flash_ptr = reinterpret_cast<const uint8_t *>(XIP_BASE + flash_offset);
+
+  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
+
+  if (data->magic_number != MAGIC_NUMBER) {
+    if (log_errors) {
+      LOG_DEBUG("No PID data found in slot " + String(slot_label) + " (missing magic number)");
+    }
+    return false;
+  }
+
+  if (data->version < PID_FLASH_VERSION || data->version >= LINEAR_EQ_FLASH_VERSION) {
+    if (log_errors) {
+      LOG_WARN("Slot " + String(slot_label) + ": unexpected PID version " + String(data->version) +
+               " (expected " + String(PID_FLASH_VERSION) + ")");
+    }
+    return false;
+  }
+
+  while (offset < data_size) {
+    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
+    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
+    offset += chunk_size;
+  }
+
+  uint16_t calculated_checksum =
+      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  if (calculated_checksum != data->checksum) {
+    if (log_errors) {
+      LOG_ERROR("Invalid PID checksum in slot " + String(slot_label));
+    }
+    return false;
+  }
+
+  if (data->dof_count == 0 || data->dof_count > MAX_DOFS || data->motor_count > MAX_MOTORS) {
+    if (log_errors) {
+      LOG_ERROR("Invalid PID data in slot " + String(slot_label) + " - count out of range");
+    }
+    return false;
+  }
+
+  return true;
+}
+
+static bool read_system_settings_blob(uint32_t flash_offset, const char *slot_label,
+                                      struct SystemSettingsData *data, bool log_errors) {
+  if (data == NULL) {
+    if (log_errors) {
+      LOG_ERROR("Invalid system settings pointer");
+    }
+    return false;
+  }
+
+  uint8_t *data_ptr        = reinterpret_cast<uint8_t *>(data);
+  size_t data_size         = sizeof(struct SystemSettingsData);
+  size_t offset            = 0;
+  const uint8_t *flash_ptr = reinterpret_cast<const uint8_t *>(XIP_BASE + flash_offset);
+
+  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
+
+  if (data->magic_number != MAGIC_NUMBER) {
+    if (log_errors) {
+      LOG_DEBUG("No system settings found in slot " + String(slot_label) + " (missing magic number)");
+    }
+    return false;
+  }
+
+  if (data->version != SYSTEM_SETTINGS_FLASH_VERSION) {
+    if (log_errors) {
+      LOG_WARN("Slot " + String(slot_label) + ": unexpected system settings version " +
+               String(data->version) + " (expected " + String(SYSTEM_SETTINGS_FLASH_VERSION) + ")");
+    }
+    return false;
+  }
+
+  while (offset < data_size) {
+    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
+    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
+    offset += chunk_size;
+  }
+
+  uint16_t calculated_checksum =
+      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  if (calculated_checksum != data->checksum) {
+    if (log_errors) {
+      LOG_ERROR("Invalid system settings checksum in slot " + String(slot_label));
+    }
+    return false;
+  }
+
+  return true;
+}
+
+static bool read_motor_offsets_blob(uint32_t flash_offset, const char *slot_label,
+                                    struct MotorOffsetsDeviceData *data, bool log_errors) {
+  if (data == NULL) {
+    if (log_errors) {
+      LOG_ERROR("Invalid motor offsets pointer");
+    }
+    return false;
+  }
+
+  uint8_t *data_ptr        = reinterpret_cast<uint8_t *>(data);
+  size_t data_size         = sizeof(struct MotorOffsetsDeviceData);
+  size_t offset            = 0;
+  const uint8_t *flash_ptr = reinterpret_cast<const uint8_t *>(XIP_BASE + flash_offset);
+
+  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
+
+  if (data->magic_number != MAGIC_NUMBER) {
+    if (log_errors) {
+      LOG_DEBUG("No motor offsets found in slot " + String(slot_label) + " (missing magic number)");
+    }
+    return false;
+  }
+
+  if (data->version != MOTOR_OFFSETS_FLASH_VERSION) {
+    if (log_errors) {
+      LOG_WARN("Slot " + String(slot_label) + ": unexpected motor offsets version " +
+               String(data->version) + " (expected " + String(MOTOR_OFFSETS_FLASH_VERSION) + ")");
+    }
+    return false;
+  }
+
+  while (offset < data_size) {
+    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
+    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
+    offset += chunk_size;
+  }
+
+  uint16_t calculated_checksum =
+      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  if (calculated_checksum != data->checksum) {
+    if (log_errors) {
+      LOG_ERROR("Invalid motor offsets checksum in slot " + String(slot_label));
+    }
+    return false;
+  }
+
+  return true;
+}
+
 // ===================================================================
 // FLASH STORAGE - PID DATA SAVE/LOAD
 // ===================================================================
@@ -244,51 +398,19 @@ bool load_pid_only_data(struct PIDOnlyDeviceData *data) {
     return false;
   }
 
-  uint8_t *data_ptr        = (uint8_t *)data;
-  size_t data_size         = sizeof(struct PIDOnlyDeviceData);
-  size_t offset            = 0;
-  const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + FLASH_PID_OFFSET);
-
-  // Step 1: Read header for validation
-  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
-
-  // Step 2: Verify magic number
-  if (data->magic_number != MAGIC_NUMBER) {
-    LOG_DEBUG("No PID data found in flash (magic number not found)");
-    return false;
+  bool loaded_from_legacy = false;
+  if (!read_pid_blob(FLASH_PID_OFFSET, "PID", data, true)) {
+    if (!read_pid_blob(FLASH_PID_OFFSET_LEGACY, "LEGACY_PID", data, true)) {
+      return false;
+    }
+    loaded_from_legacy = true;
   }
 
-  // Step 3: Verify version (must be PID format, not linear equations)
-  if (data->version < PID_FLASH_VERSION || data->version >= LINEAR_EQ_FLASH_VERSION) {
-    LOG_WARN("Unexpected PID data version found in flash: " + String(data->version) +
-             " (expected " + String(PID_FLASH_VERSION) + ")");
-    return false;
+  if (loaded_from_legacy) {
+    LOG_WARN("PID data found only in legacy flash slot - migrating to top-of-flash NVM");
+    save_pid_only_data(*data);
   }
 
-  // Step 4: Read the rest of the data in chunks
-  while (offset < data_size) {
-    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
-    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
-    offset += chunk_size;
-  }
-
-  // Step 5: Verify checksum
-  uint16_t calculated_checksum =
-      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
-                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
-
-  if (calculated_checksum != data->checksum) {
-    LOG_ERROR("PID data checksum mismatch - data corrupted!");
-    return false;
-  }
-
-  // Step 6: Validate data ranges
-  if (data->dof_count == 0 || data->dof_count > MAX_DOFS || data->motor_count > MAX_MOTORS) {
-    LOG_ERROR("Invalid PID data - DOF or motor count out of range!");
-    return false;
-  }
-
-  // Success - print loaded data summary
   LOG_INFO("PID-only data loaded successfully!");
   LOG_DEBUG("Joint type: " + String(data->joint_type));
   LOG_DEBUG("DOF count: " + String(data->dof_count));
@@ -493,14 +615,23 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
  * Prints detailed equation summary including R² and MSE statistics.
  */
 bool load_linear_equations_data(struct LinearEquationsDeviceData *data) {
+  bool loaded_from_legacy = false;
   if (!read_linear_equations_blob(FLASH_LINEAR_EQ_OFFSET, "LINEAR_EQ", data, true)) {
-    return false;
+    if (!read_linear_equations_blob(FLASH_LINEAR_EQ_OFFSET_LEGACY, "LEGACY_LINEAR_EQ", data, true)) {
+      return false;
+    }
+    loaded_from_legacy = true;
   }
 
   // Further validate data
   if (data->dof_count == 0 || data->dof_count > MAX_DOFS || data->motor_count > MAX_MOTORS) {
     SERIAL_COM_LN("Invalid linear equations data - DOF or motor count out of range!");
     return false;
+  }
+
+  if (loaded_from_legacy) {
+    LOG_WARN("Linear equations found only in legacy flash slot - migrating to top-of-flash NVM");
+    save_linear_equations_data(*data);
   }
 
   SERIAL_COM_LN("Linear equations loaded successfully from flash!");
@@ -620,42 +751,18 @@ bool load_system_settings_data(struct SystemSettingsData *data) {
     return false;
   }
 
-  uint8_t *data_ptr        = (uint8_t *)data;
-  size_t data_size         = sizeof(struct SystemSettingsData);
-  size_t offset            = 0;
-  const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + FLASH_SYSTEM_SETTINGS_OFFSET);
-
-  // Step 1: Read header for validation
-  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
-
-  // Step 2: Verify magic number
-  if (data->magic_number != MAGIC_NUMBER) {
-    LOG_DEBUG("No system settings found in flash (magic number not found)");
-    return false;
+  bool loaded_from_legacy = false;
+  if (!read_system_settings_blob(FLASH_SYSTEM_SETTINGS_OFFSET, "SYSTEM_SETTINGS", data, true)) {
+    if (!read_system_settings_blob(FLASH_SYSTEM_SETTINGS_OFFSET_LEGACY, "LEGACY_SYSTEM_SETTINGS",
+                                   data, true)) {
+      return false;
+    }
+    loaded_from_legacy = true;
   }
 
-  // Step 3: Verify version
-  if (data->version != SYSTEM_SETTINGS_FLASH_VERSION) {
-    LOG_WARN("Unexpected system settings version: " + String(data->version) +
-             " (expected " + String(SYSTEM_SETTINGS_FLASH_VERSION) + ")");
-    return false;
-  }
-
-  // Step 4: Read the rest of the data
-  while (offset < data_size) {
-    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
-    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
-    offset += chunk_size;
-  }
-
-  // Step 5: Verify checksum
-  uint16_t calculated_checksum =
-      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
-                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
-
-  if (calculated_checksum != data->checksum) {
-    LOG_ERROR("System settings checksum mismatch - data corrupted!");
-    return false;
+  if (loaded_from_legacy) {
+    LOG_WARN("System settings found only in legacy flash slot - migrating to top-of-flash NVM");
+    save_system_settings_data(*data);
   }
 
   // Success - print loaded settings summary
@@ -738,42 +845,18 @@ bool load_motor_offsets_data(struct MotorOffsetsDeviceData *data) {
     return false;
   }
 
-  uint8_t *data_ptr        = (uint8_t *)data;
-  size_t data_size         = sizeof(struct MotorOffsetsDeviceData);
-  size_t offset            = 0;
-  const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + FLASH_MOTOR_OFFSETS_OFFSET);
-
-  // Step 1: Read header for validation
-  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
-
-  // Step 2: Verify magic number
-  if (data->magic_number != MAGIC_NUMBER) {
-    LOG_DEBUG("No motor offsets found in flash (magic number not found)");
-    return false;
+  bool loaded_from_legacy = false;
+  if (!read_motor_offsets_blob(FLASH_MOTOR_OFFSETS_OFFSET, "MOTOR_OFFSETS", data, true)) {
+    if (!read_motor_offsets_blob(FLASH_MOTOR_OFFSETS_OFFSET_LEGACY, "LEGACY_MOTOR_OFFSETS", data,
+                                 true)) {
+      return false;
+    }
+    loaded_from_legacy = true;
   }
 
-  // Step 3: Verify version
-  if (data->version != MOTOR_OFFSETS_FLASH_VERSION) {
-    LOG_WARN("Unexpected motor offsets version: " + String(data->version) +
-             " (expected " + String(MOTOR_OFFSETS_FLASH_VERSION) + ")");
-    return false;
-  }
-
-  // Step 4: Read the rest of the data
-  while (offset < data_size) {
-    size_t chunk_size = (data_size - offset > 256) ? 256 : data_size - offset;
-    memcpy(data_ptr + offset, flash_ptr + offset, chunk_size);
-    offset += chunk_size;
-  }
-
-  // Step 5: Verify checksum
-  uint16_t calculated_checksum =
-      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
-                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
-
-  if (calculated_checksum != data->checksum) {
-    LOG_ERROR("Motor offsets checksum mismatch - data corrupted!");
-    return false;
+  if (loaded_from_legacy) {
+    LOG_WARN("Motor offsets found only in legacy flash slot - migrating to top-of-flash NVM");
+    save_motor_offsets_data(*data);
   }
 
   LOG_INFO("Motor offsets loaded from flash successfully!");

@@ -46,6 +46,10 @@ CAN_ID_PRETENSION_ALL = 0x00D
 CAN_ID_SET_IMPEDANCE = 0x01D
 CAN_ID_IMPEDANCE_CTRL = 0x01E
 CAN_ID_FAULT_SNAPSHOT_CTRL = 0x01F
+CAN_ID_FW_UPDATE_CTRL = 0x020
+CAN_ID_FW_UPDATE_META_A = 0x021
+CAN_ID_FW_UPDATE_META_B = 0x022
+CAN_ID_FW_UPDATE_DATA = 0x023
 
 CAN_ID_ENCODER_STREAM_DATA = 0x410
 CAN_ID_STARTUP_STATUS = 0x490
@@ -57,6 +61,10 @@ CAN_ID_FAULT_STATUS = 0x520
 CAN_ID_EVENT_NOTICE = 0x530
 CAN_ID_FAULT_SNAPSHOT_META = 0x540
 CAN_ID_FAULT_SNAPSHOT_DATA = 0x550
+CAN_ID_FW_UPDATE_STATUS = 0x560
+CAN_ID_FW_UPDATE_UID = 0x570
+CAN_ID_FW_UPDATE_INFO = 0x580
+CAN_ID_FW_UPDATE_PROGRESS = 0x590
 
 # Sentinel for unused DOF slots
 UNUSED_DOF = 0x7FFF
@@ -174,6 +182,48 @@ STARTUP_REASON_NAMES = {
     8: "REFERENCE_REQUIRED",
 }
 
+FW_UPDATE_EVENT_NAMES = {
+    0x01: "INFO_READY",
+    0x02: "MAINTENANCE_ENTERED",
+    0x03: "MAINTENANCE_EXITED",
+    0x04: "BEGIN_ACCEPTED",
+    0x05: "PAGE_COMMITTED",
+    0x06: "VERIFY_OK",
+    0x07: "ACTIVATE_OK",
+    0x08: "CANDIDATE_BOOT_OK",
+    0x09: "CONFIRM_OK",
+    0x0A: "ROLLBACK_OCCURRED",
+    0x40: "ERROR",
+}
+
+FW_UPDATE_ERROR_NAMES = {
+    0x00: "NONE",
+    0x01: "BUSY",
+    0x02: "INVALID_STATE",
+    0x03: "UID_MISMATCH",
+    0x04: "INVALID_SLOT",
+    0x05: "UPDATE_NOT_STARTED",
+    0x06: "PAGE_SEQ_MISMATCH",
+    0x07: "FRAG_INDEX_MISMATCH",
+    0x08: "PAGE_CRC_MISMATCH",
+    0x09: "SLOT_BOUNDS_ERROR",
+    0x0A: "IMAGE_CRC_MISMATCH",
+    0x0B: "VERIFY_FAILED",
+    0x0C: "CONFIRMATION_TIMEOUT",
+    0x0D: "CANDIDATE_BOOT_FAILED",
+}
+
+FW_UPDATE_BOOT_STATE_NAMES = {
+    0: "STABLE",
+    1: "MAINTENANCE",
+    2: "RECEIVING",
+    3: "VERIFIED",
+    4: "PENDING_TEST",
+    5: "CANDIDATE_RUNNING",
+    6: "ROLLBACK_REQUIRED",
+    7: "ROLLED_BACK",
+}
+
 
 # ---------------------------------------------------------------------------
 # Decoded message dataclasses
@@ -219,6 +269,74 @@ class StartupStatus:
     def is_partial(self) -> bool:
         """COMPLETE but some DOFs stayed IDLE (encoder invalid at startup)."""
         return self.event_type == 3 and self.reason_code == 7
+
+
+@dataclass
+class FirmwareUpdateStatus:
+    joint_id: int
+    event_code: int
+    boot_state: int
+    active_slot: int
+    pending_slot: int
+    error_code: int
+    flags: int
+    value: int
+
+    @property
+    def event_name(self) -> str:
+        return FW_UPDATE_EVENT_NAMES.get(self.event_code, f"EVENT_{self.event_code}")
+
+    @property
+    def boot_state_name(self) -> str:
+        return FW_UPDATE_BOOT_STATE_NAMES.get(self.boot_state, f"BOOT_{self.boot_state}")
+
+    @property
+    def error_name(self) -> str:
+        return FW_UPDATE_ERROR_NAMES.get(self.error_code, f"ERR_{self.error_code}")
+
+
+@dataclass
+class FirmwareUpdateInfo:
+    joint_id: int
+    active_slot: int
+    pending_slot: int
+    boot_state: int
+    attempts_remaining: int
+    fw_major: int
+    fw_minor: int
+    fw_patch: int
+    flags: int
+
+    @property
+    def fw_version(self) -> str:
+        return f"{self.fw_major}.{self.fw_minor}.{self.fw_patch}"
+
+    @property
+    def maintenance_active(self) -> bool:
+        return bool(self.flags & 0x01)
+
+    @property
+    def update_in_progress(self) -> bool:
+        return bool(self.flags & 0x02)
+
+    @property
+    def candidate_awaiting_confirmation(self) -> bool:
+        return bool(self.flags & 0x04)
+
+
+@dataclass
+class FirmwareUpdateProgress:
+    joint_id: int
+    next_page_index: int
+    last_page_seq: int
+    last_frag_index: int
+    boot_state: int
+
+
+@dataclass
+class FirmwareUpdateUid:
+    joint_id: int
+    uid: bytes
 
 
 @dataclass
@@ -602,6 +720,186 @@ def encode_impedance_ctrl(joint_id: int, sub_cmd: int,
 
 
 # ---------------------------------------------------------------------------
+# Firmware update frame builders (0x020-0x023)
+# ---------------------------------------------------------------------------
+
+FW_UPDATE_OP_GET_INFO = 0x01
+FW_UPDATE_OP_ENTER_MAINTENANCE = 0x02
+FW_UPDATE_OP_EXIT_MAINTENANCE = 0x03
+FW_UPDATE_OP_BEGIN_UPDATE = 0x04
+FW_UPDATE_OP_END_UPDATE = 0x05
+FW_UPDATE_OP_VERIFY_UPDATE = 0x06
+FW_UPDATE_OP_ACTIVATE_SLOT = 0x07
+FW_UPDATE_OP_CONFIRM_UPDATE = 0x08
+FW_UPDATE_OP_ABORT_UPDATE = 0x09
+FW_UPDATE_OP_REBOOT = 0x0A
+
+FW_UPDATE_EVT_INFO_READY = 0x01
+FW_UPDATE_EVT_MAINTENANCE_ENTERED = 0x02
+FW_UPDATE_EVT_MAINTENANCE_EXITED = 0x03
+FW_UPDATE_EVT_BEGIN_ACCEPTED = 0x04
+FW_UPDATE_EVT_PAGE_COMMITTED = 0x05
+FW_UPDATE_EVT_VERIFY_OK = 0x06
+FW_UPDATE_EVT_ACTIVATE_OK = 0x07
+FW_UPDATE_EVT_CANDIDATE_BOOT_OK = 0x08
+FW_UPDATE_EVT_CONFIRM_OK = 0x09
+FW_UPDATE_EVT_ROLLBACK_OCCURRED = 0x0A
+FW_UPDATE_EVT_ERROR = 0x40
+
+FW_UPDATE_ERR_NONE = 0x00
+FW_UPDATE_ERR_BUSY = 0x01
+FW_UPDATE_ERR_INVALID_STATE = 0x02
+FW_UPDATE_ERR_UID_MISMATCH = 0x03
+FW_UPDATE_ERR_INVALID_SLOT = 0x04
+FW_UPDATE_ERR_UPDATE_NOT_STARTED = 0x05
+FW_UPDATE_ERR_PAGE_SEQ_MISMATCH = 0x06
+FW_UPDATE_ERR_FRAG_INDEX_MISMATCH = 0x07
+FW_UPDATE_ERR_PAGE_CRC_MISMATCH = 0x08
+FW_UPDATE_ERR_SLOT_BOUNDS_ERROR = 0x09
+FW_UPDATE_ERR_IMAGE_CRC_MISMATCH = 0x0A
+FW_UPDATE_ERR_VERIFY_FAILED = 0x0B
+FW_UPDATE_ERR_CONFIRMATION_TIMEOUT = 0x0C
+FW_UPDATE_ERR_CANDIDATE_BOOT_FAILED = 0x0D
+
+
+def fw_update_crc16_ccitt(data: bytes) -> int:
+    """Match firmware CRC16-CCITT implementation for per-page validation."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= (byte & 0xFF) << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
+
+
+def encode_fw_update_ctrl(opcode: int, *args: int) -> tuple[int, bytes]:
+    payload = bytes([opcode & 0xFF, *(arg & 0xFF for arg in args[:7])]).ljust(8, b"\x00")
+    return CAN_ID_FW_UPDATE_CTRL, payload
+
+
+def encode_fw_update_get_info() -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_GET_INFO)
+
+
+def encode_fw_update_enter_maintenance(*, require_idle: bool = True,
+                                       reject_if_startup_active: bool = True,
+                                       stay_after_reboot: bool = False) -> tuple[int, bytes]:
+    flags = 0
+    if require_idle:
+        flags |= 0x01
+    if reject_if_startup_active:
+        flags |= 0x02
+    if stay_after_reboot:
+        flags |= 0x04
+    return encode_fw_update_ctrl(FW_UPDATE_OP_ENTER_MAINTENANCE, flags)
+
+
+def encode_fw_update_exit_maintenance() -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_EXIT_MAINTENANCE)
+
+
+def encode_fw_update_begin(target_slot: int, *,
+                           fw_major: int = 0,
+                           fw_minor: int = 0,
+                           fw_patch: int = 0,
+                           image_format: int = 1,
+                           allow_same_version: bool = True,
+                           candidate_boots_in_maintenance: bool = True) -> tuple[int, bytes]:
+    options = 0
+    if allow_same_version:
+        options |= 0x01
+    if candidate_boots_in_maintenance:
+        options |= 0x02
+    return encode_fw_update_ctrl(
+        FW_UPDATE_OP_BEGIN_UPDATE,
+        target_slot,
+        image_format,
+        fw_major,
+        fw_minor,
+        fw_patch,
+        options,
+        0,
+    )
+
+
+def encode_fw_update_end() -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_END_UPDATE)
+
+
+def encode_fw_update_verify(target_slot: int) -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_VERIFY_UPDATE, target_slot)
+
+
+def encode_fw_update_activate(target_slot: int, attempts_remaining: int = 1) -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_ACTIVATE_SLOT, target_slot, attempts_remaining)
+
+
+def encode_fw_update_confirm(target_slot: int) -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_CONFIRM_UPDATE, target_slot)
+
+
+def encode_fw_update_abort() -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_ABORT_UPDATE)
+
+
+def encode_fw_update_reboot(mode: int = 0) -> tuple[int, bytes]:
+    return encode_fw_update_ctrl(FW_UPDATE_OP_REBOOT, mode)
+
+
+def encode_fw_update_meta_a(image_size_bytes: int, image_crc32: int) -> tuple[int, bytes]:
+    payload = struct.pack("<II", image_size_bytes & 0xFFFFFFFF, image_crc32 & 0xFFFFFFFF)
+    return CAN_ID_FW_UPDATE_META_A, payload
+
+
+def encode_fw_update_meta_b(board_uid_crc32: int,
+                            protocol_major: int = 1,
+                            protocol_minor: int = 0) -> tuple[int, bytes]:
+    payload = struct.pack(
+        "<IBBBB",
+        board_uid_crc32 & 0xFFFFFFFF,
+        protocol_major & 0xFF,
+        protocol_minor & 0xFF,
+        0,
+        0,
+    )
+    return CAN_ID_FW_UPDATE_META_B, payload
+
+
+def encode_fw_update_page_begin(page_index: int,
+                                page_seq: int,
+                                page_payload: bytes,
+                                *,
+                                is_final_page: bool) -> tuple[int, bytes]:
+    page_len = len(page_payload)
+    if page_len <= 0 or page_len > 256:
+        raise ValueError("page_payload must contain between 1 and 256 bytes")
+    page_crc16 = fw_update_crc16_ccitt(page_payload)
+    length_mod = page_len % 256
+    flags = 0x01 if is_final_page else 0x00
+    payload = bytes(
+        [
+            page_index & 0xFF,
+            (page_index >> 8) & 0xFF,
+            (page_index >> 16) & 0xFF,
+            page_seq & 0xFF,
+            length_mod & 0xFF,
+            flags,
+        ]
+    ) + struct.pack("<H", page_crc16)
+    return CAN_ID_FW_UPDATE_META_B, payload
+
+
+def encode_fw_update_page_frag(page_seq: int, frag_index: int, data: bytes) -> tuple[int, bytes]:
+    if len(data) > 6:
+        raise ValueError("page fragment payload cannot exceed 6 bytes")
+    payload = bytes([page_seq & 0xFF, frag_index & 0xFF]) + data.ljust(6, b"\x00")
+    return CAN_ID_FW_UPDATE_DATA, payload
+
+
+# ---------------------------------------------------------------------------
 # SET_IMPEDANCE frame builders (0x01D)
 # ---------------------------------------------------------------------------
 
@@ -669,6 +967,51 @@ def encode_set_impedance_frame3(
 # ---------------------------------------------------------------------------
 # Decode functions (firmware → host)
 # ---------------------------------------------------------------------------
+
+def decode_fw_update_status(data: bytes, joint_id: int) -> FirmwareUpdateStatus:
+    event_code, boot_state, active_slot, pending_slot, error_code, flags, value = struct.unpack(
+        "<BBBBBBH", data
+    )
+    return FirmwareUpdateStatus(
+        joint_id=joint_id,
+        event_code=event_code,
+        boot_state=boot_state,
+        active_slot=active_slot,
+        pending_slot=pending_slot,
+        error_code=error_code,
+        flags=flags,
+        value=value,
+    )
+
+
+def decode_fw_update_uid(data: bytes, joint_id: int) -> FirmwareUpdateUid:
+    return FirmwareUpdateUid(joint_id=joint_id, uid=bytes(data[:8]))
+
+
+def decode_fw_update_info(data: bytes, joint_id: int) -> FirmwareUpdateInfo:
+    return FirmwareUpdateInfo(
+        joint_id=joint_id,
+        active_slot=data[0],
+        pending_slot=data[1],
+        boot_state=data[2],
+        attempts_remaining=data[3],
+        fw_major=data[4],
+        fw_minor=data[5],
+        fw_patch=data[6],
+        flags=data[7],
+    )
+
+
+def decode_fw_update_progress(data: bytes, joint_id: int) -> FirmwareUpdateProgress:
+    next_page_index = data[0] | (data[1] << 8) | (data[2] << 16)
+    return FirmwareUpdateProgress(
+        joint_id=joint_id,
+        next_page_index=next_page_index,
+        last_page_seq=data[3],
+        last_frag_index=data[4],
+        boot_state=data[5],
+    )
+
 
 def decode_joint_announce(data: bytes, joint_id: int) -> JointAnnounce:
     """Decode joint announce frame (0x4A0+joint)."""

@@ -78,6 +78,152 @@ static void formatBoardUidHex(char *out, size_t out_size) {
   out[needed - 1] = '\0';
 }
 
+static void completeFirmwareUpdateCoreRequest(const FirmwareUpdateCoreRequest &request,
+                                              uint8_t error_code,
+                                              const FirmwareSlotWriteSession *session = nullptr,
+                                              uint32_t value0 = 0u,
+                                              uint32_t value1 = 0u) {
+  FirmwareUpdateCoreResponse response = {};
+  response.op = request.op;
+  response.error_code = error_code;
+  response.value0 = value0;
+  response.value1 = value1;
+  if (session != nullptr) {
+    response.session = *session;
+  } else {
+    response.session = request.session;
+  }
+
+  fw_update_core_response = response;
+  fw_update_core_response.ready = true;
+  fw_update_core_request.pending = false;
+}
+
+static void handleFirmwareUpdateCoreRequest() {
+  if (!fw_update_core_request.pending) {
+    return;
+  }
+
+  const FirmwareUpdateCoreRequest request = fw_update_core_request;
+  FirmwareUpdateMetadataRecord metadata = {};
+
+  auto fail_invalid_state = [&]() {
+    completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_INVALID_STATE);
+  };
+
+  switch (request.op) {
+    case FW_UPDATE_CORE_OP_SET_MAINTENANCE: {
+      if (!ensure_firmware_update_metadata_initialized(&metadata)) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_VERIFY_FAILED);
+        return;
+      }
+      if (!firmware_update_set_maintenance_mode(&metadata, request.bool_arg0 != 0u)) {
+        fail_invalid_state();
+        return;
+      }
+      completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_NONE);
+      return;
+    }
+
+    case FW_UPDATE_CORE_OP_BEGIN: {
+      if (!ensure_firmware_update_metadata_initialized(&metadata)) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_VERIFY_FAILED);
+        return;
+      }
+      if (request.board_uid_crc32 != 0u &&
+          request.board_uid_crc32 != firmware_update_local_board_uid_crc32()) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_UID_MISMATCH);
+        return;
+      }
+
+      FirmwareSlotWriteSession session = {};
+      FirmwareSlotWriterStatus status = firmware_slot_writer_begin(
+          &metadata, request.slot, request.image_size_bytes, request.image_crc32, &session);
+      if (status == FW_SLOT_WRITER_OK) {
+        status = firmware_slot_writer_erase(&session);
+      }
+
+      completeFirmwareUpdateCoreRequest(
+          request, firmware_update_can_error_from_writer_status(status), &session);
+      return;
+    }
+
+    case FW_UPDATE_CORE_OP_COMMIT_PAGE: {
+      FirmwareSlotWriteSession session = request.session;
+      const FirmwareSlotWriterStatus status = firmware_slot_writer_commit_page(
+          &session, request.page_index, request.page_data, request.page_size, request.page_crc16);
+      completeFirmwareUpdateCoreRequest(
+          request, firmware_update_can_error_from_writer_status(status), &session,
+          request.page_index);
+      return;
+    }
+
+    case FW_UPDATE_CORE_OP_VERIFY: {
+      if (!ensure_firmware_update_metadata_initialized(&metadata)) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_VERIFY_FAILED);
+        return;
+      }
+      FirmwareSlotWriteSession session = request.session;
+      uint32_t actual_crc32 = 0u;
+      FirmwareSlotWriterStatus status =
+          firmware_slot_writer_verify(&session, &actual_crc32);
+      if (status == FW_SLOT_WRITER_OK) {
+        status = firmware_slot_writer_mark_verified(&metadata, &session);
+      }
+      completeFirmwareUpdateCoreRequest(
+          request, firmware_update_can_error_from_writer_status(status), &session, actual_crc32);
+      return;
+    }
+
+    case FW_UPDATE_CORE_OP_ACTIVATE: {
+      if (!ensure_firmware_update_metadata_initialized(&metadata)) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_VERIFY_FAILED);
+        return;
+      }
+      if (request.slot != FW_IMAGE_SLOT_A && request.slot != FW_IMAGE_SLOT_B) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_INVALID_SLOT);
+        return;
+      }
+      if (!firmware_update_activate_candidate(&metadata, request.slot, request.u8_arg0)) {
+        fail_invalid_state();
+        return;
+      }
+      completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_NONE);
+      return;
+    }
+
+    case FW_UPDATE_CORE_OP_CONFIRM: {
+      if (!ensure_firmware_update_metadata_initialized(&metadata)) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_VERIFY_FAILED);
+        return;
+      }
+      if (!firmware_update_confirm_current_image(&metadata)) {
+        fail_invalid_state();
+        return;
+      }
+      completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_NONE);
+      return;
+    }
+
+    case FW_UPDATE_CORE_OP_ABORT: {
+      if (!ensure_firmware_update_metadata_initialized(&metadata)) {
+        completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_VERIFY_FAILED);
+        return;
+      }
+      if (!firmware_update_abort_receive(&metadata)) {
+        fail_invalid_state();
+        return;
+      }
+      completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_NONE);
+      return;
+    }
+
+    default:
+      completeFirmwareUpdateCoreRequest(request, FW_UPDATE_ERR_INVALID_STATE);
+      return;
+  }
+}
+
 /**
  * @brief Clear all movement samples from queue
  * 
@@ -858,6 +1004,10 @@ void core0_main_loop() {
 
   // Drain Core1 log queue — print queued messages safely from Core0
   drainCore1LogQueue();
+
+  // Service Host-CAN firmware update flash operations requested by Core1.
+  // Core0 owns these because the current flash handshake parks Core1 in RAM.
+  handleFirmwareUpdateCoreRequest();
 
   // Emit safe limits when requested by Core1 (e.g. on encoder stream start)
   if (emit_safe_limits_requested) {

@@ -21,11 +21,17 @@ from .protocol import (
     CAN_ID_IDENTIFY_REQUEST, CAN_ID_STARTUP_SEQUENCE,
     CAN_ID_PRETENSION_ALL,
     CAN_ID_SET_IMPEDANCE, CAN_ID_IMPEDANCE_CTRL, CAN_ID_FAULT_SNAPSHOT_CTRL,
+    CAN_ID_FW_UPDATE_CTRL, CAN_ID_FW_UPDATE_META_A, CAN_ID_FW_UPDATE_META_B,
+    CAN_ID_FW_UPDATE_DATA, CAN_ID_FW_UPDATE_STATUS, CAN_ID_FW_UPDATE_UID,
+    CAN_ID_FW_UPDATE_INFO, CAN_ID_FW_UPDATE_PROGRESS,
+    FW_UPDATE_EVENT_NAMES, FW_UPDATE_ERROR_NAMES,
     CAN_ID_ENCODER_STREAM_DATA, CAN_ID_STARTUP_STATUS, CAN_ID_JOINT_ANNOUNCE,
     CAN_ID_JOINT_STATE, CAN_ID_HEALTH_STATUS, CAN_ID_FAULT_STATUS, CAN_ID_EVENT_NOTICE,
     CAN_ID_FAULT_SNAPSHOT_META, CAN_ID_FAULT_SNAPSHOT_DATA,
     FAULT_SNAPSHOT_CTRL_SUBCMDS,
     UNUSED_DOF,
+    decode_fw_update_status, decode_fw_update_uid, decode_fw_update_info,
+    decode_fw_update_progress,
     decode_event_notice, decode_fault_status, decode_health_status_counters,
     decode_health_status_summary, decode_fault_snapshot_meta, decode_fault_snapshot_chunk,
 )
@@ -87,6 +93,50 @@ def _decode_tx(arb_id: int, data: bytes) -> str:
             f"FAULT_SNAPSHOT_CTRL joint={joint_id} {sub_name} snapshot={snapshot_id} "
             f"args={args} seq={seq}"
         )
+
+    if arb_id == CAN_ID_FW_UPDATE_CTRL and len(data) >= 1:
+        opcode = data[0]
+        op_names = {
+            0x01: "GET_INFO",
+            0x02: "ENTER_MAINT",
+            0x03: "EXIT_MAINT",
+            0x04: "BEGIN_UPDATE",
+            0x05: "END_UPDATE",
+            0x06: "VERIFY",
+            0x07: "ACTIVATE",
+            0x08: "CONFIRM",
+            0x09: "ABORT",
+            0x0A: "REBOOT",
+        }
+        return f"FW_UPDATE_CTRL {op_names.get(opcode, f'op=0x{opcode:02X}')} args={list(data[1:8])}"
+
+    if arb_id == CAN_ID_FW_UPDATE_META_A and len(data) >= 8:
+        image_size, image_crc32 = struct.unpack("<II", data)
+        return f"FW_UPDATE_META_A size={image_size} crc=0x{image_crc32:08X}"
+
+    if arb_id == CAN_ID_FW_UPDATE_META_B and len(data) >= 8:
+        # During update this ID is reused for both META_B and PAGE_BEGIN.
+        # Heuristic: low bytes 4/5 are usually protocol version for META_B;
+        # page_begin carries page index/seq/len/flags/crc16.
+        board_uid_crc32 = struct.unpack_from("<I", data, 0)[0]
+        proto_major = data[4]
+        proto_minor = data[5]
+        if proto_major <= 8 and proto_minor <= 8 and data[6] == 0 and data[7] == 0:
+            return (
+                f"FW_UPDATE_META_B uid_crc=0x{board_uid_crc32:08X} "
+                f"proto={proto_major}.{proto_minor}"
+            )
+        page_index = data[0] | (data[1] << 8) | (data[2] << 16)
+        page_seq = data[3]
+        page_len = data[4] or 256
+        page_crc16 = struct.unpack_from("<H", data, 6)[0]
+        return (
+            f"FW_UPDATE_PAGE_BEGIN page={page_index} seq={page_seq} "
+            f"len={page_len} crc16=0x{page_crc16:04X}"
+        )
+
+    if arb_id == CAN_ID_FW_UPDATE_DATA and len(data) >= 2:
+        return f"FW_UPDATE_DATA seq={data[0]} frag={data[1]}"
 
     return f"0x{arb_id:03X} [{data.hex(' ')}]"
 
@@ -290,6 +340,56 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
             )
         return f"FAULT_SNAPSHOT_DATA j={joint_id} [{data.hex(' ')}]", False
 
+    if CAN_ID_FW_UPDATE_STATUS <= arb_id < CAN_ID_FW_UPDATE_STATUS + 16:
+        joint_id = arb_id - CAN_ID_FW_UPDATE_STATUS
+        if len(data) >= 8:
+            status = decode_fw_update_status(data, joint_id)
+            return (
+                f"FW_UPDATE_STATUS j={joint_id} {status.event_name} "
+                f"boot={status.boot_state_name} active={status.active_slot} "
+                f"pending={status.pending_slot} err={status.error_name} value={status.value}",
+                status.event_code == 0x05,
+            )
+        return f"FW_UPDATE_STATUS j={joint_id} [{data.hex(' ')}]", False
+
+    if CAN_ID_FW_UPDATE_UID <= arb_id < CAN_ID_FW_UPDATE_UID + 16:
+        joint_id = arb_id - CAN_ID_FW_UPDATE_UID
+        if len(data) >= 8:
+            uid = decode_fw_update_uid(data, joint_id)
+            return f"FW_UPDATE_UID j={joint_id} uid={uid.uid.hex().upper()}", False
+        return f"FW_UPDATE_UID j={joint_id} [{data.hex(' ')}]", False
+
+    if CAN_ID_FW_UPDATE_INFO <= arb_id < CAN_ID_FW_UPDATE_INFO + 16:
+        joint_id = arb_id - CAN_ID_FW_UPDATE_INFO
+        if len(data) >= 8:
+            info = decode_fw_update_info(data, joint_id)
+            flags = []
+            if info.maintenance_active:
+                flags.append("MAINT")
+            if info.update_in_progress:
+                flags.append("UPD")
+            if info.candidate_awaiting_confirmation:
+                flags.append("CONFIRM")
+            suffix = f" [{' '.join(flags)}]" if flags else ""
+            return (
+                f"FW_UPDATE_INFO j={joint_id} active={info.active_slot} pending={info.pending_slot} "
+                f"boot={info.boot_state} attempts={info.attempts_remaining} fw={info.fw_version}{suffix}",
+                False,
+            )
+        return f"FW_UPDATE_INFO j={joint_id} [{data.hex(' ')}]", False
+
+    if CAN_ID_FW_UPDATE_PROGRESS <= arb_id < CAN_ID_FW_UPDATE_PROGRESS + 16:
+        joint_id = arb_id - CAN_ID_FW_UPDATE_PROGRESS
+        if len(data) >= 8:
+            progress = decode_fw_update_progress(data, joint_id)
+            return (
+                f"FW_UPDATE_PROGRESS j={joint_id} next_page={progress.next_page_index} "
+                f"seq={progress.last_page_seq} frag={progress.last_frag_index} "
+                f"boot={progress.boot_state}",
+                True,
+            )
+        return f"FW_UPDATE_PROGRESS j={joint_id} [{data.hex(' ')}]", False
+
     # Unknown
     hex_data = data.hex(" ") if data else ""
     return f"RX 0x{arb_id:03X} [{hex_data}]", False
@@ -455,6 +555,10 @@ class CanBus:
                             f"{_SUMMARY_INTERVAL_S:.0f}s]")
                 self._imp_summary_count = 0
             # else: skip (same data, within interval)
+        elif arb_id == CAN_ID_FW_UPDATE_DATA:
+            logger.debug(f"CAN TX {decoded}")
+        elif arb_id == CAN_ID_FW_UPDATE_META_B and decoded.startswith("FW_UPDATE_PAGE_BEGIN"):
+            logger.debug(f"CAN TX {decoded}")
         else:
             logger.info(f"CAN TX {decoded}")
 

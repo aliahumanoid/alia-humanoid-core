@@ -43,6 +43,8 @@
 // Legacy support includes
 #include <PID.h>
 #include <debug.h>
+#include <FirmwareUpdateCan.h>
+#include <FirmwareUpdateMetadata.h>
 #include <global.h> // After commands.h to avoid conflicts
 #include <path.h>
 #include "pico/util/queue.h"
@@ -111,6 +113,9 @@ extern DirectEncoders directEncoders;
 extern volatile bool flash_operation_in_progress;
 // Core1 sets this to confirm it has entered the RAM wait loop
 extern volatile bool core1_flash_acknowledged;
+// Core1 sets this once its execution loop is alive; boot-time flash writes can
+// skip the handshake until then.
+extern volatile bool core1_runtime_started;
 
 // Movement in progress flag
 // Core1 sets this during movement execution to pause Serial streaming on Core0
@@ -176,6 +181,12 @@ extern volatile bool can_set_auto_start_requested;
 extern volatile uint8_t can_auto_start_enabled;
 extern volatile int16_t can_auto_start_torque;
 extern volatile uint16_t can_auto_start_duration;
+
+// CAN firmware-update flash operations (Core1 parses Host CAN, Core0 performs flash ops)
+extern FirmwareUpdateCoreRequest fw_update_core_request;
+extern FirmwareUpdateCoreResponse fw_update_core_response;
+extern volatile bool fw_update_metadata_snapshot_valid;
+extern FirmwareUpdateMetadataRecord fw_update_metadata_snapshot;
 
 // Startup status event queue (Core0 produces, Core1 consumes and sends via CAN)
 struct StartupStatusEvent {

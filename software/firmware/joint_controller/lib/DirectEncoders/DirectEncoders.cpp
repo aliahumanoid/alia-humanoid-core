@@ -7,16 +7,22 @@
 
 #include "DirectEncoders.h"
 #include <debug.h>
+#include <cstring>
 
 // External flags for flash operation synchronization with Core1
 extern volatile bool flash_operation_in_progress;
 extern volatile bool core1_flash_acknowledged;
+extern volatile bool core1_runtime_started;
 
 /**
  * @brief Handshake with Core1 before flash operations.
  * Waits for Core1 to park in RAM, with 50ms timeout.
  */
 static void wait_for_core1_flash_ready() {
+  if (!core1_runtime_started) {
+    return;
+  }
+
   core1_flash_acknowledged = false;
   flash_operation_in_progress = true;
   uint32_t start = millis();
@@ -603,6 +609,55 @@ uint16_t DirectEncoders::calculateChecksum(const uint8_t *data, size_t size) {
   return checksum;
 }
 
+static uint16_t calculate_encoder_checksum(const uint8_t *data, size_t size) {
+  uint16_t checksum = 0;
+  for (size_t i = 0; i < size; i++) {
+    checksum += data[i];
+  }
+  return checksum;
+}
+
+static bool read_encoder_offsets_blob(uint32_t flash_offset, const char *slot_label,
+                                      EncoderFlashData *data, bool log_errors) {
+  if (data == nullptr) {
+    if (log_errors) {
+      LOG_ERROR("Flash: Invalid encoder data pointer");
+    }
+    return false;
+  }
+
+  const uint8_t *flash_ptr = reinterpret_cast<const uint8_t *>(XIP_BASE + flash_offset);
+  memcpy(data, flash_ptr, sizeof(EncoderFlashData));
+
+  if (data->magic_number != ENCODER_FLASH_MAGIC_NUMBER) {
+    if (log_errors) {
+      LOG_WARN("Flash: No valid encoder data found in slot " + String(slot_label) +
+               " (magic number mismatch)");
+    }
+    return false;
+  }
+
+  if (data->version != ENCODER_FLASH_STRUCT_VERSION) {
+    if (log_errors) {
+      LOG_ERROR("Flash: Incompatible encoder data version in slot " + String(slot_label));
+    }
+    return false;
+  }
+
+  size_t header_size = sizeof(uint32_t) + sizeof(uint16_t) * 2;
+  uint16_t calculated = calculate_encoder_checksum(reinterpret_cast<uint8_t *>(data) + header_size,
+                                                   sizeof(EncoderFlashData) - header_size);
+  if (calculated != data->checksum) {
+    if (log_errors) {
+      LOG_ERROR("Flash: Encoder data corrupted in slot " + String(slot_label) +
+                " (checksum mismatch)");
+    }
+    return false;
+  }
+
+  return true;
+}
+
 bool DirectEncoders::saveOffsetsToFlash() {
   EncoderFlashData data;
   
@@ -632,7 +687,7 @@ bool DirectEncoders::saveOffsetsToFlash() {
   uint32_t ints = save_and_disable_interrupts();
   
   // Erase flash sector
-  flash_range_erase(ENCODER_FLASH_TARGET_OFFSET, num_pages * FLASH_SECTOR_SIZE);
+  flash_range_erase(FLASH_ENCODER_OFFSETS_OFFSET, num_pages * FLASH_SECTOR_SIZE);
   
   // Create aligned buffer and write
   uint8_t flash_page[FLASH_PAGE_SIZE];
@@ -640,7 +695,7 @@ bool DirectEncoders::saveOffsetsToFlash() {
   memcpy(flash_page, data_ptr, data_size);
   
   // Program the flash
-  flash_range_program(ENCODER_FLASH_TARGET_OFFSET, flash_page, FLASH_PAGE_SIZE);
+  flash_range_program(FLASH_ENCODER_OFFSETS_OFFSET, flash_page, FLASH_PAGE_SIZE);
   
   restore_interrupts(ints);
   
@@ -658,42 +713,29 @@ bool DirectEncoders::saveOffsetsToFlash() {
 
 bool DirectEncoders::loadOffsetsFromFlash() {
   EncoderFlashData data;
-  
-  // Read from flash
-  const uint8_t *flash_ptr = (const uint8_t *)(XIP_BASE + ENCODER_FLASH_TARGET_OFFSET);
-  memcpy(&data, flash_ptr, sizeof(EncoderFlashData));
-  
-  // Verify magic number
-  if (data.magic_number != ENCODER_FLASH_MAGIC_NUMBER) {
-    LOG_WARN("Flash: No valid encoder data found (magic number mismatch)");
-    _flashDataValid = false;
-    return false;
+
+  bool loaded_from_legacy = false;
+  if (!read_encoder_offsets_blob(FLASH_ENCODER_OFFSETS_OFFSET, "ENCODER_OFFSETS", &data, true)) {
+    if (!read_encoder_offsets_blob(FLASH_ENCODER_OFFSETS_OFFSET_LEGACY, "LEGACY_ENCODER_OFFSETS",
+                                   &data, true)) {
+      _flashDataValid = false;
+      return false;
+    }
+    loaded_from_legacy = true;
   }
-  
-  // Verify version
-  if (data.version != ENCODER_FLASH_STRUCT_VERSION) {
-    LOG_ERROR("Flash: Incompatible encoder data version!");
-    _flashDataValid = false;
-    return false;
-  }
-  
-  // Verify checksum
-  size_t header_size = sizeof(uint32_t) + sizeof(uint16_t) * 2;
-  uint16_t calculated = calculateChecksum((uint8_t *)&data + header_size, 
-                                           sizeof(EncoderFlashData) - header_size);
-  if (calculated != data.checksum) {
-    LOG_ERROR("Flash: Encoder data corrupted (checksum mismatch)!");
-    _flashDataValid = false;
-    return false;
-  }
-  
-  // Load offsets
+
   for (int i = 0; i < DIRECT_ENCODER_COUNT; i++) {
     _offsets[i] = data.offsets[i];
   }
-  
+
   _flashDataValid = true;
   _offsets_changed = true;
+
+  if (loaded_from_legacy) {
+    LOG_WARN("Encoder offsets found only in legacy flash slot - migrating to top-of-flash NVM");
+    saveOffsetsToFlash();
+  }
+
   LOG_INFO("Encoder offsets loaded from flash successfully!");
   LOG_INFO_F("  Offsets: %.4f, %.4f, %.4f rad",
              data.offsets[0], data.offsets[1], data.offsets[2]);

@@ -19,8 +19,10 @@
 
 #include "main_common.h"
 #include "RuntimeProvisioning.h"
+#include "flash_map.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
+#include "pico/unique_id.h"
 
 #undef ACTIVE_JOINT
 #define ACTIVE_JOINT getRuntimeJointId()
@@ -184,6 +186,13 @@ enum DiagRebootReason : uint8_t {
 };
 
 static uint8_t diag_reboot_reason = DIAG_REBOOT_POWER_ON;
+
+[[noreturn]] static void rebootThroughWatchdog() {
+  watchdog_reboot(0u, 0u, 10u);
+  while (true) {
+    tight_loop_contents();
+  }
+}
 static uint8_t diag_health_seq = 0;
 static uint8_t diag_fault_seq = 0;
 static uint8_t diag_fault_epoch = 0;
@@ -1324,6 +1333,827 @@ void resetImpedanceSegment(uint8_t dof) {
   impedance_segment[dof] = {};
 }
 
+struct FirmwareUpdateCanRxState {
+  bool begin_pending = false;
+  bool begin_meta_a_seen = false;
+  bool begin_meta_b_seen = false;
+  uint8_t begin_target_slot = FW_IMAGE_SLOT_NONE;
+  uint8_t begin_image_format = 0u;
+  uint8_t begin_fw_major = 0u;
+  uint8_t begin_fw_minor = 0u;
+  uint8_t begin_fw_patch = 0u;
+  uint8_t begin_options = 0u;
+  uint32_t begin_image_size_bytes = 0u;
+  uint32_t begin_image_crc32 = 0u;
+  uint32_t begin_board_uid_crc32 = 0u;
+  uint8_t begin_protocol_major = 0u;
+  uint8_t begin_protocol_minor = 0u;
+
+  bool session_open = false;
+  bool end_received = false;
+  FirmwareSlotWriteSession session = {};
+
+  bool page_open = false;
+  uint32_t page_index = 0u;
+  uint8_t page_seq = 0u;
+  uint16_t page_size = 0u;
+  uint16_t expected_page_crc16 = 0u;
+  bool page_is_final = false;
+  uint8_t next_frag_index = 0u;
+  uint16_t bytes_received = 0u;
+  uint8_t page_buffer[FLASH_PAGE_SIZE] = {};
+
+  uint8_t last_page_seq = 0xFFu;
+  uint8_t last_frag_index = 0xFFu;
+
+  bool awaiting_core0 = false;
+  uint8_t pending_core_op = FW_UPDATE_CORE_OP_NONE;
+  bool pending_maintenance_enabled = false;
+  uint8_t pending_target_slot = FW_IMAGE_SLOT_NONE;
+  uint8_t pending_attempts_remaining = 0u;
+  uint32_t pending_page_index = 0u;
+  uint8_t pending_page_seq = 0xFFu;
+};
+
+static FirmwareUpdateCanRxState fw_update_rx = {};
+static bool fw_update_runtime_state_initialized = false;
+static bool fw_update_runtime_maintenance_active = false;
+static bool fw_update_candidate_boot_status_sent = false;
+
+static void publishFirmwareUpdateMetadataSnapshot(const FirmwareUpdateMetadataRecord &record) {
+  fw_update_metadata_snapshot_valid = false;
+  asm volatile("" ::: "memory");
+  fw_update_metadata_snapshot = record;
+  asm volatile("" ::: "memory");
+  fw_update_metadata_snapshot_valid = true;
+}
+
+static bool readPublishedFirmwareUpdateMetadataSnapshot(FirmwareUpdateMetadataRecord *out_record) {
+  if (out_record == nullptr || !fw_update_metadata_snapshot_valid) {
+    return false;
+  }
+
+  FirmwareUpdateMetadataRecord snapshot = fw_update_metadata_snapshot;
+  asm volatile("" ::: "memory");
+  if (!fw_update_metadata_snapshot_valid) {
+    return false;
+  }
+
+  *out_record = snapshot;
+  return true;
+}
+
+static bool refreshFirmwareUpdateMetadataSnapshot(FirmwareUpdateMetadataRecord *out_record = nullptr) {
+  FirmwareUpdateMetadataRecord metadata = {};
+  if (!load_latest_firmware_update_metadata(&metadata)) {
+    return false;
+  }
+
+  publishFirmwareUpdateMetadataSnapshot(metadata);
+  if (out_record != nullptr) {
+    *out_record = metadata;
+  }
+  return true;
+}
+
+static bool loadFirmwareUpdateMetadataSnapshot(FirmwareUpdateMetadataRecord *out_record) {
+  if (out_record == nullptr) {
+    return false;
+  }
+
+  if (readPublishedFirmwareUpdateMetadataSnapshot(out_record)) {
+    return true;
+  }
+
+  if (refreshFirmwareUpdateMetadataSnapshot(out_record)) {
+    return true;
+  }
+
+  *out_record = make_default_firmware_update_metadata_record();
+  return true;
+}
+
+static void initFirmwareUpdateRuntimeStateOnce() {
+  if (fw_update_runtime_state_initialized) {
+    return;
+  }
+
+  FirmwareUpdateMetadataRecord metadata = {};
+  if (loadFirmwareUpdateMetadataSnapshot(&metadata)) {
+    fw_update_runtime_maintenance_active = firmware_update_is_maintenance_active(&metadata);
+    publishFirmwareUpdateMetadataSnapshot(metadata);
+  }
+  fw_update_runtime_state_initialized = true;
+}
+
+static void parseFirmwareVersionBytes(uint8_t *out_major,
+                                      uint8_t *out_minor,
+                                      uint8_t *out_patch) {
+  uint8_t values[3] = {0, 0, 0};
+  uint8_t part = 0u;
+  uint16_t value = 0u;
+  bool in_digits = false;
+
+  for (const char *p = FW_VERSION; *p != '\0' && part < 3; ++p) {
+    if (*p >= '0' && *p <= '9') {
+      value = static_cast<uint16_t>((value * 10u) + static_cast<uint16_t>(*p - '0'));
+      in_digits = true;
+      continue;
+    }
+
+    if (in_digits) {
+      values[part++] = static_cast<uint8_t>(min<uint16_t>(value, 255u));
+      value = 0u;
+      in_digits = false;
+    }
+  }
+
+  if (in_digits && part < 3) {
+    values[part++] = static_cast<uint8_t>(min<uint16_t>(value, 255u));
+  }
+
+  if (out_major != nullptr) *out_major = values[0];
+  if (out_minor != nullptr) *out_minor = values[1];
+  if (out_patch != nullptr) *out_patch = values[2];
+}
+
+static void resetFirmwareUpdatePageState() {
+  fw_update_rx.page_open = false;
+  fw_update_rx.page_index = 0u;
+  fw_update_rx.page_seq = 0u;
+  fw_update_rx.page_size = 0u;
+  fw_update_rx.expected_page_crc16 = 0u;
+  fw_update_rx.page_is_final = false;
+  fw_update_rx.next_frag_index = 0u;
+  fw_update_rx.bytes_received = 0u;
+  memset(fw_update_rx.page_buffer, 0, sizeof(fw_update_rx.page_buffer));
+}
+
+static void resetFirmwareUpdateTransferState() {
+  fw_update_rx.begin_pending = false;
+  fw_update_rx.begin_meta_a_seen = false;
+  fw_update_rx.begin_meta_b_seen = false;
+  fw_update_rx.begin_target_slot = FW_IMAGE_SLOT_NONE;
+  fw_update_rx.begin_image_format = 0u;
+  fw_update_rx.begin_fw_major = 0u;
+  fw_update_rx.begin_fw_minor = 0u;
+  fw_update_rx.begin_fw_patch = 0u;
+  fw_update_rx.begin_options = 0u;
+  fw_update_rx.begin_image_size_bytes = 0u;
+  fw_update_rx.begin_image_crc32 = 0u;
+  fw_update_rx.begin_board_uid_crc32 = 0u;
+  fw_update_rx.begin_protocol_major = 0u;
+  fw_update_rx.begin_protocol_minor = 0u;
+  fw_update_rx.session_open = false;
+  fw_update_rx.end_received = false;
+  fw_update_rx.session = {};
+  fw_update_rx.awaiting_core0 = false;
+  fw_update_rx.pending_core_op = FW_UPDATE_CORE_OP_NONE;
+  fw_update_rx.pending_maintenance_enabled = false;
+  fw_update_rx.pending_target_slot = FW_IMAGE_SLOT_NONE;
+  fw_update_rx.pending_attempts_remaining = 0u;
+  fw_update_rx.pending_page_index = 0u;
+  fw_update_rx.pending_page_seq = 0xFFu;
+  resetFirmwareUpdatePageState();
+}
+
+static void sendFirmwareUpdateUidFrame() {
+  pico_unique_board_id_t board_id;
+  pico_get_unique_board_id(&board_id);
+  CAN_HOST.sendMsgBuf(CAN_ID_FW_UPDATE_UID + ACTIVE_JOINT, 0, 8, board_id.id);
+}
+
+static void sendFirmwareUpdateInfoFrame(const FirmwareUpdateMetadataRecord &metadata) {
+  uint8_t fw_major = 0u;
+  uint8_t fw_minor = 0u;
+  uint8_t fw_patch = 0u;
+  parseFirmwareVersionBytes(&fw_major, &fw_minor, &fw_patch);
+
+  uint8_t flags = 0u;
+  if (firmware_update_is_maintenance_active(&metadata)) flags |= 0x01u;
+  if ((metadata.flags & FW_UPDATE_FLAG_UPDATE_IN_PROGRESS) != 0u) flags |= 0x02u;
+  if ((metadata.flags & FW_UPDATE_FLAG_CANDIDATE_AWAITS_CONFIRM) != 0u) flags |= 0x04u;
+
+  uint8_t frame[8] = {
+      metadata.active_slot,
+      metadata.pending_slot,
+      metadata.boot_state,
+      metadata.attempts_remaining,
+      fw_major,
+      fw_minor,
+      fw_patch,
+      flags,
+  };
+  CAN_HOST.sendMsgBuf(CAN_ID_FW_UPDATE_INFO + ACTIVE_JOINT, 0, sizeof(frame), frame);
+}
+
+static void sendFirmwareUpdateProgressFrame(const FirmwareUpdateMetadataRecord &metadata,
+                                            uint32_t next_page_index,
+                                            uint8_t last_page_seq,
+                                            uint8_t last_frag_index) {
+  uint8_t frame[8] = {
+      static_cast<uint8_t>(next_page_index & 0xFFu),
+      static_cast<uint8_t>((next_page_index >> 8) & 0xFFu),
+      static_cast<uint8_t>((next_page_index >> 16) & 0xFFu),
+      last_page_seq,
+      last_frag_index,
+      metadata.boot_state,
+      0u,
+      0u,
+  };
+  CAN_HOST.sendMsgBuf(CAN_ID_FW_UPDATE_PROGRESS + ACTIVE_JOINT, 0, sizeof(frame), frame);
+}
+
+static void sendFirmwareUpdateStatusFrame(uint8_t event_code,
+                                          uint8_t error_code,
+                                          uint16_t value) {
+  FirmwareUpdateMetadataRecord metadata = {};
+  if (!loadFirmwareUpdateMetadataSnapshot(&metadata)) {
+    metadata = make_default_firmware_update_metadata_record();
+  }
+
+  uint8_t frame[8] = {
+      event_code,
+      metadata.boot_state,
+      metadata.active_slot,
+      metadata.pending_slot,
+      error_code,
+      static_cast<uint8_t>(metadata.flags & 0xFFu),
+      static_cast<uint8_t>(value & 0xFFu),
+      static_cast<uint8_t>((value >> 8) & 0xFFu),
+  };
+  CAN_HOST.sendMsgBuf(CAN_ID_FW_UPDATE_STATUS + ACTIVE_JOINT, 0, sizeof(frame), frame);
+}
+
+static void sendFirmwareUpdateInfoBundle(uint8_t event_code) {
+  FirmwareUpdateMetadataRecord metadata = {};
+  if (!loadFirmwareUpdateMetadataSnapshot(&metadata)) {
+    metadata = make_default_firmware_update_metadata_record();
+  }
+
+  sendFirmwareUpdateUidFrame();
+  sendFirmwareUpdateInfoFrame(metadata);
+
+  uint32_t next_page_index = 0u;
+  if (fw_update_rx.session_open) {
+    next_page_index = fw_update_rx.session.next_page_index;
+  }
+  sendFirmwareUpdateProgressFrame(
+      metadata, next_page_index, fw_update_rx.last_page_seq, fw_update_rx.last_frag_index);
+  sendFirmwareUpdateStatusFrame(event_code, FW_UPDATE_ERR_NONE, 0u);
+}
+
+static void sendFirmwareUpdateError(uint8_t error_code, uint16_t value = 0u) {
+  sendFirmwareUpdateStatusFrame(FW_UPDATE_EVT_ERROR, error_code, value);
+}
+
+static bool queueFirmwareUpdateCoreRequest(const FirmwareUpdateCoreRequest &request) {
+  if (fw_update_core_request.pending || fw_update_core_response.ready || fw_update_rx.awaiting_core0) {
+    return false;
+  }
+
+  fw_update_core_request = request;
+  fw_update_core_request.pending = true;
+  fw_update_rx.awaiting_core0 = true;
+  fw_update_rx.pending_core_op = request.op;
+  fw_update_rx.pending_maintenance_enabled = request.bool_arg0 != 0u;
+  fw_update_rx.pending_target_slot = request.slot;
+  fw_update_rx.pending_attempts_remaining = request.u8_arg0;
+  fw_update_rx.pending_page_index = request.page_index;
+  fw_update_rx.pending_page_seq = fw_update_rx.page_seq;
+  return true;
+}
+
+static void forceControllerServiceMode() {
+  encoder_stream_can_active = false;
+  pid_diag_stream_active = false;
+  pid_diag_terms_enabled = false;
+
+  if (active_joint_controller != nullptr) {
+    const uint8_t dof_count = active_joint_controller->getConfig().dof_count;
+    active_joint_controller->stopAllMotors();
+    for (uint8_t dof = 0; dof < dof_count; ++dof) {
+      restoreInnerPidGains(dof, active_joint_controller);
+      restoreOuterLoopParameters(dof, active_joint_controller);
+      impedance_target[dof].watchdog_timed_out = false;
+      impedance_target[dof].valid = false;
+      resetImpedanceSegment(dof);
+      dof_state[dof] = DofState::IDLE;
+      imp_acc[dof].tau_ff = 0;
+      imp_acc[dof].stg_tau_ff = 0;
+      imp_acc[dof].seen_seq0 = false;
+    }
+  }
+
+  auto_mapping_state.active = false;
+  movement_in_progress = false;
+  safety_motor_power_disable();
+}
+
+static bool canAcceptFirmwareUpdateMaintenance(uint8_t flags) {
+  const bool require_idle = (flags & 0x01u) != 0u;
+  const bool reject_if_startup_active = (flags & 0x02u) != 0u;
+
+  if (require_idle) {
+    if (movement_in_progress || auto_mapping_state.active || fw_update_rx.awaiting_core0 ||
+        fw_update_rx.session_open || fw_update_rx.page_open) {
+      return false;
+    }
+    if (active_joint_controller != nullptr) {
+      const uint8_t dof_count = active_joint_controller->getConfig().dof_count;
+      for (uint8_t dof = 0; dof < dof_count; ++dof) {
+        if (dof_state[dof] == DofState::MOVING || impedance_target[dof].valid) {
+          return false;
+        }
+      }
+    }
+  }
+
+  if (reject_if_startup_active && (diag_startup_in_progress || can_startup_requested)) {
+    return false;
+  }
+
+  return true;
+}
+
+static bool isFirmwareUpdateControlFrame(uint32_t rx_id) {
+  return rx_id == CAN_ID_FW_UPDATE_CTRL ||
+         rx_id == CAN_ID_FW_UPDATE_META_A ||
+         rx_id == CAN_ID_FW_UPDATE_META_B ||
+         rx_id == CAN_ID_FW_UPDATE_DATA;
+}
+
+static bool isAllowedDuringFirmwareUpdateMaintenance(uint32_t rx_id) {
+  return rx_id == CAN_ID_TIME_SYNC ||
+         rx_id == CAN_ID_IDENTIFY_REQUEST ||
+         isFirmwareUpdateControlFrame(rx_id);
+}
+
+static void maybeEmitCandidateBootOk() {
+  if (fw_update_candidate_boot_status_sent) {
+    return;
+  }
+
+  FirmwareUpdateMetadataRecord metadata = {};
+  if (!loadFirmwareUpdateMetadataSnapshot(&metadata)) {
+    return;
+  }
+
+  if (metadata.boot_state == FW_BOOT_CANDIDATE_RUNNING &&
+      (metadata.flags & FW_UPDATE_FLAG_CANDIDATE_AWAITS_CONFIRM) != 0u) {
+    fw_update_runtime_maintenance_active = firmware_update_is_maintenance_active(&metadata);
+    sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_CANDIDATE_BOOT_OK);
+    fw_update_candidate_boot_status_sent = true;
+  }
+}
+
+static void serviceFirmwareUpdateCoreResponse() {
+  if (!fw_update_core_response.ready) {
+    return;
+  }
+
+  const FirmwareUpdateCoreResponse response = fw_update_core_response;
+  fw_update_core_response.ready = false;
+  fw_update_rx.awaiting_core0 = false;
+  fw_update_rx.pending_core_op = FW_UPDATE_CORE_OP_NONE;
+
+  if (response.error_code != FW_UPDATE_ERR_NONE) {
+    if (response.op == FW_UPDATE_CORE_OP_COMMIT_PAGE) {
+      resetFirmwareUpdatePageState();
+    }
+    sendFirmwareUpdateError(response.error_code,
+                            static_cast<uint16_t>(response.value0 & 0xFFFFu));
+    return;
+  }
+
+  FirmwareUpdateMetadataRecord latest_metadata = {};
+  const bool have_latest_metadata = refreshFirmwareUpdateMetadataSnapshot(&latest_metadata);
+
+  switch (response.op) {
+    case FW_UPDATE_CORE_OP_SET_MAINTENANCE:
+      if (have_latest_metadata) {
+        fw_update_runtime_maintenance_active = firmware_update_is_maintenance_active(&latest_metadata);
+      } else {
+        fw_update_runtime_maintenance_active = fw_update_rx.pending_maintenance_enabled;
+      }
+      if (fw_update_runtime_maintenance_active) {
+        forceControllerServiceMode();
+        sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_MAINTENANCE_ENTERED);
+      } else {
+        sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_MAINTENANCE_EXITED);
+      }
+      break;
+
+    case FW_UPDATE_CORE_OP_BEGIN:
+      fw_update_rx.session = response.session;
+      fw_update_rx.session_open = true;
+      fw_update_rx.end_received = false;
+      resetFirmwareUpdatePageState();
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_BEGIN_ACCEPTED);
+      break;
+
+    case FW_UPDATE_CORE_OP_COMMIT_PAGE:
+      fw_update_rx.session = response.session;
+      fw_update_rx.last_page_seq = fw_update_rx.pending_page_seq;
+      fw_update_rx.last_frag_index = fw_update_rx.next_frag_index == 0u
+          ? 0u
+          : static_cast<uint8_t>(fw_update_rx.next_frag_index - 1u);
+      resetFirmwareUpdatePageState();
+      sendFirmwareUpdateStatusFrame(FW_UPDATE_EVT_PAGE_COMMITTED, FW_UPDATE_ERR_NONE,
+                                    static_cast<uint16_t>(response.value0 & 0xFFFFu));
+      {
+        FirmwareUpdateMetadataRecord metadata = {};
+        if (loadFirmwareUpdateMetadataSnapshot(&metadata)) {
+          sendFirmwareUpdateProgressFrame(metadata,
+                                          fw_update_rx.session.next_page_index,
+                                          fw_update_rx.last_page_seq,
+                                          fw_update_rx.last_frag_index);
+        }
+      }
+      break;
+
+    case FW_UPDATE_CORE_OP_VERIFY:
+      fw_update_rx.session = response.session;
+      sendFirmwareUpdateStatusFrame(FW_UPDATE_EVT_VERIFY_OK, FW_UPDATE_ERR_NONE,
+                                    static_cast<uint16_t>(response.value0 & 0xFFFFu));
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_INFO_READY);
+      break;
+
+    case FW_UPDATE_CORE_OP_ACTIVATE:
+      fw_update_rx.session_open = false;
+      fw_update_rx.end_received = false;
+      resetFirmwareUpdatePageState();
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_ACTIVATE_OK);
+      break;
+
+    case FW_UPDATE_CORE_OP_CONFIRM:
+      fw_update_candidate_boot_status_sent = false;
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_CONFIRM_OK);
+      break;
+
+    case FW_UPDATE_CORE_OP_ABORT:
+      fw_update_rx.session_open = false;
+      fw_update_rx.end_received = false;
+      fw_update_rx.session = {};
+      resetFirmwareUpdatePageState();
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_INFO_READY);
+      break;
+
+    default:
+      sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+      break;
+  }
+}
+
+static bool handleFirmwareUpdateCtrlFrame(const uint8_t *buf, uint8_t len) {
+  if (len < 1u) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+
+  const uint8_t opcode = buf[0];
+  switch (opcode) {
+    case FW_UPDATE_OP_GET_INFO:
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_INFO_READY);
+      return true;
+
+    case FW_UPDATE_OP_ENTER_MAINTENANCE: {
+      if (!canAcceptFirmwareUpdateMaintenance((len >= 2u) ? buf[1] : 0u)) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+      FirmwareUpdateCoreRequest request = {};
+      request.op = FW_UPDATE_CORE_OP_SET_MAINTENANCE;
+      request.bool_arg0 = 1u;
+      if (!queueFirmwareUpdateCoreRequest(request)) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+      }
+      return true;
+    }
+
+    case FW_UPDATE_OP_EXIT_MAINTENANCE: {
+      FirmwareUpdateCoreRequest request = {};
+      request.op = FW_UPDATE_CORE_OP_SET_MAINTENANCE;
+      request.bool_arg0 = 0u;
+      if (!queueFirmwareUpdateCoreRequest(request)) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+      }
+      return true;
+    }
+
+    case FW_UPDATE_OP_BEGIN_UPDATE: {
+      if (!fw_update_runtime_maintenance_active) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+      if (len < 8u) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+      if (fw_update_rx.awaiting_core0 || fw_update_core_request.pending || fw_update_core_response.ready) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+        return true;
+      }
+      if (fw_update_rx.session_open || fw_update_rx.page_open) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+
+      resetFirmwareUpdateTransferState();
+      fw_update_rx.begin_pending = true;
+      fw_update_rx.begin_target_slot = buf[1];
+      fw_update_rx.begin_image_format = buf[2];
+      fw_update_rx.begin_fw_major = buf[3];
+      fw_update_rx.begin_fw_minor = buf[4];
+      fw_update_rx.begin_fw_patch = buf[5];
+      fw_update_rx.begin_options = buf[6];
+
+      if (fw_update_rx.begin_target_slot != FW_IMAGE_SLOT_A &&
+          fw_update_rx.begin_target_slot != FW_IMAGE_SLOT_B) {
+        fw_update_rx.begin_pending = false;
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_SLOT);
+      } else if (fw_update_rx.begin_image_format != 1u) {
+        fw_update_rx.begin_pending = false;
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+      }
+      return true;
+    }
+
+    case FW_UPDATE_OP_END_UPDATE:
+      if (!fw_update_rx.session_open) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_UPDATE_NOT_STARTED);
+      } else if (fw_update_rx.awaiting_core0 || fw_update_rx.page_open) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+      } else {
+        fw_update_rx.end_received = true;
+      }
+      return true;
+
+    case FW_UPDATE_OP_VERIFY_UPDATE: {
+      if (len < 2u) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+      if (!fw_update_rx.session_open) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_UPDATE_NOT_STARTED);
+        return true;
+      }
+      if (fw_update_rx.awaiting_core0 || fw_update_rx.page_open) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+        return true;
+      }
+      if (buf[1] != fw_update_rx.session.target_slot) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_SLOT);
+        return true;
+      }
+
+      FirmwareUpdateCoreRequest request = {};
+      request.op = FW_UPDATE_CORE_OP_VERIFY;
+      request.slot = buf[1];
+      request.session = fw_update_rx.session;
+      if (!queueFirmwareUpdateCoreRequest(request)) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+      }
+      return true;
+    }
+
+    case FW_UPDATE_OP_ACTIVATE_SLOT: {
+      if (len < 3u) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+      if (fw_update_rx.awaiting_core0) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+        return true;
+      }
+      FirmwareUpdateCoreRequest request = {};
+      request.op = FW_UPDATE_CORE_OP_ACTIVATE;
+      request.slot = buf[1];
+      request.u8_arg0 = buf[2];
+      if (!queueFirmwareUpdateCoreRequest(request)) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+      }
+      return true;
+    }
+
+    case FW_UPDATE_OP_CONFIRM_UPDATE: {
+      if (len < 2u) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+        return true;
+      }
+      FirmwareUpdateCoreRequest request = {};
+      request.op = FW_UPDATE_CORE_OP_CONFIRM;
+      request.slot = buf[1];
+      if (!queueFirmwareUpdateCoreRequest(request)) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+      }
+      return true;
+    }
+
+    case FW_UPDATE_OP_ABORT_UPDATE:
+      if (fw_update_rx.awaiting_core0) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+        return true;
+      }
+      if (fw_update_rx.begin_pending && !fw_update_rx.session_open) {
+        resetFirmwareUpdateTransferState();
+        sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_INFO_READY);
+        return true;
+      }
+      if (!fw_update_rx.session_open) {
+        FirmwareUpdateMetadataRecord metadata = {};
+        if (!loadFirmwareUpdateMetadataSnapshot(&metadata) ||
+            (metadata.boot_state != FW_BOOT_RECEIVING &&
+             metadata.boot_state != FW_BOOT_VERIFIED)) {
+          sendFirmwareUpdateError(FW_UPDATE_ERR_UPDATE_NOT_STARTED);
+          return true;
+        }
+      }
+      {
+        FirmwareUpdateCoreRequest request = {};
+        request.op = FW_UPDATE_CORE_OP_ABORT;
+        if (!queueFirmwareUpdateCoreRequest(request)) {
+          sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+        }
+      }
+      return true;
+
+    case FW_UPDATE_OP_REBOOT:
+      sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_INFO_READY);
+      diag_reboot_reason = DIAG_REBOOT_SOFT_RESET_CMD;
+      delay(5);
+      rebootThroughWatchdog();
+
+    default:
+      sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+      return true;
+  }
+}
+
+static bool handleFirmwareUpdateMetaAFrame(const uint8_t *buf, uint8_t len) {
+  if (!fw_update_rx.begin_pending || fw_update_rx.session_open) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+  if (len < 8u) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+
+  memcpy(&fw_update_rx.begin_image_size_bytes, &buf[0], sizeof(uint32_t));
+  memcpy(&fw_update_rx.begin_image_crc32, &buf[4], sizeof(uint32_t));
+  fw_update_rx.begin_meta_a_seen = true;
+  return true;
+}
+
+static bool handleFirmwareUpdateMetaBOrPageBeginFrame(const uint8_t *buf, uint8_t len) {
+  if (fw_update_rx.begin_pending && !fw_update_rx.session_open) {
+    if (len < 8u || !fw_update_rx.begin_meta_a_seen) {
+      sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+      return true;
+    }
+
+    memcpy(&fw_update_rx.begin_board_uid_crc32, &buf[0], sizeof(uint32_t));
+    fw_update_rx.begin_protocol_major = buf[4];
+    fw_update_rx.begin_protocol_minor = buf[5];
+    fw_update_rx.begin_meta_b_seen = true;
+
+    FirmwareUpdateCoreRequest request = {};
+    request.op = FW_UPDATE_CORE_OP_BEGIN;
+    request.slot = fw_update_rx.begin_target_slot;
+    request.image_size_bytes = fw_update_rx.begin_image_size_bytes;
+    request.image_crc32 = fw_update_rx.begin_image_crc32;
+    request.board_uid_crc32 = fw_update_rx.begin_board_uid_crc32;
+    if (!queueFirmwareUpdateCoreRequest(request)) {
+      sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+    }
+    return true;
+  }
+
+  if (!fw_update_rx.session_open) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_UPDATE_NOT_STARTED);
+    return true;
+  }
+  if (fw_update_rx.awaiting_core0) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+    return true;
+  }
+  if (fw_update_rx.page_open) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+    return true;
+  }
+  if (len < 8u) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+
+  uint32_t page_index = static_cast<uint32_t>(buf[0]) |
+                        (static_cast<uint32_t>(buf[1]) << 8u) |
+                        (static_cast<uint32_t>(buf[2]) << 16u);
+  const uint8_t page_seq = buf[3];
+  const uint8_t page_len_mod256 = buf[4];
+  const uint16_t page_size = (page_len_mod256 == 0u) ? FLASH_PAGE_SIZE : page_len_mod256;
+  const bool is_final_page = (buf[5] & 0x01u) != 0u;
+  uint16_t page_crc16 = 0u;
+  memcpy(&page_crc16, &buf[6], sizeof(uint16_t));
+
+  if (page_size == 0u || page_size > FLASH_PAGE_SIZE) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_SLOT_BOUNDS_ERROR);
+    return true;
+  }
+  if (page_index != fw_update_rx.session.next_page_index) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_PAGE_SEQ_MISMATCH,
+                            static_cast<uint16_t>(page_index & 0xFFFFu));
+    return true;
+  }
+
+  resetFirmwareUpdatePageState();
+  fw_update_rx.page_open = true;
+  fw_update_rx.page_index = page_index;
+  fw_update_rx.page_seq = page_seq;
+  fw_update_rx.page_size = page_size;
+  fw_update_rx.expected_page_crc16 = page_crc16;
+  fw_update_rx.page_is_final = is_final_page;
+  return true;
+}
+
+static bool handleFirmwareUpdateDataFrame(const uint8_t *buf, uint8_t len) {
+  if (!fw_update_rx.session_open) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_UPDATE_NOT_STARTED);
+    return true;
+  }
+  if (!fw_update_rx.page_open) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+  if (fw_update_rx.awaiting_core0) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+    return true;
+  }
+  if (len < 2u) {
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+
+  const uint8_t page_seq = buf[0];
+  const uint8_t frag_index = buf[1];
+  if (page_seq != fw_update_rx.page_seq) {
+    resetFirmwareUpdatePageState();
+    sendFirmwareUpdateError(FW_UPDATE_ERR_PAGE_SEQ_MISMATCH,
+                            static_cast<uint16_t>(page_seq));
+    return true;
+  }
+  if (frag_index != fw_update_rx.next_frag_index) {
+    resetFirmwareUpdatePageState();
+    sendFirmwareUpdateError(FW_UPDATE_ERR_FRAG_INDEX_MISMATCH,
+                            static_cast<uint16_t>(frag_index));
+    return true;
+  }
+
+  const uint16_t remaining = fw_update_rx.page_size - fw_update_rx.bytes_received;
+  const uint8_t copy_len = static_cast<uint8_t>(min<uint16_t>(remaining, 6u));
+  if (len < static_cast<uint8_t>(2u + copy_len)) {
+    resetFirmwareUpdatePageState();
+    sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+    return true;
+  }
+
+  memcpy(&fw_update_rx.page_buffer[fw_update_rx.bytes_received], &buf[2], copy_len);
+  fw_update_rx.bytes_received = static_cast<uint16_t>(fw_update_rx.bytes_received + copy_len);
+  fw_update_rx.last_frag_index = frag_index;
+  fw_update_rx.next_frag_index = static_cast<uint8_t>(fw_update_rx.next_frag_index + 1u);
+
+  if (fw_update_rx.bytes_received >= fw_update_rx.page_size) {
+    FirmwareUpdateCoreRequest request = {};
+    request.op = FW_UPDATE_CORE_OP_COMMIT_PAGE;
+    request.session = fw_update_rx.session;
+    request.page_index = fw_update_rx.page_index;
+    request.page_size = fw_update_rx.page_size;
+    request.page_crc16 = fw_update_rx.expected_page_crc16;
+    memcpy(request.page_data, fw_update_rx.page_buffer, fw_update_rx.page_size);
+    if (!queueFirmwareUpdateCoreRequest(request)) {
+      sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+    }
+  }
+
+  return true;
+}
+
+static bool handleFirmwareUpdateCanFrame(uint32_t rx_id, const uint8_t *buf, uint8_t len) {
+  switch (rx_id) {
+    case CAN_ID_FW_UPDATE_CTRL:
+      return handleFirmwareUpdateCtrlFrame(buf, len);
+    case CAN_ID_FW_UPDATE_META_A:
+      return handleFirmwareUpdateMetaAFrame(buf, len);
+    case CAN_ID_FW_UPDATE_META_B:
+      return handleFirmwareUpdateMetaBOrPageBeginFrame(buf, len);
+    case CAN_ID_FW_UPDATE_DATA:
+      return handleFirmwareUpdateDataFrame(buf, len);
+    default:
+      return false;
+  }
+}
+
 static float sampleImpedanceReferenceInternal(const ImpedanceRollingSegment &seg, uint32_t now_ms,
                                               float &dq_ref_deg_s, bool &segment_active) {
   if (!seg.initialized) {
@@ -1950,6 +2780,10 @@ void checkAndSendMetrics() {
 void pollHostCan() {
   extern MCP_CAN CAN_HOST;  // Host CAN bus (separate from motor CAN)
 
+  initFirmwareUpdateRuntimeStateOnce();
+  serviceFirmwareUpdateCoreResponse();
+  maybeEmitCandidateBootOk();
+
   // Check if Host CAN polling is suspended (e.g., during startup sequence)
   // This prevents SPI1 bus conflicts with Motor CAN operations on Core0
   if (suspend_host_can_polling) {
@@ -1984,6 +2818,17 @@ void pollHostCan() {
     if (CAN_HOST.readMsgBuf(&rx_id, &len, buf) != CAN_OK) {
       // Read error - skip this message
       break;
+    }
+
+    if (handleFirmwareUpdateCanFrame(rx_id, buf, len)) {
+      msg_count++;
+      continue;
+    }
+
+    if (fw_update_runtime_maintenance_active && !isAllowedDuringFirmwareUpdateMaintenance(rx_id)) {
+      sendFirmwareUpdateError(FW_UPDATE_ERR_INVALID_STATE);
+      msg_count++;
+      continue;
     }
 
     // Dispatch based on CAN ID
@@ -2703,6 +3548,7 @@ void core1_loop() {
   // NOTE: multicore_lockout_victim_init() was removed because it interferes
   // with core1 startup. Flash operations now use a simpler approach:
   // Core0 waits for Core1 to be in a safe state before flash write.
+  core1_runtime_started = true;
   
   // Timing for control loop (configurable via inner_loop_period_us)
   // Default: 2000µs = 500Hz
