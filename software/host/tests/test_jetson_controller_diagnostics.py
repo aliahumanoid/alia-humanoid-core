@@ -1,8 +1,10 @@
+import logging
 import struct
+from types import SimpleNamespace
 from pathlib import Path
 
 from diagnostic_history import DiagnosticHistoryWriter
-from jetson_controller.can_bus import _decode_rx
+from jetson_controller.can_bus import CanBus, _decode_rx
 from jetson_controller.config import ControllerConfig, GainSet, JointControlConfig
 from jetson_controller.protocol import (
     CAN_ID_EVENT_NOTICE,
@@ -10,6 +12,7 @@ from jetson_controller.protocol import (
     CAN_ID_FAULT_SNAPSHOT_DATA,
     CAN_ID_FAULT_SNAPSHOT_META,
     CAN_ID_HEALTH_STATUS,
+    CAN_ID_STARTUP_STATUS,
 )
 from jetson_controller.telemetry import TelemetryManager
 
@@ -152,6 +155,26 @@ def test_can_bus_logger_decodes_new_diagnostic_frames():
     assert decoded.startswith("EVENT_NOTICE j=1")
     assert "WATCHDOG_TIMEOUT" in decoded
     assert high_freq is False
+
+
+def test_can_bus_listener_skips_duplicate_raw_logging_for_diagnostic_frames(caplog):
+    bus = CanBus()
+    summary = struct.pack("<BBBBHBB", 0x00, 0x6F, 4, 2, 123, 9, 7)
+    fault_frame = struct.pack("<BHHBBB", 3, 0x0009, 0x0008, 3, 0, 5)
+    event_frame = struct.pack("<BBBBBBH", 0x08, 0x46, 1, 0, 12, 4, 33)
+    startup_frame = bytes([3, 0, 0, 0x93, 0x03, 0, 0, 0])  # COMPLETE, elapsed=915ms
+
+    with caplog.at_level(logging.INFO, logger="jetson_controller.can_bus"):
+        bus._log_rx(SimpleNamespace(arbitration_id=CAN_ID_HEALTH_STATUS + 1, data=summary))
+        bus._log_rx(SimpleNamespace(arbitration_id=CAN_ID_FAULT_STATUS + 1, data=fault_frame))
+        bus._log_rx(SimpleNamespace(arbitration_id=CAN_ID_EVENT_NOTICE + 1, data=event_frame))
+        bus._log_rx(SimpleNamespace(arbitration_id=CAN_ID_STARTUP_STATUS + 1, data=startup_frame))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("HEALTH_SUMMARY j=1" in message for message in messages)
+    assert not any("FAULT_STATUS j=1" in message for message in messages)
+    assert not any("EVENT_NOTICE j=1" in message for message in messages)
+    assert any("STARTUP_STATUS j=1 COMPLETE" in message for message in messages)
 
 
 def test_jetson_telemetry_assembles_fault_snapshot_dump(tmp_path: Path):

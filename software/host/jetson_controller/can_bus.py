@@ -230,7 +230,6 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
                     False,
                 )
             if frame_kind == 0x80 and len(data) >= 8:
-                import struct
                 avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
                 return (
                     f"HEALTH_LOOP j={joint_id} avg={avg_us}us max={max_us}us budget={budget_us}us",
@@ -368,7 +367,10 @@ class CanBus:
                 if self._loop is not None and self._rx_queue is not None:
                     self._loop.call_soon_threadsafe(self._enqueue, msg)
                 # Log RX frame
-                self._log_rx(msg)
+                try:
+                    self._log_rx(msg)
+                except Exception:
+                    logger.warning("CAN RX logging failed", exc_info=True)
             except can.CanError as exc:
                 self.errors += 1
                 logger.warning(f"CAN RX error: {exc}")
@@ -376,6 +378,12 @@ class CanBus:
 
     def _log_rx(self, msg: can.Message) -> None:
         """Log received CAN frame — decoded and throttled."""
+        # Diagnostic-plane frames are already decoded, logged, and persisted by
+        # TelemetryManager. Logging them again here duplicates file I/O on the
+        # listener thread and can slow down SLCAN draining during startup.
+        if CAN_ID_HEALTH_STATUS <= msg.arbitration_id < CAN_ID_FAULT_SNAPSHOT_DATA + 16:
+            return
+
         decoded, is_high_freq = _decode_rx(msg.arbitration_id, msg.data)
 
         if is_high_freq:
