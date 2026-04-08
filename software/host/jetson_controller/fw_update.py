@@ -429,6 +429,17 @@ async def wait_for_candidate_boot(can_bus: CanBus,
                     f"(active={snapshot.info.active_slot}, target={target_slot})"
                 )
 
+    if snapshot.info is not None and info_matches_pending_activation(snapshot.info, target_slot):
+        raise TimeoutError(
+            f"Timed out waiting for joint {joint_id} candidate boot "
+            f"(target_slot={target_slot}); controller remained in PENDING_TEST "
+            f"(active={snapshot.info.active_slot}, pending={snapshot.info.pending_slot}, "
+            f"attempts={snapshot.info.attempts_remaining}). "
+            "This commonly indicates that the flash-base boot_update selector on the board "
+            "is stale or mismatched. Reflash pico2_boot_update_debug over USB, then retry "
+            "or resume the confirm flow."
+        )
+
     raise TimeoutError(
         f"Timed out waiting for joint {joint_id} candidate boot "
         f"(target_slot={target_slot})"

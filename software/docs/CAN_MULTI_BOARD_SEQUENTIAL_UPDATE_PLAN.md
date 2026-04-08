@@ -50,6 +50,10 @@ update path.
    artifacts.
 6. Different boards may currently be active on different slots, so the
    orchestrator must choose the inactive slot **per board**, not globally.
+7. Every board has already been flashed at least once with the current
+   flash-base boot/update selector image (`pico2_boot_update_debug` or
+   equivalent production build). The CAN updater does not repair a stale
+   selector automatically.
 
 ---
 
@@ -138,6 +142,12 @@ For every requested joint:
    - `boot_state`
    - `maintenance_active`
 3. reject or clean up boards that are not in a safe starting state
+4. if a board later times out in `BOOT_PENDING_TEST` without ever emitting
+   `CANDIDATE_BOOT_OK`, treat that as a likely stale flash-base selector and
+   reflash `pico2_boot_update_debug` over USB before retrying CAN activation
+5. on the bench this exact failure mode was observed on `2026-04-08`; after
+   reflashing the selector, the same single-board `fw_update_all` round trip
+   succeeded in both directions (`slot B -> slot A` and `slot A -> slot B`)
 
 Recommended rule:
 

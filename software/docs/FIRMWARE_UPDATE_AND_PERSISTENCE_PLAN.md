@@ -91,6 +91,19 @@ Current main limitation:
   flash-base selector and broader shared-bus / fleet-update policy are still
   open
 
+Observed bench caveat on 2026-04-08:
+- a board with an out-of-date flash-base selector can produce a misleading CAN
+  failure pattern: `ACTIVATE_SLOT` succeeds, the board reboots, but it remains
+  stuck in `BOOT_PENDING_TEST` for the candidate slot and never emits
+  `CANDIDATE_BOOT_OK`
+- reflashing `pico2_boot_update_debug` over USB fixed that behavior immediately
+  on the same board, after which the `slot B` candidate booted and confirmed
+  normally
+- after that selector reflash, the single-board `fw_update_all` wrapper was
+  also validated in both directions (`slot B -> slot A` and back to `slot B`)
+  on the same hardware, confirming that the batch wrapper itself was not the
+  source of the earlier `BOOT_PENDING_TEST` timeout
+
 Power-loss execution guide:
 - `software/docs/CAN_POWER_LOSS_VALIDATION_RUNBOOK.md`
 

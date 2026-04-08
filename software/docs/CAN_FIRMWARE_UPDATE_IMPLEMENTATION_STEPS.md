@@ -130,12 +130,27 @@ What is **not** in place yet:
   is still a release/integration task
 - shared-bus / fleet-update hardening is still future work
 
+Important bench prerequisite:
+- before trusting any CAN A/B validation result, make sure the board has a
+  current flash-base selector image installed (`pico2_boot_update_debug` on the
+  bench, or the matching production selector build)
+- if CAN update reaches `ACTIVATE_OK`, then reboots, but the controller stays in
+  `BOOT_PENDING_TEST` and never emits `CANDIDATE_BOOT_OK`, suspect a stale
+  selector first, not a broken candidate slot image
+
 This means the full Host-CAN update flow is now operational on the bench for
 one controller at a time, including rollback after a candidate boot that is not
 confirmed, resume after a mid-transfer interruption, and verify rejection of a
 corrupted candidate. Single-board power-loss interruption is now also validated
 on hardware; the remaining work is production packaging and broader shared-bus
 hardening.
+
+Additional bench confirmation on `2026-04-08`:
+- after reflashing the flash-base selector image over USB, the
+  `fw_update_all` wrapper was also validated on a single board in both
+  directions (`slot B -> slot A` and back `slot A -> slot B`)
+- this closed the apparent `slot B` activation failure and confirmed that the
+  earlier timeout was caused by a stale selector, not by the CAN batch updater
 
 Power-loss execution guide:
 - `software/docs/CAN_POWER_LOSS_VALIDATION_RUNBOOK.md`

@@ -278,6 +278,62 @@ def test_fw_update_stream_image_supports_periodic_burst_pause():
     asyncio.run(scenario())
 
 
+def test_wait_for_candidate_boot_reports_stale_selector_hint_when_stuck_pending_test():
+    from jetson_controller import fw_update as mod
+    from jetson_controller import protocol as proto
+
+    class _FakeCanBus:
+        def __init__(self, messages):
+            self._messages = deque(messages)
+            self.sent = []
+
+        async def send(self, arbitration_id, data):
+            self.sent.append((arbitration_id, bytes(data)))
+
+        async def recv(self, timeout=None):
+            if self._messages:
+                return self._messages.popleft()
+            if timeout:
+                await asyncio.sleep(timeout)
+            return None
+
+    joint_id = 8
+    data = bytes([
+        1,
+        2,
+        mod.FW_BOOT_PENDING_TEST,
+        1,
+        0,
+        1,
+        0,
+        0x01,  # maintenance_active
+    ])
+    msg = can.Message(
+        arbitration_id=proto.CAN_ID_FW_UPDATE_INFO + joint_id,
+        data=data,
+        is_extended_id=False,
+    )
+
+    async def scenario():
+        can_bus = _FakeCanBus([msg])
+        try:
+            await mod.wait_for_candidate_boot(
+                can_bus,
+                joint_id,
+                2,
+                timeout_s=0.01,
+            )
+        except TimeoutError as exc:
+            text = str(exc)
+            assert "PENDING_TEST" in text
+            assert "boot_update selector" in text
+            assert "pico2_boot_update_debug" in text
+        else:
+            raise AssertionError("Expected timeout while controller remained in PENDING_TEST")
+
+    asyncio.run(scenario())
+
+
 def test_fw_update_stream_image_retries_recoverable_page_error():
     from jetson_controller import fw_update as mod
 
