@@ -1,7 +1,7 @@
 # Firmware Update and Persistent Flash Plan
 
 **Status:** Draft Design
-**Date:** 2026-04-07
+**Date:** 2026-04-08
 **Scope:** Preserve provisioning/calibration across firmware updates and define a safe path to future CAN-based reflashing for RP2350 joint controllers.
 
 ---
@@ -10,7 +10,7 @@
 
 The immediate hardening path is no longer theoretical only.
 
-On `2026-04-07`, the following were validated on a real Pico 2 / RP2350 board
+On `2026-04-07` and `2026-04-08`, the following were validated on a real Pico 2 / RP2350 board
 mounted on a joint-controller PCB:
 
 - current-firmware reflashing preserved the stored profile
@@ -42,6 +42,14 @@ mounted on a joint-controller PCB:
   - writing a `slot B` candidate while flipping byte offset `12345` in flight
   - observing `IMAGE_CRC_MISMATCH` on whole-image verify
   - cleaning up with `ABORT_UPDATE` and `EXIT_MAINTENANCE`
+- power-loss behavior was then validated on the same board by:
+  - cutting power during `BOOT_RECEIVING`, then restoring a clean stable state
+    with `cleanup-session`
+  - cutting power after `VERIFY_OK` but before `ACTIVATE_SLOT`, then restoring
+    a clean stable state with `cleanup-session`
+  - cutting power during the first boot of a pending candidate and observing
+    automatic rollback to the previous stable slot; `cleanup-session` was then
+    only needed to exit maintenance cleanly
 - the board was finally restored to stable `slot B`
 - the validated target board was:
   - `joint_id=8`
@@ -69,8 +77,8 @@ This means:
   whole-image CRC verification
 - build artifacts now also expose machine-readable image metadata
   (`firmware_manifest.json`) with link target, base address, size, and CRC32
-- the remaining work is now centered on power-loss and hard fault injection
-  campaigns rather than basic boot/update plumbing
+- the remaining work is now centered on production packaging, shared-bus
+  hardening, and broader recovery policy rather than basic boot/update plumbing
 
 Current end-state after the validated CAN update:
 - `active_slot=slot B`
@@ -79,7 +87,12 @@ Current end-state after the validated CAN update:
 - `maintenance_active=false`
 
 Current main limitation:
-- power-loss behavior is not yet proven under deliberate fault injection
+- the single-board Host-CAN path is validated, but production packaging of the
+  flash-base selector and broader shared-bus / fleet-update policy are still
+  open
+
+Power-loss execution guide:
+- `software/docs/CAN_POWER_LOSS_VALIDATION_RUNBOOK.md`
 
 ---
 
@@ -178,12 +191,13 @@ The current arrangement has five structural problems:
 
 4. **Rollback was originally missing and had to become explicit.**
    That gap is now closed in the slot-based Host-CAN path, and interrupted-update
-   resume plus corrupted-image rejection are now proven on hardware. Power-loss
-   handling still needs to be proven.
+   resume plus corrupted-image rejection are now proven on hardware. Single-board
+   power-loss handling is now also proven, with explicit cleanup required in some
+   post-fault states.
 
 5. **CAN update safety now exists for the dedicated Host-CAN path.**
-   Shared-bus targeting, power-loss handling, and broader recovery behavior are
-   still not fully validated.
+   Shared-bus targeting and broader recovery behavior are still not fully
+   validated.
 
 ---
 
@@ -448,7 +462,8 @@ Recommended implementation order:
    end-to-end on a single board
 5. interrupted-update resume and corrupted-image rejection are now also validated
    on a single board
-6. remaining work is the power-loss interruption campaign
+6. single-board power-loss interruption is now also validated; remaining work is
+   production packaging plus shared-bus / fleet-update hardening
 
 For the concrete execution order and deliverables of that work, see:
 - `software/docs/CAN_FIRMWARE_UPDATE_IMPLEMENTATION_STEPS.md`

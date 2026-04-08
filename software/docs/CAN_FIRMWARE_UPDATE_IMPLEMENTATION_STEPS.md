@@ -1,7 +1,7 @@
 # CAN Firmware Update Implementation Steps
 
 **Status:** Draft Working Plan
-**Date:** 2026-04-07
+**Date:** 2026-04-08
 **Scope:** Convert the current USB-only firmware update path into a safe CAN-based
 update system for RP2350 joint controllers.
 
@@ -9,7 +9,7 @@ update system for RP2350 joint controllers.
 
 ## 1. Current Starting Point
 
-As of `2026-04-07`, the following foundation is already in place:
+As of `2026-04-08`, the following foundation is already in place:
 
 - persistent records were moved out of the application growth path
 - a linker/build guard protects the reserved NVM region
@@ -107,6 +107,17 @@ Real hardware evidence from `2026-04-07`:
   - `VERIFY_UPDATE` returned `IMAGE_CRC_MISMATCH`
   - host cleaned up with `ABORT_UPDATE` followed by `EXIT_MAINTENANCE`
   - stable runtime remained on `slot A`
+- power-loss behavior was then validated on the same board on `2026-04-08`:
+  - Scenario B: power loss after `VERIFY_OK` but before `ACTIVATE_SLOT`
+    returned with stable `slot B`, `pending_slot=0`, and `boot_state=BOOT_VERIFIED`;
+    `cleanup-session` then restored `BOOT_STABLE` and exited maintenance
+  - Scenario A: power loss during `BOOT_RECEIVING` returned with stable
+    `slot B`, `pending_slot=0`, and `boot_state=BOOT_RECEIVING`;
+    `cleanup-session` then restored `BOOT_STABLE` and exited maintenance
+  - Scenario C: power loss during the first boot of a pending `slot A`
+    candidate rolled back automatically to stable `slot B` with
+    `pending_slot=0`; the board came back with `maintenance_active=true` and
+    required `cleanup-session` only to exit maintenance cleanly
 - the board was finally restored to its original stable state:
   - `active_slot=2`
   - `pending_slot=0`
@@ -115,15 +126,19 @@ Real hardware evidence from `2026-04-07`:
 
 What is **not** in place yet:
 
-- power-loss interruption is not validated end-to-end yet
 - packaging the boot/update selector as the standard production flash-base image
   is still a release/integration task
+- shared-bus / fleet-update hardening is still future work
 
 This means the full Host-CAN update flow is now operational on the bench for
 one controller at a time, including rollback after a candidate boot that is not
 confirmed, resume after a mid-transfer interruption, and verify rejection of a
-corrupted candidate. The main remaining gap is the power-loss fault-injection
-campaign.
+corrupted candidate. Single-board power-loss interruption is now also validated
+on hardware; the remaining work is production packaging and broader shared-bus
+hardening.
+
+Power-loss execution guide:
+- `software/docs/CAN_POWER_LOSS_VALIDATION_RUNBOOK.md`
 
 ---
 
@@ -462,7 +477,7 @@ The CAN update path is done only when all of the following are true:
 
 Before that point, CAN reflashing should remain a development feature only.
 
-Current overall status on `2026-04-07`:
+Current overall status on `2026-04-08`:
 - satisfied now:
   - slot-based update path exists
   - maintenance mode exists
@@ -471,7 +486,9 @@ Current overall status on `2026-04-07`:
   - rollback after deliberate non-confirmed candidate boot is demonstrated
   - interrupted-update resume is demonstrated
   - corrupted-image rejection at whole-image verify is demonstrated
+  - single-board power-loss behavior is demonstrated across all three planned scenarios
   - persistent NVM is separated from slot writes
 - still open:
-  - power-loss campaign
   - recovery procedure hardening
+  - production packaging of the flash-base selector image
+  - shared-bus / fleet-update hardening

@@ -1,14 +1,14 @@
 # CAN Firmware Update Protocol Specification
 
 **Status:** Draft Technical Specification
-**Date:** 2026-04-07
+**Date:** 2026-04-08
 **Implementation state:** Flash map regions, slot linker targets, metadata
 record helpers, boot-time metadata initialization/reconciliation, metadata
 transition helpers, inactive-slot writer primitives, a boot/update selector,
 build-time artifact manifests, Host CAN command bindings, and a host-side
 end-to-end updater now exist in code; rollback after deliberate non-confirmation,
-interrupted-update resume, and corrupted-image rejection are validated on
-hardware, while power-loss campaigns remain pending
+interrupted-update resume, corrupted-image rejection, and the planned single-board
+power-loss campaigns are validated on hardware
 **Scope:** Safe firmware update over Host CAN for RP2350 joint controllers
 
 ---
@@ -26,7 +26,7 @@ It is intentionally stricter than the high-level design notes:
 
 This protocol is for the **Host CAN** path only.
 
-Practical status on `2026-04-07`:
+Practical status on `2026-04-08`:
 - the complete single-board Host-CAN update path was validated on real hardware
 - the validated path wrote a `277700`-byte `slot B` image and completed:
   - `VERIFY_OK`
@@ -54,9 +54,22 @@ Practical status on `2026-04-07`:
   - intentionally flipping transmitted byte offset `12345`
   - observing `IMAGE_CRC_MISMATCH` on `VERIFY_UPDATE`
   - aborting the failed candidate and returning to the previous stable slot
+- the planned single-board power-loss campaign was then validated on
+  `2026-04-08`:
+  - power loss during `BOOT_RECEIVING` returned the board in
+    `BOOT_RECEIVING + maintenance`, and `cleanup-session` restored the previous
+    stable slot
+  - power loss after `VERIFY_OK` but before `ACTIVATE_SLOT` returned the board
+    in `BOOT_VERIFIED + maintenance`, and `cleanup-session` restored the
+    previous stable slot
+  - power loss during the first boot of a pending candidate caused automatic
+    rollback to the previous stable slot; the board then required only a final
+    maintenance exit for cleanup
 - final board state was restored to `active_slot=2`, `pending_slot=0`,
   `boot_state=BOOT_STABLE`
-- power-loss campaigns remain future work
+
+Power-loss execution guide:
+- `software/docs/CAN_POWER_LOSS_VALIDATION_RUNBOOK.md`
 
 ---
 

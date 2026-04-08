@@ -82,6 +82,7 @@ FW_UPDATE_INTERFRAME_DELAY_S = max(MULTI_FRAME_DELAY_S, 0.005)
 FW_UPDATE_CTRL_DELAY_S = 0.010
 FW_UPDATE_PAGE_BEGIN_DELAY_S = 0.010
 FW_BOOT_RECEIVING = 2
+FW_BOOT_VERIFIED = 3
 FW_BOOT_PENDING_TEST = 4
 FW_BOOT_CANDIDATE_RUNNING = 5
 FW_IMAGE_SLOT_NONE = 0
@@ -132,6 +133,17 @@ def info_matches_confirmed_slot(info: FirmwareUpdateInfo, target_slot: int) -> b
     return (
         info.active_slot == target_slot
         and info.pending_slot == FW_IMAGE_SLOT_NONE
+        and not info.candidate_awaiting_confirmation
+    )
+
+
+def info_matches_verified_slot(info: FirmwareUpdateInfo, target_slot: int) -> bool:
+    return (
+        info.active_slot != target_slot
+        and info.pending_slot == FW_IMAGE_SLOT_NONE
+        and info.boot_state == FW_BOOT_VERIFIED
+        and info.maintenance_active
+        and not info.update_in_progress
         and not info.candidate_awaiting_confirmation
     )
 
@@ -675,11 +687,38 @@ async def validate_candidate_rollback(can_bus: CanBus,
     )
 
 
-async def cleanup_after_expected_verify_failure(can_bus: CanBus,
-                                                joint_cfg: JointControlConfig,
-                                                *,
-                                                stable_slot: int) -> None:
-    logger.info("Cleaning up after expected verify failure with ABORT_UPDATE")
+def log_update_snapshot_summary(snapshot: UpdateSnapshot, *, label: str) -> None:
+    uid_text = snapshot.uid.uid.hex().upper() if snapshot.uid is not None else "UNKNOWN"
+    if snapshot.info is None:
+        logger.info("%s: uid=%s info=missing", label, uid_text)
+        return
+
+    progress_text = (
+        str(snapshot.progress.next_page_index)
+        if snapshot.progress is not None
+        else "n/a"
+    )
+    logger.info(
+        "%s: uid=%s active=%d pending=%d boot=%d maint=%s upd=%s confirm=%s next_page=%s fw=%s",
+        label,
+        uid_text,
+        snapshot.info.active_slot,
+        snapshot.info.pending_slot,
+        snapshot.info.boot_state,
+        snapshot.info.maintenance_active,
+        snapshot.info.update_in_progress,
+        snapshot.info.candidate_awaiting_confirmation,
+        progress_text,
+        snapshot.info.fw_version,
+    )
+
+
+async def abort_update_and_exit_maintenance(can_bus: CanBus,
+                                            joint_cfg: JointControlConfig,
+                                            *,
+                                            stable_slot: int,
+                                            reason: str) -> None:
+    logger.info("%s", reason)
     await send_and_wait(
         can_bus,
         encode_fw_update_abort(),
@@ -705,12 +744,12 @@ async def cleanup_after_expected_verify_failure(can_bus: CanBus,
 
     final = await gather_update_info(can_bus, joint_cfg.joint_id)
     if final.info is None or not info_matches_rolled_back_slot(final.info, stable_slot):
-        raise RuntimeError("Controller did not return to stable slot after expected verify failure")
+        raise RuntimeError("Controller did not return to stable slot after ABORT_UPDATE cleanup")
     if final.info.maintenance_active:
-        raise RuntimeError("Controller remained in maintenance after expected verify failure cleanup")
+        raise RuntimeError("Controller remained in maintenance after ABORT_UPDATE cleanup")
 
     logger.info(
-        "Expected verify failure cleanup complete: active_slot=%d pending_slot=%d boot=%d fw=%s",
+        "ABORT_UPDATE cleanup complete: active_slot=%d pending_slot=%d boot=%d fw=%s",
         final.info.active_slot,
         final.info.pending_slot,
         final.info.boot_state,
@@ -718,11 +757,94 @@ async def cleanup_after_expected_verify_failure(can_bus: CanBus,
     )
 
 
+async def cleanup_after_expected_verify_failure(can_bus: CanBus,
+                                                joint_cfg: JointControlConfig,
+                                                *,
+                                                stable_slot: int) -> None:
+    await abort_update_and_exit_maintenance(
+        can_bus,
+        joint_cfg,
+        stable_slot=stable_slot,
+        reason="Cleaning up after expected verify failure with ABORT_UPDATE",
+    )
+
+
+async def run_info_only(config: ControllerConfig,
+                        joint_cfg: JointControlConfig) -> None:
+    can_bus = CanBus()
+    try:
+        await can_bus.connect(config.can_interface, config.can_channel, config.can_bitrate)
+        snapshot = await gather_update_info(can_bus, joint_cfg.joint_id)
+        log_update_snapshot_summary(snapshot, label="Controller state")
+    finally:
+        await can_bus.disconnect()
+
+
+async def run_cleanup_session(config: ControllerConfig,
+                              joint_cfg: JointControlConfig) -> None:
+    can_bus = CanBus()
+    try:
+        await can_bus.connect(config.can_interface, config.can_channel, config.can_bitrate)
+        snapshot = await gather_update_info(can_bus, joint_cfg.joint_id)
+        if snapshot.uid is None or snapshot.info is None:
+            raise RuntimeError("Failed to retrieve initial UID/info snapshot for cleanup")
+
+        log_update_snapshot_summary(snapshot, label="Cleanup start")
+        info = snapshot.info
+        stable_slot = info.active_slot
+        pending_slot = info.pending_slot
+
+        if pending_slot != FW_IMAGE_SLOT_NONE and info_matches_candidate_boot(info, pending_slot):
+            await validate_candidate_rollback(
+                can_bus,
+                joint_cfg,
+                target_slot=pending_slot,
+                stable_slot=stable_slot,
+            )
+            return
+
+        if pending_slot != FW_IMAGE_SLOT_NONE and info_matches_pending_activation(info, pending_slot):
+            await validate_candidate_rollback(
+                can_bus,
+                joint_cfg,
+                target_slot=pending_slot,
+                stable_slot=stable_slot,
+            )
+            return
+
+        if info.update_in_progress or info.boot_state in (FW_BOOT_RECEIVING, FW_BOOT_VERIFIED):
+            await abort_update_and_exit_maintenance(
+                can_bus,
+                joint_cfg,
+                stable_slot=stable_slot,
+                reason="Cleanup detected RECEIVING/VERIFIED state; aborting partial session",
+            )
+            return
+
+        if info.maintenance_active:
+            logger.info("Cleanup detected maintenance-only state; exiting maintenance")
+            await send_and_wait(
+                can_bus,
+                encode_fw_update_exit_maintenance(),
+                joint_cfg.joint_id,
+                event_code=FW_UPDATE_EVT_MAINTENANCE_EXITED,
+                timeout_s=3.0,
+            )
+            final = await gather_update_info(can_bus, joint_cfg.joint_id)
+            log_update_snapshot_summary(final, label="Cleanup final")
+            return
+
+        logger.info("Cleanup found no pending update state to reset")
+    finally:
+        await can_bus.disconnect()
+
+
 async def run_update(config: ControllerConfig,
                      joint_cfg: JointControlConfig,
                      artifact: UpdateArtifact,
                      *,
                      activate: bool = False,
+                     activate_only: bool = False,
                      validate_rollback: bool = False,
                      resume_receiving: bool = False,
                      interrupt_after_pages: Optional[int] = None,
@@ -775,6 +897,11 @@ async def run_update(config: ControllerConfig,
                 "Controller is not in a resumable BOOT_RECEIVING session for the requested target slot"
             )
 
+        if activate_only and info_matches_candidate_boot(initial.info, artifact.target_slot):
+            logger.info("Controller is already running candidate slot %d; leaving it unconfirmed",
+                        artifact.target_slot)
+            return
+
         if validate_rollback and info_matches_candidate_boot(initial.info, artifact.target_slot):
             logger.info("Controller is already running candidate slot %d; resuming rollback validation",
                         artifact.target_slot)
@@ -806,6 +933,52 @@ async def run_update(config: ControllerConfig,
             final = await gather_update_info(can_bus, joint_cfg.joint_id)
             if final.info is None or not info_matches_confirmed_slot(final.info, artifact.target_slot):
                 raise RuntimeError("Candidate confirmation resume did not converge to a stable slot")
+            return
+
+        if (activate or activate_only or validate_rollback) and info_matches_verified_slot(
+            initial.info, artifact.target_slot
+        ):
+            logger.info("Controller already has slot %d verified; skipping rewrite and activating candidate",
+                        artifact.target_slot)
+            await send_and_wait(
+                can_bus,
+                encode_fw_update_activate(artifact.target_slot, 1),
+                joint_cfg.joint_id,
+                event_code=FW_UPDATE_EVT_ACTIVATE_OK,
+                timeout_s=2.0,
+            )
+            if activate_only:
+                final = await gather_update_info(can_bus, joint_cfg.joint_id)
+                if final.info is None or not info_matches_pending_activation(final.info, artifact.target_slot):
+                    raise RuntimeError(
+                        "ACTIVATE_SLOT from verified state did not leave the controller in PENDING_TEST"
+                    )
+                logger.info(
+                    "Candidate slot marked pending without reboot: active_slot=%d pending_slot=%d boot=%d fw=%s",
+                    final.info.active_slot,
+                    final.info.pending_slot,
+                    final.info.boot_state,
+                    final.info.fw_version,
+                )
+                return
+            if validate_rollback:
+                await validate_candidate_rollback(
+                    can_bus,
+                    joint_cfg,
+                    target_slot=artifact.target_slot,
+                    stable_slot=stable_slot,
+                )
+            else:
+                await activate_verified_candidate(
+                    can_bus,
+                    joint_cfg,
+                    target_slot=artifact.target_slot,
+                )
+            return
+
+        if activate_only and info_matches_pending_activation(initial.info, artifact.target_slot):
+            logger.info("Controller already has slot %d pending test; leaving reboot to the operator",
+                        artifact.target_slot)
             return
 
         if validate_rollback and info_matches_pending_activation(initial.info, artifact.target_slot):
@@ -935,6 +1108,26 @@ async def run_update(config: ControllerConfig,
             artifact.image_path,
         )
 
+        if activate_only:
+            await send_and_wait(
+                can_bus,
+                encode_fw_update_activate(artifact.target_slot, 1),
+                joint_cfg.joint_id,
+                event_code=FW_UPDATE_EVT_ACTIVATE_OK,
+                timeout_s=2.0,
+            )
+            final = await gather_update_info(can_bus, joint_cfg.joint_id)
+            if final.info is None or not info_matches_pending_activation(final.info, artifact.target_slot):
+                raise RuntimeError("ACTIVATE_SLOT without reboot did not leave the controller in PENDING_TEST")
+            logger.info(
+                "Candidate slot marked pending without reboot: active_slot=%d pending_slot=%d boot=%d fw=%s",
+                final.info.active_slot,
+                final.info.pending_slot,
+                final.info.boot_state,
+                final.info.fw_version,
+            )
+            return
+
         if activate or validate_rollback:
             await send_and_wait(
                 can_bus,
@@ -981,12 +1174,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Write firmware to RP2350 joint controller via Host CAN")
     parser.add_argument("--config", default=None, help="Path to controller.yaml")
     parser.add_argument("--joint", required=True, help="Joint profile name from controller.yaml, e.g. hip_right")
-    parser.add_argument("--manifest", required=True, help="Path to slot_a/slot_b firmware_manifest.json")
+    parser.add_argument("--manifest", default=None, help="Path to slot_a/slot_b firmware_manifest.json")
     activation_group = parser.add_mutually_exclusive_group()
     activation_group.add_argument("--activate", action="store_true",
                                   help="After verify, switch to the candidate slot, confirm it, and exit maintenance")
+    activation_group.add_argument("--activate-only", action="store_true",
+                                  help="After verify, mark the candidate pending test but leave reboot/confirmation to the operator")
     activation_group.add_argument("--validate-rollback", action="store_true",
                                   help="After verify, boot the candidate once without confirmation, then verify rollback to the previous stable slot")
+    parser.add_argument("--info-only", action="store_true",
+                        help="Query and print the controller firmware-update state without changing it")
+    parser.add_argument("--cleanup-session", action="store_true",
+                        help="Abort or roll back any partial update state, then exit maintenance when possible")
     parser.add_argument("--resume-receiving", action="store_true",
                         help="Resume an already-open BOOT_RECEIVING session using FW_UPDATE_PROGRESS.next_page_index")
     parser.add_argument("--interrupt-after-pages", type=int, default=None,
@@ -1002,24 +1201,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 async def _async_main(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
+    if args.info_only and args.cleanup_session:
+        raise ValueError("--info-only and --cleanup-session are mutually exclusive")
+    if (args.info_only or args.cleanup_session) and any([
+        args.activate,
+        args.activate_only,
+        args.validate_rollback,
+        args.resume_receiving,
+        args.interrupt_after_pages is not None,
+        args.corrupt_byte_offset is not None,
+        args.expect_verify_error is not None,
+    ]):
+        raise ValueError("inspection/cleanup modes cannot be combined with update execution flags")
     if args.interrupt_after_pages is not None and args.interrupt_after_pages <= 0:
         raise ValueError("--interrupt-after-pages must be > 0")
     if args.corrupt_byte_offset is not None and args.expect_verify_error is None:
         raise ValueError("--corrupt-byte-offset requires --expect-verify-error")
-    if args.expect_verify_error is not None and (args.activate or args.validate_rollback):
-        raise ValueError("--expect-verify-error cannot be combined with --activate or --validate-rollback")
+    config = load_config(args.config, selected_joints=[args.joint])
+    joint_cfg = select_joint(config, args.joint)
+
+    if args.info_only:
+        await run_info_only(config, joint_cfg)
+        return 0
+
+    if args.cleanup_session:
+        await run_cleanup_session(config, joint_cfg)
+        return 0
+
+    if args.expect_verify_error is not None and (args.activate or args.activate_only or args.validate_rollback):
+        raise ValueError("--expect-verify-error cannot be combined with activation or rollback modes")
+    if args.manifest is None:
+        raise ValueError("--manifest is required unless --info-only or --cleanup-session is used")
 
     artifact = maybe_corrupt_artifact(
         load_update_artifact(args.manifest),
         args.corrupt_byte_offset,
     )
-    config = load_config(args.config, selected_joints=[args.joint])
-    joint_cfg = select_joint(config, args.joint)
     await run_update(
         config,
         joint_cfg,
         artifact,
         activate=args.activate,
+        activate_only=args.activate_only,
         validate_rollback=args.validate_rollback,
         resume_receiving=args.resume_receiving,
         interrupt_after_pages=args.interrupt_after_pages,
