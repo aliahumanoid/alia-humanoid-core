@@ -71,16 +71,16 @@ from .protocol import (
     encode_fw_update_page_frag,
     encode_fw_update_reboot,
     encode_fw_update_verify,
-    MULTI_FRAME_DELAY_S,
 )
 
 logger = logging.getLogger("jetson_controller.fw_update")
 
 FLASH_PAGE_SIZE = 256
 PAGE_FRAGMENT_SIZE = 6
-FW_UPDATE_INTERFRAME_DELAY_S = max(MULTI_FRAME_DELAY_S, 0.005)
-FW_UPDATE_CTRL_DELAY_S = 0.010
-FW_UPDATE_PAGE_BEGIN_DELAY_S = 0.010
+# Bench-validated default pacing for the current SLCAN -> MCP2515 transport.
+FW_UPDATE_INTERFRAME_DELAY_S = 0.0005
+FW_UPDATE_CTRL_DELAY_S = 0.00075
+FW_UPDATE_PAGE_BEGIN_DELAY_S = 0.00075
 FW_BOOT_RECEIVING = 2
 FW_BOOT_VERIFIED = 3
 FW_BOOT_PENDING_TEST = 4
@@ -100,6 +100,13 @@ class UpdateArtifact:
     image_size_bytes: int
     image_crc32: int
     image_bytes: bytes
+
+
+@dataclass(frozen=True)
+class UpdateTimingConfig:
+    ctrl_gap_s: float = FW_UPDATE_CTRL_DELAY_S
+    page_begin_gap_s: float = FW_UPDATE_PAGE_BEGIN_DELAY_S
+    frag_gap_s: float = FW_UPDATE_INTERFRAME_DELAY_S
 
 
 @dataclass
@@ -470,8 +477,9 @@ async def stream_image(can_bus: CanBus,
                        joint_id: int,
                        artifact: UpdateArtifact,
                        *,
+                       timing: UpdateTimingConfig,
                        start_page_index: int = 0,
-                       interrupt_after_pages: Optional[int] = None) -> bool:
+                       interrupt_after_pages: Optional[int] = None) -> tuple[bool, int]:
     page_count = (artifact.image_size_bytes + FLASH_PAGE_SIZE - 1) // FLASH_PAGE_SIZE
 
     if start_page_index < 0 or start_page_index > page_count:
@@ -486,6 +494,7 @@ async def stream_image(can_bus: CanBus,
             page_count,
         )
 
+    bytes_streamed = 0
     for page_index in range(start_page_index, page_count):
         start = page_index * FLASH_PAGE_SIZE
         end = min(start + FLASH_PAGE_SIZE, artifact.image_size_bytes)
@@ -496,7 +505,7 @@ async def stream_image(can_bus: CanBus,
         await send_with_gap(
             can_bus,
             encode_fw_update_page_begin(page_index, page_seq, page, is_final_page=is_final),
-            delay_s=FW_UPDATE_PAGE_BEGIN_DELAY_S,
+            delay_s=timing.page_begin_gap_s,
         )
         for frag_index, frag_start in enumerate(range(0, len(page), PAGE_FRAGMENT_SIZE)):
             frag = page[frag_start:frag_start + PAGE_FRAGMENT_SIZE]
@@ -504,7 +513,7 @@ async def stream_image(can_bus: CanBus,
             await send_with_gap(
                 can_bus,
                 encode_fw_update_page_frag(page_seq, frag_index, frag),
-                delay_s=0.0 if is_last_frag else FW_UPDATE_INTERFRAME_DELAY_S,
+                delay_s=0.0 if is_last_frag else timing.frag_gap_s,
             )
 
         status = await wait_for_update_snapshot(
@@ -520,6 +529,7 @@ async def stream_image(can_bus: CanBus,
 
         if (page_index + 1) % 32 == 0 or page_index + 1 == page_count:
             logger.info("Flashed page %d/%d", page_index + 1, page_count)
+        bytes_streamed += len(page)
 
         if interrupt_after_pages is not None and (page_index + 1) >= interrupt_after_pages:
             logger.warning(
@@ -527,9 +537,9 @@ async def stream_image(can_bus: CanBus,
                 page_index + 1,
                 page_count,
             )
-            return False
+            return False, bytes_streamed
 
-    return True
+    return True, bytes_streamed
 
 
 async def reboot_into_candidate(can_bus: CanBus,
@@ -843,6 +853,7 @@ async def run_update(config: ControllerConfig,
                      joint_cfg: JointControlConfig,
                      artifact: UpdateArtifact,
                      *,
+                     timing: UpdateTimingConfig,
                      activate: bool = False,
                      activate_only: bool = False,
                      validate_rollback: bool = False,
@@ -883,6 +894,12 @@ async def run_update(config: ControllerConfig,
             initial.info.active_slot,
             initial.info.pending_slot,
             initial.info.fw_version,
+        )
+        logger.info(
+            "Update pacing: ctrl=%.1f ms page_begin=%.1f ms frag=%.1f ms",
+            timing.ctrl_gap_s * 1000.0,
+            timing.page_begin_gap_s * 1000.0,
+            timing.frag_gap_s * 1000.0,
         )
         stable_slot = initial.info.active_slot
 
@@ -1046,7 +1063,7 @@ async def run_update(config: ControllerConfig,
                     encode_fw_update_meta_a(artifact.image_size_bytes, artifact.image_crc32),
                     encode_fw_update_meta_b(board_uid_crc32, 1, 0),
                 ],
-                delay_s=FW_UPDATE_CTRL_DELAY_S,
+                delay_s=timing.ctrl_gap_s,
             )
             await wait_for_update_snapshot(
                 can_bus,
@@ -1056,13 +1073,16 @@ async def run_update(config: ControllerConfig,
             )
             session_started = True
 
-        stream_completed = await stream_image(
+        stream_started_at = asyncio.get_running_loop().time()
+        stream_completed, streamed_bytes = await stream_image(
             can_bus,
             joint_cfg.joint_id,
             artifact,
+            timing=timing,
             start_page_index=start_page_index,
             interrupt_after_pages=interrupt_after_pages,
         )
+        stream_elapsed_s = max(asyncio.get_running_loop().time() - stream_started_at, 1e-6)
 
         if not stream_completed:
             logger.warning(
@@ -1070,7 +1090,20 @@ async def run_update(config: ControllerConfig,
                 "(target_slot=%d)",
                 artifact.target_slot,
             )
+            logger.info(
+                "Transferred %.1f KiB before intentional interruption in %.2f s (%.1f KiB/s)",
+                streamed_bytes / 1024.0,
+                stream_elapsed_s,
+                (streamed_bytes / 1024.0) / stream_elapsed_s if stream_elapsed_s > 0.0 else 0.0,
+            )
             return
+
+        logger.info(
+            "Streamed %d bytes in %.2f s (%.1f KiB/s)",
+            streamed_bytes,
+            stream_elapsed_s,
+            (streamed_bytes / 1024.0) / stream_elapsed_s,
+        )
 
         await can_bus.send(*encode_fw_update_end())
 
@@ -1195,6 +1228,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expect-verify-error", choices=sorted(EXPECTED_VERIFY_ERROR_CODES.keys()),
                         default=None,
                         help="Treat the selected verify error as the expected outcome and clean up with ABORT_UPDATE")
+    parser.add_argument("--ctrl-gap-ms", type=float, default=FW_UPDATE_CTRL_DELAY_S * 1000.0,
+                        help="Delay between BEGIN/META control frames in milliseconds")
+    parser.add_argument("--page-begin-gap-ms", type=float, default=FW_UPDATE_PAGE_BEGIN_DELAY_S * 1000.0,
+                        help="Delay after each PAGE_BEGIN frame in milliseconds")
+    parser.add_argument("--frag-gap-ms", type=float, default=FW_UPDATE_INTERFRAME_DELAY_S * 1000.0,
+                        help="Delay between page fragment frames in milliseconds")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     return parser
 
@@ -1215,10 +1254,17 @@ async def _async_main(args: argparse.Namespace) -> int:
         raise ValueError("inspection/cleanup modes cannot be combined with update execution flags")
     if args.interrupt_after_pages is not None and args.interrupt_after_pages <= 0:
         raise ValueError("--interrupt-after-pages must be > 0")
+    if args.ctrl_gap_ms < 0.0 or args.page_begin_gap_ms < 0.0 or args.frag_gap_ms < 0.0:
+        raise ValueError("timing gaps must be >= 0 ms")
     if args.corrupt_byte_offset is not None and args.expect_verify_error is None:
         raise ValueError("--corrupt-byte-offset requires --expect-verify-error")
     config = load_config(args.config, selected_joints=[args.joint])
     joint_cfg = select_joint(config, args.joint)
+    timing = UpdateTimingConfig(
+        ctrl_gap_s=args.ctrl_gap_ms / 1000.0,
+        page_begin_gap_s=args.page_begin_gap_ms / 1000.0,
+        frag_gap_s=args.frag_gap_ms / 1000.0,
+    )
 
     if args.info_only:
         await run_info_only(config, joint_cfg)
@@ -1241,6 +1287,7 @@ async def _async_main(args: argparse.Namespace) -> int:
         config,
         joint_cfg,
         artifact,
+        timing=timing,
         activate=args.activate,
         activate_only=args.activate_only,
         validate_rollback=args.validate_rollback,
