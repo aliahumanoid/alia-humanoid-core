@@ -117,15 +117,15 @@ Recommended `4 MB` flash map:
 0x000000 - 0x01FFFF  Boot / update region         (128 KB)
 0x020000 - 0x11FFFF  App slot A                   (1 MB)
 0x120000 - 0x21FFFF  App slot B                   (1 MB)
-0x220000 - 0x3F8FFF  Reserved / service growth
-0x3F9000 - 0x3F9FFF  Update metadata sector       (4 KB)
+0x220000 - 0x3F7FFF  Reserved / service growth
+0x3F8000 - 0x3F9FFF  Update metadata journal      (8 KB, 2 sectors)
 0x3FA000 - 0x3FEFFF  Persistent NVM               (20 KB, current layout)
 0x3FF000 - 0x3FFFFF  Framework-reserved tail      (4 KB)
 ```
 
 Properties:
 - current persistent records remain at their new top-of-flash addresses
-- update metadata gets its own dedicated sector
+- update metadata gets its own dedicated two-sector ping-pong journal
 - both application slots are far below persistent data
 - slot erase/program operations cannot overlap persistent NVM by design
 
@@ -165,13 +165,15 @@ Responsible for:
 
 ## 5. Metadata Model
 
-The update metadata sector should store journaled records, not a single mutable
+The update metadata region should store journaled records, not a single mutable
 struct overwritten in place.
 
 Current code direction:
 - one metadata record occupies exactly one `256`-byte flash page
-- the `4 KB` metadata sector therefore holds `16` journal entries
-- records are appended until the sector is full, then compacted by erase + rewrite
+- each `4 KB` metadata sector therefore holds `16` journal entries
+- the active metadata journal now spans **two sectors**
+- records are appended until the active sector is full, then the latest record
+  is written into the alternate sector before the stale sector is erased
 
 Recommended record fields:
 
@@ -206,10 +208,12 @@ struct UpdateMetadataRecord {
 
 Recommended policy:
 - append a new metadata record for every state transition
-- erase the metadata sector only when the journal is full
+- compact by ping-pong sector swap only when the active sector is full
 - on boot, load the latest valid record by `record_seq`
 
-This avoids torn-state failure from a single partially rewritten metadata block.
+This avoids torn-state failure from a single partially rewritten metadata block
+and removes the destructive erase-before-write window from the previous
+single-sector design.
 
 ---
 
@@ -641,7 +645,7 @@ Before writing any transport code, freeze these two artifacts in code:
    - boot/update region
    - slot A
    - slot B
-   - update metadata sector
+   - update metadata journal
    - persistent NVM
 2. update metadata struct and boot-state enum
 

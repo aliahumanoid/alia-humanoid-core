@@ -63,6 +63,14 @@ uint32_t metadata_header_crc32(const FirmwareUpdateMetadataRecord *record) {
                      offsetof(FirmwareUpdateMetadataRecord, header_crc32));
 }
 
+struct MetadataJournalSectorScan {
+  uint32_t sector_offset = 0u;
+  bool has_valid_record = false;
+  uint32_t highest_seq = 0u;
+  FirmwareUpdateMetadataRecord latest_record = {};
+  size_t first_erased_index = FW_UPDATE_METADATA_RECORDS_PER_SECTOR;
+};
+
 bool is_erased_record(const FirmwareUpdateMetadataRecord *record) {
   const uint8_t *raw = reinterpret_cast<const uint8_t *>(record);
   for (size_t i = 0; i < sizeof(FirmwareUpdateMetadataRecord); ++i) {
@@ -118,6 +126,41 @@ bool is_valid_metadata_record(const FirmwareUpdateMetadataRecord *record) {
   }
 
   return metadata_header_crc32(record) == record->header_crc32;
+}
+
+void scan_metadata_journal_sector(uint32_t sector_offset,
+                                  MetadataJournalSectorScan *out_scan) {
+  if (out_scan == nullptr) {
+    return;
+  }
+
+  *out_scan = {};
+  out_scan->sector_offset = sector_offset;
+
+  const uint8_t *sector_ptr = reinterpret_cast<const uint8_t *>(kXipBaseAddr + sector_offset);
+  for (size_t index = 0; index < FW_UPDATE_METADATA_RECORDS_PER_SECTOR; ++index) {
+    FirmwareUpdateMetadataRecord candidate = {};
+    memcpy(&candidate, sector_ptr + (index * sizeof(FirmwareUpdateMetadataRecord)),
+           sizeof(FirmwareUpdateMetadataRecord));
+
+    if (!is_valid_metadata_record(&candidate)) {
+      if (is_erased_record(&candidate) &&
+          out_scan->first_erased_index == FW_UPDATE_METADATA_RECORDS_PER_SECTOR) {
+        out_scan->first_erased_index = index;
+      }
+      continue;
+    }
+
+    if (!out_scan->has_valid_record || candidate.record_seq > out_scan->highest_seq) {
+      out_scan->has_valid_record = true;
+      out_scan->highest_seq = candidate.record_seq;
+      out_scan->latest_record = candidate;
+    }
+  }
+}
+
+bool metadata_journal_has_erased_slot(const MetadataJournalSectorScan &scan) {
+  return scan.first_erased_index < FW_UPDATE_METADATA_RECORDS_PER_SECTOR;
 }
 
 bool slot_region_for(uint8_t slot, SlotImageInfo *out_info) {
@@ -221,25 +264,25 @@ bool load_latest_metadata(FirmwareUpdateMetadataRecord *out_record) {
     return false;
   }
 
+  const uint32_t sector_offsets[FLASH_UPDATE_METADATA_SECTOR_COUNT] = {
+      FLASH_UPDATE_METADATA_SECTOR_A_OFFSET,
+      FLASH_UPDATE_METADATA_SECTOR_B_OFFSET,
+  };
+
   bool found_valid = false;
   uint32_t best_seq = 0u;
   FirmwareUpdateMetadataRecord best_record = {};
-  const uint8_t *sector_ptr =
-      reinterpret_cast<const uint8_t *>(kXipBaseAddr + FLASH_UPDATE_METADATA_OFFSET);
-
-  for (size_t index = 0; index < FW_UPDATE_METADATA_RECORD_COUNT; ++index) {
-    FirmwareUpdateMetadataRecord candidate = {};
-    memcpy(&candidate, sector_ptr + (index * sizeof(FirmwareUpdateMetadataRecord)),
-           sizeof(FirmwareUpdateMetadataRecord));
-
-    if (!is_valid_metadata_record(&candidate)) {
+  for (size_t sector_index = 0; sector_index < FLASH_UPDATE_METADATA_SECTOR_COUNT; ++sector_index) {
+    MetadataJournalSectorScan scan = {};
+    scan_metadata_journal_sector(sector_offsets[sector_index], &scan);
+    if (!scan.has_valid_record) {
       continue;
     }
 
-    if (!found_valid || candidate.record_seq > best_seq) {
-      best_record = candidate;
-      best_seq = candidate.record_seq;
+    if (!found_valid || scan.highest_seq > best_seq) {
       found_valid = true;
+      best_seq = scan.highest_seq;
+      best_record = scan.latest_record;
     }
   }
 
@@ -256,23 +299,20 @@ bool append_metadata_record(FirmwareUpdateMetadataRecord *record) {
     return false;
   }
 
-  size_t write_index = 0u;
-  bool found_empty_page = false;
+  const uint32_t sector_offsets[FLASH_UPDATE_METADATA_SECTOR_COUNT] = {
+      FLASH_UPDATE_METADATA_SECTOR_A_OFFSET,
+      FLASH_UPDATE_METADATA_SECTOR_B_OFFSET,
+  };
+  MetadataJournalSectorScan sector_scans[FLASH_UPDATE_METADATA_SECTOR_COUNT] = {};
   uint32_t highest_seq = 0u;
-  const uint8_t *sector_ptr =
-      reinterpret_cast<const uint8_t *>(kXipBaseAddr + FLASH_UPDATE_METADATA_OFFSET);
-
-  for (size_t index = 0; index < FW_UPDATE_METADATA_RECORD_COUNT; ++index) {
-    FirmwareUpdateMetadataRecord candidate = {};
-    memcpy(&candidate, sector_ptr + (index * sizeof(FirmwareUpdateMetadataRecord)),
-           sizeof(FirmwareUpdateMetadataRecord));
-
-    if (is_valid_metadata_record(&candidate) && candidate.record_seq > highest_seq) {
-      highest_seq = candidate.record_seq;
-    }
-    if (!found_empty_page && is_erased_record(&candidate)) {
-      write_index = index;
-      found_empty_page = true;
+  int latest_sector_index = -1;
+  for (size_t sector_index = 0; sector_index < FLASH_UPDATE_METADATA_SECTOR_COUNT; ++sector_index) {
+    scan_metadata_journal_sector(sector_offsets[sector_index], &sector_scans[sector_index]);
+    if (sector_scans[sector_index].has_valid_record &&
+        (latest_sector_index < 0 ||
+         sector_scans[sector_index].highest_seq > highest_seq)) {
+      highest_seq = sector_scans[sector_index].highest_seq;
+      latest_sector_index = static_cast<int>(sector_index);
     }
   }
 
@@ -294,13 +334,40 @@ bool append_metadata_record(FirmwareUpdateMetadataRecord *record) {
   }
 
   const uint32_t ints = save_and_disable_interrupts();
-  if (!found_empty_page) {
-    flash_range_erase(FLASH_UPDATE_METADATA_OFFSET, FLASH_UPDATE_METADATA_SIZE_BYTES);
-    write_index = 0u;
+  if (latest_sector_index >= 0 &&
+      metadata_journal_has_erased_slot(sector_scans[latest_sector_index])) {
+    const uint32_t write_offset = sector_scans[latest_sector_index].sector_offset +
+                                  (sector_scans[latest_sector_index].first_erased_index *
+                                   FLASH_PAGE_SIZE);
+    flash_range_program(write_offset,
+                        reinterpret_cast<const uint8_t *>(&record_to_write),
+                        sizeof(FirmwareUpdateMetadataRecord));
+  } else if (latest_sector_index < 0) {
+    size_t destination_sector_index = 0u;
+    if (!metadata_journal_has_erased_slot(sector_scans[destination_sector_index]) &&
+        metadata_journal_has_erased_slot(sector_scans[1])) {
+      destination_sector_index = 1u;
+    }
+    if (!metadata_journal_has_erased_slot(sector_scans[destination_sector_index])) {
+      flash_range_erase(sector_offsets[destination_sector_index], FLASH_SECTOR_SIZE);
+      sector_scans[destination_sector_index].first_erased_index = 0u;
+    }
+    const uint32_t write_offset = sector_scans[destination_sector_index].sector_offset +
+                                  (sector_scans[destination_sector_index].first_erased_index *
+                                   FLASH_PAGE_SIZE);
+    flash_range_program(write_offset,
+                        reinterpret_cast<const uint8_t *>(&record_to_write),
+                        sizeof(FirmwareUpdateMetadataRecord));
+  } else {
+    const size_t destination_sector_index = (latest_sector_index == 0) ? 1u : 0u;
+    const uint32_t destination_sector_offset = sector_scans[destination_sector_index].sector_offset;
+    const uint32_t stale_sector_offset = sector_scans[latest_sector_index].sector_offset;
+    flash_range_erase(destination_sector_offset, FLASH_SECTOR_SIZE);
+    flash_range_program(destination_sector_offset,
+                        reinterpret_cast<const uint8_t *>(&record_to_write),
+                        sizeof(FirmwareUpdateMetadataRecord));
+    flash_range_erase(stale_sector_offset, FLASH_SECTOR_SIZE);
   }
-  flash_range_program(FLASH_UPDATE_METADATA_OFFSET + (write_index * FLASH_PAGE_SIZE),
-                      reinterpret_cast<const uint8_t *>(&record_to_write),
-                      sizeof(FirmwareUpdateMetadataRecord));
   restore_interrupts(ints);
 
   *record = record_to_write;

@@ -40,6 +40,8 @@ static constexpr uint16_t FW_UPDATE_METADATA_VERSION = 1u;
 static constexpr uint16_t FW_UPDATE_PROTOCOL_VERSION_MAJOR = 1u;
 static constexpr uint16_t FW_UPDATE_PROTOCOL_VERSION_MINOR = 0u;
 static constexpr size_t FW_UPDATE_METADATA_RECORD_FIXED_BYTES = 56u;
+static constexpr size_t FW_UPDATE_METADATA_RECORDS_PER_SECTOR =
+    FLASH_SECTOR_SIZE / FLASH_PAGE_SIZE;
 static constexpr size_t FW_UPDATE_METADATA_RECORD_COUNT =
     FLASH_UPDATE_METADATA_SIZE_BYTES / FLASH_PAGE_SIZE;
 
@@ -72,6 +74,8 @@ struct FirmwareUpdateMetadataRecord {
 
 static_assert(sizeof(FirmwareUpdateMetadataRecord) == FLASH_PAGE_SIZE,
               "Firmware update metadata records must occupy exactly one flash page");
+static_assert(FW_UPDATE_METADATA_RECORDS_PER_SECTOR == 16u,
+              "Each metadata sector is expected to hold 16 records");
 static_assert((FLASH_UPDATE_METADATA_SIZE_BYTES % sizeof(FirmwareUpdateMetadataRecord)) == 0u,
               "Metadata sector must contain an integer number of records");
 

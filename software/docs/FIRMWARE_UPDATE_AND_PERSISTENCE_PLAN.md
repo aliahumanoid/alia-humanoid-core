@@ -282,7 +282,7 @@ The implemented `flash_map.h` layout for `4 MB` flash is:
 0x020000 - 0x11FFFF  App slot A                 (1 MB)
 0x120000 - 0x21FFFF  App slot B                 (1 MB)
 0x220000 - 0x3F8FFF  Service region             (1892 KB)
-0x3F9000 - 0x3F9FFF  Update metadata            (4 KB)
+0x3F8000 - 0x3F9FFF  Update metadata journal    (8 KB, 2 sectors)
 0x3FA000 - 0x3FEFFF  Persistent NVM             (20 KB)
 0x3FF000 - 0x3FFFFF  Framework-reserved tail    (4 KB)
 ```
@@ -290,7 +290,9 @@ The implemented `flash_map.h` layout for `4 MB` flash is:
 Notes:
 - `Persistent NVM` holds provisioning, PID, processed equations, motor offsets,
   and direct encoder offsets.
-- `Update metadata` is already split out into its own dedicated sector below NVM.
+- `Update metadata` is already split out into its own dedicated ping-pong
+  journal below NVM, using two sectors to avoid destructive in-place erase when
+  the active journal fills.
 - The current firmware size is far below `1 MB`, so the `1 MB` app slots still leave
   large headroom.
 - `1 MB` application slots remain intentionally conservative. `512 KB` slots would
