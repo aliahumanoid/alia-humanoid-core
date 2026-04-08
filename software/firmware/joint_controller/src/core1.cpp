@@ -19,6 +19,7 @@
 
 #include "main_common.h"
 #include "RuntimeProvisioning.h"
+#include "IntercoreSync.h"
 #include "flash_map.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
@@ -32,12 +33,20 @@
 // This MUST be in RAM because flash is inaccessible during erase/program
 static void __not_in_flash_func(wait_for_flash_complete)(void) {
   // Signal Core0 that we are safely parked in RAM
+  intercore_memory_barrier();
   core1_flash_acknowledged = true;
-  while (flash_operation_in_progress) {
+  intercore_memory_barrier();
+  while (true) {
+    intercore_memory_barrier();
+    if (!flash_operation_in_progress) {
+      break;
+    }
     tight_loop_contents();  // CPU-friendly busy wait
   }
   // Reset acknowledgment for next flash operation
+  intercore_memory_barrier();
   core1_flash_acknowledged = false;
+  intercore_memory_barrier();
 }
 
 // ============================================================================
@@ -1367,6 +1376,8 @@ struct FirmwareUpdateCanRxState {
   uint8_t last_frag_index = 0xFFu;
 
   bool awaiting_core0 = false;
+  uint32_t pending_request_id = 0u;
+  uint32_t pending_core_started_ms = 0u;
   uint8_t pending_core_op = FW_UPDATE_CORE_OP_NONE;
   bool pending_maintenance_enabled = false;
   uint8_t pending_target_slot = FW_IMAGE_SLOT_NONE;
@@ -1379,13 +1390,16 @@ static FirmwareUpdateCanRxState fw_update_rx = {};
 static bool fw_update_runtime_state_initialized = false;
 static bool fw_update_runtime_maintenance_active = false;
 static bool fw_update_candidate_boot_status_sent = false;
+static uint32_t fw_update_next_request_id = 1u;
+static constexpr uint32_t FW_UPDATE_CORE_REQUEST_TIMEOUT_MS = 5000u;
 
 static void publishFirmwareUpdateMetadataSnapshot(const FirmwareUpdateMetadataRecord &record) {
   fw_update_metadata_snapshot_valid = false;
-  asm volatile("" ::: "memory");
+  intercore_memory_barrier();
   fw_update_metadata_snapshot = record;
-  asm volatile("" ::: "memory");
+  intercore_memory_barrier();
   fw_update_metadata_snapshot_valid = true;
+  intercore_memory_barrier();
 }
 
 static bool readPublishedFirmwareUpdateMetadataSnapshot(FirmwareUpdateMetadataRecord *out_record) {
@@ -1393,8 +1407,9 @@ static bool readPublishedFirmwareUpdateMetadataSnapshot(FirmwareUpdateMetadataRe
     return false;
   }
 
+  intercore_memory_barrier();
   FirmwareUpdateMetadataRecord snapshot = fw_update_metadata_snapshot;
-  asm volatile("" ::: "memory");
+  intercore_memory_barrier();
   if (!fw_update_metadata_snapshot_valid) {
     return false;
   }
@@ -1508,6 +1523,8 @@ static void resetFirmwareUpdateTransferState() {
   fw_update_rx.end_received = false;
   fw_update_rx.session = {};
   fw_update_rx.awaiting_core0 = false;
+  fw_update_rx.pending_request_id = 0u;
+  fw_update_rx.pending_core_started_ms = 0u;
   fw_update_rx.pending_core_op = FW_UPDATE_CORE_OP_NONE;
   fw_update_rx.pending_maintenance_enabled = false;
   fw_update_rx.pending_target_slot = FW_IMAGE_SLOT_NONE;
@@ -1612,9 +1629,19 @@ static bool queueFirmwareUpdateCoreRequest(const FirmwareUpdateCoreRequest &requ
     return false;
   }
 
-  fw_update_core_request = request;
+  FirmwareUpdateCoreRequest staged_request = request;
+  staged_request.request_id = fw_update_next_request_id++;
+  if (staged_request.request_id == 0u) {
+    staged_request.request_id = fw_update_next_request_id++;
+  }
+
+  fw_update_core_request = staged_request;
+  intercore_memory_barrier();
   fw_update_core_request.pending = true;
+  intercore_memory_barrier();
   fw_update_rx.awaiting_core0 = true;
+  fw_update_rx.pending_request_id = staged_request.request_id;
+  fw_update_rx.pending_core_started_ms = millis();
   fw_update_rx.pending_core_op = request.op;
   fw_update_rx.pending_maintenance_enabled = request.bool_arg0 != 0u;
   fw_update_rx.pending_target_slot = request.slot;
@@ -1622,6 +1649,40 @@ static bool queueFirmwareUpdateCoreRequest(const FirmwareUpdateCoreRequest &requ
   fw_update_rx.pending_page_index = request.page_index;
   fw_update_rx.pending_page_seq = fw_update_rx.page_seq;
   return true;
+}
+
+static void serviceFirmwareUpdateCoreTimeout() {
+  if (!fw_update_rx.awaiting_core0) {
+    return;
+  }
+
+  const uint32_t elapsed_ms = millis() - fw_update_rx.pending_core_started_ms;
+  if (elapsed_ms <= FW_UPDATE_CORE_REQUEST_TIMEOUT_MS) {
+    return;
+  }
+
+  LOG_ERROR_F("[FW-UPDATE] Core0 request timeout: op=%u request_id=%lu elapsed=%lums",
+              static_cast<unsigned>(fw_update_rx.pending_core_op),
+              static_cast<unsigned long>(fw_update_rx.pending_request_id),
+              static_cast<unsigned long>(elapsed_ms));
+
+  const uint8_t timed_out_op = fw_update_rx.pending_core_op;
+  intercore_memory_barrier();
+  fw_update_core_request.pending = false;
+  fw_update_core_response.ready = false;
+  intercore_memory_barrier();
+
+  fw_update_rx.awaiting_core0 = false;
+  fw_update_rx.pending_request_id = 0u;
+  fw_update_rx.pending_core_started_ms = 0u;
+  fw_update_rx.pending_core_op = FW_UPDATE_CORE_OP_NONE;
+
+  if (timed_out_op == FW_UPDATE_CORE_OP_COMMIT_PAGE) {
+    resetFirmwareUpdatePageState();
+  }
+
+  sendFirmwareUpdateError(FW_UPDATE_ERR_CORE_TIMEOUT,
+                          static_cast<uint16_t>(timed_out_op & 0xFFu));
 }
 
 static void forceControllerServiceMode() {
@@ -1712,9 +1773,23 @@ static void serviceFirmwareUpdateCoreResponse() {
     return;
   }
 
+  intercore_memory_barrier();
   const FirmwareUpdateCoreResponse response = fw_update_core_response;
+  intercore_memory_barrier();
   fw_update_core_response.ready = false;
+  intercore_memory_barrier();
+
+  if (!fw_update_rx.awaiting_core0 || response.request_id != fw_update_rx.pending_request_id) {
+    LOG_WARN_F("[FW-UPDATE] Ignoring stale Core0 response: req=%lu pending=%lu op=%u",
+               static_cast<unsigned long>(response.request_id),
+               static_cast<unsigned long>(fw_update_rx.pending_request_id),
+               static_cast<unsigned>(response.op));
+    return;
+  }
+
   fw_update_rx.awaiting_core0 = false;
+  fw_update_rx.pending_request_id = 0u;
+  fw_update_rx.pending_core_started_ms = 0u;
   fw_update_rx.pending_core_op = FW_UPDATE_CORE_OP_NONE;
 
   if (response.error_code != FW_UPDATE_ERR_NONE) {
@@ -1979,6 +2054,12 @@ static bool handleFirmwareUpdateCtrlFrame(const uint8_t *buf, uint8_t len) {
       return true;
 
     case FW_UPDATE_OP_REBOOT:
+      if (flash_operation_in_progress || fw_update_rx.awaiting_core0 ||
+          fw_update_core_request.pending || fw_update_core_response.ready ||
+          fw_update_rx.session_open || fw_update_rx.page_open) {
+        sendFirmwareUpdateError(FW_UPDATE_ERR_BUSY);
+        return true;
+      }
       sendFirmwareUpdateInfoBundle(FW_UPDATE_EVT_INFO_READY);
       diag_reboot_reason = DIAG_REBOOT_SOFT_RESET_CMD;
       delay(5);
@@ -2782,6 +2863,7 @@ void pollHostCan() {
 
   initFirmwareUpdateRuntimeStateOnce();
   serviceFirmwareUpdateCoreResponse();
+  serviceFirmwareUpdateCoreTimeout();
   maybeEmitCandidateBootOk();
 
   // Check if Host CAN polling is suspended (e.g., during startup sequence)

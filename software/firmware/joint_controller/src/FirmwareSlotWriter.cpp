@@ -3,12 +3,9 @@
 #include <Arduino.h>
 #include <cstring>
 #include <debug.h>
+#include "IntercoreSync.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
-
-extern volatile bool flash_operation_in_progress;
-extern volatile bool core1_flash_acknowledged;
-extern volatile bool core1_runtime_started;
 
 namespace {
 
@@ -47,24 +44,6 @@ bool is_state_ready_for_new_write(const FirmwareUpdateMetadataRecord *record) {
       return true;
     default:
       return false;
-  }
-}
-
-void wait_for_core1_flash_ready() {
-  if (!core1_runtime_started) {
-    return;
-  }
-
-  core1_flash_acknowledged = false;
-  flash_operation_in_progress = true;
-
-  const uint32_t start_ms = millis();
-  while (!core1_flash_acknowledged) {
-    if (millis() - start_ms > 50u) {
-      LOG_WARN("[FW-UPDATE] Core1 handshake timeout before slot flash operation");
-      break;
-    }
-    tight_loop_contents();
   }
 }
 
@@ -231,11 +210,13 @@ FirmwareSlotWriterStatus firmware_slot_writer_erase(FirmwareSlotWriteSession *se
     return FW_SLOT_WRITER_SLOT_BOUNDS_ERROR;
   }
 
-  wait_for_core1_flash_ready();
+  if (!begin_core1_flash_pause("slot erase")) {
+    return FW_SLOT_WRITER_BUSY;
+  }
   const uint32_t ints = save_and_disable_interrupts();
   flash_range_erase(session->slot_flash_offset, session->erase_size_bytes);
   restore_interrupts(ints);
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   LOG_INFO_F("[FW-UPDATE] Erased %lu bytes in %s",
              static_cast<unsigned long>(session->erase_size_bytes),
@@ -283,11 +264,13 @@ FirmwareSlotWriterStatus firmware_slot_writer_commit_page(FirmwareSlotWriteSessi
   memset(page_buffer, 0xFF, sizeof(page_buffer));
   memcpy(page_buffer, page_data, page_size);
 
-  wait_for_core1_flash_ready();
+  if (!begin_core1_flash_pause("slot page program")) {
+    return FW_SLOT_WRITER_BUSY;
+  }
   const uint32_t ints = save_and_disable_interrupts();
   flash_range_program(session->slot_flash_offset + page_offset, page_buffer, FLASH_PAGE_SIZE);
   restore_interrupts(ints);
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   session->next_page_index++;
   return FW_SLOT_WRITER_OK;

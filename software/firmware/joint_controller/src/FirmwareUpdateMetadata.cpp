@@ -3,31 +3,10 @@
 #include <Arduino.h>
 #include <cstring>
 #include <debug.h>
+#include "IntercoreSync.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/unique_id.h"
-
-extern volatile bool flash_operation_in_progress;
-extern volatile bool core1_flash_acknowledged;
-extern volatile bool core1_runtime_started;
-
-static void wait_for_core1_flash_ready() {
-  if (!core1_runtime_started) {
-    return;
-  }
-
-  core1_flash_acknowledged = false;
-  flash_operation_in_progress = true;
-
-  uint32_t start_ms = millis();
-  while (!core1_flash_acknowledged) {
-    if (millis() - start_ms > 50) {
-      LOG_WARN("[FLASH] Core1 handshake timeout while preparing update metadata write");
-      break;
-    }
-    tight_loop_contents();
-  }
-}
 
 static bool is_valid_slot_value(uint8_t slot) {
   return slot == FW_IMAGE_SLOT_NONE || slot == FW_IMAGE_SLOT_A || slot == FW_IMAGE_SLOT_B;
@@ -540,7 +519,9 @@ bool append_firmware_update_metadata_record(FirmwareUpdateMetadataRecord *record
     return false;
   }
 
-  wait_for_core1_flash_ready();
+  if (!begin_core1_flash_pause("update metadata write")) {
+    return false;
+  }
   const uint32_t ints = save_and_disable_interrupts();
 
   if (!found_empty_page) {
@@ -553,7 +534,7 @@ bool append_firmware_update_metadata_record(FirmwareUpdateMetadataRecord *record
                       sizeof(FirmwareUpdateMetadataRecord));
 
   restore_interrupts(ints);
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   *record = record_to_write;
   LOG_INFO_F("Firmware update metadata appended: seq=%lu active=%s pending=%s state=%s",

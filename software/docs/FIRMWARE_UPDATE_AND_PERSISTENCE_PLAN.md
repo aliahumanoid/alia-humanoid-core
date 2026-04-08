@@ -275,23 +275,26 @@ This is the minimum architecture that makes remote updates acceptable.
 
 ## 6. Proposed Flash Layout
 
-One conservative and workable layout for `4 MB` flash is:
+The implemented `flash_map.h` layout for `4 MB` flash is:
 
 ```text
 0x000000 - 0x01FFFF  Boot / update region       (128 KB)
 0x020000 - 0x11FFFF  App slot A                 (1 MB)
 0x120000 - 0x21FFFF  App slot B                 (1 MB)
-0x220000 - 0x2BFFFF  Persistent NVM             (640 KB)
-0x2C0000 - 0x3FEFFF  Reserved / service growth  (approx. 1276 KB)
+0x220000 - 0x3F8FFF  Service region             (1892 KB)
+0x3F9000 - 0x3F9FFF  Update metadata            (4 KB)
+0x3FA000 - 0x3FEFFF  Persistent NVM             (20 KB)
 0x3FF000 - 0x3FFFFF  Framework-reserved tail    (4 KB)
 ```
 
 Notes:
 - `Persistent NVM` holds provisioning, PID, processed equations, motor offsets,
-  direct encoder offsets, and update metadata if desired.
-- The current firmware size is far below `1 MB`, so this leaves large headroom.
-- `1 MB` application slots are intentionally conservative. `512 KB` slots would likely
-  fit the current image, but the larger slots reduce future migration pressure.
+  and direct encoder offsets.
+- `Update metadata` is already split out into its own dedicated sector below NVM.
+- The current firmware size is far below `1 MB`, so the `1 MB` app slots still leave
+  large headroom.
+- `1 MB` application slots remain intentionally conservative. `512 KB` slots would
+  likely fit the current image, but the larger slots reduce future migration pressure.
 - The current framework build reports the last `4 KB` as reserved, so a top-of-flash
   design should respect that tail unless the linker/framework contract is changed.
 - The exact numbers can change, but the separation of concerns should not.

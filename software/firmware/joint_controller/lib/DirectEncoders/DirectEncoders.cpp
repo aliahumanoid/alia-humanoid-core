@@ -6,30 +6,16 @@
  */
 
 #include "DirectEncoders.h"
+#include "IntercoreSync.h"
 #include <debug.h>
 #include <cstring>
-
-// External flags for flash operation synchronization with Core1
-extern volatile bool flash_operation_in_progress;
-extern volatile bool core1_flash_acknowledged;
-extern volatile bool core1_runtime_started;
 
 /**
  * @brief Handshake with Core1 before flash operations.
  * Waits for Core1 to park in RAM, with 50ms timeout.
  */
-static void wait_for_core1_flash_ready() {
-  if (!core1_runtime_started) {
-    return;
-  }
-
-  core1_flash_acknowledged = false;
-  flash_operation_in_progress = true;
-  uint32_t start = millis();
-  while (!core1_flash_acknowledged) {
-    if (millis() - start > 50) break;
-    tight_loop_contents();
-  }
+static bool wait_for_core1_flash_ready() {
+  return begin_core1_flash_pause("direct encoder offset save");
 }
 
 #ifndef PI
@@ -681,7 +667,10 @@ bool DirectEncoders::saveOffsetsToFlash() {
   size_t num_pages = (data_size + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE;
   
   // Handshake: wait for Core1 to park in RAM before flash erase/program
-  wait_for_core1_flash_ready();
+  if (!wait_for_core1_flash_ready()) {
+    LOG_ERROR("Encoder offsets save aborted: Core1 flash handshake failed");
+    return false;
+  }
   
   // Disable interrupts for flash operations
   uint32_t ints = save_and_disable_interrupts();
@@ -700,7 +689,7 @@ bool DirectEncoders::saveOffsetsToFlash() {
   restore_interrupts(ints);
   
   // Signal Core1 to resume normal operation
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
   
   _flashDataValid = true;
   _offsets_changed = true;

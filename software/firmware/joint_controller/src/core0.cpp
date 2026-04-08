@@ -20,6 +20,7 @@
  */
 
 #include "main_common.h"
+#include "IntercoreSync.h"
 #include "RuntimeProvisioning.h"
 #include "pico/unique_id.h"
 
@@ -84,6 +85,7 @@ static void completeFirmwareUpdateCoreRequest(const FirmwareUpdateCoreRequest &r
                                               uint32_t value0 = 0u,
                                               uint32_t value1 = 0u) {
   FirmwareUpdateCoreResponse response = {};
+  response.request_id = request.request_id;
   response.op = request.op;
   response.error_code = error_code;
   response.value0 = value0;
@@ -95,15 +97,20 @@ static void completeFirmwareUpdateCoreRequest(const FirmwareUpdateCoreRequest &r
   }
 
   fw_update_core_response = response;
+  intercore_memory_barrier();
   fw_update_core_response.ready = true;
+  intercore_memory_barrier();
   fw_update_core_request.pending = false;
+  intercore_memory_barrier();
 }
 
 static void handleFirmwareUpdateCoreRequest() {
+  intercore_memory_barrier();
   if (!fw_update_core_request.pending) {
     return;
   }
 
+  intercore_memory_barrier();
   const FirmwareUpdateCoreRequest request = fw_update_core_request;
   FirmwareUpdateMetadataRecord metadata = {};
 

@@ -1,14 +1,18 @@
 import asyncio
+import can
 from collections import deque
 import gc
 import importlib
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import types
 import warnings
 from pathlib import Path
+from unittest import mock
 
 
 HOST_DIR = Path(__file__).resolve().parent.parent
@@ -139,6 +143,264 @@ def test_can_bus_recv_before_connect_returns_none():
         bus = CanBus()
         msg = await bus.recv(timeout=0.01)
         assert msg is None
+
+    asyncio.run(scenario())
+
+
+def test_can_bus_send_uses_tx_worker_and_preserves_order():
+    from jetson_controller.can_bus import CanBus
+
+    class _FakeBus:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, msg):
+            self.sent.append((msg.arbitration_id, bytes(msg.data)))
+
+        def shutdown(self):
+            return None
+
+    async def scenario():
+        bus = CanBus()
+        fake = _FakeBus()
+        bus._bus = fake
+        bus._loop = asyncio.get_running_loop()
+        bus._tx_queue = queue.Queue()
+        bus._sender_stop.clear()
+        bus._sender_thread = threading.Thread(
+            target=bus._tx_loop, daemon=True, name="can-sender-test"
+        )
+        bus._sender_thread.start()
+        try:
+            first = asyncio.create_task(bus.send(0x123, b"\x01\x02"))
+            await asyncio.sleep(0)
+            second = asyncio.create_task(bus.send(0x124, b"\x03"))
+            await asyncio.gather(first, second)
+            assert fake.sent == [(0x123, b"\x01\x02"), (0x124, b"\x03")]
+            assert bus.tx_count == 2
+        finally:
+            await bus.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_can_bus_send_propagates_tx_errors():
+    from jetson_controller.can_bus import CanBus
+
+    class _FailingBus:
+        def send(self, msg):
+            raise can.CanError("synthetic tx failure")
+
+        def shutdown(self):
+            return None
+
+    async def scenario():
+        bus = CanBus()
+        bus._bus = _FailingBus()
+        bus._loop = asyncio.get_running_loop()
+        bus._tx_queue = queue.Queue()
+        bus._sender_stop.clear()
+        bus._sender_thread = threading.Thread(
+            target=bus._tx_loop, daemon=True, name="can-sender-test"
+        )
+        bus._sender_thread.start()
+        try:
+            try:
+                await bus.send(0x123, b"\x01")
+            except can.CanError as exc:
+                assert "synthetic tx failure" in str(exc)
+            else:
+                raise AssertionError("Expected CanError from queued sender")
+            assert bus.errors == 1
+        finally:
+            await bus.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_fw_update_stream_image_supports_periodic_burst_pause():
+    from jetson_controller import fw_update as mod
+
+    artifact = mod.UpdateArtifact(
+        manifest_path=Path("/tmp/test_manifest.json"),
+        image_path=Path("/tmp/test_firmware.bin"),
+        target_slot=1,
+        image_size_bytes=mod.FLASH_PAGE_SIZE * 3,
+        image_crc32=0,
+        image_bytes=bytes(range(256)) * 3,
+    )
+    timing = mod.UpdateTimingConfig(
+        ctrl_gap_s=0.0,
+        page_begin_gap_s=0.0,
+        frag_gap_s=0.0,
+        burst_percent=50.0,
+        burst_pause_s=1.0,
+        page_retry_limit=0,
+        page_retry_backoff_s=0.0,
+    )
+
+    committed_pages = []
+    burst_sleeps = []
+
+    async def fake_send_with_gap(_can_bus, _frame, *, delay_s=0.0):
+        return None
+
+    async def fake_wait_for_page_result(_can_bus, _joint_id, *, timeout_s, allow_page_retry):
+        assert allow_page_retry is False
+        page_index = len(committed_pages)
+        committed_pages.append(page_index)
+        return types.SimpleNamespace(
+            status=types.SimpleNamespace(
+                event_code=mod.FW_UPDATE_EVT_PAGE_COMMITTED,
+                error_code=mod.FW_UPDATE_ERR_NONE,
+                error_name="NONE",
+                value=page_index,
+            ),
+        )
+
+    async def fake_sleep(delay_s):
+        burst_sleeps.append(delay_s)
+
+    async def scenario():
+        with mock.patch.object(mod, "send_with_gap", fake_send_with_gap), \
+             mock.patch.object(mod, "wait_for_page_result", fake_wait_for_page_result), \
+             mock.patch.object(mod.asyncio, "sleep", fake_sleep):
+            completed, streamed = await mod.stream_image(
+                object(),
+                8,
+                artifact,
+                timing=timing,
+            )
+            assert completed is True
+            assert streamed == artifact.image_size_bytes
+            assert burst_sleeps == [1.0]
+
+    asyncio.run(scenario())
+
+
+def test_fw_update_stream_image_retries_recoverable_page_error():
+    from jetson_controller import fw_update as mod
+
+    artifact = mod.UpdateArtifact(
+        manifest_path=Path("/tmp/test_manifest.json"),
+        image_path=Path("/tmp/test_firmware.bin"),
+        target_slot=1,
+        image_size_bytes=mod.FLASH_PAGE_SIZE,
+        image_crc32=0,
+        image_bytes=bytes(range(256)),
+    )
+    timing = mod.UpdateTimingConfig(
+        ctrl_gap_s=0.0,
+        page_begin_gap_s=0.00075,
+        frag_gap_s=0.0005,
+        page_retry_limit=1,
+        page_retry_backoff_s=0.01,
+    )
+
+    sent_frames = []
+    recover_calls = []
+    page_results = [
+        types.SimpleNamespace(
+            status=types.SimpleNamespace(
+                event_code=mod.FW_UPDATE_EVT_ERROR,
+                error_code=mod.FW_UPDATE_ERR_FRAG_INDEX_MISMATCH,
+                error_name="FRAG_INDEX_MISMATCH",
+                value=1,
+            )
+        ),
+        types.SimpleNamespace(
+            status=types.SimpleNamespace(
+                event_code=mod.FW_UPDATE_EVT_PAGE_COMMITTED,
+                error_code=mod.FW_UPDATE_ERR_NONE,
+                error_name="NONE",
+                value=0,
+            )
+        ),
+    ]
+
+    async def fake_send_with_gap(_can_bus, frame, *, delay_s=0.0):
+        sent_frames.append((frame[0], bytes(frame[1]), delay_s))
+
+    async def fake_wait_for_page_result(_can_bus, _joint_id, *, timeout_s, allow_page_retry):
+        assert allow_page_retry is True
+        return page_results.pop(0)
+
+    async def fake_recover_page_retry_state(_can_bus, _joint_id, *, page_index, backoff_s):
+        recover_calls.append((page_index, backoff_s))
+        return False
+
+    async def scenario():
+        with mock.patch.object(mod, "send_with_gap", fake_send_with_gap), \
+             mock.patch.object(mod, "wait_for_page_result", fake_wait_for_page_result), \
+             mock.patch.object(mod, "recover_page_retry_state", fake_recover_page_retry_state):
+            completed, streamed = await mod.stream_image(
+                object(),
+                8,
+                artifact,
+                timing=timing,
+            )
+            assert completed is True
+            assert streamed == artifact.image_size_bytes
+            assert recover_calls == [(0, 0.01)]
+            assert len(sent_frames) == 2 * (1 + 43)
+
+    asyncio.run(scenario())
+
+
+def test_fw_update_recover_page_retry_state_drains_and_resumes_same_page():
+    from jetson_controller import fw_update as mod
+
+    class _FakeBus:
+        def __init__(self):
+            self._messages = deque([object(), None])
+            self.sent = []
+
+        async def recv(self, timeout=None):
+            if self._messages:
+                return self._messages.popleft()
+            return None
+
+        async def send(self, arb_id, data):
+            self.sent.append((arb_id, bytes(data)))
+
+    consumed = []
+
+    def fake_consume_update_message(snapshot, joint_id, msg, *, allow_error_codes=None):
+        consumed.append((joint_id, msg, allow_error_codes))
+        return snapshot
+
+    async def fake_wait_for_update_snapshot(
+        _can_bus,
+        _joint_id,
+        *,
+        timeout_s,
+        expect_event=None,
+        require_uid=False,
+        require_info=False,
+        allow_error_codes=None,
+    ):
+        return mod.UpdateSnapshot(
+            info=types.SimpleNamespace(
+                boot_state=mod.FW_BOOT_RECEIVING,
+                update_in_progress=True,
+                flags=0,
+            ),
+            progress=types.SimpleNamespace(next_page_index=12),
+        )
+
+    async def scenario():
+        bus = _FakeBus()
+        with mock.patch.object(mod, "consume_update_message", fake_consume_update_message), \
+             mock.patch.object(mod, "wait_for_update_snapshot", fake_wait_for_update_snapshot):
+            already_committed = await mod.recover_page_retry_state(
+                bus,
+                8,
+                page_index=12,
+                backoff_s=0.0,
+            )
+            assert already_committed is False
+            assert consumed == [(8, mock.ANY, mod.RECOVERABLE_PAGE_ERROR_CODES)]
+            assert len(bus.sent) == 1
 
     asyncio.run(scenario())
 

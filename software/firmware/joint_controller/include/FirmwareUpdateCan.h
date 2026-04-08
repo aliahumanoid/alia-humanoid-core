@@ -57,6 +57,7 @@ enum FirmwareUpdateCanErrorCode : uint8_t {
   FW_UPDATE_ERR_VERIFY_FAILED = 0x0B,
   FW_UPDATE_ERR_CONFIRMATION_TIMEOUT = 0x0C,
   FW_UPDATE_ERR_CANDIDATE_BOOT_FAILED = 0x0D,
+  FW_UPDATE_ERR_CORE_TIMEOUT = 0x0E,
 };
 
 enum FirmwareUpdateCoreOp : uint8_t {
@@ -72,6 +73,7 @@ enum FirmwareUpdateCoreOp : uint8_t {
 
 struct FirmwareUpdateCoreRequest {
   volatile bool pending;
+  uint32_t request_id;
   uint8_t op;
   uint8_t slot;
   uint8_t bool_arg0;
@@ -88,6 +90,7 @@ struct FirmwareUpdateCoreRequest {
 
 struct FirmwareUpdateCoreResponse {
   volatile bool ready;
+  uint32_t request_id;
   uint8_t op;
   uint8_t error_code;
   uint8_t reserved0;

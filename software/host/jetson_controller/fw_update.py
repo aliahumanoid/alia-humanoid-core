@@ -25,6 +25,7 @@ import asyncio
 import binascii
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -36,8 +37,11 @@ from .protocol import (
     CAN_ID_FW_UPDATE_PROGRESS,
     CAN_ID_FW_UPDATE_STATUS,
     CAN_ID_FW_UPDATE_UID,
+    FW_UPDATE_ERR_FRAG_INDEX_MISMATCH,
+    FW_UPDATE_ERR_INVALID_STATE,
     FW_UPDATE_ERR_IMAGE_CRC_MISMATCH,
     FW_UPDATE_ERR_NONE,
+    FW_UPDATE_ERR_PAGE_SEQ_MISMATCH,
     FW_UPDATE_ERR_VERIFY_FAILED,
     FW_UPDATE_EVT_ACTIVATE_OK,
     FW_UPDATE_EVT_BEGIN_ACCEPTED,
@@ -77,10 +81,16 @@ logger = logging.getLogger("jetson_controller.fw_update")
 
 FLASH_PAGE_SIZE = 256
 PAGE_FRAGMENT_SIZE = 6
-# Bench-validated default pacing for the current SLCAN -> MCP2515 transport.
+# Bench-validated fast default pacing for the current SLCAN -> MCP2515
+# transport, coupled with per-page retry for recoverable desync events.
 FW_UPDATE_INTERFRAME_DELAY_S = 0.0005
 FW_UPDATE_CTRL_DELAY_S = 0.00075
 FW_UPDATE_PAGE_BEGIN_DELAY_S = 0.00075
+FW_UPDATE_PAGE_RETRY_LIMIT = 2
+FW_UPDATE_PAGE_RETRY_BACKOFF_S = 0.150
+FW_UPDATE_TURBO_INTERFRAME_DELAY_S = 0.0002
+FW_UPDATE_TURBO_CTRL_DELAY_S = 0.0004
+FW_UPDATE_TURBO_PAGE_BEGIN_DELAY_S = 0.0004
 FW_BOOT_RECEIVING = 2
 FW_BOOT_VERIFIED = 3
 FW_BOOT_PENDING_TEST = 4
@@ -89,6 +99,11 @@ FW_IMAGE_SLOT_NONE = 0
 EXPECTED_VERIFY_ERROR_CODES = {
     "image_crc_mismatch": FW_UPDATE_ERR_IMAGE_CRC_MISMATCH,
     "verify_failed": FW_UPDATE_ERR_VERIFY_FAILED,
+}
+RECOVERABLE_PAGE_ERROR_CODES = {
+    FW_UPDATE_ERR_INVALID_STATE,
+    FW_UPDATE_ERR_PAGE_SEQ_MISMATCH,
+    FW_UPDATE_ERR_FRAG_INDEX_MISMATCH,
 }
 
 
@@ -107,6 +122,10 @@ class UpdateTimingConfig:
     ctrl_gap_s: float = FW_UPDATE_CTRL_DELAY_S
     page_begin_gap_s: float = FW_UPDATE_PAGE_BEGIN_DELAY_S
     frag_gap_s: float = FW_UPDATE_INTERFRAME_DELAY_S
+    burst_percent: float = 0.0
+    burst_pause_s: float = 0.0
+    page_retry_limit: int = FW_UPDATE_PAGE_RETRY_LIMIT
+    page_retry_backoff_s: float = FW_UPDATE_PAGE_RETRY_BACKOFF_S
 
 
 @dataclass
@@ -453,7 +472,7 @@ async def ensure_update_session_reset(can_bus: CanBus,
     if info is None:
         return snapshot
 
-    if not info.update_in_progress and info.boot_state != 2:
+    if not info.update_in_progress and info.boot_state != FW_BOOT_RECEIVING:
         return snapshot
 
     logger.warning(
@@ -471,6 +490,110 @@ async def ensure_update_session_reset(can_bus: CanBus,
         require_uid=True,
         require_info=True,
     )
+
+
+def _is_recoverable_page_error(status: Optional[FirmwareUpdateStatus]) -> bool:
+    return (
+        status is not None
+        and status.event_code == FW_UPDATE_EVT_ERROR
+        and status.error_code in RECOVERABLE_PAGE_ERROR_CODES
+    )
+
+
+async def wait_for_page_result(can_bus: CanBus,
+                               joint_id: int,
+                               *,
+                               timeout_s: float,
+                               allow_page_retry: bool) -> UpdateSnapshot:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    snapshot = UpdateSnapshot()
+
+    while asyncio.get_running_loop().time() < deadline:
+        msg = await can_bus.recv(timeout=min(0.2, deadline - asyncio.get_running_loop().time()))
+        if msg is None:
+            continue
+
+        snapshot = consume_update_message(
+            snapshot,
+            joint_id,
+            msg,
+            allow_error_codes=RECOVERABLE_PAGE_ERROR_CODES if allow_page_retry else None,
+        )
+
+        if snapshot.status is None:
+            continue
+        if snapshot.status.event_code == FW_UPDATE_EVT_PAGE_COMMITTED:
+            return snapshot
+        if allow_page_retry and _is_recoverable_page_error(snapshot.status):
+            return snapshot
+
+    raise TimeoutError(
+        f"Timed out waiting for joint {joint_id} page result "
+        f"(allow_page_retry={allow_page_retry})"
+    )
+
+
+async def _drain_update_messages(can_bus: CanBus,
+                                 joint_id: int,
+                                 *,
+                                 duration_s: float) -> UpdateSnapshot:
+    deadline = asyncio.get_running_loop().time() + max(duration_s, 0.0)
+    snapshot = UpdateSnapshot()
+    while asyncio.get_running_loop().time() < deadline:
+        msg = await can_bus.recv(timeout=min(0.02, deadline - asyncio.get_running_loop().time()))
+        if msg is None:
+            continue
+        snapshot = consume_update_message(
+            snapshot,
+            joint_id,
+            msg,
+            allow_error_codes=RECOVERABLE_PAGE_ERROR_CODES,
+        )
+    return snapshot
+
+
+async def recover_page_retry_state(can_bus: CanBus,
+                                   joint_id: int,
+                                   *,
+                                   page_index: int,
+                                   backoff_s: float) -> bool:
+    if backoff_s > 0.0:
+        await asyncio.sleep(backoff_s)
+
+    await _drain_update_messages(can_bus, joint_id, duration_s=0.05)
+    await can_bus.send(*encode_fw_update_get_info())
+    snapshot = await wait_for_update_snapshot(
+        can_bus,
+        joint_id,
+        timeout_s=2.0,
+        expect_event=FW_UPDATE_EVT_INFO_READY,
+        require_uid=True,
+        require_info=True,
+        allow_error_codes=RECOVERABLE_PAGE_ERROR_CODES,
+    )
+    if snapshot.info is None:
+        raise RuntimeError("Failed to recover update state before page retry")
+    if snapshot.info.boot_state != FW_BOOT_RECEIVING or not snapshot.info.update_in_progress:
+        raise RuntimeError(
+            "Controller left BOOT_RECEIVING after recoverable page error: "
+            f"boot={snapshot.info.boot_state} flags=0x{snapshot.info.flags:02X}"
+        )
+
+    if snapshot.progress is not None:
+        if snapshot.progress.next_page_index == page_index + 1:
+            logger.warning(
+                "Controller advanced to page %d while recovering page %d; treating page as committed",
+                snapshot.progress.next_page_index,
+                page_index,
+            )
+            return True
+        if snapshot.progress.next_page_index != page_index:
+            raise RuntimeError(
+                "Controller resume pointer diverged during page retry: "
+                f"next_page_index={snapshot.progress.next_page_index} expected={page_index}"
+            )
+
+    return False
 
 
 async def stream_image(can_bus: CanBus,
@@ -494,42 +617,112 @@ async def stream_image(can_bus: CanBus,
             page_count,
         )
 
+    burst_pages = 0
+    if timing.burst_percent > 0.0 and timing.burst_pause_s > 0.0:
+        burst_pages = max(1, math.ceil(page_count * (timing.burst_percent / 100.0)))
+        logger.info(
+            "Burst pacing enabled: every %d page(s) pause for %.0f ms",
+            burst_pages,
+            timing.burst_pause_s * 1000.0,
+        )
+
     bytes_streamed = 0
+    recovered_pages = 0
+    total_page_retry_attempts = 0
     for page_index in range(start_page_index, page_count):
         start = page_index * FLASH_PAGE_SIZE
         end = min(start + FLASH_PAGE_SIZE, artifact.image_size_bytes)
         page = artifact.image_bytes[start:end]
         page_seq = page_index & 0xFF
         is_final = end >= artifact.image_size_bytes
+        page_committed = False
+        retry_count = 0
+        while not page_committed:
+            attempt_page_begin_gap_s = timing.page_begin_gap_s
+            attempt_frag_gap_s = timing.frag_gap_s
+            if retry_count > 0:
+                attempt_page_begin_gap_s = max(attempt_page_begin_gap_s, 0.001)
+                attempt_frag_gap_s = max(attempt_frag_gap_s, 0.00075)
+                logger.warning(
+                    "Retrying page %d/%d (%d/%d) with page_begin=%.1f ms frag=%.1f ms",
+                    page_index + 1,
+                    page_count,
+                    retry_count,
+                    timing.page_retry_limit,
+                    attempt_page_begin_gap_s * 1000.0,
+                    attempt_frag_gap_s * 1000.0,
+                )
 
-        await send_with_gap(
-            can_bus,
-            encode_fw_update_page_begin(page_index, page_seq, page, is_final_page=is_final),
-            delay_s=timing.page_begin_gap_s,
-        )
-        for frag_index, frag_start in enumerate(range(0, len(page), PAGE_FRAGMENT_SIZE)):
-            frag = page[frag_start:frag_start + PAGE_FRAGMENT_SIZE]
-            is_last_frag = (frag_start + PAGE_FRAGMENT_SIZE) >= len(page)
             await send_with_gap(
                 can_bus,
-                encode_fw_update_page_frag(page_seq, frag_index, frag),
-                delay_s=0.0 if is_last_frag else timing.frag_gap_s,
+                encode_fw_update_page_begin(page_index, page_seq, page, is_final_page=is_final),
+                delay_s=attempt_page_begin_gap_s,
             )
+            for frag_index, frag_start in enumerate(range(0, len(page), PAGE_FRAGMENT_SIZE)):
+                frag = page[frag_start:frag_start + PAGE_FRAGMENT_SIZE]
+                is_last_frag = (frag_start + PAGE_FRAGMENT_SIZE) >= len(page)
+                await send_with_gap(
+                    can_bus,
+                    encode_fw_update_page_frag(page_seq, frag_index, frag),
+                    delay_s=0.0 if is_last_frag else attempt_frag_gap_s,
+                )
 
-        status = await wait_for_update_snapshot(
-            can_bus,
-            joint_id,
-            timeout_s=2.0,
-            expect_event=FW_UPDATE_EVT_PAGE_COMMITTED,
-        )
-        if status.status is None or status.status.value != (page_index & 0xFFFF):
-            raise RuntimeError(
-                f"Unexpected PAGE_COMMITTED acknowledgement for page {page_index}: {status.status}"
+            status = await wait_for_page_result(
+                can_bus,
+                joint_id,
+                timeout_s=2.0,
+                allow_page_retry=timing.page_retry_limit > 0,
             )
+            if status.status is None:
+                raise RuntimeError(f"Missing page result for page {page_index}")
 
+            if status.status.event_code == FW_UPDATE_EVT_PAGE_COMMITTED:
+                if status.status.value != (page_index & 0xFFFF):
+                    raise RuntimeError(
+                        f"Unexpected PAGE_COMMITTED acknowledgement for page {page_index}: {status.status}"
+                    )
+                page_committed = True
+                break
+
+            if not _is_recoverable_page_error(status.status):
+                raise RuntimeError(
+                    f"Unexpected non-recoverable page result for page {page_index}: {status.status}"
+                )
+
+            if retry_count >= timing.page_retry_limit:
+                raise RuntimeError(
+                    f"Page {page_index} exhausted retries after {status.status.error_name}"
+                )
+
+            retry_count += 1
+            total_page_retry_attempts += 1
+            already_committed = await recover_page_retry_state(
+                can_bus,
+                joint_id,
+                page_index=page_index,
+                backoff_s=timing.page_retry_backoff_s,
+            )
+            if already_committed:
+                page_committed = True
+
+        if retry_count > 0:
+            recovered_pages += 1
         if (page_index + 1) % 32 == 0 or page_index + 1 == page_count:
             logger.info("Flashed page %d/%d", page_index + 1, page_count)
         bytes_streamed += len(page)
+
+        if (
+            burst_pages > 0
+            and (page_index + 1) < page_count
+            and ((page_index + 1) % burst_pages) == 0
+        ):
+            logger.info(
+                "Burst pause after page %d/%d for %.0f ms",
+                page_index + 1,
+                page_count,
+                timing.burst_pause_s * 1000.0,
+            )
+            await asyncio.sleep(timing.burst_pause_s)
 
         if interrupt_after_pages is not None and (page_index + 1) >= interrupt_after_pages:
             logger.warning(
@@ -537,8 +730,20 @@ async def stream_image(can_bus: CanBus,
                 page_index + 1,
                 page_count,
             )
+            if total_page_retry_attempts > 0:
+                logger.info(
+                    "Recovered %d page(s) via %d retry attempt(s) before interruption",
+                    recovered_pages,
+                    total_page_retry_attempts,
+                )
             return False, bytes_streamed
 
+    if total_page_retry_attempts > 0:
+        logger.info(
+            "Recovered %d page(s) via %d retry attempt(s)",
+            recovered_pages,
+            total_page_retry_attempts,
+        )
     return True, bytes_streamed
 
 
@@ -896,10 +1101,15 @@ async def run_update(config: ControllerConfig,
             initial.info.fw_version,
         )
         logger.info(
-            "Update pacing: ctrl=%.1f ms page_begin=%.1f ms frag=%.1f ms",
+            "Update pacing: ctrl=%.1f ms page_begin=%.1f ms frag=%.1f ms "
+            "burst=%.1f%%/%.0f ms page_retries=%d/%.0f ms",
             timing.ctrl_gap_s * 1000.0,
             timing.page_begin_gap_s * 1000.0,
             timing.frag_gap_s * 1000.0,
+            timing.burst_percent,
+            timing.burst_pause_s * 1000.0,
+            timing.page_retry_limit,
+            timing.page_retry_backoff_s * 1000.0,
         )
         stable_slot = initial.info.active_slot
 
@@ -1234,6 +1444,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Delay after each PAGE_BEGIN frame in milliseconds")
     parser.add_argument("--frag-gap-ms", type=float, default=FW_UPDATE_INTERFRAME_DELAY_S * 1000.0,
                         help="Delay between page fragment frames in milliseconds")
+    parser.add_argument("--burst-percent", type=float, default=0.0,
+                        help="After this percentage of image pages, pause for --burst-pause-ms and repeat")
+    parser.add_argument("--burst-pause-ms", type=float, default=0.0,
+                        help="Pause duration between burst windows in milliseconds")
+    parser.add_argument("--page-retries", type=int, default=FW_UPDATE_PAGE_RETRY_LIMIT,
+                        help="Retry the current page this many times after recoverable page errors")
+    parser.add_argument("--page-retry-backoff-ms", type=float, default=FW_UPDATE_PAGE_RETRY_BACKOFF_S * 1000.0,
+                        help="Backoff before retrying a failed page in milliseconds")
+    parser.add_argument("--turbo", action="store_true",
+                        help="Use the aggressive 0.4/0.4/0.2 ms pacing preset with page retry")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     return parser
 
@@ -1256,14 +1476,30 @@ async def _async_main(args: argparse.Namespace) -> int:
         raise ValueError("--interrupt-after-pages must be > 0")
     if args.ctrl_gap_ms < 0.0 or args.page_begin_gap_ms < 0.0 or args.frag_gap_ms < 0.0:
         raise ValueError("timing gaps must be >= 0 ms")
+    if args.burst_percent < 0.0 or args.burst_pause_ms < 0.0:
+        raise ValueError("burst settings must be >= 0")
+    if (args.burst_percent == 0.0) != (args.burst_pause_ms == 0.0):
+        raise ValueError("--burst-percent and --burst-pause-ms must be set together")
+    if args.burst_percent >= 100.0:
+        raise ValueError("--burst-percent must be < 100")
+    if args.page_retries < 0 or args.page_retry_backoff_ms < 0.0:
+        raise ValueError("page retry settings must be >= 0")
     if args.corrupt_byte_offset is not None and args.expect_verify_error is None:
         raise ValueError("--corrupt-byte-offset requires --expect-verify-error")
+    if args.turbo:
+        args.ctrl_gap_ms = FW_UPDATE_TURBO_CTRL_DELAY_S * 1000.0
+        args.page_begin_gap_ms = FW_UPDATE_TURBO_PAGE_BEGIN_DELAY_S * 1000.0
+        args.frag_gap_ms = FW_UPDATE_TURBO_INTERFRAME_DELAY_S * 1000.0
     config = load_config(args.config, selected_joints=[args.joint])
     joint_cfg = select_joint(config, args.joint)
     timing = UpdateTimingConfig(
         ctrl_gap_s=args.ctrl_gap_ms / 1000.0,
         page_begin_gap_s=args.page_begin_gap_ms / 1000.0,
         frag_gap_s=args.frag_gap_ms / 1000.0,
+        burst_percent=args.burst_percent,
+        burst_pause_s=args.burst_pause_ms / 1000.0,
+        page_retry_limit=args.page_retries,
+        page_retry_backoff_s=args.page_retry_backoff_ms / 1000.0,
     )
 
     if args.info_only:

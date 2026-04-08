@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import struct
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import can
@@ -40,6 +42,16 @@ logger = logging.getLogger(__name__)
 
 # How often to log a periodic summary for high-frequency streams (seconds)
 _SUMMARY_INTERVAL_S = 5.0
+_TX_QUEUE_POLL_S = 0.1
+_TX_SENTINEL = object()
+
+
+@dataclass
+class _TxRequest:
+    msg: can.Message
+    arb_id: int
+    data: bytes
+    future: asyncio.Future
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +413,11 @@ class CanBus:
     def __init__(self):
         self._bus: Optional[can.BusABC] = None
         self._rx_queue: Optional[asyncio.Queue] = None
+        self._tx_queue: Optional[queue.Queue] = None
         self._listener_thread: Optional[threading.Thread] = None
+        self._sender_thread: Optional[threading.Thread] = None
         self._listener_stop = threading.Event()
+        self._sender_stop = threading.Event()
         self._tx_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -428,6 +443,7 @@ class CanBus:
 
         self._loop = asyncio.get_running_loop()
         self._rx_queue = asyncio.Queue(maxsize=2000)
+        self._tx_queue = queue.Queue()
 
         logger.info(f"Connecting CAN: {interface} @ {channel} ({bitrate} bps)")
         self._bus = can.interface.Bus(
@@ -448,12 +464,67 @@ class CanBus:
         if drained:
             logger.info(f"Drained {drained} stale CAN frame(s) from buffer")
 
+        # Start background sender
+        self._sender_stop.clear()
+        self._sender_thread = threading.Thread(
+            target=self._tx_loop, daemon=True, name="can-sender"
+        )
+        self._sender_thread.start()
+
         # Start background listener
         self._listener_stop.clear()
         self._listener_thread = threading.Thread(
             target=self._listen_loop, daemon=True, name="can-listener"
         )
         self._listener_thread.start()
+
+    def _complete_tx_future(self, future: asyncio.Future, exc: Optional[BaseException]) -> None:
+        if future.done():
+            return
+        if exc is None:
+            future.set_result(None)
+        else:
+            future.set_exception(exc)
+
+    def _tx_loop(self) -> None:
+        """Background thread: serialize blocking CAN writes through one queue."""
+        while True:
+            try:
+                item = self._tx_queue.get(timeout=_TX_QUEUE_POLL_S)
+            except queue.Empty:
+                if self._sender_stop.is_set():
+                    break
+                continue
+
+            if item is _TX_SENTINEL:
+                if self._sender_stop.is_set():
+                    break
+                continue
+
+            request = item
+            if self._sender_stop.is_set():
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        self._complete_tx_future,
+                        request.future,
+                        RuntimeError("CAN bus disconnected"),
+                    )
+                continue
+
+            try:
+                self._send_blocking(request.msg)
+            except Exception as exc:
+                self.errors += 1
+                logger.warning(f"CAN TX error: {exc}")
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        self._complete_tx_future, request.future, exc
+                    )
+            else:
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(
+                        self._complete_tx_future, request.future, None
+                    )
 
     def _listen_loop(self) -> None:
         """Background thread: read CAN frames and push to asyncio queue."""
@@ -516,13 +587,14 @@ class CanBus:
 
     async def send(self, arb_id: int, data: bytes) -> None:
         """Send a single CAN frame."""
-        if self._bus is None:
+        if self._bus is None or self._tx_queue is None:
             raise RuntimeError("Not connected")
         msg = can.Message(arbitration_id=arb_id, data=data, is_extended_id=False)
-        # python-can send is fast but may block briefly on TX buffer
-        await asyncio.get_running_loop().run_in_executor(
-            None, self._send_blocking, msg
+        future = asyncio.get_running_loop().create_future()
+        self._tx_queue.put_nowait(
+            _TxRequest(msg=msg, arb_id=arb_id, data=bytes(data), future=future)
         )
+        await future
         self.tx_count += 1
 
         # Log TX frame — decoded and throttled
@@ -566,6 +638,23 @@ class CanBus:
         with self._tx_lock:
             self._bus.send(msg)
 
+    def _fail_pending_tx_requests(self, exc: BaseException) -> None:
+        if self._tx_queue is None or self._loop is None:
+            return
+
+        while True:
+            try:
+                item = self._tx_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if item is _TX_SENTINEL:
+                continue
+
+            self._loop.call_soon_threadsafe(
+                self._complete_tx_future, item.future, exc
+            )
+
     async def send_impedance_sequence(self, frames: list[tuple[int, bytes]]) -> None:
         """Send a multi-frame SET_IMPEDANCE sequence with inter-frame delays.
 
@@ -580,10 +669,18 @@ class CanBus:
     async def disconnect(self) -> None:
         """Stop listener and close CAN bus."""
         self._listener_stop.set()
+        self._sender_stop.set()
+        if self._tx_queue is not None:
+            self._tx_queue.put_nowait(_TX_SENTINEL)
         if self._listener_thread is not None:
             self._listener_thread.join(timeout=2.0)
             self._listener_thread = None
+        if self._sender_thread is not None:
+            self._sender_thread.join(timeout=2.0)
+            self._sender_thread = None
+        self._fail_pending_tx_requests(RuntimeError("CAN bus disconnected"))
         if self._bus is not None:
             self._bus.shutdown()
             self._bus = None
+        self._tx_queue = None
         logger.info("CAN bus disconnected")

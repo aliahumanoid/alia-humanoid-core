@@ -6,17 +6,13 @@
  */
 
 #include "utils.h"
+#include "IntercoreSync.h"
 #include "debug.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include <Arduino.h>
 #include <array>
 #include <cstring>
-
-// External flags for flash operation synchronization with Core1
-extern volatile bool flash_operation_in_progress;
-extern volatile bool core1_flash_acknowledged;
-extern volatile bool core1_runtime_started;
 
 /**
  * @brief Handshake with Core1 before flash operations.
@@ -25,30 +21,11 @@ extern volatile bool core1_runtime_started;
  * Core1 to acknowledge.  Replaces the previous delay(5) with a proper
  * bidirectional handshake that is immune to Core1 timing jitter.
  *
- * Timeout (50 ms) covers the case where Core1 is not running yet
- * (boot) or is stuck — the flash operation proceeds anyway.
+ * Timeout (50 ms) aborts the flash write instead of risking an erase/program
+ * while Core1 is still executing from XIP.
  */
-static void wait_for_core1_flash_ready() {
-  if (!core1_runtime_started) {
-    return;
-  }
-
-  // Reset ack from any previous operation (safe: Core1 is not in the
-  // wait loop because flash_operation_in_progress is still false)
-  core1_flash_acknowledged = false;
-
-  // Signal Core1 to enter RAM wait loop
-  flash_operation_in_progress = true;
-
-  // Wait for Core1 to confirm it is safely in RAM
-  uint32_t start = millis();
-  while (!core1_flash_acknowledged) {
-    if (millis() - start > 50) {
-      LOG_WARN("[FLASH] Core1 handshake timeout — proceeding");
-      break;
-    }
-    tight_loop_contents();
-  }
+static bool wait_for_core1_flash_ready(const char *context_label) {
+  return begin_core1_flash_pause(context_label);
 }
 
 // Data format versions
@@ -346,7 +323,10 @@ void save_pid_only_data(struct PIDOnlyDeviceData data) {
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
   // Handshake: wait for Core1 to park in RAM before flash erase/program
-  wait_for_core1_flash_ready();
+  if (!wait_for_core1_flash_ready("PID save")) {
+    LOG_ERROR("PID-only data save aborted: Core1 flash handshake failed");
+    return;
+  }
   
   // Atomic flash operation: disable interrupts during write
   uint32_t ints = save_and_disable_interrupts();
@@ -373,7 +353,7 @@ void save_pid_only_data(struct PIDOnlyDeviceData data) {
   restore_interrupts(ints);
   
   // Signal Core1 to resume normal operation
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   // Print confirmation
   LOG_INFO("PID-only data saved successfully!");
@@ -542,7 +522,10 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
   // Handshake: wait for Core1 to park in RAM before flash erase/program
-  wait_for_core1_flash_ready();
+  if (!wait_for_core1_flash_ready("linear equations save")) {
+    LOG_ERROR("Linear equations save aborted: Core1 flash handshake failed");
+    return;
+  }
   
   // Atomic flash operation
   uint32_t ints = save_and_disable_interrupts();
@@ -565,7 +548,7 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data) {
   restore_interrupts(ints);
   
   // Signal Core1 to resume normal operation
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   // Print confirmation with equation details
   SERIAL_COM_LN("Linear equations saved to flash successfully!");
@@ -699,7 +682,10 @@ void save_system_settings_data(struct SystemSettingsData data) {
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
   // Handshake: wait for Core1 to park in RAM before flash erase/program
-  wait_for_core1_flash_ready();
+  if (!wait_for_core1_flash_ready("system settings save")) {
+    LOG_ERROR("System settings save aborted: Core1 flash handshake failed");
+    return;
+  }
 
   // Atomic flash operation: disable interrupts during write
   uint32_t ints = save_and_disable_interrupts();
@@ -726,7 +712,7 @@ void save_system_settings_data(struct SystemSettingsData data) {
   restore_interrupts(ints);
 
   // Signal Core1 to resume normal operation
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   // Print confirmation
   LOG_INFO("System settings saved successfully!");
@@ -802,7 +788,10 @@ void save_motor_offsets_data(struct MotorOffsetsDeviceData data) {
   size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
 
   // Handshake: wait for Core1 to park in RAM before flash erase/program
-  wait_for_core1_flash_ready();
+  if (!wait_for_core1_flash_ready("motor offsets save")) {
+    LOG_ERROR("Motor offsets save aborted: Core1 flash handshake failed");
+    return;
+  }
 
   // Atomic flash operation: disable interrupts during write
   uint32_t ints = save_and_disable_interrupts();
@@ -827,7 +816,7 @@ void save_motor_offsets_data(struct MotorOffsetsDeviceData data) {
   restore_interrupts(ints);
 
   // Signal Core1 to resume normal operation
-  flash_operation_in_progress = false;
+  end_core1_flash_pause();
 
   LOG_INFO("Motor offsets saved to flash successfully!");
   LOG_DEBUG("Joint type: " + String(data.joint_type));
