@@ -101,11 +101,16 @@
   isolato e conferma che il bring-up fisico singolo-DOF è praticabile
 - restano aperti:
   - test distruttivo della reference (`REFERENCE_REQUIRED -> Set Reference -> reboot`)
-  - pulizia diagnostica sotto movimento (`MOTOR_CAN_WARN`, `LOOP_OVERRUN`)
+  - pulizia finale dei warning CAN sotto movimento
   - il recente blocco `MOTOR_TIMEOUT` visto su cold-start dopo `PRETENSION_ALL`
     era dovuto a un problema di alimentazione del bench; dopo il fix hardware il
     cold-start è tornato a passare, e il miglioramento software utile rimane che
     il host lo segnala esplicitamente invece di degradare in `POSITION_RANGE`
+- `LOOP_OVERRUN` sul sotto-caso roll non è più il blocker principale: il pass
+  firmware di debounce/hysteresis lo ha portato a `0` nei run `20 s` validati
+  (`hold`, `±5°`, `±10°`, `±15°`)
+- il warning residuo più credibile resta `MOTOR_CAN_WARN`; `HOST_CAN_WARN` è
+  sceso ma resta parzialmente contaminato dal path `slcan` del banco Jetson
 
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi

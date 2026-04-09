@@ -45,6 +45,7 @@ For integrated experiments and Jetson bring-up, see
 - `config.py` - Configuration (loaded from joint_config.json)
 - `routes.py` - Flask API routes
 - `diagnostic_history.py` - JSONL persistence for structured CAN diagnostics
+- `bench_diagnostics.py` - Windowed summaries for bench diagnostic JSONL histories
 - `serial_handler.py` - Serial protocol implementation
 - `serial_manager.py` - Multi-device serial management
 - `templates/` - HTML templates (Alia Joint Controller UI)
@@ -99,6 +100,23 @@ Use PlatformIO extension in VS Code:
 - `mapping_data/` stores auto-mapping results (gitignored)
 - `can_config.json` is created after a successful CAN connection and remains local (gitignored)
 - Dev server uses `allow_unsafe_werkzeug=True` for Flask-SocketIO compatibility (local dev only)
+
+## Bench Diagnostics
+
+For repeatable bench-motion diagnostics, record one exercise window and then
+summarize only that time slice from the structured JSONL history:
+
+```bash
+cd software/host
+python3 -m jetson_controller.exercise --joint hip_roll_bench_right --report-json /tmp/hip_roll_run.json ...
+python3 tools/analyze_bench_diagnostics.py --report /tmp/hip_roll_run.json
+```
+
+The report anchors the movement window, and the analyzer summarizes:
+- health counter deltas
+- active fault counts
+- event counts
+- loop timing samples from `HEALTH_STATUS`
 
 ## License
 

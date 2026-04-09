@@ -454,6 +454,10 @@ static uint32_t cycle_time_us_last = 0;       // Last cycle time in microseconds
 static uint32_t cycle_time_us_max = 0;        // Maximum cycle time (for diagnostics)
 static uint32_t cycle_time_us_avg = 0;        // Running average (exponential)
 static uint32_t profiling_start_us = 0;       // Start timestamp for current cycle
+static constexpr uint32_t LOOP_OVERRUN_MARGIN_US = 100;
+static constexpr uint8_t LOOP_OVERRUN_CONSECUTIVE_LIMIT = 2;
+static uint8_t loop_overrun_streak = 0;
+static bool loop_overrun_burst_active = false;
 
 /**
  * @brief Get current profiling statistics
@@ -2666,6 +2670,7 @@ bool JointController::executeControlLoop() {
   {
     uint32_t cycle_end_us = time_us_32();
     cycle_time_us_last = cycle_end_us - profiling_start_us;
+    const uint32_t overrun_threshold_us = inner_loop_period_us + LOOP_OVERRUN_MARGIN_US;
     
     // Update max (reset every ~10 seconds)
     if (cycle_time_us_last > cycle_time_us_max) {
@@ -2675,8 +2680,19 @@ bool JointController::executeControlLoop() {
     // Exponential moving average (α = 0.1 for smoothing)
     cycle_time_us_avg = (cycle_time_us_avg * 9 + cycle_time_us_last) / 10;
 
-    if (cycle_time_us_last > inner_loop_period_us) {
-      diag_note_loop_overrun();
+    // Treat loop overruns as burst diagnostics, not single-cycle noise.
+    if (cycle_time_us_last > overrun_threshold_us) {
+      if (loop_overrun_streak < 255) {
+        ++loop_overrun_streak;
+      }
+      if (!loop_overrun_burst_active &&
+          loop_overrun_streak >= LOOP_OVERRUN_CONSECUTIVE_LIMIT) {
+        diag_note_loop_overrun();
+        loop_overrun_burst_active = true;
+      }
+    } else {
+      loop_overrun_streak = 0;
+      loop_overrun_burst_active = false;
     }
 
     // Log only when over budget (every 5 seconds = 2500 cycles @ 500Hz)
@@ -2687,11 +2703,12 @@ bool JointController::executeControlLoop() {
       profiling_log_counter = 0;
       
       // Only log if we exceeded the budget during this period
-      if (cycle_time_us_max > inner_loop_period_us) {
-        LOG_C1_WARN("[PROFILING] OVER BUDGET! last=" + String(cycle_time_us_last) + "µs, " +
+      if (cycle_time_us_max > overrun_threshold_us) {
+        LOG_C1_WARN("[PROFILING] OVER DIAG THRESHOLD! last=" + String(cycle_time_us_last) + "µs, " +
                  "avg=" + String(cycle_time_us_avg) + "µs, " +
                  "max=" + String(cycle_time_us_max) + "µs " +
-                 "(budget=" + String(inner_loop_period_us) + "µs)");
+                 "(budget=" + String(inner_loop_period_us) + "µs, " +
+                 "threshold=" + String(overrun_threshold_us) + "µs)");
       }
       
       // Reset max for next period

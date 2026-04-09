@@ -665,8 +665,6 @@ Residual issues observed on the same bench:
 - the destructive `REFERENCE_REQUIRED -> Set Reference -> reboot` path was not
   rerun during this session because it would overwrite the saved reference and
   requires a mechanically known neutral pose
-- diagnostics are not yet clean under motion: `MOTOR_CAN_WARN` and
-  `LOOP_OVERRUN` still appear during `±10°` and `±15°` exercise runs
 - a later cold-start stall that showed up as persistent `MOTOR_TIMEOUT` after
   `PRETENSION_ALL` was traced to a bench power fault, not to the host startup
   path; after restoring motor power the same cold-start path succeeded again
@@ -677,8 +675,18 @@ Residual issues observed on the same bench:
   not eliminate the residual motion warnings enough to justify changing the
   default control-loop policy; it remains a diagnostic tool, not a validated
   production fix
-- therefore this slice is **bench-usable**, but not yet “fully clean” by the
-  stricter criteria below
+- firmware-side diagnostic cleanup has now removed the spurious
+  `LOOP_OVERRUN` noise on the bench: a `20 s` campaign at hold, `±5°`, `±10°`,
+  and `±15°` completed with `loop_overrun_count = 0` in every post-fix report
+- `MOTOR_CAN_WARN` is still the main residual warning under motion, but it is
+  materially lower than the initial baseline (for example, `±15° / 20 s`
+  dropped from `32` active samples to `11` after the diagnostic cleanup pass)
+- `HOST_CAN_WARN` still appears occasionally on the Jetson `slcan` bench path;
+  a host-specific threshold adjustment reduced it, but it remains a transport
+  artifact to watch until the service path moves off `slcan`
+- therefore this slice is **bench-usable** and the control-loop diagnostic
+  cleanup is substantially closed, but the stricter criteria below still need
+  the destructive reference test plus a final pass on residual CAN warnings
 
 ### 12.4 Logs to Inspect
 

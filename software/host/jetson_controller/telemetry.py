@@ -106,9 +106,7 @@ class TelemetryManager:
 
         self._running = False
         self._retension_probe_pending: dict[tuple[int, int], dict[str, object]] = {}
-        self._health_status_pending: dict[
-            tuple[int, int], tuple[Optional[HealthStatusSummary], Optional[HealthStatusCounters], float]
-        ] = {}
+        self._health_status_pending: dict[tuple[int, int], dict[str, object]] = {}
         self.health_status: dict[int, dict[str, object]] = {}
         self.fault_status: dict[int, FaultStatus] = {}
         self.fault_snapshot_meta: dict[int, FaultSnapshotMeta] = {}
@@ -349,8 +347,9 @@ class TelemetryManager:
         summary: HealthStatusSummary,
         counters: HealthStatusCounters,
         timestamp: float,
+        loop_timing: tuple[int, int, int] | None = None,
     ) -> dict[str, object]:
-        return {
+        payload = {
             "type": "health_status",
             "joint_id": joint_id,
             "joint_name": joint_name,
@@ -379,6 +378,32 @@ class TelemetryManager:
             "loop_overrun_count": counters.loop_overrun_count,
             "watchdog_trip_count": counters.watchdog_trip_count,
             "can_recovery_count": counters.can_recovery_count,
+        }
+        if loop_timing is not None:
+            payload["loop_avg_us"] = loop_timing[0]
+            payload["loop_max_us"] = loop_timing[1]
+            payload["loop_budget_us"] = loop_timing[2]
+        return payload
+
+    @staticmethod
+    def _health_loop_timing_payload(
+        joint_id: int,
+        joint_name: str,
+        seq: int,
+        avg_us: int,
+        max_us: int,
+        budget_us: int,
+        timestamp: float,
+    ) -> dict[str, object]:
+        return {
+            "type": "health_loop_timing",
+            "joint_id": joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "seq": seq,
+            "loop_avg_us": avg_us,
+            "loop_max_us": max_us,
+            "loop_budget_us": budget_us,
         }
 
     @staticmethod
@@ -536,28 +561,51 @@ class TelemetryManager:
         seq = data[7] if frame_kind != 0x80 else data[1]
         for pending_key in [key for key in self._health_status_pending if key[0] == joint_id and key[1] != seq]:
             self._health_status_pending.pop(pending_key, None)
-        summary, counters, _ = self._health_status_pending.get((joint_id, seq), (None, None, timestamp))
+        pending = self._health_status_pending.setdefault(
+            (joint_id, seq),
+            {"timestamp": timestamp},
+        )
+        pending["timestamp"] = timestamp
         if frame_kind == 0x00:
-            summary = decode_health_status_summary(data, joint_id)
+            pending["summary"] = decode_health_status_summary(data, joint_id)
         elif frame_kind == 0x40:
-            counters = decode_health_status_counters(data, joint_id)
+            pending["counters"] = decode_health_status_counters(data, joint_id)
         elif frame_kind == 0x80 and len(data) >= 8:
             # Loop timing frame — attach to current joint state directly
             import struct
             avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
-            if state is not None and isinstance(state.health_status, dict):
+            pending["loop_timing"] = (avg_us, max_us, budget_us)
+            if isinstance(state.health_status, dict):
                 state.health_status["loop_avg_us"] = avg_us
                 state.health_status["loop_max_us"] = max_us
                 state.health_status["loop_budget_us"] = budget_us
-            return
+            self._record_diagnostic(
+                self._health_loop_timing_payload(
+                    joint_id,
+                    key,
+                    seq,
+                    avg_us,
+                    max_us,
+                    budget_us,
+                    timestamp,
+                )
+            )
         else:
             return
 
-        self._health_status_pending[(joint_id, seq)] = (summary, counters, timestamp)
+        summary = pending.get("summary")
+        counters = pending.get("counters")
         if summary is None or counters is None:
             return
 
-        payload = self._health_status_payload(joint_id, key, summary, counters, timestamp)
+        payload = self._health_status_payload(
+            joint_id,
+            key,
+            summary,
+            counters,
+            float(pending["timestamp"]),
+            pending.get("loop_timing"),
+        )
         state.health_status = payload
         self.health_status[joint_id] = payload
         state.last_update = time.monotonic()

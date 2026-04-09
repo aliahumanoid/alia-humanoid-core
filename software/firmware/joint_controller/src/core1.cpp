@@ -162,7 +162,12 @@ static constexpr uint32_t DIAG_ENCODER_INVALID_HOLD_MS = 250;
 static constexpr uint32_t DIAG_LOOP_OVERRUN_HOLD_MS = 1000;
 static constexpr uint32_t DIAG_MOTOR_TIMEOUT_HOLD_MS = 1000;
 static constexpr uint32_t DIAG_BAD_COMMAND_HOLD_MS = 500;
-static constexpr uint8_t DIAG_CAN_WARN_THRESHOLD = 32;
+static constexpr uint8_t DIAG_HOST_CAN_WARN_ASSERT_THRESHOLD = 64;
+static constexpr uint8_t DIAG_HOST_CAN_WARN_CLEAR_THRESHOLD = 16;
+static constexpr uint8_t DIAG_MOTOR_CAN_WARN_ASSERT_THRESHOLD = 32;
+static constexpr uint8_t DIAG_MOTOR_CAN_WARN_CLEAR_THRESHOLD = 8;
+static constexpr uint8_t DIAG_CAN_WARN_ASSERT_SAMPLES = 2;
+static constexpr uint8_t DIAG_CAN_WARN_CLEAR_SAMPLES = 2;
 static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 1;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_QUERY_META = 0x00;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_BEGIN_DUMP = 0x01;
@@ -214,6 +219,12 @@ static uint32_t diag_transient_fault_until_ms[DIAG_FAULT_COUNT] = {};
 static uint8_t diag_watchdog_trip_count = 0;
 static uint8_t diag_can_recovery_count = 0;
 static uint8_t diag_loop_overrun_count = 0;
+static bool diag_host_can_warn_active = false;
+static bool diag_motor_can_warn_active = false;
+static uint8_t diag_host_can_warn_assert_samples = 0;
+static uint8_t diag_host_can_warn_clear_samples = 0;
+static uint8_t diag_motor_can_warn_assert_samples = 0;
+static uint8_t diag_motor_can_warn_clear_samples = 0;
 static bool diag_snapshot_available = false;
 static bool diag_startup_in_progress = false;
 static bool diag_estop_latched = false;
@@ -789,29 +800,61 @@ static void diagQueueFaultTransitionEvent(uint8_t event_code, uint8_t fault_code
       diagComputePhaseCode());
 }
 
+static void diagUpdateCanWarnFault(DiagFaultCode code, uint8_t source_id, uint8_t sample_value,
+                                   uint8_t assert_threshold, uint8_t clear_threshold,
+                                   bool& active, uint8_t& assert_samples,
+                                   uint8_t& clear_samples) {
+  const bool above_assert = sample_value >= assert_threshold;
+  const bool below_clear = sample_value <= clear_threshold;
+
+  if (above_assert) {
+    if (assert_samples < 255) {
+      ++assert_samples;
+    }
+    clear_samples = 0;
+  } else if (below_clear) {
+    if (clear_samples < 255) {
+      ++clear_samples;
+    }
+    assert_samples = 0;
+  } else {
+    assert_samples = 0;
+    clear_samples = 0;
+  }
+
+  if (!active && assert_samples >= DIAG_CAN_WARN_ASSERT_SAMPLES) {
+    active = true;
+  } else if (active && clear_samples >= DIAG_CAN_WARN_CLEAR_SAMPLES) {
+    active = false;
+  }
+
+  if (active) {
+    diagSetPersistentFaultActive(code, source_id);
+    diagMarkLatchedFault(code, source_id);
+  } else {
+    diagClearPersistentFaultActive(code);
+  }
+}
+
 static void diagSampleCanHealthCounters() {
   diag_last_host_can_tx_error_count = CAN_HOST.errorCountTX();
   diag_last_host_can_rx_error_count = CAN_HOST.errorCountRX();
   diag_last_motor_can_tx_error_count = CAN.errorCountTX();
   diag_last_host_can_warn_sample_ms = millis();
 
-  const bool host_warn = diag_last_host_can_tx_error_count >= DIAG_CAN_WARN_THRESHOLD ||
-                         diag_last_host_can_rx_error_count >= DIAG_CAN_WARN_THRESHOLD;
-  const bool motor_warn = diag_last_motor_can_tx_error_count >= DIAG_CAN_WARN_THRESHOLD;
-
-  if (host_warn) {
-    diagSetPersistentFaultActive(DIAG_FAULT_HOST_CAN_WARN, 0xE0);
-    diagMarkLatchedFault(DIAG_FAULT_HOST_CAN_WARN, 0xE0);
-  } else {
-    diagClearPersistentFaultActive(DIAG_FAULT_HOST_CAN_WARN);
-  }
-
-  if (motor_warn) {
-    diagSetPersistentFaultActive(DIAG_FAULT_MOTOR_CAN_WARN, 0xE1);
-    diagMarkLatchedFault(DIAG_FAULT_MOTOR_CAN_WARN, 0xE1);
-  } else {
-    diagClearPersistentFaultActive(DIAG_FAULT_MOTOR_CAN_WARN);
-  }
+  const uint8_t host_peak = max(diag_last_host_can_tx_error_count, diag_last_host_can_rx_error_count);
+  diagUpdateCanWarnFault(DIAG_FAULT_HOST_CAN_WARN, 0xE0, host_peak,
+                         DIAG_HOST_CAN_WARN_ASSERT_THRESHOLD,
+                         DIAG_HOST_CAN_WARN_CLEAR_THRESHOLD,
+                         diag_host_can_warn_active,
+                         diag_host_can_warn_assert_samples,
+                         diag_host_can_warn_clear_samples);
+  diagUpdateCanWarnFault(DIAG_FAULT_MOTOR_CAN_WARN, 0xE1, diag_last_motor_can_tx_error_count,
+                         DIAG_MOTOR_CAN_WARN_ASSERT_THRESHOLD,
+                         DIAG_MOTOR_CAN_WARN_CLEAR_THRESHOLD,
+                         diag_motor_can_warn_active,
+                         diag_motor_can_warn_assert_samples,
+                         diag_motor_can_warn_clear_samples);
 }
 
 static void diagRefreshRuntimeFaults() {

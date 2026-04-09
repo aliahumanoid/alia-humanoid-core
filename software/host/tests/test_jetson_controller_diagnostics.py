@@ -1,3 +1,4 @@
+import json
 import logging
 import struct
 from types import SimpleNamespace
@@ -110,6 +111,34 @@ def test_jetson_telemetry_combines_health_status_and_persists(tmp_path: Path):
     assert payload["state"]["watchdog_warning"] is True
     assert payload["watchdog_trip_count"] == 5
     assert (tmp_path / "knee_left.jsonl").exists()
+
+
+def test_jetson_telemetry_persists_health_loop_timing_and_attaches_it_to_health_status(tmp_path: Path):
+    telemetry = TelemetryManager(_build_config())
+    telemetry._diagnostic_history = DiagnosticHistoryWriter(tmp_path, source="test_suite")
+
+    loop_timing = struct.pack("<BBHHH", 0x80, 7, 1800, 2200, 2000)
+    summary = struct.pack("<BBBBHBB", 0x00, 0x6F, 4, 2, 123, 9, 7)
+    counters = struct.pack("<BBBBBBBB", 0x40, 1, 2, 3, 4, 5, 6, 7)
+
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, loop_timing, 1000.0)
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, summary, 1000.1)
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, counters, 1000.2)
+
+    payload = telemetry.states["KNEE_LEFT"].health_status
+    assert payload is not None
+    assert payload["loop_avg_us"] == 1800
+    assert payload["loop_max_us"] == 2200
+    assert payload["loop_budget_us"] == 2000
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "knee_left.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    loop_record = next(row for row in records if row["type"] == "health_loop_timing")
+    health_record = next(row for row in records if row["type"] == "health_status")
+    assert loop_record["loop_avg_us"] == 1800
+    assert health_record["loop_max_us"] == 2200
 
 
 def test_jetson_telemetry_decodes_faults_and_events(tmp_path: Path):

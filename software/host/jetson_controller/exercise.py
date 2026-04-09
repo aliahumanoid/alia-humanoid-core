@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .can_bus import CanBus
 from .config import ControllerConfig, JointControlConfig, load_config
@@ -39,6 +41,15 @@ class ExerciseDofPlan:
     dof: int
     center_deg: float
     targets_deg: list[float]
+
+
+def _write_run_report(path: str, payload: dict[str, object]) -> None:
+    report_path = Path(path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -179,8 +190,17 @@ async def run_exercise(config_path: str | None,
                        min_excursion_deg: float,
                        inner_loop_us: int | None,
                        outer_loop_divisor: int | None,
-                       estop_on_exit: bool) -> int:
+                       estop_on_exit: bool,
+                       report_json: str | None = None) -> int:
     setup_logging(verbose)
+    config: ControllerConfig | None = None
+    plans: list[ExerciseDofPlan] = []
+    run_started_at_unix = time.time()
+    startup_completed_at_unix: float | None = None
+    movement_started_at_unix: float | None = None
+    movement_finished_at_unix: float | None = None
+    step_count = 0
+    failure_reason: str | None = None
 
     try:
         config = load_config(config_path, selected_joints=selected_joints)
@@ -233,9 +253,22 @@ async def run_exercise(config_path: str | None,
         if not discovered:
             return 1
 
+        if inner_loop_us is not None or outer_loop_divisor is not None:
+            if len(config.joints) != 1:
+                raise RuntimeError(
+                    "Loop frequency override is broadcast-only; refuse when exercising multiple joints"
+                )
+            unexpected_ids = sorted(telemetry.unexpected_announces.keys())
+            if unexpected_ids:
+                raise RuntimeError(
+                    "Loop frequency override is broadcast-only; unexpected joints are present on the bus: "
+                    f"{unexpected_ids}"
+                )
+
         ready = await fsm.run_startup(can_bus, config, telemetry, safety)
         if not ready:
             return 1
+        startup_completed_at_unix = time.time()
 
         if inner_loop_us is not None or outer_loop_divisor is not None:
             inner_us = inner_loop_us or 2000
@@ -290,7 +323,7 @@ async def run_exercise(config_path: str | None,
         await asyncio.sleep(dwell_s)
 
         started = time.monotonic()
-        step_count = 0
+        movement_started_at_unix = time.time()
 
         while (time.monotonic() - started) < duration_s:
             for step in steps:
@@ -337,9 +370,12 @@ async def run_exercise(config_path: str | None,
             f"Exercise complete: duration={time.monotonic() - started:.1f}s "
             f"steps={step_count}"
         )
+        movement_finished_at_unix = time.time()
 
     except Exception as exc:
         logger.error(f"Exercise failed: {exc}")
+        failure_reason = str(exc)
+        movement_finished_at_unix = movement_finished_at_unix or time.time()
         exit_code = 1
     finally:
         await impedance.stop()
@@ -352,6 +388,42 @@ async def run_exercise(config_path: str | None,
         except asyncio.CancelledError:
             pass
         await can_bus.disconnect()
+        if report_json:
+            report = {
+                "config_path": config_path,
+                "selected_joints": selected_joints or (list(config.joints.keys()) if config is not None else []),
+                "preflight_auto": preflight_auto,
+                "preflight_serials": preflight_serials or [],
+                "pretension_before_startup": pretension_before_startup,
+                "duration_s": duration_s,
+                "dwell_s": dwell_s,
+                "span_cap_deg": span_cap_deg,
+                "margin_deg": margin_deg,
+                "min_excursion_deg": min_excursion_deg,
+                "inner_loop_us": inner_loop_us,
+                "outer_loop_divisor": outer_loop_divisor,
+                "estop_on_exit": estop_on_exit,
+                "session_log_path": str(get_log_path()),
+                "started_at_unix": run_started_at_unix,
+                "startup_completed_at_unix": startup_completed_at_unix,
+                "movement_started_at_unix": movement_started_at_unix,
+                "movement_finished_at_unix": movement_finished_at_unix,
+                "finished_at_unix": time.time(),
+                "exit_code": exit_code,
+                "failure_reason": failure_reason,
+                "step_count": step_count,
+                "plans": [
+                    {
+                        "joint_key": plan.joint_key,
+                        "dof": plan.dof,
+                        "center_deg": plan.center_deg,
+                        "targets_deg": plan.targets_deg,
+                    }
+                    for plan in plans
+                ],
+            }
+            _write_run_report(report_json, report)
+            logger.info(f"Wrote exercise report: {report_json}")
 
     return exit_code
 
@@ -388,12 +460,16 @@ def cli() -> None:
     parser.add_argument(
         "--inner-loop-us",
         type=int,
-        help="Override inner control-loop period in microseconds for this run only",
+        help="Override inner control-loop period in microseconds for this run only (single isolated controller only)",
     )
     parser.add_argument(
         "--outer-loop-divisor",
         type=int,
-        help="Override outer loop divisor for this run only (outer Hz = inner Hz / divisor)",
+        help="Override outer loop divisor for this run only (single isolated controller only)",
+    )
+    parser.add_argument(
+        "--report-json",
+        help="Write a structured JSON report for this exercise run",
     )
     parser.add_argument("--estop-on-exit", action="store_true", help="Send EMERGENCY_STOP after the exercise completes")
     args = parser.parse_args()
@@ -419,6 +495,7 @@ def cli() -> None:
             args.inner_loop_us,
             args.outer_loop_divisor,
             args.estop_on_exit,
+            args.report_json,
         )
     )
     sys.exit(exit_code)
