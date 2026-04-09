@@ -647,6 +647,29 @@ Pass criteria:
 - software does not allow obviously unsafe commands
 - no unexpected limit violation inside the intended usable range
 
+### 12.3 Bench Note (2026-04-09)
+
+The isolated `hip_roll_bench_right` direct-drive slice has now been exercised on
+the Jetson bench with motor power applied:
+
+- startup succeeded with the already-saved direct-drive reference
+- short motion tests completed at `±5°`, `±10°`, and `±15°`
+- hold-only control at `0°` also completed for `20 s`
+- the host resume path required a real fix: after a previous `E-stop`, the
+  controller could still announce `ready=true` before publishing
+  `ESTOP_LATCHED`; the Jetson startup FSM now waits for that delayed fault and
+  sends `PRETENSION_ALL` recovery automatically before resuming motion
+
+Residual issues observed on the same bench:
+
+- the destructive `REFERENCE_REQUIRED -> Set Reference -> reboot` path was not
+  rerun during this session because it would overwrite the saved reference and
+  requires a mechanically known neutral pose
+- diagnostics are not yet clean under motion: `MOTOR_CAN_WARN` and
+  `LOOP_OVERRUN` still appear during `±10°` and `±15°` exercise runs
+- therefore this slice is **bench-usable**, but not yet “fully clean” by the
+  stricter criteria below
+
 ### 12.4 Logs to Inspect
 
 - startup log:
@@ -667,6 +690,12 @@ The roll slice is considered passed when all of the following are true:
 3. startup succeeds with that reference
 4. small nudge commands move and hold the roll
 5. no tendon-only command path is used on `DOF2`
+
+Current status on `2026-04-09`:
+- items `3`, `4`, and `5` are satisfied on `hip_roll_bench_right`
+- items `1` and `2` still require the explicit destructive reference test
+- diagnostic cleanliness under motion still needs follow-up because
+  `MOTOR_CAN_WARN` and `LOOP_OVERRUN` remain visible during larger nudges
 
 Only after this should the project move to:
 - mixed HIP startup (`DOF0/1 tendon + DOF2 direct-drive`)

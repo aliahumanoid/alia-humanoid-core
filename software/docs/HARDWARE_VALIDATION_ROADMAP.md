@@ -94,6 +94,15 @@
   - 1 DOF roll direct-drive single motor
 - prima del test singolo HIP va corretta l'astrazione software, come descritto in [HIP_HYBRID_DOF_SPEC.md](software/docs/HIP_HYBRID_DOF_SPEC.md)
 
+**Nota banco (2026-04-09):**
+- il sotto-caso `hip_roll_bench_right` direct-drive è già stato portato su banco
+  Jetson e mosso con successo a `±5°`, `±10°`, `±15°`, con hold stabile a `0°`
+- questo non sblocca ancora `L3` completo, ma riduce il rischio del path roll
+  isolato e conferma che il bring-up fisico singolo-DOF è praticabile
+- restano aperti:
+  - test distruttivo della reference (`REFERENCE_REQUIRED -> Set Reference -> reboot`)
+  - pulizia diagnostica sotto movimento (`MOTOR_CAN_WARN`, `LOOP_OVERRUN`)
+
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi
 - 5 motori sullo stesso bus CAN motore (~250 frame/s torque loop)
