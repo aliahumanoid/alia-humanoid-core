@@ -667,12 +667,16 @@ Residual issues observed on the same bench:
   requires a mechanically known neutral pose
 - diagnostics are not yet clean under motion: `MOTOR_CAN_WARN` and
   `LOOP_OVERRUN` still appear during `±10°` and `±15°` exercise runs
-- a later cold-start validation, with motor power applied and host-side
-  `PRETENSION_ALL` forced before startup, stalled in persistent
-  `MOTOR_TIMEOUT`; the Jetson host now reports that condition explicitly
-  instead of collapsing into a misleading `POSITION_RANGE` startup failure.
-  This is now a bench hardware / motor CAN readiness blocker, not an ambiguous
-  host-state bug.
+- a later cold-start stall that showed up as persistent `MOTOR_TIMEOUT` after
+  `PRETENSION_ALL` was traced to a bench power fault, not to the host startup
+  path; after restoring motor power the same cold-start path succeeded again
+- the Jetson host now reports `MOTOR_TIMEOUT` explicitly instead of collapsing
+  into a misleading `POSITION_RANGE` startup failure, which makes this class of
+  bench issue much easier to isolate
+- runtime loop tuning on the Jetson bench (`outer_loop_divisor = 2` / `5`) did
+  not eliminate the residual motion warnings enough to justify changing the
+  default control-loop policy; it remains a diagnostic tool, not a validated
+  production fix
 - therefore this slice is **bench-usable**, but not yet “fully clean” by the
   stricter criteria below
 
