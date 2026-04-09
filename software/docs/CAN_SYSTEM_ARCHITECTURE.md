@@ -751,7 +751,8 @@ with the following special cases:
    - resume directly into `READY`
 
 4. **Post-`E-stop` recovery in the same Jetson process**
-   - only if the host knows it sent the `E-stop`
+   - if the host knows it sent the `E-stop`, **or** if diagnostics later reveal
+     `ESTOP_LATCHED` on a controller that still announces `ready=true`
    - send `PRETENSION_ALL` to re-enable motor power
    - keep current pose
    - wait `RECOVERY_SETTLE` (`30 s` in the current validated config)
