@@ -164,6 +164,20 @@ DIAG_REBOOT_REASON_NAMES = {
     7: "RESERVED",
 }
 
+DIAG_HEALTH_EXT_LOOP_TIMING = 0x00
+DIAG_HEALTH_EXT_CAN_DETAILS = 0x01
+
+MCP2515_EFLG_NAMES = {
+    0x80: "RX1OVR",
+    0x40: "RX0OVR",
+    0x20: "TXBO",
+    0x10: "TXEP",
+    0x08: "RXEP",
+    0x04: "TXWAR",
+    0x02: "RXWAR",
+    0x01: "EWARN",
+}
+
 DIAG_SEVERITY_NAMES = {
     0: "INFO",
     1: "WARN",
@@ -437,6 +451,30 @@ class HealthStatusCounters:
     loop_overrun_count: int
     watchdog_trip_count: int
     can_recovery_count: int
+
+
+@dataclass
+class HealthStatusCanDetails:
+    joint_id: int
+    seq: int
+    host_can_tec: int
+    host_can_rec: int
+    host_can_eflg: int
+    motor_can_tec: int
+    motor_can_rec: int
+    motor_can_eflg: int
+
+    @property
+    def host_can_eflg_names(self) -> list[str]:
+        return decode_can_eflg(self.host_can_eflg)
+
+    @property
+    def motor_can_eflg_names(self) -> list[str]:
+        return decode_can_eflg(self.motor_can_eflg)
+
+
+def decode_can_eflg(value: int) -> list[str]:
+    return [name for bit, name in MCP2515_EFLG_NAMES.items() if value & bit]
 
 
 @dataclass
@@ -1115,6 +1153,20 @@ def decode_health_status_counters(data: bytes, joint_id: int) -> HealthStatusCou
         loop_overrun_count=data[4],
         watchdog_trip_count=data[5],
         can_recovery_count=data[6],
+    )
+
+
+def decode_health_status_can_details(data: bytes, joint_id: int) -> HealthStatusCanDetails:
+    """Decode CAN-detail extension of HEALTH_STATUS (0x510+joint, frame kind 0x81)."""
+    return HealthStatusCanDetails(
+        joint_id=joint_id,
+        seq=data[1],
+        host_can_tec=data[2],
+        host_can_rec=data[3],
+        host_can_eflg=data[4],
+        motor_can_tec=data[5],
+        motor_can_rec=data[6],
+        motor_can_eflg=data[7],
     )
 
 

@@ -31,11 +31,12 @@ from .protocol import (
     CAN_ID_ENCODER_STREAM_DATA, CAN_ID_STARTUP_STATUS, CAN_ID_JOINT_ANNOUNCE,
     CAN_ID_JOINT_STATE, CAN_ID_HEALTH_STATUS, CAN_ID_FAULT_STATUS, CAN_ID_EVENT_NOTICE,
     CAN_ID_FAULT_SNAPSHOT_META, CAN_ID_FAULT_SNAPSHOT_DATA,
+    DIAG_HEALTH_EXT_CAN_DETAILS, DIAG_HEALTH_EXT_LOOP_TIMING,
     FAULT_SNAPSHOT_CTRL_SUBCMDS,
     UNUSED_DOF,
     decode_fw_update_status, decode_fw_update_uid, decode_fw_update_info,
     decode_fw_update_progress,
-    decode_event_notice, decode_fault_status, decode_health_status_counters,
+    decode_event_notice, decode_fault_status, decode_health_status_can_details, decode_health_status_counters,
     decode_health_status_summary, decode_fault_snapshot_meta, decode_fault_snapshot_chunk,
 )
 
@@ -303,11 +304,23 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
                     False,
                 )
             if frame_kind == 0x80 and len(data) >= 8:
-                avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
-                return (
-                    f"HEALTH_LOOP j={joint_id} avg={avg_us}us max={max_us}us budget={budget_us}us",
-                    False,
-                )
+                ext_kind = data[0] & 0x3F
+                if ext_kind == DIAG_HEALTH_EXT_LOOP_TIMING:
+                    avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
+                    return (
+                        f"HEALTH_LOOP j={joint_id} avg={avg_us}us max={max_us}us budget={budget_us}us",
+                        False,
+                    )
+                if ext_kind == DIAG_HEALTH_EXT_CAN_DETAILS:
+                    details = decode_health_status_can_details(data, joint_id)
+                    return (
+                        f"HEALTH_CAN j={joint_id} seq={details.seq} "
+                        f"host=(tec={details.host_can_tec} rec={details.host_can_rec} "
+                        f"eflg=0x{details.host_can_eflg:02X}) "
+                        f"motor=(tec={details.motor_can_tec} rec={details.motor_can_rec} "
+                        f"eflg=0x{details.motor_can_eflg:02X})",
+                        False,
+                    )
         return f"HEALTH j={joint_id} [{data.hex(' ')}]", False
 
     # Fault status

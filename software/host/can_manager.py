@@ -37,6 +37,8 @@ from diagnostic_history import DiagnosticHistoryWriter
 from jetson_controller.protocol import (
     DIAG_EVENT_NAMES,
     DIAG_FAULT_NAMES,
+    DIAG_HEALTH_EXT_CAN_DETAILS,
+    DIAG_HEALTH_EXT_LOOP_TIMING,
     DIAG_PHASE_NAMES,
     DIAG_REBOOT_REASON_NAMES,
     DIAG_SEVERITY_NAMES,
@@ -44,6 +46,7 @@ from jetson_controller.protocol import (
     FAULT_SNAPSHOT_PENDING_TIMEOUT_S,
     STARTUP_REASON_NAMES,
     FaultSnapshotMeta,
+    decode_can_eflg,
     decode_fault_mask,
     decode_fault_snapshot_blob,
     decode_fault_snapshot_chunk,
@@ -2760,7 +2763,8 @@ class CanManager:
 
     def _handle_health_status(self, data: bytes, timestamp: float, joint_id: int = 0) -> None:
         frame_kind = data[0] & 0xC0
-        seq = data[7]
+        ext_kind = data[0] & 0x3F if frame_kind == 0x80 else None
+        seq = data[1] if frame_kind == 0x80 else data[7]
         joint_name = self._joint_id_lookup.get(joint_id, f"JOINT_{joint_id:02d}")
         key = (joint_id, seq)
 
@@ -2796,11 +2800,21 @@ class CanManager:
                     "can_recovery_count": data[6],
                 }
             elif frame_kind == 0x80:
-                avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
                 diag = self._diagnostics.setdefault(joint_name, {})
-                diag["loop_avg_us"] = avg_us
-                diag["loop_max_us"] = max_us
-                diag["loop_budget_us"] = budget_us
+                if ext_kind == DIAG_HEALTH_EXT_LOOP_TIMING:
+                    avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
+                    diag["loop_avg_us"] = avg_us
+                    diag["loop_max_us"] = max_us
+                    diag["loop_budget_us"] = budget_us
+                elif ext_kind == DIAG_HEALTH_EXT_CAN_DETAILS:
+                    diag["host_can_tec"] = data[2]
+                    diag["host_can_rec"] = data[3]
+                    diag["host_can_eflg"] = data[4]
+                    diag["host_can_eflg_names"] = decode_can_eflg(data[4])
+                    diag["motor_can_tec"] = data[5]
+                    diag["motor_can_rec"] = data[6]
+                    diag["motor_can_eflg"] = data[7]
+                    diag["motor_can_eflg_names"] = decode_can_eflg(data[7])
                 return
             else:
                 return

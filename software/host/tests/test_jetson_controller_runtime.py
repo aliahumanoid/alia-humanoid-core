@@ -454,6 +454,7 @@ def test_exercise_applies_loop_frequency_override_before_impedance_start():
                 outer_loop_divisor=5,
                 estop_on_exit=False,
                 report_json=None,
+                can_preflight=False,
             )
             assert rc == 0
 
@@ -580,6 +581,7 @@ def test_exercise_writes_report_json(tmp_path):
                 outer_loop_divisor=None,
                 estop_on_exit=False,
                 report_json=str(report_path),
+                can_preflight=False,
             )
             assert rc == 0
 
@@ -692,6 +694,7 @@ def test_exercise_rejects_loop_frequency_override_when_multiple_joints_selected(
                 outer_loop_divisor=5,
                 estop_on_exit=False,
                 report_json=None,
+                can_preflight=False,
             )
             assert rc == 1
 
@@ -796,8 +799,294 @@ def test_exercise_rejects_loop_frequency_override_when_unexpected_joint_is_prese
                 outer_loop_divisor=5,
                 estop_on_exit=False,
                 report_json=None,
+                can_preflight=False,
             )
             assert rc == 1
+
+    asyncio.run(scenario())
+
+
+def test_exercise_can_preflight_rejects_active_can_faults():
+    _install_fake_rich()
+    _install_fake_yaml()
+
+    from jetson_controller import exercise as mod
+    from jetson_controller.protocol import FaultStatus
+
+    class _FakeCanBus:
+        connected = False
+
+        async def send(self, *_args, **_kwargs):
+            return None
+
+        async def disconnect(self):
+            return None
+
+    class _FakeTelemetry:
+        def __init__(self, _config):
+            self.states = {
+                "hip_roll_bench_right": types.SimpleNamespace(
+                    health_status={
+                        "phase": "READY",
+                        "host_can_tx_error_count": 12,
+                        "host_can_rx_error_count": 0,
+                        "motor_can_tx_error_count": 0,
+                        "host_can_tec": 12,
+                        "host_can_rec": 0,
+                        "host_can_eflg": 0,
+                        "host_can_eflg_names": [],
+                        "motor_can_tec": 0,
+                        "motor_can_rec": 0,
+                        "motor_can_eflg": 0,
+                        "motor_can_eflg_names": [],
+                    },
+                    fault_status=FaultStatus(
+                        joint_id=8,
+                        seq=1,
+                        active_fault_bits=(1 << 0),
+                        latched_fault_bits=(1 << 0),
+                        primary_fault_code=0,
+                        source_id=3,
+                        fault_epoch=1,
+                    ),
+                    angles_deg={0: 0.0},
+                )
+            }
+            self.unexpected_announces = {}
+
+        async def listen(self, _can_bus):
+            await asyncio.sleep(3600)
+
+        def stop(self):
+            return None
+
+        def any_stale(self):
+            return False
+
+    class _FakeSafety:
+        async def send_estop(self, *_args, **_kwargs):
+            return None
+
+    class _FakeImpedance:
+        def __init__(self, _config):
+            self.targets = {
+                "hip_roll_bench_right": {0: types.SimpleNamespace(q_deg=0.0)}
+            }
+
+        def start(self, _can_bus):
+            return None
+
+        def set_target(self, *_args, **_kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+    class _FakeFSM:
+        async def run_discover(self, *_args, **_kwargs):
+            return True
+
+        async def run_startup(self, *_args, **_kwargs):
+            return True
+
+    config = types.SimpleNamespace(
+        can_interface="slcan",
+        can_channel="dummy",
+        joints={
+            "hip_roll_bench_right": types.SimpleNamespace(
+                joint_id=8,
+                name="Hip Roll Bench Right",
+                dof_count=1,
+                min_angles={0: -20.0},
+                max_angles={0: 20.0},
+            )
+        },
+        nudge_speed_deg_s=5.0,
+        homing_tolerance_deg=1.0,
+        startup_pretension_all=False,
+    )
+    plan = mod.ExerciseDofPlan(
+        joint_key="hip_roll_bench_right",
+        dof=0,
+        center_deg=0.0,
+        targets_deg=[0.0],
+    )
+    step = mod.ExerciseStep(
+        joint_key="hip_roll_bench_right",
+        dof=0,
+        target_deg=0.0,
+    )
+
+    async def _wait_immediately(*_args, **_kwargs):
+        return True
+
+    async def scenario():
+        with mock.patch.object(mod, "load_config", return_value=config), \
+             mock.patch.object(mod, "CanBus", _FakeCanBus), \
+             mock.patch.object(mod, "TelemetryManager", _FakeTelemetry), \
+             mock.patch.object(mod, "SafetyManager", _FakeSafety), \
+             mock.patch.object(mod, "ImpedanceLoop", _FakeImpedance), \
+             mock.patch.object(mod, "StartupFSM", _FakeFSM), \
+             mock.patch.object(mod, "_build_plans", return_value=[plan]), \
+             mock.patch.object(mod, "_interleave_steps", return_value=[step]), \
+             mock.patch.object(mod, "_wait_for_target", _wait_immediately):
+            rc = await mod.run_exercise(
+                config_path=None,
+                verbose=False,
+                selected_joints=["hip_roll_bench_right"],
+                preflight_auto=False,
+                preflight_serials=None,
+                pretension_before_startup=False,
+                duration_s=0.0,
+                dwell_s=0.0,
+                span_cap_deg=10.0,
+                margin_deg=5.0,
+                min_excursion_deg=1.0,
+                inner_loop_us=None,
+                outer_loop_divisor=None,
+                estop_on_exit=False,
+                report_json=None,
+                can_preflight=True,
+            )
+            assert rc == 1
+
+    asyncio.run(scenario())
+
+
+def test_exercise_can_preflight_accepts_clean_bus():
+    _install_fake_rich()
+    _install_fake_yaml()
+
+    from jetson_controller import exercise as mod
+
+    class _FakeCanBus:
+        connected = False
+
+        async def send(self, *_args, **_kwargs):
+            return None
+
+        async def disconnect(self):
+            return None
+
+    class _FakeTelemetry:
+        def __init__(self, _config):
+            self.states = {
+                "hip_roll_bench_right": types.SimpleNamespace(
+                    health_status={
+                        "phase": "READY",
+                        "host_can_tx_error_count": 0,
+                        "host_can_rx_error_count": 0,
+                        "motor_can_tx_error_count": 0,
+                        "host_can_tec": 0,
+                        "host_can_rec": 0,
+                        "host_can_eflg": 0,
+                        "host_can_eflg_names": [],
+                        "motor_can_tec": 0,
+                        "motor_can_rec": 0,
+                        "motor_can_eflg": 0,
+                        "motor_can_eflg_names": [],
+                    },
+                    fault_status=None,
+                    angles_deg={0: 0.0},
+                )
+            }
+            self.unexpected_announces = {}
+
+        async def listen(self, _can_bus):
+            await asyncio.sleep(3600)
+
+        def stop(self):
+            return None
+
+        def any_stale(self):
+            return False
+
+    class _FakeSafety:
+        async def send_estop(self, *_args, **_kwargs):
+            return None
+
+    class _FakeImpedance:
+        def __init__(self, _config):
+            self.targets = {
+                "hip_roll_bench_right": {0: types.SimpleNamespace(q_deg=0.0)}
+            }
+
+        def start(self, _can_bus):
+            return None
+
+        def set_target(self, *_args, **_kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+    class _FakeFSM:
+        async def run_discover(self, *_args, **_kwargs):
+            return True
+
+        async def run_startup(self, *_args, **_kwargs):
+            return True
+
+    config = types.SimpleNamespace(
+        can_interface="slcan",
+        can_channel="dummy",
+        joints={
+            "hip_roll_bench_right": types.SimpleNamespace(
+                joint_id=8,
+                name="Hip Roll Bench Right",
+                dof_count=1,
+                min_angles={0: -20.0},
+                max_angles={0: 20.0},
+            )
+        },
+        nudge_speed_deg_s=5.0,
+        homing_tolerance_deg=1.0,
+        startup_pretension_all=False,
+    )
+    plan = mod.ExerciseDofPlan(
+        joint_key="hip_roll_bench_right",
+        dof=0,
+        center_deg=0.0,
+        targets_deg=[0.0],
+    )
+    step = mod.ExerciseStep(
+        joint_key="hip_roll_bench_right",
+        dof=0,
+        target_deg=0.0,
+    )
+
+    async def _wait_immediately(*_args, **_kwargs):
+        return True
+
+    async def scenario():
+        with mock.patch.object(mod, "load_config", return_value=config), \
+             mock.patch.object(mod, "CanBus", _FakeCanBus), \
+             mock.patch.object(mod, "TelemetryManager", _FakeTelemetry), \
+             mock.patch.object(mod, "SafetyManager", _FakeSafety), \
+             mock.patch.object(mod, "ImpedanceLoop", _FakeImpedance), \
+             mock.patch.object(mod, "StartupFSM", _FakeFSM), \
+             mock.patch.object(mod, "_build_plans", return_value=[plan]), \
+             mock.patch.object(mod, "_interleave_steps", return_value=[step]), \
+             mock.patch.object(mod, "_wait_for_target", _wait_immediately):
+            rc = await mod.run_exercise(
+                config_path=None,
+                verbose=False,
+                selected_joints=["hip_roll_bench_right"],
+                preflight_auto=False,
+                preflight_serials=None,
+                pretension_before_startup=False,
+                duration_s=0.0,
+                dwell_s=0.0,
+                span_cap_deg=10.0,
+                margin_deg=5.0,
+                min_excursion_deg=1.0,
+                inner_loop_us=None,
+                outer_loop_divisor=None,
+                estop_on_exit=False,
+                report_json=None,
+                can_preflight=True,
+            )
+            assert rc == 0
 
     asyncio.run(scenario())
 

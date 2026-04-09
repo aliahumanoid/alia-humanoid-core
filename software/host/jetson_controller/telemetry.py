@@ -31,6 +31,8 @@ from .protocol import (
     CAN_ID_JOINT_STATE,
     CAN_ID_RETENSION_PROBE_RESULT,
     CAN_ID_STARTUP_STATUS,
+    DIAG_HEALTH_EXT_CAN_DETAILS,
+    DIAG_HEALTH_EXT_LOOP_TIMING,
     DIAG_FAULT_NAMES,
     FAULT_SNAPSHOT_PENDING_TIMEOUT_S,
     DIAG_PHASE_NAMES,
@@ -39,6 +41,7 @@ from .protocol import (
     EventNotice,
     FaultStatus,
     FaultSnapshotMeta,
+    HealthStatusCanDetails,
     HealthStatusCounters,
     HealthStatusSummary,
     JointAnnounce,
@@ -50,6 +53,7 @@ from .protocol import (
     decode_event_notice,
     decode_encoder_stream,
     decode_fault_status,
+    decode_health_status_can_details,
     decode_health_status_counters,
     decode_health_status_summary,
     decode_joint_announce,
@@ -347,6 +351,7 @@ class TelemetryManager:
         summary: HealthStatusSummary,
         counters: HealthStatusCounters,
         timestamp: float,
+        can_details: HealthStatusCanDetails | None = None,
         loop_timing: tuple[int, int, int] | None = None,
     ) -> dict[str, object]:
         payload = {
@@ -379,6 +384,15 @@ class TelemetryManager:
             "watchdog_trip_count": counters.watchdog_trip_count,
             "can_recovery_count": counters.can_recovery_count,
         }
+        if can_details is not None:
+            payload["host_can_tec"] = can_details.host_can_tec
+            payload["host_can_rec"] = can_details.host_can_rec
+            payload["host_can_eflg"] = can_details.host_can_eflg
+            payload["host_can_eflg_names"] = can_details.host_can_eflg_names
+            payload["motor_can_tec"] = can_details.motor_can_tec
+            payload["motor_can_rec"] = can_details.motor_can_rec
+            payload["motor_can_eflg"] = can_details.motor_can_eflg
+            payload["motor_can_eflg_names"] = can_details.motor_can_eflg_names
         if loop_timing is not None:
             payload["loop_avg_us"] = loop_timing[0]
             payload["loop_max_us"] = loop_timing[1]
@@ -404,6 +418,29 @@ class TelemetryManager:
             "loop_avg_us": avg_us,
             "loop_max_us": max_us,
             "loop_budget_us": budget_us,
+        }
+
+    @staticmethod
+    def _health_can_detail_payload(
+        joint_id: int,
+        joint_name: str,
+        details: HealthStatusCanDetails,
+        timestamp: float,
+    ) -> dict[str, object]:
+        return {
+            "type": "health_can_details",
+            "joint_id": joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "seq": details.seq,
+            "host_can_tec": details.host_can_tec,
+            "host_can_rec": details.host_can_rec,
+            "host_can_eflg": details.host_can_eflg,
+            "host_can_eflg_names": details.host_can_eflg_names,
+            "motor_can_tec": details.motor_can_tec,
+            "motor_can_rec": details.motor_can_rec,
+            "motor_can_eflg": details.motor_can_eflg,
+            "motor_can_eflg_names": details.motor_can_eflg_names,
         }
 
     @staticmethod
@@ -558,6 +595,7 @@ class TelemetryManager:
             return
 
         frame_kind = data[0] & 0xC0
+        ext_kind = data[0] & 0x3F if frame_kind == 0x80 else None
         seq = data[7] if frame_kind != 0x80 else data[1]
         for pending_key in [key for key in self._health_status_pending if key[0] == joint_id and key[1] != seq]:
             self._health_status_pending.pop(pending_key, None)
@@ -571,25 +609,46 @@ class TelemetryManager:
         elif frame_kind == 0x40:
             pending["counters"] = decode_health_status_counters(data, joint_id)
         elif frame_kind == 0x80 and len(data) >= 8:
-            # Loop timing frame — attach to current joint state directly
-            import struct
-            avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
-            pending["loop_timing"] = (avg_us, max_us, budget_us)
-            if isinstance(state.health_status, dict):
-                state.health_status["loop_avg_us"] = avg_us
-                state.health_status["loop_max_us"] = max_us
-                state.health_status["loop_budget_us"] = budget_us
-            self._record_diagnostic(
-                self._health_loop_timing_payload(
-                    joint_id,
-                    key,
-                    seq,
-                    avg_us,
-                    max_us,
-                    budget_us,
-                    timestamp,
+            if ext_kind == DIAG_HEALTH_EXT_LOOP_TIMING:
+                avg_us, max_us, budget_us = struct.unpack_from("<HHH", data, 2)
+                pending["loop_timing"] = (avg_us, max_us, budget_us)
+                if isinstance(state.health_status, dict):
+                    state.health_status["loop_avg_us"] = avg_us
+                    state.health_status["loop_max_us"] = max_us
+                    state.health_status["loop_budget_us"] = budget_us
+                self._record_diagnostic(
+                    self._health_loop_timing_payload(
+                        joint_id,
+                        key,
+                        seq,
+                        avg_us,
+                        max_us,
+                        budget_us,
+                        timestamp,
+                    )
                 )
-            )
+            elif ext_kind == DIAG_HEALTH_EXT_CAN_DETAILS:
+                details = decode_health_status_can_details(data, joint_id)
+                pending["can_details"] = details
+                if isinstance(state.health_status, dict):
+                    state.health_status["host_can_tec"] = details.host_can_tec
+                    state.health_status["host_can_rec"] = details.host_can_rec
+                    state.health_status["host_can_eflg"] = details.host_can_eflg
+                    state.health_status["host_can_eflg_names"] = details.host_can_eflg_names
+                    state.health_status["motor_can_tec"] = details.motor_can_tec
+                    state.health_status["motor_can_rec"] = details.motor_can_rec
+                    state.health_status["motor_can_eflg"] = details.motor_can_eflg
+                    state.health_status["motor_can_eflg_names"] = details.motor_can_eflg_names
+                self._record_diagnostic(
+                    self._health_can_detail_payload(
+                        joint_id,
+                        key,
+                        details,
+                        timestamp,
+                    )
+                )
+            else:
+                return
         else:
             return
 
@@ -604,6 +663,7 @@ class TelemetryManager:
             summary,
             counters,
             float(pending["timestamp"]),
+            pending.get("can_details"),
             pending.get("loop_timing"),
         )
         state.health_status = payload
@@ -615,7 +675,8 @@ class TelemetryManager:
         logger.debug(
             f"HEALTH [{key}] phase={summary.phase_name} reboot={summary.reboot_reason_name} "
             f"can=({counters.host_can_tx_error_count},{counters.host_can_rx_error_count},"
-            f"{counters.motor_can_tx_error_count}) overrun={counters.loop_overrun_count}"
+            f"{counters.motor_can_tx_error_count}) overrun={counters.loop_overrun_count} "
+            f"eflg=({payload.get('host_can_eflg', 0)},{payload.get('motor_can_eflg', 0)})"
         )
 
     def _handle_fault_status(self, data: bytes, joint_id: int, timestamp: float) -> None:

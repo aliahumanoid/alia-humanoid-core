@@ -141,6 +141,38 @@ def test_jetson_telemetry_persists_health_loop_timing_and_attaches_it_to_health_
     assert health_record["loop_max_us"] == 2200
 
 
+def test_jetson_telemetry_attaches_health_can_details(tmp_path: Path):
+    telemetry = TelemetryManager(_build_config())
+    telemetry._diagnostic_history = DiagnosticHistoryWriter(tmp_path, source="test_suite")
+
+    can_details = struct.pack("<BBBBBBBB", 0x81, 7, 11, 12, 0x04, 21, 22, 0x20)
+    summary = struct.pack("<BBBBHBB", 0x00, 0x6F, 4, 2, 123, 9, 7)
+    counters = struct.pack("<BBBBBBBB", 0x40, 1, 2, 3, 4, 5, 6, 7)
+
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, can_details, 1000.0)
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, summary, 1000.1)
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, counters, 1000.2)
+
+    payload = telemetry.states["KNEE_LEFT"].health_status
+    assert payload is not None
+    assert payload["host_can_tec"] == 11
+    assert payload["host_can_rec"] == 12
+    assert payload["host_can_eflg"] == 0x04
+    assert payload["host_can_eflg_names"] == ["TXWAR"]
+    assert payload["motor_can_tec"] == 21
+    assert payload["motor_can_rec"] == 22
+    assert payload["motor_can_eflg_names"] == ["TXBO"]
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "knee_left.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    can_record = next(row for row in records if row["type"] == "health_can_details")
+    health_record = next(row for row in records if row["type"] == "health_status")
+    assert can_record["host_can_eflg_names"] == ["TXWAR"]
+    assert health_record["motor_can_eflg"] == 0x20
+
+
 def test_jetson_telemetry_decodes_faults_and_events(tmp_path: Path):
     telemetry = TelemetryManager(_build_config())
     telemetry._diagnostic_history = DiagnosticHistoryWriter(tmp_path, source="test_suite")
@@ -168,6 +200,7 @@ def test_jetson_telemetry_decodes_faults_and_events(tmp_path: Path):
 
 def test_can_bus_logger_decodes_new_diagnostic_frames():
     summary = struct.pack("<BBBBHBB", 0x00, 0x6F, 4, 2, 123, 9, 7)
+    can_details = struct.pack("<BBBBBBBB", 0x81, 7, 11, 12, 0x04, 21, 22, 0x20)
     fault_frame = struct.pack("<BHHBBB", 3, 0x0009, 0x0008, 3, 0, 5)
     event_frame = struct.pack("<BBBBBBH", 0x08, 0x46, 1, 0, 12, 4, 33)
 
@@ -178,6 +211,11 @@ def test_can_bus_logger_decodes_new_diagnostic_frames():
     decoded, high_freq = _decode_rx(CAN_ID_FAULT_STATUS + 1, fault_frame)
     assert decoded.startswith("FAULT_STATUS j=1")
     assert "HOST_WATCHDOG_TIMEOUT" in decoded
+    assert high_freq is False
+
+    decoded, high_freq = _decode_rx(CAN_ID_HEALTH_STATUS + 1, can_details)
+    assert decoded.startswith("HEALTH_CAN j=1")
+    assert "eflg=0x04" in decoded
     assert high_freq is False
 
     decoded, high_freq = _decode_rx(CAN_ID_EVENT_NOTICE + 1, event_frame)

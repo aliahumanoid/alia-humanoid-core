@@ -168,6 +168,8 @@ static constexpr uint8_t DIAG_MOTOR_CAN_WARN_ASSERT_THRESHOLD = 32;
 static constexpr uint8_t DIAG_MOTOR_CAN_WARN_CLEAR_THRESHOLD = 8;
 static constexpr uint8_t DIAG_CAN_WARN_ASSERT_SAMPLES = 2;
 static constexpr uint8_t DIAG_CAN_WARN_CLEAR_SAMPLES = 2;
+static constexpr uint8_t DIAG_HEALTH_EXT_LOOP_TIMING = 0x00;
+static constexpr uint8_t DIAG_HEALTH_EXT_CAN_DETAILS = 0x01;
 static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 1;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_QUERY_META = 0x00;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_BEGIN_DUMP = 0x01;
@@ -240,6 +242,9 @@ static uint32_t diag_last_host_can_warn_sample_ms = 0;
 static uint8_t diag_last_host_can_tx_error_count = 0;
 static uint8_t diag_last_host_can_rx_error_count = 0;
 static uint8_t diag_last_motor_can_tx_error_count = 0;
+static uint8_t diag_last_host_can_eflg = 0;
+static uint8_t diag_last_motor_can_rx_error_count = 0;
+static uint8_t diag_last_motor_can_eflg = 0;
 
 struct __attribute__((packed)) DiagSnapshotHeaderV1 {
   uint8_t layout_version;
@@ -839,7 +844,10 @@ static void diagUpdateCanWarnFault(DiagFaultCode code, uint8_t source_id, uint8_
 static void diagSampleCanHealthCounters() {
   diag_last_host_can_tx_error_count = CAN_HOST.errorCountTX();
   diag_last_host_can_rx_error_count = CAN_HOST.errorCountRX();
+  diag_last_host_can_eflg = CAN_HOST.getError();
   diag_last_motor_can_tx_error_count = CAN.errorCountTX();
+  diag_last_motor_can_rx_error_count = CAN.errorCountRX();
+  diag_last_motor_can_eflg = CAN.getError();
   diag_last_host_can_warn_sample_ms = millis();
 
   const uint8_t host_peak = max(diag_last_host_can_tx_error_count, diag_last_host_can_rx_error_count);
@@ -1010,7 +1018,28 @@ static void sendHealthStatusData() {
   frame2.seq = seq;
   CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame2), (uint8_t *)&frame2);
 
-  // Frame 3: loop timing (optional, same 1Hz cadence, zero impact on control loop)
+  struct __attribute__((packed)) {
+    uint8_t frame_kind;
+    uint8_t seq;
+    uint8_t host_can_tec;
+    uint8_t host_can_rec;
+    uint8_t host_can_eflg;
+    uint8_t motor_can_tec;
+    uint8_t motor_can_rec;
+    uint8_t motor_can_eflg;
+  } frame3;
+
+  frame3.frame_kind = static_cast<uint8_t>(0x80 | DIAG_HEALTH_EXT_CAN_DETAILS);
+  frame3.seq = seq;
+  frame3.host_can_tec = diag_last_host_can_tx_error_count;
+  frame3.host_can_rec = diag_last_host_can_rx_error_count;
+  frame3.host_can_eflg = diag_last_host_can_eflg;
+  frame3.motor_can_tec = diag_last_motor_can_tx_error_count;
+  frame3.motor_can_rec = diag_last_motor_can_rx_error_count;
+  frame3.motor_can_eflg = diag_last_motor_can_eflg;
+  CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t *)&frame3);
+
+  // Frame 4: loop timing (optional, same 1Hz cadence, zero impact on control loop)
   // DISABLED pending investigation of startup timeout regression.
   // The extra CAN_HOST.sendMsgBuf may interfere with SPI1 during
   // recalc offset, or the 3-frame burst may overflow the SLCAN adapter.

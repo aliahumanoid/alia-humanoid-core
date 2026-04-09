@@ -27,6 +27,10 @@ from .protocol import encode_loop_frequency
 
 logger = logging.getLogger("jetson_controller.exercise")
 
+CAN_PREFLIGHT_TIMEOUT_S = 1.5
+CAN_PREFLIGHT_HOST_ERROR_LIMIT = 8
+CAN_PREFLIGHT_MOTOR_ERROR_LIMIT = 8
+
 
 @dataclass(frozen=True)
 class ExerciseStep:
@@ -177,6 +181,91 @@ def _move_timeout(current_deg: float, target_deg: float,
     return max(2.5, (travel / max(speed_deg_s, 1.0)) + 2.0)
 
 
+def _can_preflight_snapshot(joint_key: str, state) -> dict[str, object]:
+    health = state.health_status if isinstance(state.health_status, dict) else {}
+    fault = getattr(state, "fault_status", None)
+    active_faults = list(getattr(fault, "active_fault_names", []) or [])
+    return {
+        "joint_key": joint_key,
+        "phase": health.get("phase"),
+        "active_faults": active_faults,
+        "host_can_tx_error_count": health.get("host_can_tx_error_count"),
+        "host_can_rx_error_count": health.get("host_can_rx_error_count"),
+        "motor_can_tx_error_count": health.get("motor_can_tx_error_count"),
+        "host_can_tec": health.get("host_can_tec"),
+        "host_can_rec": health.get("host_can_rec"),
+        "host_can_eflg": health.get("host_can_eflg"),
+        "host_can_eflg_names": health.get("host_can_eflg_names", []),
+        "motor_can_tec": health.get("motor_can_tec"),
+        "motor_can_rec": health.get("motor_can_rec"),
+        "motor_can_eflg": health.get("motor_can_eflg"),
+        "motor_can_eflg_names": health.get("motor_can_eflg_names", []),
+    }
+
+
+async def _run_can_preflight(config: ControllerConfig, telemetry: TelemetryManager) -> dict[str, dict[str, object]]:
+    deadline = time.monotonic() + CAN_PREFLIGHT_TIMEOUT_S
+    pending = set(config.joints.keys())
+
+    while pending and time.monotonic() < deadline:
+        pending = {
+            joint_key
+            for joint_key in pending
+            if not isinstance(getattr(telemetry.states.get(joint_key), "health_status", None), dict)
+        }
+        if pending:
+            await asyncio.sleep(0.05)
+
+    if pending:
+        raise RuntimeError(
+            "CAN preflight timed out waiting for health telemetry: "
+            + ", ".join(sorted(pending))
+        )
+
+    summary: dict[str, dict[str, object]] = {}
+    errors: list[str] = []
+    for joint_key in config.joints.keys():
+        state = telemetry.states[joint_key]
+        snapshot = _can_preflight_snapshot(joint_key, state)
+        summary[joint_key] = snapshot
+
+        active_faults = set(snapshot["active_faults"])
+        active_can_faults = sorted(active_faults & {"HOST_CAN_WARN", "MOTOR_CAN_WARN"})
+        if active_can_faults:
+            errors.append(f"{joint_key}: active CAN faults={active_can_faults}")
+
+        host_can_eflg = int(snapshot.get("host_can_eflg") or 0)
+        motor_can_eflg = int(snapshot.get("motor_can_eflg") or 0)
+        if host_can_eflg:
+            errors.append(
+                f"{joint_key}: host CAN EFLG=0x{host_can_eflg:02X} "
+                f"{snapshot.get('host_can_eflg_names', [])}"
+            )
+        if motor_can_eflg:
+            errors.append(
+                f"{joint_key}: motor CAN EFLG=0x{motor_can_eflg:02X} "
+                f"{snapshot.get('motor_can_eflg_names', [])}"
+            )
+
+        host_tec = int(snapshot.get("host_can_tec") or snapshot.get("host_can_tx_error_count") or 0)
+        host_rec = int(snapshot.get("host_can_rec") or snapshot.get("host_can_rx_error_count") or 0)
+        motor_tec = int(snapshot.get("motor_can_tec") or snapshot.get("motor_can_tx_error_count") or 0)
+        motor_rec = int(snapshot.get("motor_can_rec") or 0)
+        if host_tec > CAN_PREFLIGHT_HOST_ERROR_LIMIT or host_rec > CAN_PREFLIGHT_HOST_ERROR_LIMIT:
+            errors.append(
+                f"{joint_key}: host CAN counters high tec/rec={host_tec}/{host_rec}"
+            )
+        if motor_tec > CAN_PREFLIGHT_MOTOR_ERROR_LIMIT or motor_rec > CAN_PREFLIGHT_MOTOR_ERROR_LIMIT:
+            errors.append(
+                f"{joint_key}: motor CAN counters high tec/rec={motor_tec}/{motor_rec}"
+            )
+
+    if errors:
+        raise RuntimeError("CAN preflight failed: " + "; ".join(errors))
+
+    return summary
+
+
 async def run_exercise(config_path: str | None,
                        verbose: bool,
                        selected_joints: list[str] | None,
@@ -191,7 +280,8 @@ async def run_exercise(config_path: str | None,
                        inner_loop_us: int | None,
                        outer_loop_divisor: int | None,
                        estop_on_exit: bool,
-                       report_json: str | None = None) -> int:
+                       report_json: str | None = None,
+                       can_preflight: bool = True) -> int:
     setup_logging(verbose)
     config: ControllerConfig | None = None
     plans: list[ExerciseDofPlan] = []
@@ -199,6 +289,7 @@ async def run_exercise(config_path: str | None,
     startup_completed_at_unix: float | None = None
     movement_started_at_unix: float | None = None
     movement_finished_at_unix: float | None = None
+    can_preflight_summary: dict[str, dict[str, object]] | None = None
     step_count = 0
     failure_reason: str | None = None
 
@@ -269,6 +360,10 @@ async def run_exercise(config_path: str | None,
         if not ready:
             return 1
         startup_completed_at_unix = time.time()
+
+        if can_preflight:
+            can_preflight_summary = await _run_can_preflight(config, telemetry)
+            logger.info("CAN preflight passed for %d joint(s)", len(can_preflight_summary))
 
         if inner_loop_us is not None or outer_loop_divisor is not None:
             inner_us = inner_loop_us or 2000
@@ -402,6 +497,8 @@ async def run_exercise(config_path: str | None,
                 "min_excursion_deg": min_excursion_deg,
                 "inner_loop_us": inner_loop_us,
                 "outer_loop_divisor": outer_loop_divisor,
+                "can_preflight_enabled": can_preflight,
+                "can_preflight_summary": can_preflight_summary,
                 "estop_on_exit": estop_on_exit,
                 "session_log_path": str(get_log_path()),
                 "started_at_unix": run_started_at_unix,
@@ -471,6 +568,11 @@ def cli() -> None:
         "--report-json",
         help="Write a structured JSON report for this exercise run",
     )
+    parser.add_argument(
+        "--skip-can-preflight",
+        action="store_true",
+        help="Skip the startup CAN-health preflight gate for this run only",
+    )
     parser.add_argument("--estop-on-exit", action="store_true", help="Send EMERGENCY_STOP after the exercise completes")
     args = parser.parse_args()
 
@@ -496,6 +598,7 @@ def cli() -> None:
             args.outer_loop_divisor,
             args.estop_on_exit,
             args.report_json,
+            not args.skip_can_preflight,
         )
     )
     sys.exit(exit_code)
