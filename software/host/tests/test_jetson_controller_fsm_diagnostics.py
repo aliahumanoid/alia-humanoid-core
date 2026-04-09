@@ -196,3 +196,78 @@ def test_fsm_resume_blocks_if_estop_fault_remains_active(monkeypatch):
     assert fsm.state == FSMState.ERROR
     assert "ESTOP_LATCHED" in messages[-1][1]
     assert "PRETENSION_ALL" in messages[-1][1]
+
+
+def test_fsm_resume_recovers_when_controller_reports_estop_latched_without_host_latch(monkeypatch):
+    config = _build_config()
+    state = _telemetry_state(
+        ready=True,
+        phase="FAULT_LOCKOUT",
+        active_faults=["ESTOP_LATCHED"],
+        latched_faults=["ESTOP_LATCHED"],
+    )
+    telemetry = SimpleNamespace(states={"KNEE_LEFT": state})
+    safety = SafetyManager()
+    fsm = StartupFSM()
+
+    async def recover(*_args, **_kwargs) -> None:
+        state.fault_status = _fault_status(latched=["ESTOP_LATCHED"])
+        state.health_status = {"phase": "READY"}
+
+    async def should_not_home(*_args, **_kwargs) -> None:
+        raise AssertionError("resume path should not home already-ready joints")
+
+    monkeypatch.setattr(fsm_module.asyncio, "sleep", _noop)
+    fsm._startup = _noop  # type: ignore[method-assign]
+    fsm._recover_ready_joints_after_estop = recover  # type: ignore[method-assign]
+    fsm._stream = _noop  # type: ignore[method-assign]
+    fsm._init_gains = _noop  # type: ignore[method-assign]
+    fsm._home = should_not_home  # type: ignore[method-assign]
+
+    result = asyncio.run(fsm.run_startup(object(), config, telemetry, safety))
+
+    assert result is True
+    assert fsm.state == FSMState.READY
+    assert safety.estop_latched is False
+
+
+def test_fsm_resume_waits_for_delayed_estop_fault_and_recovers(monkeypatch):
+    config = _build_config()
+    state = _telemetry_state(
+        ready=True,
+        phase="READY",
+        active_faults=[],
+        latched_faults=["ESTOP_LATCHED"],
+    )
+    telemetry = SimpleNamespace(states={"KNEE_LEFT": state})
+    safety = SafetyManager()
+    fsm = StartupFSM()
+
+    async def recover(*_args, **_kwargs) -> None:
+        state.fault_status = _fault_status(latched=["ESTOP_LATCHED"])
+        state.health_status = {"phase": "READY"}
+
+    async def delayed_estop(*_args, **_kwargs) -> bool:
+        state.fault_status = _fault_status(
+            active=["ESTOP_LATCHED"],
+            latched=["ESTOP_LATCHED"],
+        )
+        state.health_status = {"phase": "FAULT_LOCKOUT"}
+        return True
+
+    async def should_not_home(*_args, **_kwargs) -> None:
+        raise AssertionError("resume path should not home already-ready joints")
+
+    monkeypatch.setattr(fsm_module.asyncio, "sleep", _noop)
+    fsm._startup = _noop  # type: ignore[method-assign]
+    fsm._wait_for_active_estop_latch = delayed_estop  # type: ignore[method-assign]
+    fsm._recover_ready_joints_after_estop = recover  # type: ignore[method-assign]
+    fsm._stream = _noop  # type: ignore[method-assign]
+    fsm._init_gains = _noop  # type: ignore[method-assign]
+    fsm._home = should_not_home  # type: ignore[method-assign]
+
+    result = asyncio.run(fsm.run_startup(object(), config, telemetry, safety))
+
+    assert result is True
+    assert fsm.state == FSMState.READY
+    assert safety.estop_latched is False

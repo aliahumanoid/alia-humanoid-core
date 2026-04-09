@@ -107,7 +107,13 @@ class StartupFSM:
         """
         try:
             all_ready_on_entry = self._all_joints_ready(config, telemetry)
-            recovering_after_estop = all_ready_on_entry and safety.estop_latched
+            telemetry_estop_latched = (
+                all_ready_on_entry
+                and self._has_active_estop_latch(config, telemetry)
+            )
+            recovering_after_estop = all_ready_on_entry and (
+                safety.estop_latched or telemetry_estop_latched
+            )
             self._assert_no_blocking_diagnostics(
                 config,
                 telemetry,
@@ -127,6 +133,10 @@ class StartupFSM:
             await self._stream(can_bus, config, telemetry)
             await self._init_gains(can_bus, config, telemetry, safety)
             await asyncio.sleep(0.15)
+            if all_ready_on_entry and not recovering_after_estop:
+                if await self._wait_for_active_estop_latch(config, telemetry):
+                    await self._recover_ready_joints_after_estop(can_bus, config)
+                    recovering_after_estop = True
             self._assert_no_blocking_diagnostics(
                 config,
                 telemetry,
@@ -182,6 +192,37 @@ class StartupFSM:
             if state is None or state.announce is None or not state.announce.ready:
                 return False
         return True
+
+    @staticmethod
+    def _has_active_estop_latch(config: ControllerConfig,
+                                telemetry: TelemetryManager) -> bool:
+        for key in config.joints:
+            state = telemetry.states.get(key)
+            if state is None:
+                continue
+            fault = getattr(state, "fault_status", None)
+            if fault is None:
+                continue
+            if "ESTOP_LATCHED" in getattr(fault, "active_fault_names", []):
+                return True
+        return False
+
+    async def _wait_for_active_estop_latch(self, config: ControllerConfig,
+                                           telemetry: TelemetryManager,
+                                           timeout_s: float = 1.2) -> bool:
+        """Allow one diagnostic cycle to reveal a latent ESTOP_LATCHED fault.
+
+        When reconnecting to a controller that still announces ``ready=True``,
+        fault telemetry can lag behind JOINT_ANNOUNCE by up to about one second.
+        Give the controller a short window to publish ESTOP_LATCHED before
+        assuming the resume path is safe.
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._has_active_estop_latch(config, telemetry):
+                return True
+            await asyncio.sleep(0.05)
+        return self._has_active_estop_latch(config, telemetry)
 
     @staticmethod
     def _assert_no_blocking_diagnostics(
