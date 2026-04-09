@@ -667,6 +667,12 @@ Residual issues observed on the same bench:
   requires a mechanically known neutral pose
 - diagnostics are not yet clean under motion: `MOTOR_CAN_WARN` and
   `LOOP_OVERRUN` still appear during `±10°` and `±15°` exercise runs
+- a later cold-start validation, with motor power applied and host-side
+  `PRETENSION_ALL` forced before startup, stalled in persistent
+  `MOTOR_TIMEOUT`; the Jetson host now reports that condition explicitly
+  instead of collapsing into a misleading `POSITION_RANGE` startup failure.
+  This is now a bench hardware / motor CAN readiness blocker, not an ambiguous
+  host-state bug.
 - therefore this slice is **bench-usable**, but not yet “fully clean” by the
   stricter criteria below
 

@@ -231,6 +231,32 @@ def test_fsm_resume_recovers_when_controller_reports_estop_latched_without_host_
     assert safety.estop_latched is False
 
 
+def test_fsm_wait_for_faults_clear_observes_motor_timeout_recovery(monkeypatch):
+    config = _build_config()
+    state = _telemetry_state(
+        ready=False,
+        phase="FAULT_LOCKOUT",
+        active_faults=["MOTOR_TIMEOUT"],
+        latched_faults=["MOTOR_TIMEOUT"],
+    )
+    telemetry = SimpleNamespace(states={"KNEE_LEFT": state})
+    fsm = StartupFSM()
+    calls = {"sleep": 0}
+
+    async def fake_sleep(_delay: float) -> None:
+        calls["sleep"] += 1
+        if calls["sleep"] == 1:
+            state.fault_status = _fault_status(latched=["MOTOR_TIMEOUT"])
+
+    monkeypatch.setattr(fsm_module.asyncio, "sleep", fake_sleep)
+
+    cleared = asyncio.run(
+        fsm._wait_for_faults_clear(config, telemetry, {"MOTOR_TIMEOUT"}, timeout_s=0.2)
+    )
+
+    assert cleared is True
+
+
 def test_fsm_resume_waits_for_delayed_estop_fault_and_recovers(monkeypatch):
     config = _build_config()
     state = _telemetry_state(

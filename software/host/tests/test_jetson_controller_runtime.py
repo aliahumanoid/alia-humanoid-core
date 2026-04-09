@@ -334,6 +334,135 @@ def test_wait_for_candidate_boot_reports_stale_selector_hint_when_stuck_pending_
     asyncio.run(scenario())
 
 
+def test_exercise_applies_loop_frequency_override_before_impedance_start():
+    _install_fake_rich()
+    _install_fake_yaml()
+
+    from jetson_controller import exercise as mod
+    from jetson_controller.protocol import encode_loop_frequency
+
+    sent_frames = []
+    start_snapshots = []
+
+    class _FakeCanBus:
+        connected = False
+
+        async def send(self, arbitration_id, data):
+            sent_frames.append((arbitration_id, bytes(data)))
+
+        async def disconnect(self):
+            return None
+
+    class _FakeTelemetry:
+        def __init__(self, _config):
+            self.states = {}
+
+        async def listen(self, _can_bus):
+            await asyncio.sleep(3600)
+
+        def stop(self):
+            return None
+
+        def any_stale(self):
+            return False
+
+    class _FakeSafety:
+        async def send_estop(self, *_args, **_kwargs):
+            return None
+
+    class _FakeImpedance:
+        def __init__(self, _config):
+            self.targets = {
+                "hip_roll_bench_right": {
+                    0: types.SimpleNamespace(q_deg=0.0),
+                }
+            }
+
+        def start(self, _can_bus):
+            start_snapshots.append(list(sent_frames))
+
+        def set_target(self, *_args, **_kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+    class _FakeFSM:
+        async def run_discover(self, *_args, **_kwargs):
+            return True
+
+        async def run_startup(self, _can_bus, config, _telemetry, _safety):
+            assert config.startup_pretension_all is True
+            return True
+
+    config = types.SimpleNamespace(
+        can_interface="slcan",
+        can_channel="dummy",
+        joints={
+            "hip_roll_bench_right": types.SimpleNamespace(
+                joint_id=8,
+                name="Hip Roll Bench Right",
+                dof_count=1,
+                min_angles={0: -20.0},
+                max_angles={0: 20.0},
+            )
+        },
+        nudge_speed_deg_s=5.0,
+        homing_tolerance_deg=1.0,
+        startup_pretension_all=False,
+    )
+
+    plan = mod.ExerciseDofPlan(
+        joint_key="hip_roll_bench_right",
+        dof=0,
+        center_deg=0.0,
+        targets_deg=[0.0],
+    )
+    step = mod.ExerciseStep(
+        joint_key="hip_roll_bench_right",
+        dof=0,
+        target_deg=0.0,
+    )
+
+    async def _wait_immediately(*_args, **_kwargs):
+        return True
+
+    async def scenario():
+        with mock.patch.object(mod, "load_config", return_value=config), \
+             mock.patch.object(mod, "CanBus", _FakeCanBus), \
+             mock.patch.object(mod, "TelemetryManager", _FakeTelemetry), \
+             mock.patch.object(mod, "SafetyManager", _FakeSafety), \
+             mock.patch.object(mod, "ImpedanceLoop", _FakeImpedance), \
+             mock.patch.object(mod, "StartupFSM", _FakeFSM), \
+             mock.patch.object(mod, "_build_plans", return_value=[plan]), \
+             mock.patch.object(mod, "_interleave_steps", return_value=[step]), \
+             mock.patch.object(mod, "_wait_for_target", _wait_immediately):
+            rc = await mod.run_exercise(
+                config_path=None,
+                verbose=False,
+                selected_joints=["hip_roll_bench_right"],
+                preflight_auto=False,
+                preflight_serials=None,
+                pretension_before_startup=True,
+                duration_s=0.0,
+                dwell_s=0.0,
+                span_cap_deg=10.0,
+                margin_deg=5.0,
+                min_excursion_deg=1.0,
+                inner_loop_us=2000,
+                outer_loop_divisor=5,
+                estop_on_exit=False,
+            )
+            assert rc == 0
+
+    asyncio.run(scenario())
+
+    expected = encode_loop_frequency(2000, 5)
+    assert sent_frames[0] == expected
+    assert start_snapshots
+    assert start_snapshots[0][0] == expected
+
+
 def test_fw_update_stream_image_retries_recoverable_page_error():
     from jetson_controller import fw_update as mod
 

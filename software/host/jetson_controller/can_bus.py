@@ -20,6 +20,7 @@ import can
 from .protocol import (
     MULTI_FRAME_DELAY_S,
     CAN_ID_EMERGENCY_STOP, CAN_ID_TIME_SYNC, CAN_ID_ENCODER_STREAM_CTRL,
+    CAN_ID_LOOP_FREQUENCY,
     CAN_ID_IDENTIFY_REQUEST, CAN_ID_STARTUP_SEQUENCE,
     CAN_ID_PRETENSION_ALL,
     CAN_ID_SET_IMPEDANCE, CAN_ID_IMPEDANCE_CTRL, CAN_ID_FAULT_SNAPSHOT_CTRL,
@@ -74,6 +75,16 @@ def _decode_tx(arb_id: int, data: bytes) -> str:
     if arb_id == CAN_ID_ENCODER_STREAM_CTRL:
         start = bool(data[0]) if data else False
         return f"ENCODER_STREAM {'START' if start else 'STOP'}"
+
+    if arb_id == CAN_ID_LOOP_FREQUENCY and len(data) >= 3:
+        inner_period_us = struct.unpack_from("<H", data, 0)[0]
+        outer_divisor = data[2]
+        inner_hz = 1000000.0 / inner_period_us if inner_period_us else 0.0
+        outer_hz = inner_hz / outer_divisor if outer_divisor else 0.0
+        return (
+            f"LOOP_FREQUENCY inner={inner_period_us}us ({inner_hz:.1f}Hz) "
+            f"outer_div={outer_divisor} ({outer_hz:.1f}Hz)"
+        )
 
     if arb_id == CAN_ID_STARTUP_SEQUENCE:
         joint_id = data[0] if data else 0

@@ -102,6 +102,9 @@
 - restano aperti:
   - test distruttivo della reference (`REFERENCE_REQUIRED -> Set Reference -> reboot`)
   - pulizia diagnostica sotto movimento (`MOTOR_CAN_WARN`, `LOOP_OVERRUN`)
+  - cold-start del bench con motore alimentato: al momento il blocco osservato
+    è `MOTOR_TIMEOUT` persistente dopo `PRETENSION_ALL`, ora riportato
+    esplicitamente dal host invece di apparire come `POSITION_RANGE`
 
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi

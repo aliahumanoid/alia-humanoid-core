@@ -21,6 +21,7 @@ from .safety import SafetyManager
 from .serial_monitor import discover_ports, preflight_boot
 from .session_log import get_log_path, setup_session_logging
 from .telemetry import TelemetryManager
+from .protocol import encode_loop_frequency
 
 logger = logging.getLogger("jetson_controller.exercise")
 
@@ -170,11 +171,14 @@ async def run_exercise(config_path: str | None,
                        selected_joints: list[str] | None,
                        preflight_auto: bool,
                        preflight_serials: list[str] | None,
+                       pretension_before_startup: bool,
                        duration_s: float,
                        dwell_s: float,
                        span_cap_deg: float,
                        margin_deg: float,
                        min_excursion_deg: float,
+                       inner_loop_us: int | None,
+                       outer_loop_divisor: int | None,
                        estop_on_exit: bool) -> int:
     setup_logging(verbose)
 
@@ -183,6 +187,9 @@ async def run_exercise(config_path: str | None,
     except (FileNotFoundError, ValueError) as exc:
         logger.error(f"Configuration error: {exc}")
         return 1
+
+    if pretension_before_startup:
+        config.startup_pretension_all = True
 
     logger.info(f"Loaded config: {len(config.joints)} joints, CAN={config.can_interface}:{config.can_channel}")
     for key, jcfg in config.joints.items():
@@ -229,6 +236,20 @@ async def run_exercise(config_path: str | None,
         ready = await fsm.run_startup(can_bus, config, telemetry, safety)
         if not ready:
             return 1
+
+        if inner_loop_us is not None or outer_loop_divisor is not None:
+            inner_us = inner_loop_us or 2000
+            outer_div = outer_loop_divisor or 1
+            arb_id, payload = encode_loop_frequency(inner_us, outer_div)
+            await can_bus.send(arb_id, payload)
+            logger.info(
+                "Applied loop frequency override: inner=%dus (%.1fHz), outer_div=%d (%.1fHz)",
+                inner_us,
+                1000000.0 / inner_us,
+                outer_div,
+                (1000000.0 / inner_us) / outer_div,
+            )
+            await asyncio.sleep(0.2)
 
         impedance.start(can_bus)
         await asyncio.sleep(0.5)
@@ -354,13 +375,33 @@ def cli() -> None:
         action="append",
         help="Open a specific board USB serial port once before CAN startup (repeatable)",
     )
+    parser.add_argument(
+        "--pretension-before-startup",
+        action="store_true",
+        help="Force PRETENSION_ALL before startup for this run only",
+    )
     parser.add_argument("--duration-sec", type=float, default=300.0, help="Total exercise duration")
     parser.add_argument("--dwell-sec", type=float, default=0.2, help="Pause after each reached target")
     parser.add_argument("--span-cap-deg", type=float, default=20.0, help="Maximum excursion from home per DOF")
     parser.add_argument("--margin-deg", type=float, default=5.0, help="Keep this margin from configured limits")
     parser.add_argument("--min-excursion-deg", type=float, default=3.0, help="Minimum excursion to include in the pattern")
+    parser.add_argument(
+        "--inner-loop-us",
+        type=int,
+        help="Override inner control-loop period in microseconds for this run only",
+    )
+    parser.add_argument(
+        "--outer-loop-divisor",
+        type=int,
+        help="Override outer loop divisor for this run only (outer Hz = inner Hz / divisor)",
+    )
     parser.add_argument("--estop-on-exit", action="store_true", help="Send EMERGENCY_STOP after the exercise completes")
     args = parser.parse_args()
+
+    if args.inner_loop_us is not None and not (500 <= args.inner_loop_us <= 10000):
+        parser.error("--inner-loop-us must be between 500 and 10000")
+    if args.outer_loop_divisor is not None and not (1 <= args.outer_loop_divisor <= 20):
+        parser.error("--outer-loop-divisor must be between 1 and 20")
 
     exit_code = asyncio.run(
         run_exercise(
@@ -369,11 +410,14 @@ def cli() -> None:
             args.joint,
             args.preflight_auto,
             args.preflight_serial,
+            args.pretension_before_startup,
             args.duration_sec,
             args.dwell_sec,
             args.span_cap_deg,
             args.margin_deg,
             args.min_excursion_deg,
+            args.inner_loop_us,
+            args.outer_loop_divisor,
             args.estop_on_exit,
         )
     )

@@ -39,6 +39,7 @@ from typing import Optional
 CAN_ID_EMERGENCY_STOP = 0x000
 CAN_ID_TIME_SYNC = 0x002
 CAN_ID_ENCODER_STREAM_CTRL = 0x003
+CAN_ID_LOOP_FREQUENCY = 0x006
 CAN_ID_IDENTIFY_REQUEST = 0x008
 CAN_ID_STARTUP_SEQUENCE = 0x009
 CAN_ID_PRETENSION = 0x00C
@@ -707,6 +708,16 @@ def encode_encoder_stream_ctrl(start: bool) -> tuple[int, bytes]:
     """Encode encoder stream start/stop (0x003)."""
     payload = bytes([0x01 if start else 0x00]) + bytes(7)
     return CAN_ID_ENCODER_STREAM_CTRL, payload
+
+
+def encode_loop_frequency(inner_period_us: int, outer_divisor: int) -> tuple[int, bytes]:
+    """Encode loop frequency update (0x006).
+
+    byte 0-1: inner loop period in microseconds (uint16 LE)
+    byte 2: outer loop divisor (uint8)
+    """
+    payload = struct.pack("<HB", inner_period_us, outer_divisor).ljust(8, b"\x00")
+    return CAN_ID_LOOP_FREQUENCY, payload
 
 
 def encode_impedance_ctrl(joint_id: int, sub_cmd: int,

@@ -207,6 +207,20 @@ class StartupFSM:
                 return True
         return False
 
+    @staticmethod
+    def _active_fault_names(config: ControllerConfig,
+                            telemetry: TelemetryManager) -> set[str]:
+        active: set[str] = set()
+        for key in config.joints:
+            state = telemetry.states.get(key)
+            if state is None:
+                continue
+            fault = getattr(state, "fault_status", None)
+            if fault is None:
+                continue
+            active.update(getattr(fault, "active_fault_names", []))
+        return active
+
     async def _wait_for_active_estop_latch(self, config: ControllerConfig,
                                            telemetry: TelemetryManager,
                                            timeout_s: float = 1.2) -> bool:
@@ -223,6 +237,19 @@ class StartupFSM:
                 return True
             await asyncio.sleep(0.05)
         return self._has_active_estop_latch(config, telemetry)
+
+    async def _wait_for_faults_clear(self, config: ControllerConfig,
+                                     telemetry: TelemetryManager,
+                                     fault_names: set[str],
+                                     timeout_s: float) -> bool:
+        """Wait for a set of active fault names to clear from telemetry."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            active = self._active_fault_names(config, telemetry)
+            if not (active & fault_names):
+                return True
+            await asyncio.sleep(0.05)
+        return not (self._active_fault_names(config, telemetry) & fault_names)
 
     @staticmethod
     def _assert_no_blocking_diagnostics(
@@ -371,7 +398,25 @@ class StartupFSM:
             if config.startup_pretension_all:
                 arb_id, data = encode_pretension_all(jcfg.joint_id)
                 await can_bus.send(arb_id, data)
-                await asyncio.sleep(0.1)  # Let firmware process pretension
+                # Give the controller one diagnostic cycle to publish any
+                # post-pretension transient faults before deciding startup is safe.
+                await asyncio.sleep(0.15)
+                transient_faults = {"ESTOP_LATCHED", "MOTOR_TIMEOUT"}
+                if not await self._wait_for_faults_clear(
+                    config,
+                    telemetry,
+                    transient_faults,
+                    timeout_s=1.0,
+                ):
+                    still_active = sorted(
+                        self._active_fault_names(config, telemetry) & transient_faults
+                    )
+                    fault_text = ",".join(still_active) if still_active else "unknown"
+                    raise StartupError(
+                        f"{key} did not recover after PRETENSION_ALL: active={fault_text}. "
+                        "Check motor CAN bus, power stage, and motor responsiveness."
+                    )
+                await asyncio.sleep(0.05)
             else:
                 logger.info(f"Skipping PRETENSION_ALL before startup for {key}")
 
