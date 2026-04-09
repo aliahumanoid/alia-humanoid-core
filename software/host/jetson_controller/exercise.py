@@ -28,8 +28,9 @@ from .protocol import encode_loop_frequency
 logger = logging.getLogger("jetson_controller.exercise")
 
 CAN_PREFLIGHT_TIMEOUT_S = 1.5
-CAN_PREFLIGHT_HOST_ERROR_LIMIT = 8
-CAN_PREFLIGHT_MOTOR_ERROR_LIMIT = 8
+CAN_PREFLIGHT_HOST_ERROR_LIMIT = 64
+CAN_PREFLIGHT_MOTOR_ERROR_LIMIT = 32
+CAN_PREFLIGHT_EFLG_FATAL_MASK = 0x38  # TXBO | TXEP | RXEP
 
 
 @dataclass(frozen=True)
@@ -236,12 +237,12 @@ async def _run_can_preflight(config: ControllerConfig, telemetry: TelemetryManag
 
         host_can_eflg = int(snapshot.get("host_can_eflg") or 0)
         motor_can_eflg = int(snapshot.get("motor_can_eflg") or 0)
-        if host_can_eflg:
+        if host_can_eflg & CAN_PREFLIGHT_EFLG_FATAL_MASK:
             errors.append(
                 f"{joint_key}: host CAN EFLG=0x{host_can_eflg:02X} "
                 f"{snapshot.get('host_can_eflg_names', [])}"
             )
-        if motor_can_eflg:
+        if motor_can_eflg & CAN_PREFLIGHT_EFLG_FATAL_MASK:
             errors.append(
                 f"{joint_key}: motor CAN EFLG=0x{motor_can_eflg:02X} "
                 f"{snapshot.get('motor_can_eflg_names', [])}"
@@ -342,6 +343,8 @@ async def run_exercise(config_path: str | None,
     try:
         discovered = await fsm.run_discover(can_bus, config, telemetry)
         if not discovered:
+            exit_code = 1
+            failure_reason = "discover_failed"
             return 1
 
         if inner_loop_us is not None or outer_loop_divisor is not None:
@@ -358,6 +361,8 @@ async def run_exercise(config_path: str | None,
 
         ready = await fsm.run_startup(can_bus, config, telemetry, safety)
         if not ready:
+            exit_code = 1
+            failure_reason = "startup_failed"
             return 1
         startup_completed_at_unix = time.time()
 
