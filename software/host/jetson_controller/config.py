@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import can
 import serial.tools.list_ports
 import yaml
 
@@ -92,15 +93,31 @@ class ControllerConfig:
         return self.joints.get(key) if key else None
 
 
-def _autodetect_can_channel() -> str:
-    """Auto-detect CANable USB adapter by VID:PID.
+def _autodetect_can_channel(interface: str = "slcan") -> str:
+    """Auto-detect the CAN channel for the selected interface.
 
-    Known adapters:
-      CANable 2:  VID=16D0  PID=117E
+    For `slcan`, auto-detects a serial CANable USB adapter by VID:PID.
+    For `gs_usb`, defaults to device index ``0`` for the common single-adapter case.
+    For `candle`, returns the first detected python-can-candle channel.
 
     Falls back to description matching ('canable', 'can') if VID:PID
     is unknown.  Returns the device path, or raises FileNotFoundError.
     """
+    if interface == "gs_usb":
+        logger.info("Auto-selected gs_usb device index 0")
+        return "0"
+
+    if interface == "candle":
+        configs = can.detect_available_configs("candle")
+        if not configs:
+            raise FileNotFoundError(
+                "No candle backend device found. Ensure python-can-candle is installed "
+                "and the CANable is running candleLight firmware."
+            )
+        channel = str(configs[0].get("channel", 0))
+        logger.info("Auto-selected candle device channel %s", channel)
+        return channel
+
     # Known CAN adapter VID:PID pairs
     CAN_VID_PIDS = {
         (0x16D0, 0x117E),  # CANable 2
@@ -341,14 +358,15 @@ def load_config(yaml_path: Optional[str] = None,
     can_cfg = cfg.get("can", {})
     imp_cfg = cfg.get("impedance", {})
     homing_cfg = cfg.get("homing", {})
+    can_interface = can_cfg.get("interface", "slcan")
 
     # Auto-detect CAN channel if set to "auto" or empty
     can_channel = can_cfg.get("channel", "auto")
     if not can_channel or can_channel == "auto":
-        can_channel = _autodetect_can_channel()
+        can_channel = _autodetect_can_channel(can_interface)
 
     return ControllerConfig(
-        can_interface=can_cfg.get("interface", "slcan"),
+        can_interface=can_interface,
         can_channel=can_channel,
         can_bitrate=can_cfg.get("bitrate", 500000),
         startup_pretension_all=bool(cfg.get("startup", {}).get("pretension_all", False)),

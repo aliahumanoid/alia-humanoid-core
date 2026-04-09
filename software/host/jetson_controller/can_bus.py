@@ -7,9 +7,12 @@ thread and an asyncio.Queue for received messages.
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import glob
 import logging
 import queue
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -46,6 +49,70 @@ logger = logging.getLogger(__name__)
 _SUMMARY_INTERVAL_S = 5.0
 _TX_QUEUE_POLL_S = 0.1
 _TX_SENTINEL = object()
+
+
+def _configure_macos_gs_usb_backend() -> None:
+    """Force gs_usb to use the arm64 Homebrew libusb on macOS when needed."""
+    if sys.platform != "darwin":
+        return
+
+    try:
+        import usb.backend.libusb1
+        import gs_usb.gs_usb as gs_usb_module
+    except Exception as exc:  # pragma: no cover - optional path
+        logger.debug("gs_usb backend helper unavailable: %s", exc)
+        return
+
+    if getattr(gs_usb_module.GsUsb, "_macos_start_patch_installed", False) is False:
+        original_start = gs_usb_module.GsUsb.start
+
+        def _macos_start(self, flags=(
+            gs_usb_module.GS_CAN_MODE_NORMAL | gs_usb_module.GS_CAN_MODE_HW_TIMESTAMP
+        )):
+            """macOS variant that skips libusb_detach_kernel_driver()."""
+            self.gs_usb.reset()
+            flags &= self.device_capability.feature
+            flags &= (
+                gs_usb_module.GS_CAN_MODE_LISTEN_ONLY
+                | gs_usb_module.GS_CAN_MODE_LOOP_BACK
+                | gs_usb_module.GS_CAN_MODE_ONE_SHOT
+                | gs_usb_module.GS_CAN_MODE_HW_TIMESTAMP
+            )
+            self.device_flags = flags
+            mode = gs_usb_module.DeviceMode(gs_usb_module.GS_CAN_MODE_START, flags)
+            self.gs_usb.ctrl_transfer(
+                0x41,
+                gs_usb_module._GS_USB_BREQ_MODE,
+                0,
+                0,
+                mode.pack(),
+            )
+
+        gs_usb_module.GsUsb.start = _macos_start
+        gs_usb_module.GsUsb._macos_start_patch_installed = True
+        gs_usb_module.GsUsb._original_start = original_start
+
+    if usb.backend.libusb1.get_backend() is not None:
+        return
+
+    candidates = [
+        "/opt/homebrew/opt/libusb/lib/libusb-1.0.dylib",
+        *sorted(glob.glob("/opt/homebrew/Cellar/libusb/*/lib/libusb-1.0.dylib")),
+    ]
+
+    for path in candidates:
+        try:
+            ctypes.CDLL(path)
+        except OSError:
+            continue
+
+        backend = usb.backend.libusb1.get_backend(find_library=lambda _name, p=path: p)
+        if backend is not None:
+            gs_usb_module.libusb1.get_backend = lambda backend=backend: backend
+            logger.info("Configured macOS gs_usb backend via %s", path)
+            return
+
+    logger.warning("gs_usb requested on macOS, but no compatible arm64 libusb backend was found")
 
 
 @dataclass
@@ -469,11 +536,24 @@ class CanBus:
         self._rx_queue = asyncio.Queue(maxsize=2000)
         self._tx_queue = queue.Queue()
 
+        bus_channel: object = channel
+        bus_kwargs: dict[str, object] = {}
+        if interface == "gs_usb":
+            _configure_macos_gs_usb_backend()
+            if isinstance(channel, str) and channel.isdigit():
+                bus_channel = int(channel)
+        elif interface == "candle":
+            if isinstance(channel, str) and channel.isdigit():
+                bus_channel = int(channel)
+            # python-can-candle recommends ignore_config=True to avoid coercion surprises
+            bus_kwargs["ignore_config"] = True
+
         logger.info(f"Connecting CAN: {interface} @ {channel} ({bitrate} bps)")
         self._bus = can.interface.Bus(
             interface=interface,
-            channel=channel,
+            channel=bus_channel,
             bitrate=bitrate,
+            **bus_kwargs,
         )
         logger.info("CAN bus connected")
 
@@ -556,6 +636,12 @@ class CanBus:
             try:
                 msg = self._bus.recv(timeout=0.2)
                 if msg is None:
+                    continue
+                # python-can-candle surfaces local TX echoes as messages with
+                # is_rx=False. For firmware update they would pollute the RX
+                # stream with our own PAGE_BEGIN/DATA frames and desync the
+                # protocol state machine, so drop them here.
+                if getattr(msg, "is_rx", True) is False:
                     continue
                 self.rx_count += 1
                 # Thread-safe put into asyncio queue

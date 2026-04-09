@@ -218,6 +218,59 @@ def test_can_bus_send_propagates_tx_errors():
     asyncio.run(scenario())
 
 
+def test_can_bus_listener_drops_tx_echo_frames():
+    from jetson_controller.can_bus import CanBus
+
+    class _FakeLoop:
+        def __init__(self):
+            self.scheduled = []
+
+        def call_soon_threadsafe(self, callback, *args):
+            self.scheduled.append((callback, args))
+
+    class _FakeBus:
+        def __init__(self, owner):
+            self._owner = owner
+            self._calls = 0
+
+        def recv(self, timeout=0.2):
+            self._calls += 1
+            if self._calls == 1:
+                self._owner._listener_stop.set()
+                return types.SimpleNamespace(
+                    arbitration_id=0x123,
+                    data=b"\x01\x02",
+                    is_rx=False,
+                )
+            return None
+
+    bus = CanBus()
+    bus._loop = _FakeLoop()
+    bus._rx_queue = object()
+    bus._bus = _FakeBus(bus)
+    bus._listener_stop.clear()
+
+    with mock.patch.object(bus, "_log_rx") as log_rx:
+        bus._listen_loop()
+
+    assert bus.rx_count == 0
+    assert bus._loop.scheduled == []
+    log_rx.assert_not_called()
+
+
+def test_config_autodetect_candle_channel():
+    from jetson_controller import config as mod
+
+    with mock.patch.object(
+        mod.can,
+        "detect_available_configs",
+        return_value=[{"interface": "candle", "channel": "001A00473945501720303651:0"}],
+    ):
+        channel = mod._autodetect_can_channel("candle")
+
+    assert channel == "001A00473945501720303651:0"
+
+
 def test_fw_update_stream_image_supports_periodic_burst_pause():
     from jetson_controller import fw_update as mod
 
