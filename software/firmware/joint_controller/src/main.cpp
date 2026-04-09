@@ -20,6 +20,22 @@
 #include "FirmwareUpdateMetadata.h"
 #include "RuntimeProvisioning.h"
 
+#ifndef MOTOR_CAN_MCP_BITRATE
+#define MOTOR_CAN_MCP_BITRATE CAN_1000KBPS
+#endif
+
+#ifndef HOST_CAN_MCP_BITRATE
+#define HOST_CAN_MCP_BITRATE CAN_500KBPS
+#endif
+
+#ifndef MOTOR_CAN_BITRATE_KBPS
+#define MOTOR_CAN_BITRATE_KBPS 1000
+#endif
+
+#ifndef HOST_CAN_BITRATE_KBPS
+#define HOST_CAN_BITRATE_KBPS 500
+#endif
+
 extern "C" uint8_t __flash_binary_start;
 extern "C" uint8_t __flash_binary_end;
 
@@ -413,16 +429,18 @@ void setup() {
   // an undefined MISO state that could cause bus contention during tests.
 
   // Initialize Motor CAN module (J4 CAN_Servo)
-  if (CAN.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
-    LOG_INFO("Motor CAN (J4) initialized successfully on SPI1, CS=GP" + String(CAN_CS_PIN));
+  if (CAN.begin(MCP_ANY, MOTOR_CAN_MCP_BITRATE, MCP_8MHZ) == CAN_OK) {
+    LOG_INFO("Motor CAN (J4) initialized successfully on SPI1, CS=GP" + String(CAN_CS_PIN) +
+             ", bitrate=" + String(MOTOR_CAN_BITRATE_KBPS) + " kbps");
   } else {
     LOG_ERROR("Failed to initialize Motor CAN on SPI1!");
     LOG_INFO("Continuing without Motor CAN (normal for serial-only testing)");
   }
 
   // Initialize Host CAN module (J5 CAN_Controller)
-  if (CAN_HOST.begin(MCP_ANY, CAN_1000KBPS, MCP_8MHZ) == CAN_OK) {
-    LOG_INFO("Host CAN (J5) initialized successfully on SPI1, CS=GP" + String(CAN_HOST_CS_PIN));
+  if (CAN_HOST.begin(MCP_ANY, HOST_CAN_MCP_BITRATE, MCP_8MHZ) == CAN_OK) {
+    LOG_INFO("Host CAN (J5) initialized successfully on SPI1, CS=GP" + String(CAN_HOST_CS_PIN) +
+             ", bitrate=" + String(HOST_CAN_BITRATE_KBPS) + " kbps");
 
     // SAFETY: Flush any stale messages from MCP2515 RX buffers
     // This prevents old commands from executing after a reset

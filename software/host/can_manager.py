@@ -100,7 +100,7 @@ def _decode_state_bits(state_bits: int) -> Dict[str, bool]:
 class CanManager:
     """High-level helper that manages python-can Bus lifecycle and protocol helpers."""
 
-    DEFAULT_BITRATE = 1_000_000  # 1 Mbps (maximum speed test)
+    DEFAULT_BITRATE = 500_000  # 500 kbps Host CAN baseline; 1 Mbps only after harness validation
     MOTOR_ID_BASE = 0x140
     MOTOR_TEST_LOG_DIR = Path(__file__).resolve().parent / "logs" / "motor_can_bench"
     PROBE_HISTORY_DIR = Path(__file__).resolve().parent / "logs" / "probe_history"

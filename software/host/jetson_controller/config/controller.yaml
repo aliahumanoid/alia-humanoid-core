@@ -7,7 +7,7 @@
 can:
   interface: slcan
   channel: auto                            # "auto" = detect CANable USB device
-  bitrate: 1000000
+  bitrate: 500000                         # Host CAN default baseline; 1 Mbps stays diagnostic-only until harness validation
 
 startup:
   pretension_all: false                    # Match webapp startup path by default

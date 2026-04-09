@@ -684,6 +684,9 @@ Residual issues observed on the same bench:
 - `HOST_CAN_WARN` still appears occasionally on the Jetson `slcan` bench path;
   a host-specific threshold adjustment reduced it, but it remains a transport
   artifact to watch until the service path moves off `slcan`
+- after the April 9 bench campaign, the project default for `Host CAN` was
+  moved to `500 kbps`; `1 Mbps` stays available only as a diagnostic override
+  until the final harness is validated
 - therefore this slice is **bench-usable** and the control-loop diagnostic
   cleanup is substantially closed, but the stricter criteria below still need
   the destructive reference test plus a final pass on residual CAN warnings

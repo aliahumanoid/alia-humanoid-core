@@ -58,7 +58,7 @@ This document describes the complete CAN-based communication architecture for th
 ### Key Design Decisions:
 - **Multi-Bus Architecture**: Dedicated CAN bus per joint controller (point-to-point, no bus sharing)
 - **Dual CAN per Joint**: Host CAN (commands/telemetry) + Motor CAN (torque/status) — electrically isolated
-- **Protocol**: CAN 2.0 @ 1 Mbps (upgradeable to CAN FD)
+- **Protocol**: CAN 2.0; current default is `Host CAN = 500 kbps`, `Motor CAN = 1 Mbps` (upgradeable to CAN FD)
 - **Control Frequency**: 500 Hz (motor PID), `SET_IMPEDANCE` sender cadence frozen at 50 Hz for the current validated Jetson bench path
 - **Latency**: < 1 ms single frame transit
 - **Hardware Platform**: Nvidia Jetson direct CAN + 4x CAN Expansion Boards (8ch each)
@@ -73,6 +73,12 @@ This document describes the complete CAN-based communication architecture for th
 | Joint controllers | 20x RP2350 Pico 2 |
 | CAN channels used | 20 (dedicated, one per joint) |
 | Motors | 80 (4x LKM per joint) |
+| Host CAN default bitrate | 500 kbps |
+| Motor CAN bitrate | 1 Mbps |
+
+Operational note (2026-04-09):
+- `Host CAN` is now frozen to `500 kbps` as the default runtime/update baseline.
+- `1 Mbps` remains available only as a diagnostic override until the final harness is validated end-to-end.
 | Communication cost | ~900 EUR (see §11.1) |
 
 ### Comparison with Commercial Robots:

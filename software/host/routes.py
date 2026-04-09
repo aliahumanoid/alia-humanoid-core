@@ -749,7 +749,7 @@ def register_routes(
         
         Expected JSON:
             {
-                "config": "{\"interface\":\"slcan\",\"channel\":\"/dev/ttyUSB0\"}"
+                "config": "{\"interface\":\"slcan\",\"channel\":\"/dev/ttyUSB0\",\"bitrate\":500000}"
             }
         
         Returns:
@@ -775,6 +775,7 @@ def register_routes(
             config = json.loads(config_str)
             interface = config.get('interface')
             channel = config.get('channel')
+            bitrate = int(config.get('bitrate', 500000))
             
             if not interface or not channel:
                 return jsonify({
@@ -783,19 +784,19 @@ def register_routes(
                 }), 400
             
             # Try to initialize CAN bus
-            logger.info(f"Initializing CAN bus: {interface} on {channel} @ 1 Mbps")
+            logger.info(f"Initializing CAN bus: {interface} on {channel} @ {bitrate} bps")
             
             bus = can.Bus(
                 interface=interface,
                 channel=channel,
-                bitrate=1000000  # 1 Mbps
+                bitrate=bitrate
             )
             
             # Get bus info
             bus_info = {
                 "interface": interface,
                 "channel": channel,
-                "bitrate": "1 Mbps",
+                "bitrate": f"{bitrate} bps",
                 "channel_info": str(bus.channel_info) if hasattr(bus, 'channel_info') else "N/A"
             }
             

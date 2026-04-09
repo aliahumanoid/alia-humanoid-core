@@ -2997,6 +2997,10 @@ void pollHostCan() {
         bool start = (buf[0] == 0x01);
         encoder_stream_can_active = start;
         if (start) {
+          if (identify_broadcast_active) {
+            identify_broadcast_active = false;
+            LOG_C1_INFO("[CAN_HOST] Joint identification broadcast STOPPED (encoder stream active)");
+          }
           // Reset timer to ensure immediate first send
           encoder_stream_last_send_us = time_us_32() - ENCODER_STREAM_INTERVAL_US - 1;
           LOG_C1_INFO("[CAN_HOST] Encoder streaming STARTED @ 50Hz");
@@ -3097,6 +3101,10 @@ void pollHostCan() {
       if (len >= 6) {
         uint8_t joint_id = buf[0];
         if (joint_id == ACTIVE_JOINT) {
+          if (identify_broadcast_active) {
+            identify_broadcast_active = false;
+            LOG_C1_INFO("[CAN_HOST] Joint identification broadcast STOPPED (startup requested)");
+          }
           // Guard: reject if already ready, startup pending, or startup in progress.
           // A duplicate STARTUP_SEQUENCE (e.g. CAN retry or stale buffer frame)
           // would trigger a redundant recalc that blocks Core1 and prevents

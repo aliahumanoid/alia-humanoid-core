@@ -111,6 +111,9 @@
   (`hold`, `±5°`, `±10°`, `±15°`)
 - il warning residuo più credibile resta `MOTOR_CAN_WARN`; `HOST_CAN_WARN` è
   sceso ma resta parzialmente contaminato dal path `slcan` del banco Jetson
+- decisione congelata dopo la campagna bench del `2026-04-09`: `Host CAN`
+  default a `500 kbps`; `1 Mbps` resta un override diagnostico finché il
+  cablaggio finale non è validato
 
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi

@@ -23,7 +23,7 @@ from .safety import SafetyManager
 from .serial_monitor import discover_ports, preflight_boot
 from .session_log import get_log_path, setup_session_logging
 from .telemetry import TelemetryManager
-from .protocol import encode_loop_frequency
+from .protocol import encode_encoder_stream_ctrl, encode_loop_frequency
 
 logger = logging.getLogger("jetson_controller.exercise")
 
@@ -366,7 +366,12 @@ async def run_exercise(config_path: str | None,
             return 1
         startup_completed_at_unix = time.time()
 
+        stream_paused_for_preflight = False
         if can_preflight:
+            arb_id, payload = encode_encoder_stream_ctrl(start=False)
+            await can_bus.send(arb_id, payload)
+            stream_paused_for_preflight = True
+            await asyncio.sleep(0.1)
             can_preflight_summary = await _run_can_preflight(config, telemetry)
             logger.info("CAN preflight passed for %d joint(s)", len(can_preflight_summary))
 
@@ -382,6 +387,11 @@ async def run_exercise(config_path: str | None,
                 outer_div,
                 (1000000.0 / inner_us) / outer_div,
             )
+            await asyncio.sleep(0.2)
+
+        if stream_paused_for_preflight:
+            arb_id, payload = encode_encoder_stream_ctrl(start=True)
+            await can_bus.send(arb_id, payload)
             await asyncio.sleep(0.2)
 
         impedance.start(can_bus)
