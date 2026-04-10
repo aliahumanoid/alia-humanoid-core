@@ -687,6 +687,11 @@ Residual issues observed on the same bench:
 - after the April 9 bench campaign, the project default for `Host CAN` was
   moved to `500 kbps`; `1 Mbps` stays available only as a diagnostic override
   until the final harness is validated
+- on `2026-04-10`, a dedicated cross-chip stress experiment on the same board
+  (`J4↔J5` bridged, same CAT5 link) passed at `1 Mbps` both at boot and at
+  runtime inside the full firmware loop using `CMD:CAN_DIAG_CROSS`; this
+  removes the remaining suspicion that the hip-roll controller firmware itself
+  requires `500 kbps`
 - therefore this slice is **bench-usable** and the control-loop diagnostic
   cleanup is substantially closed, but the stricter criteria below still need
   the destructive reference test plus a final pass on residual CAN warnings

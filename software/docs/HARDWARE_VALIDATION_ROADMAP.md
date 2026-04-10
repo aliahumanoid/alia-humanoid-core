@@ -114,6 +114,13 @@
 - decisione congelata dopo la campagna bench del `2026-04-09`: `Host CAN`
   default a `500 kbps`; `1 Mbps` resta un override diagnostico finché il
   cablaggio finale non è validato
+- conferma aggiuntiva del `2026-04-10`: con `J4↔J5` ponticellati sulla stessa
+  board, il test cross-chip a `1 Mbps` è passato sia al boot (`1024/1024`
+  frame per verso) sia a runtime nel firmware completo tramite
+  `CMD:CAN_DIAG_CROSS` (`512/512` frame per verso, `0` errori)
+- quindi il declassamento operativo a `500 kbps` non è richiesto dal loop
+  firmware del controller, ma resta una scelta prudente per il path host
+  esterno attuale fino alla validazione dell’harness finale
 
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi

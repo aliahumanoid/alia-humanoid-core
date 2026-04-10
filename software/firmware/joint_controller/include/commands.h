@@ -180,7 +180,11 @@
 #define CMD_FRICTION_FF 56  // Set friction feedforward compensation params
 #endif
 
-// Reserved: 57-59 for future measurement commands
+#ifndef CMD_CAN_DIAG_CROSS
+#define CMD_CAN_DIAG_CROSS 57
+#endif
+
+// Reserved: 58-59 for future measurement commands
 
 // --- Special Commands ---
 #ifndef CMD_UNKNOWN
@@ -290,6 +294,7 @@
 #define SERIAL_CMD_GET_MOVEMENT_DATA "GET_MOVEMENT_DATA"
 #define SERIAL_CMD_CAN_DIAG "CAN_DIAG"
 #define SERIAL_CMD_FRICTION_FF "FRICTION_FF"
+#define SERIAL_CMD_CAN_DIAG_CROSS "CAN_DIAG_CROSS"
 
 // ============================================================================
 // PARAMETER NAMES
@@ -429,6 +434,8 @@ inline uint8_t getCommandId(const char *cmd_name) {
     return CMD_CAN_DIAG;
   } else if (strcmp(cmd_name, SERIAL_CMD_FRICTION_FF) == 0) {
     return CMD_FRICTION_FF;
+  } else if (strcmp(cmd_name, SERIAL_CMD_CAN_DIAG_CROSS) == 0) {
+    return CMD_CAN_DIAG_CROSS;
   }
 
   return CMD_UNKNOWN;

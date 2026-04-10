@@ -1244,8 +1244,9 @@ void core0_main_loop() {
         else {
           int simple_cmd_id = getCommandId(actual_command);
           
-          if (simple_cmd_id != CMD_UNKNOWN && 
-              (simple_cmd_id == CMD_STATUS || simple_cmd_id == CMD_STOP)) {
+          if (simple_cmd_id != CMD_UNKNOWN &&
+              (simple_cmd_id == CMD_STATUS || simple_cmd_id == CMD_STOP ||
+               simple_cmd_id == CMD_CAN_DIAG_CROSS)) {
             // Handle simple commands that don't use multi-joint format
             switch (simple_cmd_id) {
               case CMD_STATUS: {
@@ -1264,6 +1265,29 @@ void core0_main_loop() {
                 // Emergency stop - forward to Core1
                 emergency_stop_requested = true;
                 SERIAL_COM_LN("RSP:STOP");
+                break;
+              }
+
+              case CMD_CAN_DIAG_CROSS: {
+                // Forward runtime cross-chip CAN stress test to Core1 without
+                // going through the multi-joint parser.
+                if (buffer_ready[0] || buffer_ready[1]) {
+                  SERIAL_COM_LN("RSP:ERROR: Core1 busy");
+                  break;
+                }
+
+                command_data_extended_t diag_cmd = {};
+                diag_cmd.joint_id = ACTIVE_JOINT;
+
+                const int next_buffer = (active_buffer == 0) ? 1 : 0;
+                shared_data_ext.flag = 0;
+                shared_data_ext.joint_id = ACTIVE_JOINT;
+                command_buffer[next_buffer] = diag_cmd;
+                pending_command_type = CMD_CAN_DIAG_CROSS;
+                buffer_ready[next_buffer] = true;
+                active_buffer = next_buffer;
+
+                LOG_INFO("Dispatched runtime cross-chip CAN diagnostic to Core1");
                 break;
               }
             }

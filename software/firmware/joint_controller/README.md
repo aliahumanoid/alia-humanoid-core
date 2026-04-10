@@ -98,6 +98,8 @@ Notes:
 - Lines that start with `EVT:` are events parsed by the host — do not rename without versioned Decision.
 - In integrated experiments, structured CAN diagnostics are the authoritative observability path;
   USB serial remains service-only. See `software/docs/CAN_DIAGNOSTICS_OPERATIONAL_GUIDE.md`.
+- Service-only serial diagnostics include `CAN_DIAG` and `CAN_DIAG_CROSS`; the latter is a
+  bench command for temporary `J4↔J5` bridging when isolating board-local `1 Mbps` behavior.
 
 ### Flash & Persistence
 - Compact linear equations and limits stored in flash

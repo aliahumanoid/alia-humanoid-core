@@ -362,6 +362,122 @@ bool can_loopback_test(MCP_CAN &can, const char* label,
   return match;
 }
 
+struct CrossChipCanStats {
+  uint16_t iterations = 0;
+  uint16_t send_failures = 0;
+  uint16_t rx_timeouts = 0;
+  uint16_t rx_read_failures = 0;
+  uint16_t rx_mismatches = 0;
+
+  bool passed() const {
+    return send_failures == 0 &&
+           rx_timeouts == 0 &&
+           rx_read_failures == 0 &&
+           rx_mismatches == 0;
+  }
+};
+
+static void flush_can_rx(MCP_CAN &can) {
+  unsigned long id;
+  unsigned char len;
+  unsigned char buf[8];
+  while (can.checkReceive() == CAN_MSGAVAIL) {
+    can.readMsgBuf(&id, &len, buf);
+  }
+}
+
+static bool wait_for_can_frame(MCP_CAN &can,
+                               unsigned long expected_id,
+                               const unsigned char expected_data[8],
+                               uint16_t timeout_ms,
+                               unsigned long &rx_id_out,
+                               unsigned char &rx_len_out,
+                               unsigned char rx_buf_out[8]) {
+  const unsigned long deadline = millis() + timeout_ms;
+  while (millis() < deadline) {
+    if (can.checkReceive() == CAN_MSGAVAIL) {
+      if (can.readMsgBuf(&rx_id_out, &rx_len_out, rx_buf_out) != CAN_OK) {
+        rx_len_out = 0xFF;
+        return false;
+      }
+      bool match = (rx_id_out == expected_id) && (rx_len_out == 8);
+      for (int i = 0; i < 8 && match; ++i) {
+        if (rx_buf_out[i] != expected_data[i]) match = false;
+      }
+      return match;
+    }
+    delay(1);
+  }
+  rx_len_out = 0;
+  return false;
+}
+
+static CrossChipCanStats run_cross_chip_can_stress(MCP_CAN &tx_can,
+                                                   MCP_CAN &rx_can,
+                                                   const char* direction_label,
+                                                   unsigned long test_id,
+                                                   const unsigned char seed_data[8]) {
+  CrossChipCanStats stats = {};
+  unsigned char payload[8];
+  unsigned char rx_buf[8];
+
+  LOG_INFO(String(direction_label) + ": running " + String(CAN_CROSS_CHIP_STRESS_FRAMES) +
+           " frames, timeout=" + String(CAN_CROSS_CHIP_RX_TIMEOUT_MS) + "ms");
+
+  for (uint16_t i = 0; i < CAN_CROSS_CHIP_STRESS_FRAMES; ++i) {
+    stats.iterations++;
+    memcpy(payload, seed_data, sizeof(payload));
+    payload[0] ^= static_cast<unsigned char>(i & 0xFF);
+    payload[1] ^= static_cast<unsigned char>((i >> 8) & 0xFF);
+    payload[7] ^= static_cast<unsigned char>((i * 17u) & 0xFF);
+
+    flush_can_rx(rx_can);
+    if (tx_can.sendMsgBuf(test_id, 0, 8, payload) != CAN_OK) {
+      stats.send_failures++;
+      continue;
+    }
+
+    unsigned long rx_id = 0;
+    unsigned char rx_len = 0;
+    const bool matched = wait_for_can_frame(
+      rx_can, test_id, payload, CAN_CROSS_CHIP_RX_TIMEOUT_MS, rx_id, rx_len, rx_buf
+    );
+
+    if (!matched) {
+      if (rx_len == 0) {
+        stats.rx_timeouts++;
+      } else if (rx_len == 0xFF) {
+        stats.rx_read_failures++;
+      } else if (rx_len != 8 || rx_id != test_id) {
+        stats.rx_mismatches++;
+      } else {
+        stats.rx_mismatches++;
+      }
+    }
+
+    if ((i + 1) % CAN_CROSS_CHIP_PROGRESS_INTERVAL == 0 || (i + 1) == CAN_CROSS_CHIP_STRESS_FRAMES) {
+      LOG_INFO(
+        String(direction_label) + ": " + String(i + 1) + "/" + String(CAN_CROSS_CHIP_STRESS_FRAMES) +
+        " send_fail=" + String(stats.send_failures) +
+        " timeout=" + String(stats.rx_timeouts) +
+        " read_fail=" + String(stats.rx_read_failures) +
+        " mismatch=" + String(stats.rx_mismatches)
+      );
+    }
+  }
+
+  LOG_INFO(
+    String(direction_label) + " summary: ok=" + String(stats.passed() ? "true" : "false") +
+    " frames=" + String(stats.iterations) +
+    " send_fail=" + String(stats.send_failures) +
+    " timeout=" + String(stats.rx_timeouts) +
+    " read_fail=" + String(stats.rx_read_failures) +
+    " mismatch=" + String(stats.rx_mismatches)
+  );
+
+  return stats;
+}
+
 // Helper: blink LED with configurable pattern (reduces ~12s of boot delays to ~2s)
 static void led_blink(uint8_t count, uint16_t on_ms, uint16_t off_ms) {
   for (uint8_t i = 0; i < count; i++) {
@@ -473,55 +589,22 @@ void setup() {
 
 #ifdef CAN_CROSS_CHIP_TEST
   // Cross-chip CAN bus test: requires external bridge J4↔J5 (CAN_H↔CAN_H, CAN_L↔CAN_L)
-  // Sends a frame on one MCP2515 and verifies reception on the other, both directions.
+  // Sends many frames on one MCP2515 and verifies reception on the other, both directions.
   {
     LOG_INFO("=== CROSS-CHIP CAN BUS TEST (J4↔J5 bridged) ===");
-    const unsigned long cross_test_id = 0x7EE;
     const unsigned char cross_test_data[8] = {0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04, 0x05};
-    bool j4_to_j5_ok = false;
-    bool j5_to_j4_ok = false;
+    const CrossChipCanStats j4_to_j5_stats = run_cross_chip_can_stress(
+      CAN, CAN_HOST, "J4→J5", 0x601, cross_test_data
+    );
+    const CrossChipCanStats j5_to_j4_stats = run_cross_chip_can_stress(
+      CAN_HOST, CAN, "J5→J4", 0x701, cross_test_data
+    );
 
-    // --- J4 → J5 ---
-    // Flush J5 RX first
-    { unsigned long id; unsigned char l, b[8];
-      while (CAN_HOST.checkReceive() == CAN_MSGAVAIL) CAN_HOST.readMsgBuf(&id, &l, b); }
-
-    if (CAN.sendMsgBuf(cross_test_id, 0, 8, const_cast<unsigned char*>(cross_test_data)) == CAN_OK) {
-      delay(10);
-      if (CAN_HOST.checkReceive() == CAN_MSGAVAIL) {
-        unsigned long rx_id; unsigned char rx_len, rx_buf[8];
-        if (CAN_HOST.readMsgBuf(&rx_id, &rx_len, rx_buf) == CAN_OK) {
-          j4_to_j5_ok = (rx_id == cross_test_id) && (rx_len == 8);
-          for (int i = 0; i < 8 && j4_to_j5_ok; i++)
-            if (rx_buf[i] != cross_test_data[i]) j4_to_j5_ok = false;
-        }
-      }
-    }
-    LOG_INFO(String("J4→J5: ") + (j4_to_j5_ok ? "PASSED" : "FAILED"));
-
-    // --- J5 → J4 ---
-    // Flush J4 RX first
-    { unsigned long id; unsigned char l, b[8];
-      while (CAN.checkReceive() == CAN_MSGAVAIL) CAN.readMsgBuf(&id, &l, b); }
-
-    if (CAN_HOST.sendMsgBuf(cross_test_id, 0, 8, const_cast<unsigned char*>(cross_test_data)) == CAN_OK) {
-      delay(10);
-      if (CAN.checkReceive() == CAN_MSGAVAIL) {
-        unsigned long rx_id; unsigned char rx_len, rx_buf[8];
-        if (CAN.readMsgBuf(&rx_id, &rx_len, rx_buf) == CAN_OK) {
-          j5_to_j4_ok = (rx_id == cross_test_id) && (rx_len == 8);
-          for (int i = 0; i < 8 && j5_to_j4_ok; i++)
-            if (rx_buf[i] != cross_test_data[i]) j5_to_j4_ok = false;
-        }
-      }
-    }
-    LOG_INFO(String("J5→J4: ") + (j5_to_j4_ok ? "PASSED" : "FAILED"));
-
-    if (j4_to_j5_ok && j5_to_j4_ok) {
-      LOG_INFO("Cross-chip CAN bus test PASSED — both transceivers OK");
+    if (j4_to_j5_stats.passed() && j5_to_j4_stats.passed()) {
+      LOG_INFO("Cross-chip CAN bus stress PASSED — both transceivers and bridge look healthy");
       led_blink(3, 100, 100);
     } else {
-      LOG_ERROR("Cross-chip CAN bus test FAILED — check bus wiring/termination");
+      LOG_ERROR("Cross-chip CAN bus stress FAILED — check wiring, topology, or bitrate margin");
       led_blink(10, 50, 50);
     }
     LOG_INFO("=================================================");

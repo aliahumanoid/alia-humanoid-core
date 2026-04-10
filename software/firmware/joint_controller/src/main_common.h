@@ -59,10 +59,23 @@
 // If no valid profile is provisioned, the firmware enters an unprovisioned
 // safe mode (`JOINT_NONE`) and exposes only identity/provisioning paths.
 
-// Cross-chip CAN bus test: bridge J4 CAN_H↔J5 CAN_H and J4 CAN_L↔J5 CAN_L
+// Cross-chip CAN bus stress test: bridge J4 CAN_H↔J5 CAN_H and J4 CAN_L↔J5 CAN_L
 // externally, then enable this to verify both transceivers through the physical bus.
-// Disable for normal operation (motors on J4, host on J5 are separate buses).
+// Prefer enabling it via a dedicated PlatformIO env / build flag, not by editing
+// this header for normal operation (motors on J4, host on J5 are separate buses).
 //#define CAN_CROSS_CHIP_TEST
+
+#ifndef CAN_CROSS_CHIP_STRESS_FRAMES
+#define CAN_CROSS_CHIP_STRESS_FRAMES 512
+#endif
+
+#ifndef CAN_CROSS_CHIP_RX_TIMEOUT_MS
+#define CAN_CROSS_CHIP_RX_TIMEOUT_MS 10
+#endif
+
+#ifndef CAN_CROSS_CHIP_PROGRESS_INTERVAL
+#define CAN_CROSS_CHIP_PROGRESS_INTERVAL 64
+#endif
 
 
 // CAN ID assignment scheme for motors:

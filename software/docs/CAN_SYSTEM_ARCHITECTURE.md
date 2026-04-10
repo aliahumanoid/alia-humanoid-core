@@ -75,11 +75,16 @@ This document describes the complete CAN-based communication architecture for th
 | Motors | 80 (4x LKM per joint) |
 | Host CAN default bitrate | 500 kbps |
 | Motor CAN bitrate | 1 Mbps |
+| Communication cost | ~900 EUR (see §11.1) |
 
-Operational note (2026-04-09):
+Operational note (2026-04-10):
 - `Host CAN` is now frozen to `500 kbps` as the default runtime/update baseline.
 - `1 Mbps` remains available only as a diagnostic override until the final harness is validated end-to-end.
-| Communication cost | ~900 EUR (see §11.1) |
+- On `2026-04-10`, a board-local cross-chip stress test (`J4↔J5` bridged with the same CAT5 link)
+  passed both at boot and at runtime inside the full firmware loop using `CMD:CAN_DIAG_CROSS`:
+  `512/512` frames each direction, `0` send failures, `0` timeouts, `0` mismatches.
+- Therefore the current `500 kbps` default is a robustness choice for the external host path
+  (`Mac/adapter/backend/transients`), not a proven limit of the RP2350 controller firmware.
 
 ### Comparison with Commercial Robots:
 - **Similar to**: Figure 01 (CAN 2.0 multi-bus), Tesla Optimus (multi-bus approach)

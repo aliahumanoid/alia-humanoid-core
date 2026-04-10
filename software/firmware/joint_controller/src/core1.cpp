@@ -49,6 +49,122 @@ static void __not_in_flash_func(wait_for_flash_complete)(void) {
   intercore_memory_barrier();
 }
 
+struct CrossChipCanStatsRuntime {
+  uint16_t iterations = 0;
+  uint16_t send_failures = 0;
+  uint16_t rx_timeouts = 0;
+  uint16_t rx_read_failures = 0;
+  uint16_t rx_mismatches = 0;
+
+  bool passed() const {
+    return send_failures == 0 &&
+           rx_timeouts == 0 &&
+           rx_read_failures == 0 &&
+           rx_mismatches == 0;
+  }
+};
+
+static void flush_can_rx_runtime(MCP_CAN &can) {
+  unsigned long id = 0;
+  unsigned char len = 0;
+  unsigned char buf[8];
+  while (can.checkReceive() == CAN_MSGAVAIL) {
+    can.readMsgBuf(&id, &len, buf);
+  }
+}
+
+static bool wait_for_can_frame_runtime(MCP_CAN &can,
+                                       unsigned long expected_id,
+                                       const unsigned char expected_data[8],
+                                       uint16_t timeout_ms,
+                                       unsigned long &rx_id_out,
+                                       unsigned char &rx_len_out,
+                                       unsigned char rx_buf_out[8]) {
+  const unsigned long deadline = millis() + timeout_ms;
+  while (millis() < deadline) {
+    if (can.checkReceive() == CAN_MSGAVAIL) {
+      if (can.readMsgBuf(&rx_id_out, &rx_len_out, rx_buf_out) != CAN_OK) {
+        rx_len_out = 0xFF;
+        return false;
+      }
+      bool match = (rx_id_out == expected_id) && (rx_len_out == 8);
+      for (int i = 0; i < 8 && match; ++i) {
+        if (rx_buf_out[i] != expected_data[i]) {
+          match = false;
+        }
+      }
+      return match;
+    }
+    delay(1);
+  }
+  rx_len_out = 0;
+  return false;
+}
+
+static CrossChipCanStatsRuntime run_cross_chip_can_stress_runtime(
+    MCP_CAN &tx_can,
+    MCP_CAN &rx_can,
+    const char *direction_label,
+    unsigned long test_id,
+    const unsigned char seed_data[8]) {
+  CrossChipCanStatsRuntime stats = {};
+  unsigned char payload[8];
+  unsigned char rx_buf[8];
+
+  LOG_C1_INFO(String("[XDIAG] ") + direction_label + ": running " +
+              String(CAN_CROSS_CHIP_STRESS_FRAMES) + " frames, timeout=" +
+              String(CAN_CROSS_CHIP_RX_TIMEOUT_MS) + "ms");
+
+  flush_can_rx_runtime(tx_can);
+  flush_can_rx_runtime(rx_can);
+
+  for (uint16_t i = 0; i < CAN_CROSS_CHIP_STRESS_FRAMES; ++i) {
+    stats.iterations++;
+    memcpy(payload, seed_data, sizeof(payload));
+    payload[0] ^= static_cast<unsigned char>(i & 0xFF);
+    payload[1] ^= static_cast<unsigned char>((i >> 8) & 0xFF);
+    payload[7] ^= static_cast<unsigned char>((i * 17u) & 0xFF);
+
+    flush_can_rx_runtime(rx_can);
+    if (tx_can.sendMsgBuf(test_id, 0, 8, payload) != CAN_OK) {
+      stats.send_failures++;
+      continue;
+    }
+
+    unsigned long rx_id = 0;
+    unsigned char rx_len = 0;
+    const bool matched = wait_for_can_frame_runtime(
+        rx_can, test_id, payload, CAN_CROSS_CHIP_RX_TIMEOUT_MS, rx_id, rx_len, rx_buf);
+
+    if (!matched) {
+      if (rx_len == 0) {
+        stats.rx_timeouts++;
+      } else if (rx_len == 0xFF) {
+        stats.rx_read_failures++;
+      } else {
+        stats.rx_mismatches++;
+      }
+    }
+
+    if ((i + 1) % CAN_CROSS_CHIP_PROGRESS_INTERVAL == 0 ||
+        (i + 1) == CAN_CROSS_CHIP_STRESS_FRAMES) {
+      LOG_C1_INFO(String("[XDIAG] ") + direction_label + ": " + String(i + 1) + "/" +
+                  String(CAN_CROSS_CHIP_STRESS_FRAMES) + " send_fail=" +
+                  String(stats.send_failures) + " timeout=" + String(stats.rx_timeouts) +
+                  " read_fail=" + String(stats.rx_read_failures) + " mismatch=" +
+                  String(stats.rx_mismatches));
+    }
+  }
+
+  LOG_C1_INFO(String("[XDIAG] ") + direction_label + " summary: ok=" +
+              String(stats.passed() ? "true" : "false") + " frames=" +
+              String(stats.iterations) + " send_fail=" + String(stats.send_failures) +
+              " timeout=" + String(stats.rx_timeouts) + " read_fail=" +
+              String(stats.rx_read_failures) + " mismatch=" + String(stats.rx_mismatches));
+
+  return stats;
+}
+
 // ============================================================================
 // DUAL CAN BUS ARCHITECTURE
 // ============================================================================
@@ -4423,6 +4539,44 @@ void core1_loop() {
       }
       
       LOG_C1_INFO("=== END CAN DIAGNOSTIC ===");
+    } break;
+
+    case CMD_CAN_DIAG_CROSS: {
+      LOG_C1_INFO("=== RUNTIME CROSS-CHIP CAN DIAGNOSTIC (J4↔J5 bridged) ===");
+      const bool previous_suspend = suspend_host_can_polling;
+      suspend_host_can_polling = true;
+      delay(10);
+
+      const unsigned char cross_test_data[8] = {0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04, 0x05};
+      const CrossChipCanStatsRuntime j4_to_j5_stats =
+          run_cross_chip_can_stress_runtime(CAN, CAN_HOST, "J4→J5", 0x601, cross_test_data);
+      const CrossChipCanStatsRuntime j5_to_j4_stats =
+          run_cross_chip_can_stress_runtime(CAN_HOST, CAN, "J5→J4", 0x701, cross_test_data);
+
+      suspend_host_can_polling = previous_suspend;
+      shared_data_ext.joint_id = ACTIVE_JOINT;
+
+      if (j4_to_j5_stats.passed() && j5_to_j4_stats.passed()) {
+        LOG_C1_INFO("[XDIAG] Cross-chip runtime test PASSED");
+        snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
+                 "XCAN OK A(s%u t%u r%u m%u) B(s%u t%u r%u m%u)",
+                 j4_to_j5_stats.send_failures, j4_to_j5_stats.rx_timeouts,
+                 j4_to_j5_stats.rx_read_failures, j4_to_j5_stats.rx_mismatches,
+                 j5_to_j4_stats.send_failures, j5_to_j4_stats.rx_timeouts,
+                 j5_to_j4_stats.rx_read_failures, j5_to_j4_stats.rx_mismatches);
+        shared_data_ext.flag = CMD1_END_MOVE;
+      } else {
+        LOG_C1_ERROR("[XDIAG] Cross-chip runtime test FAILED");
+        snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
+                 "XCAN FAIL A(s%u t%u r%u m%u) B(s%u t%u r%u m%u)",
+                 j4_to_j5_stats.send_failures, j4_to_j5_stats.rx_timeouts,
+                 j4_to_j5_stats.rx_read_failures, j4_to_j5_stats.rx_mismatches,
+                 j5_to_j4_stats.send_failures, j5_to_j4_stats.rx_timeouts,
+                 j5_to_j4_stats.rx_read_failures, j5_to_j4_stats.rx_mismatches);
+        shared_data_ext.flag = CMD1_FAIL_MOVE;
+      }
+
+      LOG_C1_INFO("=== END RUNTIME CROSS-CHIP CAN DIAGNOSTIC ===");
     } break;
 
     case CMD_CHECK_OFFSETS: {

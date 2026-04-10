@@ -76,6 +76,28 @@ Primary implementation path:
 
 - `software/firmware/joint_controller/src/core1.cpp`
 
+Serial service-only diagnostics also include two bench commands:
+
+- `CMD:CAN_DIAG`
+  - legacy motor-bus diagnostic
+  - validates MCP2515 loopback, raw TX, and motor replies on `J4`
+- `CMD:CAN_DIAG_CROSS`
+  - cross-chip stress diagnostic for temporary `J4↔J5` bridging on the same board
+  - suspends normal `Host CAN` polling, then sends a bounded frame burst in both directions
+  - intended only for lab isolation experiments when proving whether `1 Mbps` failures come
+    from the controller runtime or from the external host path
+
+Observed result on `2026-04-10`:
+
+- `CMD:CAN_DIAG_CROSS` passed at runtime on `hip_roll_bench_right` with:
+  - `Host CAN = 1 Mbps`
+  - `Motor CAN = 1 Mbps`
+  - `J4↔J5` bridged via the same CAT5 link used in the bench experiment
+  - `512/512` frames each direction, `0` send failures, `0` timeouts, `0` mismatches
+
+That result means the current project default of `Host CAN = 500 kbps` remains an
+external-host robustness choice, not a demonstrated limitation of the board-local firmware.
+
 ### Flask Host
 
 The Flask host decodes and persists structured diagnostic history per joint.
