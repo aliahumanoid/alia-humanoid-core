@@ -98,6 +98,16 @@ Observed result on `2026-04-10`:
 That result means the current project default of `Host CAN = 500 kbps` remains an
 external-host robustness choice, not a demonstrated limitation of the board-local firmware.
 
+Operational note for the current macOS bench:
+
+- a CANable flashed to `candleLight` may appear in macOS USB inspection while
+  `python-can` autodetect still reports no adapters from a sandboxed process
+- in that case, the useful path is to force `interface: candle` with the
+  device serial/channel explicitly, rather than relying on the repo default
+  `slcan` config or on autodetect
+- this is a host-tooling quirk of the current Mac bench path, not a controller
+  firmware fault
+
 ### Flask Host
 
 The Flask host decodes and persists structured diagnostic history per joint.

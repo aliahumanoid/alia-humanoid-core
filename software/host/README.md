@@ -100,6 +100,13 @@ Use PlatformIO extension in VS Code:
 - `mapping_data/` stores auto-mapping results (gitignored)
 - `can_config.json` is created after a successful CAN connection and remains local (gitignored)
 - Dev server uses `allow_unsafe_werkzeug=True` for Flask-SocketIO compatibility (local dev only)
+- On macOS with a CANable flashed to `candleLight`, the reliable host path is
+  currently `interface: candle` at `500 kbps`. The repo default still points to
+  `slcan`, so bench runs may require a local config override.
+- On the same macOS bench, USB enumeration can be visible at the OS level while
+  process-local autodetect still returns no CAN adapters. If that happens,
+  verify the device in system USB info first, then force the `candle` backend
+  explicitly instead of relying on autodetect.
 
 ## Bench Diagnostics
 
