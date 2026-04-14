@@ -1,0 +1,6 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "power_blocks")(type "KiCad")(uri "${KIPRJMOD}/power_blocks.kicad_sym")(options "")(descr "Placeholder functional blocks for rev_d_power draft"))
+  (lib (name "UCC27282")(type "KiCad")(uri "${KIPRJMOD}/UCC27282D.kicad_sym")(options "")(descr ""))
+  (lib (name "rev_d_power_parts")(type "KiCad")(uri "${KIPRJMOD}/rev_d_power_parts.kicad_sym")(options "")(descr "Local symbols for rev_d_power redesign"))
+)
