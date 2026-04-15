@@ -40,6 +40,7 @@ Implementation note:
 - final `PWRGD_N` / `FAULT_N` polarity conditioning will be handled during schematic capture if the native output polarity does not match the RJ45 naming convention
 - the current-limit threshold is not independently programmable; continuous vs transient behavior must be split between `R_SENSE`, `PROG`, `TIMER`, and firmware supervision through `IMON`
 - first-pass recommendation is `R_SENSE = 1.25 mOhm`, **4-terminal / Kelvin sensed**, `>= 2W`
+- the current schematic/BOM freeze uses `Vishay Dale WSR21L250FEA`, which matches the KiCad `WSR2/WSR3` Kelvin footprint and gives `2W` steady-state rating margin
 - route `IMON` to firmware-side monitoring so the logic board can supervise continuous current in software
 - size `PROG` from the MOSFET SOA during startup, not only from steady-state load current
 
