@@ -444,6 +444,7 @@
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Connector_AMASS.3dshapes/AMASS_XT60PW-M_1x02_P7.20mm_Horizontal.step"
+			(hide yes)
 			(offset
 				(xyz 0 0 0)
 			)
@@ -456,13 +457,13 @@
 		)
 		(model "${KIPRJMOD}/3dmodels/Connector_AMASS.3dshapes/AMASS_XT60PW-M_1x02_P7.20mm_Horizontal.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 0 4.2)
 			)
 			(scale
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz -90 0 0)
+				(xyz -90 -180 -180)
 			)
 		)
 	)
@@ -1559,18 +1560,18 @@
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz 0 0 0)
+				(xyz -0 -0 -90)
 			)
 		)
 		(model "${KIPRJMOD}/3dmodels/Connector_AMASS.3dshapes/AMASS_XT60PW-F_1x02_P7.20mm_Horizontal.step"
 			(offset
-				(xyz 0 0 0)
+				(xyz 0 2 4.2)
 			)
 			(scale
 				(xyz 1 1 1)
 			)
 			(rotate
-				(xyz -90 0 0)
+				(xyz -90 -0 -180)
 			)
 		)
 	)
