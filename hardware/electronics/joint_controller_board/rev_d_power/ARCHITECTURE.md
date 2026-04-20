@@ -34,7 +34,7 @@ Pinout is frozen by split Rev D architecture:
 1. `+5V_FROM_POWER`
 2. `GND`
 3. `SAFETY_EN`
-4. `VIN_POST_F1_MON`
+4. `VIN_RAW_MON`
 5. `VOUT_POST_FET_MON`
 6. `PWRGD_N`
 7. `FAULT_N`
@@ -44,7 +44,7 @@ Shield. `GND`
 ## Recommended Power Architecture
 
 ```text
-24V_IN_RAW
+24V_IN_RAW  (protected upstream by external 30A ATO fuse on PDU / battery board)
   |
   +--> TVS + bulk input filtering
   |
@@ -56,31 +56,49 @@ Shield. `GND`
          |                |
          |                +--> 3V3_AUX for sensing / status pull-ups only
          |
-         +--> F1 local fuse
-                |
-                +--> high-side hot-swap / eFuse controller
-                       +--> parallel N-MOSFETs
-                              +--> J_PWR_OUT_SW
+         +--> high-side hot-swap / eFuse controller (TPS2492, Ilim ~40 A latch-off)
+                +--> back-to-back N-MOSFETs
+                       +--> J_PWR_OUT_SW
 ```
+
+### External fusing (Option C1)
+
+Branch protection against catastrophic short-circuit (cable fault, burned FET,
+reverse polarity) is provided by a **30 A ATO blade fuse mounted on the upstream
+PDU / battery distribution board**, one per joint branch.
+
+Rationale:
+- the on-board `TPS2492` current-limit acts as primary fast protection (~40 A trip)
+- a fuse on each joint controller board protects the board but not the cable
+  upstream of it; moving the fuse to the PDU protects the full cable run
+- a single central PDU gives a single maintenance point for fuse replacement
+  on a 20+ joint humanoid
+- removing the PCB fuse saves board area and ~24 mm vertical clearance inside
+  the joint enclosure (critical for mechanical fit)
+
+Minimum cable gauge: 12 AWG silicone (or 10 AWG for higher margin).
 
 ## Architecture Decisions
 
-### 1. Raw daisy-chain must bypass the local fuse
+### 1. Raw daisy-chain shares the raw input node
 
-`J_PWR_CHAIN_RAW` should be connected in parallel with `J_PWR_IN_RAW`, not after the local fuse.
-
-Reason:
-- each board protects only its own switched output branch
-- downstream boards are not forced through the fuse and copper bottleneck of one upstream board
-- daisy-chain current does not falsify local fuse sizing
-
-### 2. Local 5V should be generated from raw 24V
-
-The `5V` regulator should be fed from raw `24V`, before the local motor fuse.
+`J_PWR_CHAIN_RAW` is connected in parallel with `J_PWR_IN_RAW`. Both see the raw
+24 V coming from the upstream PDU, already protected by the PDU-side branch fuse.
 
 Reason:
-- logic board remains powered even if the motor branch fuse opens
-- the controller can still report fault and diagnostics
+- each joint branch has its own fuse on the PDU side
+- on-board `TPS2492` provides fast electronic protection for the local switched
+  output only
+- daisy-chain copper and connector are sized as a bus pass-through
+
+### 2. Local 5V is generated from raw 24V
+
+The `5V` regulator is fed from the raw `24V` rail, upstream of the hot-swap
+controller.
+
+Reason:
+- logic board remains powered even if the switched motor branch latches off
+- the controller can still report fault and diagnostics after a `TPS2492` trip
 - startup and fault handling are easier to debug
 
 ### 3. Add a small local 3.3V auxiliary rail
@@ -114,14 +132,21 @@ Reason:
 
 ## Diagnostic Signals
 
-### `VIN_POST_F1_MON`
+### `VIN_RAW_MON`
 
-Analog monitor of the fused branch input, measured after `F1` and before the high-side switch.
+Analog monitor of the raw 24 V bus, measured between the input TVS/bulk stage and
+the high-side switch (TPS2492).
 
 Requirements:
 - scaled to `0..3.3V`
 - RC filtered
 - tolerant to raw-bus transients
+
+Use:
+- battery undervoltage / sag detection
+- telemetry to host for battery state-of-charge estimation
+- diagnosis of upstream PDU fuse open (`VIN_RAW_MON` drops to 0 while host
+  side still powered)
 
 ### `VOUT_POST_FET_MON`
 
@@ -151,7 +176,8 @@ Active-low digital fault line. Proposed meaning:
 - HIGH = no fault
 
 Recommended fault sources:
-- fuse-open or branch missing voltage when enable requested
+- branch missing voltage when enable requested (e.g. upstream PDU fuse open,
+  inferred from `VIN_RAW_MON` below UV threshold while board is powered)
 - overcurrent / short-circuit trip
 - input undervoltage or overvoltage
 - `5V` regulator fault
@@ -193,7 +219,8 @@ First-pass design targets for `J_PWR_OUT_SW`:
 Design implication:
 - the switched branch should be treated as a `>20 A continuous` path
 - the controller / MOSFET stage should tolerate at least `40 A` class short-duration events without nuisance trip
-- fuse and electronic current-limit thresholds must not be set near the nominal continuous point
+- electronic current-limit threshold (`TPS2492` `Ilim`) must not be set near the nominal continuous point
+- the upstream PDU-side branch fuse must not be set near the nominal continuous point either; first-pass target is 30 A ATO, sized below `TPS2492` `Ilim` so the on-board fast protection trips first on transient overcurrent while the fuse only acts on catastrophic cable-side faults
 
 ### 4. Control-side torque command note
 
@@ -231,7 +258,9 @@ Reason:
 
 ### 6. Raw daisy-chain sizing
 
-`J_PWR_CHAIN_RAW` bypasses the local fuse, so its copper and connector path must be sized as a bus path, not as a protected local branch.
+`J_PWR_CHAIN_RAW` is a straight bus pass-through from `J_PWR_IN_RAW`, not a
+protected local branch. Its copper and connector path must be sized as a bus
+path.
 
 Minimum rule:
 - raw input and raw daisy-chain path must not be rated below the local branch capability
@@ -245,28 +274,29 @@ Practical implication:
 - use a 4-layer PCB if possible
 - keep raw input loop, MOSFET loop, and output loop physically short
 - reserve wide copper for `24V` power path and return
-- use Kelvin sense routing where current sense or fuse-drop monitoring matters
+- use Kelvin sense routing where current-sense accuracy matters (e.g. `TPS2492` shunt)
 - keep monitor dividers away from the switching node
-- place TVS, bulk capacitor, fuse, controller, MOSFETs, and switched XT60 in current-flow order
+- place TVS, bulk capacitor, controller, MOSFETs, and switched XT60 in current-flow order
 - keep RJ45 and low-voltage sensing away from XT60 high-current entry/exit
 - expose test points for:
-  - `24V_IN_RAW`
-  - `24V_POST_F1`
+  - `24V_RAW`
   - `24V_OUT_SW`
   - `5V`
   - `3V3_AUX`
   - `SAFETY_EN`
   - `PWRGD_N`
   - `FAULT_N`
-  - `VIN_POST_F1_MON`
+  - `VIN_RAW_MON`
   - `VOUT_POST_FET_MON`
 
 ## Open Items Before Schematic Capture
 
-- final fuse rating and trip philosophy
 - whether `FAULT_N` is latched until power cycle or auto-retry
 - exact mechanical orientation of the three XT60 connectors
 - whether the raw daisy-chain path must support more than one downstream power board in series
+- PDU / battery board architecture (number of protected branches, central fuse
+  form factor — PCB blade vs. bolted MIDI — and whether each branch exposes
+  a per-fuse status LED or telemetry line)
 
 ## First Capture Order
 
@@ -279,23 +309,26 @@ Recommended schematic-capture sequence:
 2. Place the RJ45 interface connector and assign the frozen pinout.
 3. Draw the raw `24V` bus and branch split:
    - direct branch to `J_PWR_CHAIN_RAW`
-   - local branch to fuse and switched output path
+   - local branch to hot-swap controller and switched output path
    - local branch to `5V` generation
 4. Add input protection:
    - TVS
    - bulk capacitance
    - optional reverse-polarity strategy if desired
 5. Add the switched motor branch:
-   - local fuse
-   - high-side controller
+   - high-side controller (TPS2492)
    - external MOSFET stage
    - output connector
 6. Add low-voltage generation:
    - `24V -> 5V`
    - `5V -> 3V3_AUX`
 7. Add diagnostics and status conditioning:
-   - `VIN_POST_F1_MON`
+   - `VIN_RAW_MON`
    - `VOUT_POST_FET_MON`
    - `PWRGD_N`
    - `FAULT_N`
 8. Add test points and net classes before layout begins.
+
+> Branch fuse protection is intentionally NOT on this board — see
+> *External fusing (Option C1)* above. A 30 A ATO slow-blow per branch lives on
+> the upstream PDU, below the `TPS2492` `Ilim` threshold.

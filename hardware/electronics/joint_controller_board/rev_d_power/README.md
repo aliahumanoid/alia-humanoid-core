@@ -19,8 +19,9 @@ Status:
   - `XT60` raw daisy-chain output
   - `XT60` switched output
   - input protection network with `SMCJ33A`, raw bulk capacitor, raw decoupling capacitor
-  - local switched-branch fuse `F1`
-  - generic high-side switch / eFuse functional block driven by `SAFETY_EN`
+  - high-side `TPS2492` hot-swap / eFuse controller driven by `SAFETY_EN`, with
+    `Ilim ≈ 40 A` fast-trip and latch-off on fault (branch fuse intentionally
+    moved off-board to upstream PDU — see `ARCHITECTURE.md` "External fusing")
   - `LMR36520`-based `24V -> 5V` buck draft for `+5V_FROM_POWER`
   - `TLV75533P`-based `5V -> 3V3` auxiliary LDO draft for monitor/status conditioning
   - `PWR_FLAG` markers on `24V_RAW`, `+5V_FROM_POWER`, and `GND` for clean ERC intent
@@ -29,7 +30,7 @@ Status:
     - `TLV70012_SOT23-5` as schematic base symbol for `TLV75533PDBV`
     - `Device:L` for the buck output inductor
   - first-pass analog monitors:
-    - `VIN_POST_F1_MON` divider + RC
+    - `VIN_RAW_MON` divider + RC
     - `VOUT_POST_FET_MON` divider + RC
   - first-pass status conditioning:
     - `PWRGD_N` 3.3 V pull-up

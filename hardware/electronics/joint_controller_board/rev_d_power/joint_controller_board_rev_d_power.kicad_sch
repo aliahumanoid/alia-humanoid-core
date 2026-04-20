@@ -3177,16 +3177,6 @@
 	)
 	(wire
 		(pts
-			(xy 219.71 49.53) (xy 219.71 46.99)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "14cfc0ab-005b-479f-8e3d-424f6fbb01f2")
-	)
-	(wire
-		(pts
 			(xy 252.73 81.28) (xy 279.4 81.28)
 		)
 		(stroke
@@ -3324,26 +3314,6 @@
 			(type default)
 		)
 		(uuid "20000000-0000-4000-8000-000000000020")
-	)
-	(wire
-		(pts
-			(xy 219.71 38.1) (xy 224.79 38.1)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "20000000-0000-4000-8000-000000000021")
-	)
-	(wire
-		(pts
-			(xy 219.71 49.53) (xy 224.79 49.53)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "20000000-0000-4000-8000-000000000022")
 	)
 	(wire
 		(pts
@@ -3967,16 +3937,6 @@
 	)
 	(wire
 		(pts
-			(xy 219.71 38.1) (xy 219.71 39.37)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "db025445-5d4c-43dc-808f-bba4947d1ab8")
-	)
-	(wire
-		(pts
 			(xy 223.52 194.31) (xy 223.52 193.04)
 		)
 		(stroke
@@ -4259,7 +4219,7 @@
 			)
 		)
 	)
-	(global_label "VIN_POST_F1_MON"
+	(global_label "VIN_RAW_MON"
 		(shape input)
 		(at 279.4 91.44 0)
 		(fields_autoplaced yes)
@@ -4407,48 +4367,6 @@
 		)
 	)
 	(global_label "24V_RAW"
-		(shape input)
-		(at 224.79 38.1 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "10000000-0000-4000-8000-000000000020")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 224.79 38.1 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-	)
-	(global_label "24V_POST_F1"
-		(shape input)
-		(at 224.79 49.53 0)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left)
-		)
-		(uuid "10000000-0000-4000-8000-000000000021")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 224.79 49.53 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-	)
-	(global_label "24V_POST_F1"
 		(shape input)
 		(at 290.83 205.74 270)
 		(fields_autoplaced yes)
@@ -4745,7 +4663,7 @@
 			)
 		)
 	)
-	(global_label "24V_POST_F1"
+	(global_label "24V_RAW"
 		(shape input)
 		(at 53.34 193.04 90)
 		(fields_autoplaced yes)
@@ -4766,7 +4684,7 @@
 			)
 		)
 	)
-	(global_label "VIN_POST_F1_MON"
+	(global_label "VIN_RAW_MON"
 		(shape input)
 		(at 40.64 204.47 180)
 		(fields_autoplaced yes)
@@ -5067,7 +4985,7 @@
 			)
 		)
 	)
-	(global_label "24V_POST_F1"
+	(global_label "24V_RAW"
 		(shape input)
 		(at 308.61 204.47 270)
 		(fields_autoplaced yes)
@@ -5089,7 +5007,7 @@
 			)
 		)
 	)
-	(global_label "24V_POST_F1"
+	(global_label "24V_RAW"
 		(shape input)
 		(at 223.52 181.61 90)
 		(fields_autoplaced yes)
@@ -5128,28 +5046,6 @@
 				(font
 					(size 1.27 1.27)
 				)
-				(hide yes)
-			)
-		)
-	)
-	(global_label "24V_POST_F1"
-		(shape input)
-		(at 20.32 29.21 270)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right)
-		)
-		(uuid "b5393902-c2bb-4a8a-b9d6-31573f3209b1")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 20.32 44.7137 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
 				(hide yes)
 			)
 		)
@@ -5197,7 +5093,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "TPS2492 local VCC bypass capacitor on 24V_POST_F1"
+		(property "Description" "TPS2492 local VCC bypass capacitor on 24V_RAW"
 			(at 285.75 218.44 0)
 			(effects
 				(font
@@ -6986,91 +6882,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:Fuse")
-		(at 219.71 43.18 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "30000000-0000-4000-8000-000000000008")
-		(property "Reference" "F1"
-			(at 223.52 41.91 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "30A"
-			(at 226.568 44.45 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "rev_d_power_footprints:FuseHolder_Blade_ATO_Littelfuse_FLR_178.6165"
-			(at 219.71 43.18 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 219.71 43.18 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Local switched-branch fuse, 30A ATO blade secondary backup above TPS2492 40A fast-trip"
-			(at 219.71 43.18 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Manufacturer" "Littelfuse"
-			(at 219.71 43.18 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "MPN" "FLR178.6165"
-			(at 219.71 43.18 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "31000000-0000-4000-8000-000000000016")
-		)
-		(pin "2"
-			(uuid "31000000-0000-4000-8000-000000000017")
-		)
-		(instances
-			(project "joint_controller_board_rev_d_power"
-				(path "/b525a606-cb90-472f-b247-e06589b94564"
-					(reference "F1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "rev_d_power_parts:LMR36520ADDA")
 		(at 67.31 114.3 0)
 		(unit 1)
@@ -7736,7 +7547,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "VIN_POST_F1 monitor top divider"
+		(property "Description" "VIN_RAW monitor top divider"
 			(at 53.34 198.12 0)
 			(effects
 				(font
@@ -7806,7 +7617,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "VIN_POST_F1 monitor bottom divider"
+		(property "Description" "VIN_RAW monitor bottom divider"
 			(at 53.34 209.55 0)
 			(effects
 				(font
@@ -7876,7 +7687,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "VIN_POST_F1 monitor RC filter capacitor"
+		(property "Description" "VIN_RAW monitor RC filter capacitor"
 			(at 76.2 208.28 0)
 			(effects
 				(font
@@ -10487,71 +10298,6 @@
 			(project "joint_controller_board_rev_d_power"
 				(path "/b525a606-cb90-472f-b247-e06589b94564"
 					(reference "R10")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:PWR_FLAG")
-		(at 20.32 29.21 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "e93dfc0f-98f4-4dfe-bcc2-b3ce2a422910")
-		(property "Reference" "#FLG04"
-			(at 20.32 27.305 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "PWR_FLAG"
-			(at 20.574 20.828 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 20.32 29.21 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 20.32 29.21 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Special symbol for telling ERC where power comes from"
-			(at 20.32 29.21 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "5a273c7a-752f-432b-adcb-e95cd1a08b41")
-		)
-		(instances
-			(project "joint_controller_board_rev_d_power"
-				(path "/b525a606-cb90-472f-b247-e06589b94564"
-					(reference "#FLG04")
 					(unit 1)
 				)
 			)

@@ -116,20 +116,33 @@ Design note:
 - keep the TVS physically close to the raw input connector and return path
 - `SMCJ33A` remains the default first-prototype choice; `SMCJ30A` is a possible follow-up only if extra clamping margin is needed after bench transient testing
 
-## Deliberately Not Frozen Yet
+## Branch Fuse (moved off-board — Option C1)
 
-### Fuse `F1`
+The per-branch protection fuse has been **removed from the rev_d_power board**
+and is now expected on the upstream PDU / battery distribution board.
 
-Fuse rating is still intentionally open.
+Rationale:
+- the on-board `TPS2492` provides primary fast protection via its fixed
+  50 mV current-limit (target `Ilim ≈ 40 A` with `R_SENSE = 1.25 mOhm`)
+- an on-board slow-blow fuse would protect the board but not the cable feeding
+  it — a cable short upstream of the board cannot be interrupted by an on-board
+  device
+- a single central PDU is the natural location for branch fuses in a 20+ joint
+  humanoid: single maintenance point, uniform interchangeable fuse type, per-branch
+  status LEDs / telemetry are easier to expose there
+- removing the ATO holder + fuse saves ~24 mm of vertical clearance inside
+  the joint enclosure, resolving the mechanical fit-check blocker seen on the
+  first rev_d_power physical prototype
 
-Reason:
-- the branch current envelope is known
-- the load-side input capacitance and startup profile of the 5-motor HIP branch are not yet frozen
-- the electronic hot-swap controller should trip before the fuse under most overload conditions
-
-Current direction for design:
-- treat the fuse as **secondary backup protection**, not as the primary current-limiting element
-- expect the final fuse to land around the `25A` to `30A` class, but do not freeze that value yet
+Recommendation for the upstream PDU:
+- **30 A ATO** slow-blow per joint branch (one `Ilim`-safe fuse per joint)
+- sized below `TPS2492` `Ilim` so that on-board fast protection trips first
+  under transient overcurrent; the fuse only opens on catastrophic cable-side
+  faults (dead short, reverse polarity, burned FET)
+- minimum cable gauge 12 AWG silicone (10 AWG preferred for margin)
+- PCB holder form factor can be the same Littelfuse 178.6165 series used here
+  previously, or a lower-profile 177.6183 (horizontal) if PDU height is
+  constrained
 
 ### Sense resistor / timer / UVLO / OVLO component values
 

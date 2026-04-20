@@ -587,10 +587,6 @@
       },
       {
         "netclass": "PWR_MOTOR",
-        "pattern": "^24V_POST_F1$"
-      },
-      {
-        "netclass": "PWR_MOTOR",
         "pattern": "^24V_SENSE_OUT$"
       },
       {
@@ -615,7 +611,7 @@
       },
       {
         "netclass": "KELVIN_SENSE",
-        "pattern": "^VIN_POST_F1_MON$"
+        "pattern": "^VIN_RAW_MON$"
       },
       {
         "netclass": "KELVIN_SENSE",
