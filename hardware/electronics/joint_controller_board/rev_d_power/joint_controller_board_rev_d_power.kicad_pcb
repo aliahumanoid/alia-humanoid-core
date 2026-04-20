@@ -152,7 +152,7 @@
 		(layer "F.Cu")
 		(uuid "1b84ac16-e140-4755-83a2-f21df1892616")
 		(at 136.9 114.6 90)
-		(descr "Connector XT60 Horizontal PCB Female, https://www.tme.eu/Document/b13629717d44ae038681dba08d18c0b6/XT60PW-M.pdf")
+		(descr "Connector XT60 Horizontal PCB Male, https://www.tme.eu/Document/b13629717d44ae038681dba08d18c0b6/XT60PW-M.pdf")
 		(tags "RC Connector XT60")
 		(property "Reference" "J4"
 			(at 3.6 -17.5 0)
@@ -217,7 +217,7 @@
 				)
 			)
 		)
-		(property "MPN" "XT60PW-F"
+		(property "MPN" "XT60PW-M"
 			(at 0 0 90)
 			(unlocked yes)
 			(layer "F.Fab")
@@ -969,7 +969,7 @@
 				)
 			)
 		)
-		(property "MPN" "XT60PW-M"
+		(property "MPN" "XT60PW-F"
 			(at 0 0 90)
 			(unlocked yes)
 			(layer "F.Fab")
