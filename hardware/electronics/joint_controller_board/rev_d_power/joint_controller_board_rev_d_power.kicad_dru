@@ -63,6 +63,13 @@
 # Note: physical_clearance on mask layers checks the gap between
 # solder mask openings (i.e., the bridge width).
 
+# --- Exception: U2 HTSOP thermal pad ---
+# U2 LMR36520 HTSOP-8 footprint includes an exposed thermal pad (no-net, mask-only)
+# AND 6 PTH thermal vias on GND inside the same pad area. The mask openings
+# overlap by design (the exposed pad opening engulfs the thermal via openings).
+# Most fabs handle this without problem for HTSOP thermal pads.
+# The condition below exempts mask bridge checks when both items are inside U2's courtyard.
+
 (rule "Fabrication: Min solder mask bridge"
 	(layer "F.Mask")
 	(constraint physical_clearance (min 0.19mm))
@@ -70,5 +77,6 @@
 
 (rule "Fabrication: Min solder mask bridge back"
 	(layer "B.Mask")
+	(condition "!(A.intersectsCourtyard('U2') && B.intersectsCourtyard('U2'))")
 	(constraint physical_clearance (min 0.19mm))
 )

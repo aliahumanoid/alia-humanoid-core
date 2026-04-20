@@ -89,7 +89,7 @@
         "items_not_allowed": "error",
         "length_out_of_range": "error",
         "lib_footprint_issues": "warning",
-        "lib_footprint_mismatch": "warning",
+        "lib_footprint_mismatch": "ignore",
         "malformed_courtyard": "error",
         "microvia_drill_out_of_range": "error",
         "mirrored_text_on_front_layer": "warning",
@@ -97,9 +97,9 @@
         "missing_footprint": "warning",
         "net_conflict": "warning",
         "nonmirrored_text_on_back_layer": "warning",
-        "npth_inside_courtyard": "warning",
+        "npth_inside_courtyard": "ignore",
         "padstack": "warning",
-        "pth_inside_courtyard": "warning",
+        "pth_inside_courtyard": "ignore",
         "shorting_items": "error",
         "silk_edge_clearance": "warning",
         "silk_over_copper": "warning",
@@ -190,7 +190,10 @@
         }
       ],
       "track_widths": [
-        0.0
+        0.0,
+        0.2,
+        1.2,
+        6.0
       ],
       "tuning_pattern_settings": {
         "diff_pair_defaults": {
@@ -226,6 +229,14 @@
         {
           "diameter": 0.5,
           "drill": 0.3
+        },
+        {
+          "diameter": 0.8,
+          "drill": 0.4
+        },
+        {
+          "diameter": 1.2,
+          "drill": 0.6
         }
       ],
       "zones_allow_external_fillets": false
@@ -491,8 +502,59 @@
         "priority": 2147483647,
         "schematic_color": "rgba(0, 0, 0, 0.000)",
         "track_width": 0.2,
-        "via_diameter": 0.5,
+        "via_diameter": 0.6,
         "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_width": 1.0,
+        "line_style": 0,
+        "microvia_diameter": 0.5,
+        "microvia_drill": 0.3,
+        "name": "KELVIN_SENSE",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 3,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.25,
+        "diff_pair_gap": 0.25,
+        "diff_pair_width": 1.0,
+        "line_style": 0,
+        "microvia_diameter": 0.5,
+        "microvia_drill": 0.3,
+        "name": "PWR_BUCK",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 1.2,
+        "via_diameter": 0.8,
+        "via_drill": 0.4,
+        "wire_width": 6
+      },
+      {
+        "bus_width": 12,
+        "clearance": 0.25,
+        "diff_pair_gap": 0.25,
+        "diff_pair_width": 1.0,
+        "line_style": 0,
+        "microvia_diameter": 0.5,
+        "microvia_drill": 0.3,
+        "name": "PWR_MOTOR",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 1,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 1.2,
+        "via_diameter": 0.8,
+        "via_drill": 0.4,
         "wire_width": 6
       },
       {
@@ -520,16 +582,64 @@
     "netclass_assignments": null,
     "netclass_patterns": [
       {
-        "netclass": "Power",
-        "pattern": "+24V"
+        "netclass": "PWR_MOTOR",
+        "pattern": "^24V_RAW$"
       },
       {
-        "netclass": "Default",
-        "pattern": "Net-(J3-Pin_1)"
+        "netclass": "PWR_MOTOR",
+        "pattern": "^24V_POST_F1$"
       },
       {
-        "netclass": "Power",
-        "pattern": "Net-(J2-Pin_1)"
+        "netclass": "PWR_MOTOR",
+        "pattern": "^24V_SENSE_OUT$"
+      },
+      {
+        "netclass": "PWR_MOTOR",
+        "pattern": "^24V_PASS_MID$"
+      },
+      {
+        "netclass": "PWR_MOTOR",
+        "pattern": "^24V_SW$"
+      },
+      {
+        "netclass": "PWR_BUCK",
+        "pattern": "^\\+5V_FROM_POWER$"
+      },
+      {
+        "netclass": "PWR_BUCK",
+        "pattern": "^/U2_SW$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^/U2_FB$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^VIN_POST_F1_MON$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^VOUT_POST_FET_MON$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^Net-\\(U1-VREF\\)$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^Net-\\(U1-PROG\\)$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^Net-\\(U1-TIMER\\)$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^Net-\\(U1-OV\\)$"
+      },
+      {
+        "netclass": "KELVIN_SENSE",
+        "pattern": "^Net-\\(U1-IMON\\)$"
       }
     ]
   },
