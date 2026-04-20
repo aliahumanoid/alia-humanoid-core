@@ -7,7 +7,6 @@
 The board must:
 - accept raw `24V` motor power
 - provide one switched `24V` motor output
-- provide one raw `24V` daisy-chain output
 - provide regulated `+5V_FROM_POWER` to `rev_d_logic`
 - expose power diagnostics and status to `rev_d_logic` through the RJ45 interface
 
@@ -21,11 +20,15 @@ The board must not include:
 ### XT60 connectors
 
 - `J_PWR_IN_RAW`
-  Raw `24V` input from system power bus.
-- `J_PWR_CHAIN_RAW`
-  Raw `24V` daisy-chain output, directly paralleled to `J_PWR_IN_RAW`.
+  Raw `24V` input from system power bus. Final connector: `J2`, XT60PW-F
+  female PCB connector.
 - `J_PWR_OUT_SW`
-  Switched `24V` output to the motor power input.
+  Switched `24V` output to the motor power input. Final connector: `J4`,
+  XT60PW-M male PCB connector.
+
+There is intentionally no raw daisy-chain connector on `rev_d_power`. Branch
+fan-out and cable protection are handled upstream by the PDU / battery
+distribution board.
 
 ### RJ45 interface to rev_d_logic
 
@@ -47,8 +50,6 @@ Shield. `GND`
 24V_IN_RAW  (protected upstream by external 30A ATO fuse on PDU / battery board)
   |
   +--> TVS + bulk input filtering
-  |
-  +--> J_PWR_CHAIN_RAW
   |
   +--> local branch
          |
@@ -80,16 +81,20 @@ Minimum cable gauge: 12 AWG silicone (or 10 AWG for higher margin).
 
 ## Architecture Decisions
 
-### 1. Raw daisy-chain shares the raw input node
+### 1. No on-board raw daisy-chain output
 
-`J_PWR_CHAIN_RAW` is connected in parallel with `J_PWR_IN_RAW`. Both see the raw
-24 V coming from the upstream PDU, already protected by the PDU-side branch fuse.
+The final `rev_d_power` board has a single raw input connector and a single
+switched motor output connector. Raw power daisy-chain / fan-out is not provided
+on this PCB.
 
 Reason:
 - each joint branch has its own fuse on the PDU side
 - on-board `TPS2492` provides fast electronic protection for the local switched
   output only
-- daisy-chain copper and connector are sized as a bus pass-through
+- removing the raw pass-through connector reduces current-routing ambiguity,
+  assembly risk, and board congestion
+- upstream fan-out keeps cable protection and branch distribution in one
+  serviceable PDU location
 
 ### 2. Local 5V is generated from raw 24V
 
@@ -256,18 +261,20 @@ Reason:
 - `1 A` gives safe headroom for controller startup, CAN activity, future small additions, and regulator margin
 - the cost/size penalty versus a smaller buck is negligible compared with the rest of the power path
 
-### 6. Raw daisy-chain sizing
+### 6. Upstream raw distribution sizing
 
-`J_PWR_CHAIN_RAW` is a straight bus pass-through from `J_PWR_IN_RAW`, not a
-protected local branch. Its copper and connector path must be sized as a bus
-path.
+Raw daisy-chain / branch fan-out is handled outside this board by the upstream
+PDU / battery distribution board. This PCB only carries the local branch current
+from `J_PWR_IN_RAW` to `J_PWR_OUT_SW`.
 
 Minimum rule:
-- raw input and raw daisy-chain path must not be rated below the local branch capability
+- upstream PDU branch fuse and cabling must be rated for the local branch envelope
+- local board copper from input to switched output must support the `22 A`
+  continuous / `40 A`-class transient design target
 
 Practical implication:
-- treat the raw pass-through path as `22 A continuous` minimum
-- if the board may sit upstream of additional power boards, the system-level trunk current must be evaluated separately and may exceed the local branch current substantially
+- no additional downstream branch current is allowed through this PCB
+- system-level trunk current is evaluated on the PDU harness, not on rev_d_power
 
 ## Compact and Stable Layout Guidance
 
@@ -292,8 +299,6 @@ Practical implication:
 ## Open Items Before Schematic Capture
 
 - whether `FAULT_N` is latched until power cycle or auto-retry
-- exact mechanical orientation of the three XT60 connectors
-- whether the raw daisy-chain path must support more than one downstream power board in series
 - PDU / battery board architecture (number of protected branches, central fuse
   form factor — PCB blade vs. bolted MIDI — and whether each branch exposes
   a per-fuse status LED or telemetry line)
@@ -302,13 +307,11 @@ Practical implication:
 
 Recommended schematic-capture sequence:
 
-1. Place the three external connectors:
+1. Place the two external XT60 connectors:
    - `J_PWR_IN_RAW`
-   - `J_PWR_CHAIN_RAW`
    - `J_PWR_OUT_SW`
 2. Place the RJ45 interface connector and assign the frozen pinout.
 3. Draw the raw `24V` bus and branch split:
-   - direct branch to `J_PWR_CHAIN_RAW`
    - local branch to hot-swap controller and switched output path
    - local branch to `5V` generation
 4. Add input protection:

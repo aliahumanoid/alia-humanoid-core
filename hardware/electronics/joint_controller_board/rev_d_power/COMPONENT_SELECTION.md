@@ -11,9 +11,9 @@ It is intentionally limited to the main protection and regulation devices needed
 ### Motor branch
 
 - raw `24V` input
-- raw `24V` daisy-chain output in parallel with input
 - local switched branch controlled by a dedicated hot-swap / eFuse controller
 - external back-to-back N-MOSFET pass stage
+- no raw daisy-chain output on this board; branch fan-out is handled by the upstream PDU
 
 ### Logic rail
 
@@ -41,7 +41,7 @@ Implementation note:
 - the current-limit threshold is not independently programmable; continuous vs transient behavior must be split between `R_SENSE`, `PROG`, `TIMER`, and firmware supervision through `IMON`
 - first-pass recommendation is `R_SENSE = 1.25 mOhm`, **4-terminal / Kelvin sensed**, `>= 2W`
 - the current schematic/BOM freeze uses `Vishay Dale WSR21L250FEA`, which matches the KiCad `WSR2/WSR3` Kelvin footprint and gives `2W` steady-state rating margin
-- route `IMON` to firmware-side monitoring so the logic board can supervise continuous current in software
+- current rev_d_power freeze leaves `IMON` unexposed because the RJ45 pin budget is full; future continuous-current firmware monitoring requires either sacrificing one voltage-monitor pin or adding a bench-only test point
 - size `PROG` from the MOSFET SOA during startup, not only from steady-state load current
 
 ### 2. External switched-path MOSFETs

@@ -1,6 +1,6 @@
 # rev_d_power
 
-Power board for split Rev D architecture (`65 mm x 40 mm`).
+Power board for split Rev D architecture (`40 mm x 60 mm`).
 
 Reference documents:
 - `../docs/rev_d_architecture.md`
@@ -15,9 +15,9 @@ Status:
 - `ARCHITECTURE.md` is the authoritative design direction for the new power board
 - current schematic draft now includes:
   - `RJ45` interface connector with frozen split-architecture pinout
-  - `XT60` raw input
-  - `XT60` raw daisy-chain output
-  - `XT60` switched output
+  - `XT60` raw input: `J2`, XT60PW-F female
+  - `XT60` switched output: `J4`, XT60PW-M male
+  - no raw daisy-chain connector; upstream fan-out is handled by the PDU
   - input protection network with `SMCJ33A`, raw bulk capacitor, raw decoupling capacitor
   - high-side `TPS2492` hot-swap / eFuse controller driven by `SAFETY_EN`, with
     `Ilim ≈ 40 A` fast-trip and latch-off on fault (branch fuse intentionally
@@ -26,7 +26,7 @@ Status:
   - `TLV75533P`-based `5V -> 3V3` auxiliary LDO draft for monitor/status conditioning
   - `PWR_FLAG` markers on `24V_RAW`, `+5V_FROM_POWER`, and `GND` for clean ERC intent
   - official KiCad library symbols already adopted for:
-    - `LMR36510ADDA` as schematic base symbol for `LMR36520DDA`
+    - `LMR36520ADDA` for the `LMR36520ADDAR` buck
     - `TLV70012_SOT23-5` as schematic base symbol for `TLV75533PDBV`
     - `Device:L` for the buck output inductor
   - first-pass analog monitors:
@@ -35,8 +35,8 @@ Status:
   - first-pass status conditioning:
     - `PWRGD_N` 3.3 V pull-up
     - `FAULT_N` 3.3 V pull-up
-- PCB content is still temporary template material and must be replaced during the redesign
-- schematic ERC is currently at `0` errors; remaining warnings are limited to known library-mismatch noise on existing passive symbols and the intentional `U1` placeholder
+- schematic ERC is currently at `0` errors / `0` warnings
+- PCB DRC is currently at `0` violations after zone refill
 - primary semiconductor selection is now frozen at architecture level:
   - high-side controller / eFuse
   - `24V -> 5V` regulator
@@ -56,7 +56,7 @@ Status:
 - validation feedback has been folded into the design notes:
   - `TPS2492` is treated as a fixed-`50 mV` current-limit device
   - first-pass shunt target = `1.25 mOhm`, Kelvin sensed, `>= 2W`
-  - `IMON` is intended for firmware-side supervision of continuous current
+  - `IMON` is intentionally not routed to RJ45 in this revision because the connector pin budget is full
   - MOSFET thermal layout must assume the `22 A` HIP envelope from day one
 - local symbol library now exists for the selected active devices:
   - `rev_d_power_parts.kicad_sym`

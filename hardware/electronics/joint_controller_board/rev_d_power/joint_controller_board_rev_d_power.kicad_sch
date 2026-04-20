@@ -6403,7 +6403,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Connector_AMASS:AMASS_XT60PW-M_1x02_P7.20mm_Horizontal"
+		(property "Footprint" "Connector_AMASS:AMASS_XT60PW-F_1x02_P7.20mm_Horizontal"
 			(at 62.23 29.21 0)
 			(effects
 				(font
@@ -6421,7 +6421,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "Raw 24V input XT60"
+		(property "Description" "Raw 24V input XT60 female connector"
 			(at 62.23 29.21 0)
 			(effects
 				(font
@@ -6439,7 +6439,7 @@
 				(hide yes)
 			)
 		)
-		(property "MPN" "XT60PW-M"
+		(property "MPN" "XT60PW-F"
 			(at 62.23 29.21 0)
 			(effects
 				(font
@@ -6488,7 +6488,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Connector_AMASS:AMASS_XT60PW-F_1x02_P7.20mm_Horizontal"
+		(property "Footprint" "Connector_AMASS:AMASS_XT60PW-M_1x02_P7.20mm_Horizontal"
 			(at 62.23 59.69 0)
 			(effects
 				(font
@@ -6506,7 +6506,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "Switched 24V output XT60"
+		(property "Description" "Switched 24V output XT60 male connector"
 			(at 62.23 59.69 0)
 			(effects
 				(font
@@ -6524,7 +6524,7 @@
 				(hide yes)
 			)
 		)
-		(property "MPN" "XT60PW-F"
+		(property "MPN" "XT60PW-M"
 			(at 62.23 59.69 0)
 			(effects
 				(font
