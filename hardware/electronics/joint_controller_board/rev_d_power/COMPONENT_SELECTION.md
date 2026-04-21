@@ -139,7 +139,10 @@ Recommendation for the upstream PDU:
 - sized below `TPS2492` `Ilim` so that on-board fast protection trips first
   under transient overcurrent; the fuse only opens on catastrophic cable-side
   faults (dead short, reverse polarity, burned FET)
-- minimum cable gauge 12 AWG silicone (10 AWG preferred for margin)
+- harness gauge follows the joint-class policy in `ARCHITECTURE.md`:
+  `12 AWG` silicone for HIP / high-current trunk runs, `14 AWG` silicone for
+  knee and ankle branches, and `16 AWG` only for short single-motor runs or
+  bench testing
 - PCB holder form factor can be the same Littelfuse 178.6165 series used here
   previously, or a lower-profile 177.6183 (horizontal) if PDU height is
   constrained

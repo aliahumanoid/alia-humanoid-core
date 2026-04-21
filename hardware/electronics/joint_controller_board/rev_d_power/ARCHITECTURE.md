@@ -77,7 +77,47 @@ Rationale:
 - removing the PCB fuse saves board area and ~24 mm vertical clearance inside
   the joint enclosure (critical for mechanical fit)
 
-Minimum cable gauge: 12 AWG silicone (or 10 AWG for higher margin).
+Power cabling is sized by joint class. The board and protection stage are
+designed for the worst-case HIP electrical envelope, but the harness does not
+need to use the same cable gauge on every joint. See "Harness gauge policy"
+below.
+
+### Harness gauge policy
+
+Use flexible silicone wire for the motor power harness. Final cable selection
+is based on realistic joint utilization, not the impossible case where every
+agonist and antagonist motor draws peak current continuously at the same time.
+
+Reference motor currents from `docs/specs/MOTOR_SPECIFICATIONS.md`:
+- 50 mm class motor: `4.4 A` continuous at `24V`
+- 40 mm class motor: `1.6 A` continuous at `24V`
+
+Practical first-build purchase:
+- `10 m` of red/black `12 AWG` silicone wire for HIP and other high-current
+  trunk runs
+- `20 m` of red/black `14 AWG` silicone wire for knee, ankle, and general joint
+  power harnesses
+- existing `16 AWG` silicone wire may be used for short single-motor runs,
+  bench testing, and non-critical low-current sections
+
+| Harness section | Expected current profile | Recommended gauge | Notes |
+|---|---:|---:|---|
+| PDU / battery board to HIP `rev_d_power` | HIP worst case, 2 tendon pairs + 1 direct-drive motor | `12 AWG` | Keep as the high-current standard. Avoid 10 AWG unless mechanically supported because it can stress PCB-mounted XT60s. |
+| HIP `rev_d_power` to HIP local distribution / motor power input | highest local branch current | `12 AWG` | Matches the board's `22 A` continuous / `40 A` class transient design envelope. |
+| PDU to knee `rev_d_power` | 2 x 50 mm antagonistic motors; only one side normally carries maximum useful torque | `14 AWG` | `12 AWG` acceptable for long or mechanically exposed runs; `16 AWG` only for short bench/testing use. |
+| PDU to ankle `rev_d_power` | 1 x 50 mm + 3 x 40 mm motors; project peak estimate around `15 A` for the ankle assembly | `14 AWG` | Good balance of current margin and flexibility. |
+| Single 50 mm motor branch | `4.4 A` continuous motor class | `16 AWG` | Suitable for short local motor pigtails; use `14 AWG` if length or bundling increases heating. |
+| Single 40 mm motor branch | `1.6 A` continuous motor class | `18 AWG` or `16 AWG` | `16 AWG` is conservative and already available in stock. |
+| CAN / signals | low current | twisted shielded pair / CAT5-class cable | Do not use motor power wire for CAN signaling. |
+
+The intentionally conservative electronic design envelope remains:
+- `rev_d_power` switched branch target: `22 A` continuous, `40 A` class transient
+- upstream PDU fuse target: `30 A ATO` per joint branch
+
+This margin protects against non-nominal cases such as co-contraction,
+pretension/hold phases, tuning instability, cable faults, and transient impacts,
+while still allowing lighter `14 AWG` cabling on knee and ankle where the
+realistic continuous current is lower than the HIP branch.
 
 ## Architecture Decisions
 
