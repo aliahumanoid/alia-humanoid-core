@@ -22,24 +22,24 @@
 )
 
 # --- Minimum track width ---
-# Fabrication baseline: >= 0.127 mm (5 mil).
+# Fabrication baseline for 2 oz copper: >= 0.15 mm (6 mil).
 
 (rule "Fabrication: Min track width"
-	(constraint track_width (min 0.127mm))
+	(constraint track_width (min 0.15mm))
 )
 
 # --- Minimum clearance (copper to copper) ---
-# Fabrication baseline: >= 0.127 mm (5 mil).
+# Fabrication baseline for 2 oz copper: >= 0.15 mm (6 mil).
 
 (rule "Fabrication: Min copper clearance"
-	(constraint clearance (min 0.127mm))
+	(constraint clearance (min 0.15mm))
 )
 
 # --- Minimum annular ring ---
-# Fabrication baseline: >= 0.127 mm (5 mil).
+# Fabrication baseline for 2 oz copper: >= 0.15 mm (6 mil).
 
 (rule "Fabrication: Min annular ring"
-	(constraint annular_width (min 0.127mm))
+	(constraint annular_width (min 0.15mm))
 )
 
 # --- Hole to hole clearance ---
