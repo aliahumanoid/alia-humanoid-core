@@ -3363,7 +3363,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Value" "B560C-13-F"
+		(property "Value" "SS56B-HF"
 			(at 0 -3.1 90)
 			(layer "B.Fab")
 			(uuid "82c76e34-35b6-4e6f-8fcc-7b6db2db308d")
@@ -3375,7 +3375,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Datasheet" "https://www.diodes.com/assets/Datasheets/ds13005.pdf"
+		(property "Datasheet" "https://www.digikey.com/en/products/detail/comchip-technology/SS56B-HF/11584479"
 			(at 0 0 270)
 			(unlocked yes)
 			(layer "B.Fab")
@@ -3389,7 +3389,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" "Negative transient clamp diode from 24V_PASS_MID to GND, 60V 5A Schottky"
+		(property "Description" "Negative transient clamp diode from 24V_PASS_MID to GND, 60V 5A Schottky, SMB/DO-214AA"
 			(at 0 0 270)
 			(unlocked yes)
 			(layer "B.Fab")
@@ -3403,7 +3403,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Manufacturer" "Diodes Incorporated"
+		(property "Manufacturer" "Comchip Technology"
 			(at 0 0 270)
 			(unlocked yes)
 			(layer "B.Fab")
@@ -3417,7 +3417,7 @@
 				(justify mirror)
 			)
 		)
-		(property "MPN" "B560C-13-F"
+		(property "MPN" "SS56B-HF"
 			(at 0 0 270)
 			(unlocked yes)
 			(layer "B.Fab")
