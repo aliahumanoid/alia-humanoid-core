@@ -1,6 +1,6 @@
 /**
  * @file safety_system.h
- * @brief Hardware Safety System for Joint Controller Board Rev B
+ * @brief Hardware Safety System for Joint Controller Board revisions.
  *
  * Provides firmware integration for the Rev B hardware safety chain:
  * - External watchdog timer (MAX6369KA) on GP15
@@ -9,8 +9,11 @@
  *
  * Hardware logic: MOTOR_POWER = SAFETY_ENABLE(GP22) AND NOT(WATCHDOG_TIMEOUT)
  *
- * @note Enable SAFETY_BOARD_REV_B in build flags when running on Rev B hardware.
- *       On Rev A hardware, all functions are safe no-ops.
+ * Rev D reuses GP22 as the TPS2492 SAFETY_EN input and adds passive power
+ * board monitoring in power_board_rev_d.{h,cpp}.
+ *
+ * @note Enable SAFETY_BOARD_REV_B or SAFETY_BOARD_REV_D in build flags for
+ *       hardware-gated boards. On Rev A hardware, all functions are safe no-ops.
  */
 
 #ifndef SAFETY_SYSTEM_H
@@ -21,18 +24,19 @@
 // ============================================================================
 // BOARD REVISION GATE
 // ============================================================================
-// Define SAFETY_BOARD_REV_B in platformio.ini build_flags to enable hardware
-// safety features. When not defined, all functions are safe no-ops.
+// Define SAFETY_BOARD_REV_B or SAFETY_BOARD_REV_D in platformio.ini build_flags
+// to enable hardware safety features. When neither is defined, all functions
+// are safe no-ops.
 //
 // Example platformio.ini:
-//   build_flags = -DSAFETY_BOARD_REV_B
+//   build_flags = -DSAFETY_BOARD_REV_D
 
 // ============================================================================
-// PIN DEFINITIONS (Rev B board layout)
+// PIN DEFINITIONS (Rev B / Rev D board layout)
 // ============================================================================
 
 #define PIN_SAFETY_WDT_KICK  15   // GP15 — Watchdog kick pulse (WDI on MAX6369)
-#define PIN_SAFETY_ENABLE    22   // GP22 — Motor power enable (to AND gate)
+#define PIN_SAFETY_ENABLE    22   // GP22 — Motor power enable / Rev D TPS2492 SAFETY_EN
 
 // ============================================================================
 // TIMING CONSTANTS

@@ -20,6 +20,7 @@
 #include "main_common.h"
 #include "RuntimeProvisioning.h"
 #include "IntercoreSync.h"
+#include "power_board_rev_d.h"
 #include "flash_map.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
@@ -286,6 +287,7 @@ static constexpr uint8_t DIAG_CAN_WARN_ASSERT_SAMPLES = 2;
 static constexpr uint8_t DIAG_CAN_WARN_CLEAR_SAMPLES = 2;
 static constexpr uint8_t DIAG_HEALTH_EXT_LOOP_TIMING = 0x00;
 static constexpr uint8_t DIAG_HEALTH_EXT_CAN_DETAILS = 0x01;
+static constexpr uint8_t DIAG_HEALTH_EXT_POWER_BOARD_STATE = 0x02;
 static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 1;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_QUERY_META = 0x00;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_BEGIN_DUMP = 0x01;
@@ -1154,6 +1156,29 @@ static void sendHealthStatusData() {
   frame3.motor_can_rec = diag_last_motor_can_rx_error_count;
   frame3.motor_can_eflg = diag_last_motor_can_eflg;
   CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t *)&frame3);
+
+#ifdef SAFETY_BOARD_REV_D
+  const PowerBoardRevDState &power_state = power_board_rev_d_get_state();
+  struct __attribute__((packed)) {
+    uint8_t frame_kind;
+    uint8_t seq;
+    uint8_t state_flags;
+    uint16_t vin_raw_mv;
+    uint16_t vout_post_fet_mv;
+    uint8_t fault_event_count;
+  } frame4;
+
+  frame4.frame_kind = static_cast<uint8_t>(0x80 | DIAG_HEALTH_EXT_POWER_BOARD_STATE);
+  frame4.seq = seq;
+  frame4.state_flags = static_cast<uint8_t>(((power_state.state_code & 0x0Fu) << 4) |
+                                            (power_state.flags & 0x0Fu));
+  frame4.vin_raw_mv = power_state.vin_raw_mv;
+  frame4.vout_post_fet_mv = power_state.vout_post_fet_mv;
+  frame4.fault_event_count = power_state.fault_event_count > 255u
+                                 ? 255u
+                                 : static_cast<uint8_t>(power_state.fault_event_count);
+  CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame4), (uint8_t *)&frame4);
+#endif
 
   // Frame 4: loop timing (optional, same 1Hz cadence, zero impact on control loop)
   // DISABLED pending investigation of startup timeout regression.

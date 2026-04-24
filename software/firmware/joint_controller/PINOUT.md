@@ -99,6 +99,8 @@ GP17 (was slave CS)  ──────────────────► G
 
 The safety system is implemented in `safety_system.h` / `safety_system.cpp`.
 Activate by adding `-DSAFETY_BOARD_REV_B` to `build_flags` in `platformio.ini`.
+For Rev D split logic/power boards use the dedicated `pico2_debug_rev_d`
+environment, which defines `-DSAFETY_BOARD_REV_D`.
 
 ```cpp
 #include <safety_system.h>
@@ -122,6 +124,22 @@ safety_motor_power_enable();     // Re-enable motor power
 - MCU freeze → Watchdog timeout → MOSFETs OFF → Motors coast to stop
 - Software disable (GP22 LOW) → Immediate power cutoff
 - Both paths independent of MCU software state
+
+### Rev D Split Power Board
+
+Rev D keeps `GP22` as the motor power enable line, but it drives the TPS2492
+`SAFETY_EN` input on the separate power board. The firmware also monitors the
+power board passively:
+
+- `GP22` -> `SAFETY_EN`
+- `GP26_ADC0` -> `VIN_RAW_MON`
+- `GP27_ADC1` -> `VOUT_POST_FET_MON`
+- `GP5` -> `PWRGD_N`
+- `GP6` -> `FAULT_N`
+
+The first Rev D integration does not change the active safety state machine:
+`safety_motor_power_enable()` still asserts `GP22` synchronously. Passive
+telemetry is published on `HEALTH_STATUS` extension frame `0x82`.
 
 ---
 
