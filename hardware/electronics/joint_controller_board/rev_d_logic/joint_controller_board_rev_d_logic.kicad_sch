@@ -4575,7 +4575,7 @@
 			)
 		)
 	)
-	(global_label "VIN_POST_F1_MON"
+	(global_label "VIN_RAW_MON"
 		(shape input)
 		(at 346.71 124.46 0)
 		(fields_autoplaced yes)
@@ -6857,7 +6857,7 @@
 			)
 		)
 	)
-	(global_label "VIN_POST_F1_MON"
+	(global_label "VIN_RAW_MON"
 		(shape input)
 		(at 308.61 200.66 0)
 		(fields_autoplaced yes)

@@ -32,7 +32,7 @@ Latest validation used KiCad CLI checks on the current schematic/PCB pair.
 1. `+5V_FROM_POWER`
 2. `GND`
 3. `SAFETY_EN`
-4. `VIN_POST_F1_MON`
+4. `VIN_RAW_MON`
 5. `VOUT_POST_FET_MON`
 6. `PWRGD_N`
 7. `FAULT_N`
@@ -83,7 +83,7 @@ Encoder:
 
 Analog monitor inputs:
 
-- `GP26_ADC0` -> `VIN_POST_F1_MON`
+- `GP26_ADC0` -> `VIN_RAW_MON`
 - `GP27_ADC1` -> `VOUT_POST_FET_MON`
 
 Digital status inputs:
