@@ -166,6 +166,19 @@ DIAG_REBOOT_REASON_NAMES = {
 
 DIAG_HEALTH_EXT_LOOP_TIMING = 0x00
 DIAG_HEALTH_EXT_CAN_DETAILS = 0x01
+DIAG_HEALTH_EXT_POWER_BOARD_STATE = 0x02
+
+POWER_BOARD_STATE_NAMES = {
+    0: "OFF",
+    1: "POWERING_UP",
+    2: "READY",
+    3: "FAULT",
+}
+
+POWER_BOARD_FLAG_PRESENT = 0x01
+POWER_BOARD_FLAG_SAFETY_EN = 0x02
+POWER_BOARD_FLAG_PWRGD = 0x04
+POWER_BOARD_FLAG_FAULT = 0x08
 
 MCP2515_EFLG_NAMES = {
     0x80: "RX1OVR",
@@ -471,6 +484,37 @@ class HealthStatusCanDetails:
     @property
     def motor_can_eflg_names(self) -> list[str]:
         return decode_can_eflg(self.motor_can_eflg)
+
+
+@dataclass
+class HealthStatusPowerBoardState:
+    joint_id: int
+    seq: int
+    state_code: int
+    vin_raw_mv: int
+    vout_post_fet_mv: int
+    flags: int
+    fault_event_count: int
+
+    @property
+    def state_name(self) -> str:
+        return POWER_BOARD_STATE_NAMES.get(self.state_code, f"CODE_{self.state_code}")
+
+    @property
+    def present(self) -> bool:
+        return bool(self.flags & POWER_BOARD_FLAG_PRESENT)
+
+    @property
+    def safety_en_asserted(self) -> bool:
+        return bool(self.flags & POWER_BOARD_FLAG_SAFETY_EN)
+
+    @property
+    def pwr_good(self) -> bool:
+        return bool(self.flags & POWER_BOARD_FLAG_PWRGD)
+
+    @property
+    def fault_asserted(self) -> bool:
+        return bool(self.flags & POWER_BOARD_FLAG_FAULT)
 
 
 def decode_can_eflg(value: int) -> list[str]:
@@ -1167,6 +1211,20 @@ def decode_health_status_can_details(data: bytes, joint_id: int) -> HealthStatus
         motor_can_tec=data[5],
         motor_can_rec=data[6],
         motor_can_eflg=data[7],
+    )
+
+
+def decode_health_status_power_board_state(data: bytes, joint_id: int) -> HealthStatusPowerBoardState:
+    """Decode Rev D power-board extension of HEALTH_STATUS (0x510+joint, frame kind 0x82)."""
+    state_flags = data[2]
+    return HealthStatusPowerBoardState(
+        joint_id=joint_id,
+        seq=data[1],
+        state_code=(state_flags >> 4) & 0x0F,
+        vin_raw_mv=struct.unpack_from("<H", data, 3)[0],
+        vout_post_fet_mv=struct.unpack_from("<H", data, 5)[0],
+        flags=state_flags & 0x0F,
+        fault_event_count=data[7],
     )
 
 

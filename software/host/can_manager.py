@@ -39,6 +39,7 @@ from jetson_controller.protocol import (
     DIAG_FAULT_NAMES,
     DIAG_HEALTH_EXT_CAN_DETAILS,
     DIAG_HEALTH_EXT_LOOP_TIMING,
+    DIAG_HEALTH_EXT_POWER_BOARD_STATE,
     DIAG_PHASE_NAMES,
     DIAG_REBOOT_REASON_NAMES,
     DIAG_SEVERITY_NAMES,
@@ -2815,6 +2816,26 @@ class CanManager:
                     diag["motor_can_rec"] = data[6]
                     diag["motor_can_eflg"] = data[7]
                     diag["motor_can_eflg_names"] = decode_can_eflg(data[7])
+                elif ext_kind == DIAG_HEALTH_EXT_POWER_BOARD_STATE:
+                    state_flags = data[2]
+                    state_code = (state_flags >> 4) & 0x0F
+                    flags = state_flags & 0x0F
+                    state_names = {
+                        0: "OFF",
+                        1: "POWERING_UP",
+                        2: "READY",
+                        3: "FAULT",
+                    }
+                    diag["power_board_state_code"] = state_code
+                    diag["power_board_state"] = state_names.get(state_code, f"CODE_{state_code}")
+                    diag["power_board_vin_raw_mv"] = struct.unpack_from("<H", data, 3)[0]
+                    diag["power_board_vout_post_fet_mv"] = struct.unpack_from("<H", data, 5)[0]
+                    diag["power_board_flags"] = flags
+                    diag["power_board_present"] = bool(flags & 0x01)
+                    diag["power_board_safety_en"] = bool(flags & 0x02)
+                    diag["power_board_pwr_good"] = bool(flags & 0x04)
+                    diag["power_board_fault"] = bool(flags & 0x08)
+                    diag["power_board_fault_event_count"] = data[7]
                 return
             else:
                 return

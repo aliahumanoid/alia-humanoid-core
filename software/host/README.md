@@ -124,6 +124,7 @@ The report anchors the movement window, and the analyzer summarizes:
 - active fault counts
 - event counts
 - loop timing samples from `HEALTH_STATUS`
+- Rev D power-board status when `HEALTH_STATUS` extension `0x82` is present
 
 ## License
 

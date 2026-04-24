@@ -33,6 +33,7 @@ from .protocol import (
     CAN_ID_STARTUP_STATUS,
     DIAG_HEALTH_EXT_CAN_DETAILS,
     DIAG_HEALTH_EXT_LOOP_TIMING,
+    DIAG_HEALTH_EXT_POWER_BOARD_STATE,
     DIAG_FAULT_NAMES,
     FAULT_SNAPSHOT_PENDING_TIMEOUT_S,
     DIAG_PHASE_NAMES,
@@ -43,6 +44,7 @@ from .protocol import (
     FaultSnapshotMeta,
     HealthStatusCanDetails,
     HealthStatusCounters,
+    HealthStatusPowerBoardState,
     HealthStatusSummary,
     JointAnnounce,
     RetensionProbeResult,
@@ -55,6 +57,7 @@ from .protocol import (
     decode_fault_status,
     decode_health_status_can_details,
     decode_health_status_counters,
+    decode_health_status_power_board_state,
     decode_health_status_summary,
     decode_joint_announce,
     decode_joint_state,
@@ -353,6 +356,7 @@ class TelemetryManager:
         timestamp: float,
         can_details: HealthStatusCanDetails | None = None,
         loop_timing: tuple[int, int, int] | None = None,
+        power_board: HealthStatusPowerBoardState | None = None,
     ) -> dict[str, object]:
         payload = {
             "type": "health_status",
@@ -397,6 +401,17 @@ class TelemetryManager:
             payload["loop_avg_us"] = loop_timing[0]
             payload["loop_max_us"] = loop_timing[1]
             payload["loop_budget_us"] = loop_timing[2]
+        if power_board is not None:
+            payload["power_board_state_code"] = power_board.state_code
+            payload["power_board_state"] = power_board.state_name
+            payload["power_board_vin_raw_mv"] = power_board.vin_raw_mv
+            payload["power_board_vout_post_fet_mv"] = power_board.vout_post_fet_mv
+            payload["power_board_flags"] = power_board.flags
+            payload["power_board_present"] = power_board.present
+            payload["power_board_safety_en"] = power_board.safety_en_asserted
+            payload["power_board_pwr_good"] = power_board.pwr_good
+            payload["power_board_fault"] = power_board.fault_asserted
+            payload["power_board_fault_event_count"] = power_board.fault_event_count
         return payload
 
     @staticmethod
@@ -441,6 +456,31 @@ class TelemetryManager:
             "motor_can_rec": details.motor_can_rec,
             "motor_can_eflg": details.motor_can_eflg,
             "motor_can_eflg_names": details.motor_can_eflg_names,
+        }
+
+    @staticmethod
+    def _health_power_board_payload(
+        joint_id: int,
+        joint_name: str,
+        power_board: HealthStatusPowerBoardState,
+        timestamp: float,
+    ) -> dict[str, object]:
+        return {
+            "type": "health_power_board",
+            "joint_id": joint_id,
+            "joint_name": joint_name,
+            "timestamp": timestamp,
+            "seq": power_board.seq,
+            "state_code": power_board.state_code,
+            "state": power_board.state_name,
+            "vin_raw_mv": power_board.vin_raw_mv,
+            "vout_post_fet_mv": power_board.vout_post_fet_mv,
+            "flags": power_board.flags,
+            "present": power_board.present,
+            "safety_en": power_board.safety_en_asserted,
+            "pwr_good": power_board.pwr_good,
+            "fault": power_board.fault_asserted,
+            "fault_event_count": power_board.fault_event_count,
         }
 
     @staticmethod
@@ -647,6 +687,28 @@ class TelemetryManager:
                         timestamp,
                     )
                 )
+            elif ext_kind == DIAG_HEALTH_EXT_POWER_BOARD_STATE:
+                power = decode_health_status_power_board_state(data, joint_id)
+                pending["power_board"] = power
+                if isinstance(state.health_status, dict):
+                    state.health_status["power_board_state_code"] = power.state_code
+                    state.health_status["power_board_state"] = power.state_name
+                    state.health_status["power_board_vin_raw_mv"] = power.vin_raw_mv
+                    state.health_status["power_board_vout_post_fet_mv"] = power.vout_post_fet_mv
+                    state.health_status["power_board_flags"] = power.flags
+                    state.health_status["power_board_present"] = power.present
+                    state.health_status["power_board_safety_en"] = power.safety_en_asserted
+                    state.health_status["power_board_pwr_good"] = power.pwr_good
+                    state.health_status["power_board_fault"] = power.fault_asserted
+                    state.health_status["power_board_fault_event_count"] = power.fault_event_count
+                self._record_diagnostic(
+                    self._health_power_board_payload(
+                        joint_id,
+                        key,
+                        power,
+                        timestamp,
+                    )
+                )
             else:
                 return
         else:
@@ -665,6 +727,7 @@ class TelemetryManager:
             float(pending["timestamp"]),
             pending.get("can_details"),
             pending.get("loop_timing"),
+            pending.get("power_board"),
         )
         state.health_status = payload
         self.health_status[joint_id] = payload

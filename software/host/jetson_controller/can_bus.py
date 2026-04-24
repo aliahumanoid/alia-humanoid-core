@@ -35,12 +35,14 @@ from .protocol import (
     CAN_ID_JOINT_STATE, CAN_ID_HEALTH_STATUS, CAN_ID_FAULT_STATUS, CAN_ID_EVENT_NOTICE,
     CAN_ID_FAULT_SNAPSHOT_META, CAN_ID_FAULT_SNAPSHOT_DATA,
     DIAG_HEALTH_EXT_CAN_DETAILS, DIAG_HEALTH_EXT_LOOP_TIMING,
+    DIAG_HEALTH_EXT_POWER_BOARD_STATE,
     FAULT_SNAPSHOT_CTRL_SUBCMDS,
     UNUSED_DOF,
     decode_fw_update_status, decode_fw_update_uid, decode_fw_update_info,
     decode_fw_update_progress,
     decode_event_notice, decode_fault_status, decode_health_status_can_details, decode_health_status_counters,
-    decode_health_status_summary, decode_fault_snapshot_meta, decode_fault_snapshot_chunk,
+    decode_health_status_power_board_state, decode_health_status_summary,
+    decode_fault_snapshot_meta, decode_fault_snapshot_chunk,
 )
 
 logger = logging.getLogger(__name__)
@@ -386,6 +388,14 @@ def _decode_rx(arb_id: int, data: bytes) -> tuple[str, bool]:
                         f"eflg=0x{details.host_can_eflg:02X}) "
                         f"motor=(tec={details.motor_can_tec} rec={details.motor_can_rec} "
                         f"eflg=0x{details.motor_can_eflg:02X})",
+                        False,
+                    )
+                if ext_kind == DIAG_HEALTH_EXT_POWER_BOARD_STATE:
+                    power = decode_health_status_power_board_state(data, joint_id)
+                    return (
+                        f"HEALTH_POWER j={joint_id} seq={power.seq} state={power.state_name} "
+                        f"vin={power.vin_raw_mv}mV vout={power.vout_post_fet_mv}mV "
+                        f"flags=0x{power.flags:02X} faults={power.fault_event_count}",
                         False,
                     )
         return f"HEALTH j={joint_id} [{data.hex(' ')}]", False

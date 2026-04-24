@@ -173,6 +173,39 @@ def test_jetson_telemetry_attaches_health_can_details(tmp_path: Path):
     assert health_record["motor_can_eflg"] == 0x20
 
 
+def test_jetson_telemetry_attaches_rev_d_power_board_state(tmp_path: Path):
+    telemetry = TelemetryManager(_build_config())
+    telemetry._diagnostic_history = DiagnosticHistoryWriter(tmp_path, source="test_suite")
+
+    state_flags = (2 << 4) | 0x07  # READY + PRESENT/SAFETY_EN/PWRGD
+    power_board = struct.pack("<BBBHHB", 0x82, 7, state_flags, 24000, 23850, 1)
+    summary = struct.pack("<BBBBHBB", 0x00, 0x6F, 4, 2, 123, 9, 7)
+    counters = struct.pack("<BBBBBBBB", 0x40, 1, 2, 3, 4, 5, 6, 7)
+
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, power_board, 1000.0)
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, summary, 1000.1)
+    telemetry._dispatch(CAN_ID_HEALTH_STATUS + 1, counters, 1000.2)
+
+    payload = telemetry.states["KNEE_LEFT"].health_status
+    assert payload is not None
+    assert payload["power_board_state"] == "READY"
+    assert payload["power_board_vin_raw_mv"] == 24000
+    assert payload["power_board_vout_post_fet_mv"] == 23850
+    assert payload["power_board_present"] is True
+    assert payload["power_board_pwr_good"] is True
+    assert payload["power_board_fault"] is False
+    assert payload["power_board_fault_event_count"] == 1
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "knee_left.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    power_record = next(row for row in records if row["type"] == "health_power_board")
+    health_record = next(row for row in records if row["type"] == "health_status")
+    assert power_record["state"] == "READY"
+    assert health_record["power_board_flags"] == 0x07
+
+
 def test_jetson_telemetry_decodes_faults_and_events(tmp_path: Path):
     telemetry = TelemetryManager(_build_config())
     telemetry._diagnostic_history = DiagnosticHistoryWriter(tmp_path, source="test_suite")
@@ -201,6 +234,7 @@ def test_jetson_telemetry_decodes_faults_and_events(tmp_path: Path):
 def test_can_bus_logger_decodes_new_diagnostic_frames():
     summary = struct.pack("<BBBBHBB", 0x00, 0x6F, 4, 2, 123, 9, 7)
     can_details = struct.pack("<BBBBBBBB", 0x81, 7, 11, 12, 0x04, 21, 22, 0x20)
+    power_board = struct.pack("<BBBHHB", 0x82, 7, (2 << 4) | 0x07, 24000, 23850, 1)
     fault_frame = struct.pack("<BHHBBB", 3, 0x0009, 0x0008, 3, 0, 5)
     event_frame = struct.pack("<BBBBBBH", 0x08, 0x46, 1, 0, 12, 4, 33)
 
@@ -216,6 +250,12 @@ def test_can_bus_logger_decodes_new_diagnostic_frames():
     decoded, high_freq = _decode_rx(CAN_ID_HEALTH_STATUS + 1, can_details)
     assert decoded.startswith("HEALTH_CAN j=1")
     assert "eflg=0x04" in decoded
+    assert high_freq is False
+
+    decoded, high_freq = _decode_rx(CAN_ID_HEALTH_STATUS + 1, power_board)
+    assert decoded.startswith("HEALTH_POWER j=1")
+    assert "state=READY" in decoded
+    assert "vin=24000mV" in decoded
     assert high_freq is False
 
     decoded, high_freq = _decode_rx(CAN_ID_EVENT_NOTICE + 1, event_frame)
