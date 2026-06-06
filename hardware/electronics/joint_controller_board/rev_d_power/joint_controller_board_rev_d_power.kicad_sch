@@ -6403,7 +6403,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Connector_AMASS:AMASS_XT60PW-F_1x02_P7.20mm_Horizontal"
+		(property "Footprint" "rev_d_power_footprints:AMASS_XT60PW-F_1x02_P7.20mm_Horizontal"
 			(at 62.23 29.21 0)
 			(effects
 				(font
@@ -6488,7 +6488,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Connector_AMASS:AMASS_XT60PW-M_1x02_P7.20mm_Horizontal"
+		(property "Footprint" "rev_d_power_footprints:AMASS_XT60PW-M_1x02_P7.20mm_Horizontal"
 			(at 62.23 59.69 0)
 			(effects
 				(font
@@ -9083,7 +9083,7 @@
 				)
 			)
 		)
-		(property "Value" "1.25mOhm"
+		(property "Value" "1.5mOhm"
 			(at 302.26 194.564 90)
 			(effects
 				(font
@@ -9109,7 +9109,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "TPS2492 current-sense shunt, 1.25mOhm 1% 2W Kelvin resistor"
+		(property "Description" "TPS2492 current-sense shunt, 1.5mOhm 1% 3W Kelvin resistor; PCBWay-approved R4 substitution for first assembly lot"
 			(at 302.26 196.85 0)
 			(effects
 				(font
@@ -9127,7 +9127,7 @@
 				(hide yes)
 			)
 		)
-		(property "MPN" "WSR21L250FEA"
+		(property "MPN" "WSR31L500FEA"
 			(at 302.26 196.85 0)
 			(effects
 				(font

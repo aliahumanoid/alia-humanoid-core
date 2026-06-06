@@ -62,6 +62,13 @@ hardware/electronics/joint_controller_board/rev_a/
 hardware/electronics/joint_controller_board/rev_b/
 hardware/electronics/joint_controller_board/rev_c/
 hardware/electronics/joint_controller_board/rev_d_power/
+!hardware/electronics/joint_controller_board/rev_d_power/
+hardware/electronics/joint_controller_board/rev_d_power/*
+!hardware/electronics/joint_controller_board/rev_d_power/fp-lib-table
+!hardware/electronics/joint_controller_board/rev_d_power/rev_d_power_footprints.pretty/
+hardware/electronics/joint_controller_board/rev_d_power/rev_d_power_footprints.pretty/*
+!hardware/electronics/joint_controller_board/rev_d_power/rev_d_power_footprints.pretty/AMASS_XT60PW-F_1x02_P7.20mm_Horizontal.kicad_mod
+!hardware/electronics/joint_controller_board/rev_d_power/rev_d_power_footprints.pretty/AMASS_XT60PW-M_1x02_P7.20mm_Horizontal.kicad_mod
 hardware/electronics/joint_controller_board/rev_d_logic/release_*2026-02-22/
 hardware/electronics/joint_controller_board/rev_d_logic/release_*_wdt_padfix.zip
 hardware/electronics/MT6835_hub_rev_a/CABLE_HARNESS_SPEC.md

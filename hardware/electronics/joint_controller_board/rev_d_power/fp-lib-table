@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "rev_d_power_footprints")(type "KiCad")(uri "${KIPRJMOD}/rev_d_power_footprints.pretty")(options "")(descr "Local footprints for rev_d_power"))
+)
