@@ -175,6 +175,13 @@ Reason:
 - better short-circuit and startup behavior
 - smaller and more professional than adding external ad-hoc protection blocks later
 
+Bench-validated (first article, 2026-06): `TPS2492` soft-start brought `J4` to
+`24V` in `<` a few ms and handled the motor driver's input-capacitance inrush
+without tripping the fault timer (`C22 = 10nF -> ~1.5ms`). The `SAFETY_EN` line
+has a `100k` pulldown (`R1`), giving a deterministic OFF default when the RJ45 is
+unpowered or floating. High-current overcurrent latch-off has not yet been
+exercised — it needs a stiff supply (see open follow-ups).
+
 ## Diagnostic Signals
 
 ### `VIN_RAW_MON`
@@ -192,6 +199,13 @@ Use:
 - telemetry to host for battery state-of-charge estimation
 - diagnosis of upstream PDU fuse open (`VIN_RAW_MON` drops to 0 while host
   side still powered)
+
+Bench-validated (first article, 2026-06): at `24V` the divider reads `2.18V`
+exactly (`= 24V x 8.2/90.2`), confirming divider precision. The firmware ADC
+reading runs about `+1.6%` high (`24382 mV` reported vs `~24000 mV` actual),
+consistent with the real `3V3_AUX` rail sitting at `~3355 mV` (within the
+TLV75533 LDO `+/-2%` tolerance). This is calibratable per board in firmware via
+`-DPOWER_BOARD_ADC_REF_MV=<mV>` (default `3300`).
 
 ### `VOUT_POST_FET_MON`
 
@@ -214,6 +228,11 @@ Recommended conditions for LOW:
 - no active latched fault
 - switched branch available
 
+Bench-validated (first article, 2026-06): `PWRGD_N` active-low polarity confirmed
+on hardware. At idle (TPS off) it sits at `3.3V` pulled up to `3V3_AUX`; on enable
+with the output good it goes LOW. Matches the firmware polarity assumption — no
+change needed.
+
 ### `FAULT_N`
 
 Active-low digital fault line. Proposed meaning:
@@ -227,6 +246,11 @@ Recommended fault sources:
 - input undervoltage or overvoltage
 - `5V` regulator fault
 - thermal shutdown if available
+
+Bench-validated (first article, 2026-06): `FAULT_N` active-low polarity confirmed
+on hardware (idle `3.3V`, pulled up to `3V3_AUX`; pulling it to GND made firmware
+read `fault=true` and increment the edge counter). Matches the firmware polarity
+assumption — no change needed.
 
 ## Electrical Design Envelope
 

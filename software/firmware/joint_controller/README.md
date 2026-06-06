@@ -18,6 +18,22 @@ Notes:
 - Keep all protocol messages that start with `EVT:` unchanged; they are used by the host application.
 - This project targets Raspberry Pi Pico 2 (RP2350) with dual Cortex-M33 cores.
 
+### Rev D Split Power-Board Integration (`pico2_debug_rev_d`)
+
+The Rev D split power-board integration is bench-validated end-to-end with a real motor
+(`hip_roll_bench_right`, joint `8`): bare board → rails → TPS2492 hot-swap path → telemetry →
+FAULT handling → closed-loop control. The `0x82` HEALTH power-board telemetry frame
+(`DIAG_HEALTH_EXT_POWER_BOARD_STATE`) is emitted and decoded end-to-end at the host.
+
+Two firmware refinements landed in `src/power_board_rev_d.cpp` during bring-up:
+- ADC reference is now overridable via `-DPOWER_BOARD_ADC_REF_MV` (default `3300`, no behaviour
+  change) for per-board calibration of the `3V3_AUX` rail.
+- `FAULT_N` startup blanking (`FAULT_STARTUP_BLANK_MS = 100`) suppresses the one-shot boot glitch
+  during GPIO/pull-up settling; real faults past the window are still detected/counted.
+
+High-current stress (Phase 7) and TPS2492 hardware overcurrent latch-off are not yet exercised.
+Board design docs: `hardware/electronics/joint_controller_board/rev_d_power/`.
+
 ## Overview
 This firmware implements the control system for a tendon‑driven robotic joint actuated by up to 4 LKM motors. It runs on a Raspberry Pi Pico 2 (RP2350) and controls motors over CAN.
 

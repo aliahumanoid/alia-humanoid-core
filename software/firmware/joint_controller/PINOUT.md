@@ -131,15 +131,36 @@ Rev D keeps `GP22` as the motor power enable line, but it drives the TPS2492
 `SAFETY_EN` input on the separate power board. The firmware also monitors the
 power board passively:
 
-- `GP22` -> `SAFETY_EN`
-- `GP26_ADC0` -> `VIN_RAW_MON`
-- `GP27_ADC1` -> `VOUT_POST_FET_MON`
-- `GP5` -> `PWRGD_N`
-- `GP6` -> `FAULT_N`
+- `GP22` -> `SAFETY_EN` (output to TPS2492 enable)
+- `GP26_ADC0` -> `VIN_RAW_MON` (analog; 82k/8.2k divider, firmware x11 scale)
+- `GP27_ADC1` -> `VOUT_POST_FET_MON` (analog)
+- `GP5` -> `PWRGD_N` (digital input)
+- `GP6` -> `FAULT_N` (digital input)
 
 The first Rev D integration does not change the active safety state machine:
 `safety_motor_power_enable()` still asserts `GP22` synchronously. Passive
 telemetry is published on `HEALTH_STATUS` extension frame `0x82`.
+
+**Bench-validated (2026-06, PCBWay first article):** the pin map above is
+confirmed on real `rev_d_power` hardware. `PWRGD_N` (`GP5`) and `FAULT_N`
+(`GP6`) are confirmed **ACTIVE-LOW** (LOW = power good / LOW = fault), matching
+the firmware assumptions written before hardware existed — no polarity changes
+needed. `VIN_RAW_MON` read 2.18 V at 24 V input (= 24 V x 8.2/90.2), confirming
+divider precision.
+
+**Firmware items added during bench validation**
+(`src/power_board_rev_d.cpp`):
+
+- **ADC calibration override:** `ADC_REF_MV` is overridable via
+  `-DPOWER_BOARD_ADC_REF_MV` (default `3300`, no behaviour change). The bench
+  showed a +1.6 % reading (24382 mV reported vs ~24000 mV actual), consistent
+  with the real `3V3_AUX` rail at ~3355 mV (within TLV75533 LDO ±2 %). Per-board
+  calibration: measure the `3V3_AUX` rail and set
+  `-DPOWER_BOARD_ADC_REF_MV=<mV>`.
+- **FAULT_N startup blanking:** `FAULT_STARTUP_BLANK_MS = 100` ms window after
+  init during which `FAULT_N` edges are ignored, to suppress the one-shot boot
+  glitch (`fault_event_count=1`) seen during GPIO/pull-up settling. Real faults
+  persisting past the window are still detected and counted.
 
 ---
 

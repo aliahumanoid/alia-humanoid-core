@@ -122,6 +122,31 @@
   firmware del controller, ma resta una scelta prudente per il path host
   esterno attuale fino alla validazione dell’harness finale
 
+**Nota power board (2026-06): `rev_d_power` bench-validated end-to-end**
+- la prima board `joint_controller_board_rev_d_power` (first article PCBWay) è
+  stata validata sul banco `hip_roll_bench_right` (joint 8, direct-drive)
+- catena coperta: bare board → continuità/smoke test → rail buck 5V + LDO
+  3V3_AUX → TPS2492 hot-swap + path FET back-to-back → telemetria HEALTH_STATUS
+  (frame `0x82`) decodificata end-to-end all'host → gestione `FAULT_N`
+  (active-low, edge counter) → controllo closed-loop di un motore reale →
+  enforcement dei safety-limit
+- closed-loop: nudge `+5°` con errore di tracking steady-state `0.08°`, loop
+  ~350µs (budget 2000µs), `0` CAN error, nessun motor timeout
+- safety-limit: comando `+40°` clampato dal firmware a `±38.5°` (margine fisso
+  1.5° dentro l'hard limit per joint direct-drive, equazioni tendon non
+  disponibili) — comportamento graceful (WARN + clamp, no fault/E-stop)
+- conferme hardware: polarità `PWRGD_N`/`FAULT_N` active-low corrette;
+  divider `VIN_RAW_MON` 82k/8.2k preciso (2.18V a 24V); pulldown 100k su
+  `SAFETY_EN` (OFF di default); auto-enable a boot quando l'alimentazione è
+  presente — comportamento intenzionale mantenuto
+- evidenza completa in
+  [BENCH_VALIDATION_REPORT.md](../../hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md)
+- **ancora aperto sul power board:**
+  - Phase 7 stress alta corrente (22A continui / ~38A picco) con batteria o PSU
+    grande + fuse esterno 30A ATO + carico reale — non ancora eseguito
+  - latch-off overcurrent reale del TPS2492 non ancora esercitato (richiede
+    un'alimentazione stiff)
+
 **Cosa testa di nuovo rispetto a L2:**
 - MAX_DOFS=3 tutti attivi
 - 5 motori sullo stesso bus CAN motore (~250 frame/s torque loop)

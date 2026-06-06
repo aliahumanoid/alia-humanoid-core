@@ -126,6 +126,34 @@ The report anchors the movement window, and the analyzer summarizes:
 - loop timing samples from `HEALTH_STATUS`
 - Rev D power-board status when `HEALTH_STATUS` extension `0x82` is present
 
+## CAN adapter on macOS (CANable2 / candleLight)
+
+The bench CANable2 runs `candleLight` (gs_usb) firmware, not `slcan`. The committed
+`controller.yaml` defaults to `interface: slcan` and does **not** work with this adapter,
+so the gs_usb path requires a local config override (`controller.yaml` is left untouched).
+
+**Working path: the `candle` interface under arm64.** Notes:
+- The venv needs `python-can-candle` (1.2.4) + `candle_api` (0.0.12) installed under arm64.
+- Use `controller_candle_bench.yaml` (`interface: candle`, `channel: auto`,
+  `bitrate: 500000`) and pass it via `--config`.
+- Adapter observed at host CAN bitrate 500 kbps (candle channel id
+  `001A00473945501720303651:0`); Pico 2 USB CDC serial at `/dev/cu.usbmodem1401`.
+
+**sudo / DYLD pitfall:** the universal `/usr/local/bin/python3` runs x86_64 by default, so
+the arm64 `candle_api` binding fails to load. The raw gs_usb backend needs `sudo` **and**
+libusb, but `sudo` strips `DYLD_*` so pyusb cannot find libusb — a dead end. The `candle`
+interface under arm64 avoids this and works **without** sudo. For ad-hoc reads use
+`arch -arm64 /usr/local/bin/python3` with `python-can-candle`.
+
+**Launch (CAN-only TUI):**
+```bash
+./jetson_controller/run_hip_roll_bench_right_can_only.sh \
+  --config <abs path to controller_candle_bench.yaml>
+```
+
+> The dual-pane `run_hip_roll_bench_right.sh` wrapper is currently broken for this use:
+> `run.sh` `both` mode rejects the `--joint` pass-through arg. Use the `_can_only` variant.
+
 ## License
 
 MIT License - see repository root `LICENSE` file.

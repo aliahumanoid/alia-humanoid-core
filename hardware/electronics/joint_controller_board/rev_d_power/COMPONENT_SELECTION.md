@@ -39,8 +39,8 @@ Implementation note:
 - use `TPS2493` only if auto-retry is explicitly desired later
 - final `PWRGD_N` / `FAULT_N` polarity conditioning will be handled during schematic capture if the native output polarity does not match the RJ45 naming convention
 - the current-limit threshold is not independently programmable; continuous vs transient behavior must be split between `R_SENSE`, `PROG`, `TIMER`, and firmware supervision through `IMON`
-- first-pass recommendation is `R_SENSE = 1.25 mOhm`, **4-terminal / Kelvin sensed**, `>= 2W`
-- the current schematic/BOM freeze uses `Vishay Dale WSR21L250FEA`, which matches the KiCad `WSR2/WSR3` Kelvin footprint and gives `2W` steady-state rating margin
+- first-pass recommendation was `R_SENSE = 1.25 mOhm`, **4-terminal / Kelvin sensed**, `>= 2W`, for an electronic current limit of about `40 A`
+- the PCBWay first assembly lot uses the approved substitution `Vishay Dale WSR31L500FEA`: `1.5 mOhm`, `1%`, `3W`, same `WSR2/WSR3` 4527 J-lead compatible Kelvin footprint. With the `TPS2492` fixed 50 mV sense threshold, this sets `Ilim ≈ 33.3 A`
 - current rev_d_power freeze leaves `IMON` unexposed because the RJ45 pin budget is full; future continuous-current firmware monitoring requires either sacrificing one voltage-monitor pin or adding a bench-only test point
 - size `PROG` from the MOSFET SOA during startup, not only from steady-state load current
 
@@ -123,7 +123,8 @@ and is now expected on the upstream PDU / battery distribution board.
 
 Rationale:
 - the on-board `TPS2492` provides primary fast protection via its fixed
-  50 mV current-limit (target `Ilim ≈ 40 A` with `R_SENSE = 1.25 mOhm`)
+  50 mV current-limit (`Ilim ≈ 33.3 A` on the PCBWay first lot with
+  `R_SENSE = 1.5 mOhm`; original 1.25 mΩ target would give about 40 A)
 - an on-board slow-blow fuse would protect the board but not the cable feeding
   it — a cable short upstream of the board cannot be interrupted by an on-board
   device
@@ -156,7 +157,8 @@ These values depend on:
 - trip philosophy for `FAULT_N`
 
 Current design intent:
-- electronic current limit target in the `35A` to `40A` class
+- electronic current limit target in the `33A` to `40A` class, depending on the populated Kelvin shunt
+- PCBWay first assembly lot: `R_SENSE = 1.5 mOhm` (`WSR31L500FEA`) -> `Ilim ≈ 33.3 A`
 - latch-off fault behavior by default
 - use Kelvin routing for the shunt and keep the `TPS2492` sense traces away from the main current path copper
 

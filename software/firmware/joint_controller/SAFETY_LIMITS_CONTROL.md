@@ -47,6 +47,20 @@ if (!checkSafetyForDof(dof_idx, q_curr[dof_idx], safety_message, false)) {
 
 The movement function exits immediately upon detecting a violation. Core0 receives the error through the inter‑core `shared_data_ext` structure and can inform the host or take corrective action.
 
+### Conservative Limit Fallback (direct_drive joints)
+
+For a `direct_drive` joint the tendon mapping equations are unavailable, so the mapping‑derived conservative limits cannot be computed. In that case the safety layer falls back to a **fixed 1.5° margin inside the hard limit**, applied symmetrically. A commanded SET_IMPEDANCE setpoint outside the resulting conservative range is **clamped inward** rather than rejected.
+
+This path is graceful: WARN + clamp + inward‑only recovery, with **no fault raised and no E‑stop**. It is distinct from the hard‑violation path above (`stopAllMotors()` + `MOVEMENT_ERROR`).
+
+Example log (hip_roll_bench_right, hard limits ±40°, commanded +40°):
+```
+SET_IMPEDANCE q=40.00 clamped to safe [-38.5,38.5] -> 38.50
+outside conservative limits (equations unavailable)
+```
+
+**Validated on rev_d_power hardware (2026-06):** joint 8 = hip_roll_bench_right (direct_drive, single motor, hard limits ±40°). Commanding +40° was clamped to +38.5° (the 1.5° margin), behaving gracefully and symmetrically with no fault or E‑stop. The 1.5° fallback margin is intended/safe behaviour and was deliberately **kept** (not changed) during the bench validation session.
+
 ## Example Error Messages
 
 **Joint limit violation**:
