@@ -168,6 +168,7 @@ class CanManager:
         self._joint_state: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self._health_status: Dict[str, Dict[str, Any]] = {}
         self._fault_status: Dict[str, Dict[str, Any]] = {}
+        self._diagnostics: Dict[str, Dict[str, Any]] = {}
         self._fault_snapshot_meta: Dict[str, Dict[str, Any]] = {}
         self._fault_snapshots: Dict[str, Dict[str, Any]] = {}
         self._diagnostic_events: deque[Dict[str, Any]] = deque(maxlen=500)

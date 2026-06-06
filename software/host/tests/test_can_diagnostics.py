@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import can_manager as can_manager_module
 from can_manager import CanManager
 from diagnostic_history import DiagnosticHistoryWriter
-from jetson_controller.protocol import CAN_ID_FAULT_SNAPSHOT_CTRL
+from jetson_controller.protocol import CAN_ID_FAULT_SNAPSHOT_CTRL, DIAG_HEALTH_EXT_CAN_DETAILS
 
 
 def _build_manager(tmp_path, monkeypatch):
@@ -74,6 +74,29 @@ def test_health_status_frames_are_combined_and_persisted(tmp_path, monkeypatch):
     assert payload["watchdog_trip_count"] == 5
     assert connection_state["status_messages"][0]["type"] == "health_status"
     assert (tmp_path / "knee_left.jsonl").exists()
+
+
+def test_health_status_can_details_frame_does_not_crash_listener(tmp_path, monkeypatch):
+    manager = _build_manager(tmp_path, monkeypatch)
+
+    can_details = bytes(
+        [
+            0x80 | DIAG_HEALTH_EXT_CAN_DETAILS,
+            7,   # seq
+            11,  # host TEC
+            12,  # host REC
+            0x14,  # host EFLG
+            21,  # motor TEC
+            22,  # motor REC
+            0x28,  # motor EFLG
+        ]
+    )
+
+    manager._handle_health_status(can_details, 1000.0, joint_id=1)
+
+    assert manager._diagnostics["KNEE_LEFT"]["host_can_tec"] == 11
+    assert manager._diagnostics["KNEE_LEFT"]["host_can_eflg_names"] == ["TXEP", "TXWAR"]
+    assert manager._diagnostics["KNEE_LEFT"]["motor_can_eflg_names"] == ["TXBO", "RXEP"]
 
 
 def test_fault_and_event_frames_are_decoded(tmp_path, monkeypatch):
