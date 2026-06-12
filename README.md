@@ -45,6 +45,19 @@
 </tr>
 </table>
 
+<table>
+<tr>
+<td align="center">
+<a href="https://x.com/AliaHumanoid/status/2062545958991265831">
+  <img src="docs/media/hero/walking-sim-demo.gif" alt="First natural walking gait — physics simulation" width="60%">
+</a>
+</td>
+</tr>
+<tr>
+<td align="center"><i>First natural walking gait — physics simulation, motion-tracking RL (June 2026). Not hardware yet: sim-to-real is gated by remaining hardware.</i></td>
+</tr>
+</table>
+
 ---
 
 ## What We're Building
@@ -58,6 +71,8 @@ The result? A robot that can fit human environments, wear human clothing, and in
 **Current Phase 0 Focus:** Lower body (hip + knee + ankle) — tendon-driven and direct-drive actuation.
 
 ### Latest Updates
+- 2026-06-04: **First natural walking gait in simulation** — motion-tracking RL on the lower body, ONNX-verified locally — [X thread](https://x.com/AliaHumanoid/status/2062545958991265831) · [details](PUBLIC_UPDATES.md)
+- 2026-06: Per-joint power board (`rev_d_power`) bench-validated end-to-end — closed-loop motor control on real hardware, 0.08° tracking error ([report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md))
 - 2026-04: Hip hybrid firmware path implemented (3 DOF / 5 motors) — roll bench bring-up in progress
 - 2026-01-26: Joint Design Log #002 (Knee) published — [YouTube](https://youtu.be/4jU5Na2z-s8) · [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
 - 2025-11-13: Joint Design Log #001 (Ankle) published — [YouTube](https://youtu.be/1Z9GlTnYEFs)
@@ -86,6 +101,9 @@ The result? A robot that can fit human environments, wear human clothing, and in
 - 🖥️ **Jetson Multi-Joint Controller**
   CAN-direct impedance streaming at 50Hz, automated exercise patterns, CAN-first diagnostics
 
+- 🚶 **Walking — In Simulation**
+  Natural full-amplitude gait via motion-tracking RL (knee ROM ~57°, foot clearance ~14 cm); sim-to-real gated by remaining hardware
+
 - 📂 **Progressive Open Source**
   Phased licensing roadmap: STL → STEP → CAD source
 
@@ -108,14 +126,14 @@ The result? A robot that can fit human environments, wear human clothing, and in
 
 ---
 
-## Current Status (Phase 0 — April 2026)
+## Current Status (Phase 0 — June 2026)
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
 | **Software** | ✅ Public | MIT | Python host + C++ firmware (RP2350 Pico 2) |
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | Assembly guides, BOM, design specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
-| **Electronics** | ✅ Public | CC BY-NC-ND | RP2350 controller board (Gerber files + KiCad source) |
+| **Electronics** | ✅ Public | CC BY-NC-ND | RP2350 controller board + per-joint power board (KiCad source, Gerber, STEP) |
 | **CAD Source** | 📅 Phase 2+ (TBD) | CC BY-SA | Full parametric Fusion 360 timeline |
 
 See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-source transition.
@@ -137,7 +155,7 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 
 We document **both successes and failures** transparently.
 
-**Current validation snapshot: knee and ankle closed as architecture baselines; hip firmware complete, bench bring-up in progress**
+**Current validation snapshot: knee and ankle closed as architecture baselines; per-joint power board bench-validated; hip firmware complete, bench bring-up in progress; natural walking gait achieved in simulation**
 
 ### ✅ Validated On Hardware (Phase 0)
 
@@ -151,6 +169,14 @@ We document **both successes and failures** transparently.
 - PA12 structure passes current static/load validation
 - Peak torque matches biomechanics requirements
 - Rolling impedance control via CAN with cascade PID on the validated tendon-driven joints
+- Per-joint power board (`rev_d_power`) validated end-to-end: power rails, hot-swap protection, health telemetry, closed-loop motor control (0.08° tracking error)
+
+### 🧪 Validated In Simulation (Not Hardware)
+
+- Natural full-amplitude walking gait via motion-tracking RL (knee ROM ~57°, foot clearance ~14 cm)
+- Policy exported to ONNX and verified locally with observation-parity checks
+- Robustness via domain randomization (actuator gains, latency, mass) grounded in measured bench data
+- **Honest boundary:** simulation results are simulation results — hardware walking requires foot sole, batteries and full-leg integration first
 
 ### 🛠️ Implemented In Firmware, Pending Hip Bench Validation
 
@@ -165,8 +191,9 @@ We document **both successes and failures** transparently.
 - Hip roll bench bring-up and per-DOF gain tuning
 - Full hip 3-DOF integrated validation (L3)
 - Multi-controller integrated test (L4: hip + knee + ankle on Jetson)
-- Walking gait as integrated lower-body system
-- Sim2real pipeline (URDF model, RL training, policy deployment)
+- Walking gait as integrated lower-body system **on hardware**
+- Sim-to-real transfer (policy deployment on the onboard computer; gated by foot sole, power boards at scale, batteries)
+- Power board high-current stress testing (22A continuous / ~38A peak)
 
 
 ---
@@ -270,6 +297,6 @@ This asserts compliance with the [Developer Certificate of Origin](https://devel
 
 ---
 
-**Project Status:** Phase 0 active development | Last updated: April 2026
+**Project Status:** Phase 0 active development | Last updated: June 2026
 
 ---
