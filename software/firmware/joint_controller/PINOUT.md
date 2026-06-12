@@ -141,7 +141,7 @@ The first Rev D integration does not change the active safety state machine:
 `safety_motor_power_enable()` still asserts `GP22` synchronously. Passive
 telemetry is published on `HEALTH_STATUS` extension frame `0x82`.
 
-**Bench-validated (2026-06, PCBWay first article):** the pin map above is
+**Bench-validated (2026-06, first fabricated article):** the pin map above is
 confirmed on real `rev_d_power` hardware. `PWRGD_N` (`GP5`) and `FAULT_N`
 (`GP6`) are confirmed **ACTIVE-LOW** (LOW = power good / LOW = fault), matching
 the firmware assumptions written before hardware existed — no polarity changes

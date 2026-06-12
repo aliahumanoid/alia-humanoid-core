@@ -66,7 +66,7 @@ STL files alone make **significant modifications impractical** (see technical no
 
 ## Transition Roadmap
 
-### Next Release Step (Target: Q2-Q3 2026)
+### Next Release Step (validation-gated, no fixed date)
 **License**: CC BY-NC-SA 4.0  
 **Assets Released**: STL + **STEP files** (parametric CAD interchange)  
 **Rationale**: STEP enables modifications → ShareAlike ensures improvements return to community
@@ -154,7 +154,7 @@ Software and hardware licenses are independent:
 - Selling products/services: ❌ No, commercial license required
 
 ### When will you release STEP files?
-🎯 **Target Q2-Q3 2026**, contingent on design maturity (Rev B+ validation).
+🎯 **When validation permits** — contingent on design maturity (Rev B+ validation through testing). We deliberately avoid fixed dates: the trigger is engineering evidence, not the calendar.
 
 ### Will you ever be fully open?
 ✅ **Yes**, planned for 2027. We're phasing to ensure quality, not to stay closed.
@@ -189,7 +189,7 @@ https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
 
 ---
 
-**Last Updated**: 2025-10-22  
+**Last Updated**: 2026-06-12  
 **License Version**: CC BY-NC-ND 4.0  
 **Transition Plan**: See roadmap above  
 **Questions**: info@aliahumanoid.com

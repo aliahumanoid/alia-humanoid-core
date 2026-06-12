@@ -123,7 +123,7 @@
   esterno attuale fino alla validazione dell’harness finale
 
 **Nota power board (2026-06): `rev_d_power` bench-validated end-to-end**
-- la prima board `joint_controller_board_rev_d_power` (first article PCBWay) è
+- la prima board `joint_controller_board_rev_d_power` (primo esemplare fabbricato) è
   stata validata sul banco `hip_roll_bench_right` (joint 8, direct-drive)
 - catena coperta: bare board → continuità/smoke test → rail buck 5V + LDO
   3V3_AUX → TPS2492 hot-swap + path FET back-to-back → telemetria HEALTH_STATUS
