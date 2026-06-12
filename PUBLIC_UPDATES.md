@@ -6,6 +6,23 @@ Structured log of outward-facing progress notes. Updates published as milestones
 
 ---
 
+## 2026-06-04 — First natural walking gait achieved in simulation
+
+**Milestone:** Alia's lower body walks with a natural, full-amplitude gait in physics simulation, trained via motion-tracking reinforcement learning (BeyondMimic-style approach on the MuJoCo/mjlab stack).
+
+**What was achieved:**
+- Full-amplitude forward gait: knee ROM ~57°, foot clearance ~14 cm
+- Policy exported to ONNX and verified in a local viewer (observation-parity check between training and inference environments)
+- Robustness pass: domain randomization on actuator gains, latency and mass properties, grounded in measured bench data from our real actuators
+
+**What this is not:** hardware walking. The sim-to-real step is gated by missing hardware (foot sole design, control boards, batteries, onboard computer). We document simulation results as simulation results.
+
+**Credits:** built on the open-source mjlab stack and the BeyondMimic motion-tracking approach.
+
+**Announcement:** [X thread](https://x.com/AliaHumanoid/status/2062545958991265831)
+
+---
+
 ## 2026-01-26 — Joint Design Log #002 published
 
 **Video documentation:** Second technical deep-dive published on YouTube — Joint Design Log #002 documenting the knee joint mechanics.
