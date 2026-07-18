@@ -21,6 +21,7 @@
 
 // RP2350 hardware watchdog SDK
 #include "hardware/watchdog.h"
+#include <hot_path.h>
 
 // ============================================================================
 // INTERNAL STATE
@@ -110,7 +111,7 @@ void safety_motor_power_disable() {
 #endif
 }
 
-void safety_watchdog_kick() {
+void HOT_FUNC(safety_watchdog_kick)() {
   uint32_t now = millis();
 
 #ifdef SAFETY_BOARD_REV_B
@@ -133,6 +134,6 @@ void safety_watchdog_kick() {
 #endif
 }
 
-bool safety_is_motor_power_enabled() {
+bool HOT_FUNC(safety_is_motor_power_enabled)() {
   return _motor_power_enabled;
 }

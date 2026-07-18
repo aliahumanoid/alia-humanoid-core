@@ -263,6 +263,71 @@ struct LinearEquationsDeviceData {
   uint32_t timestamp;                     // Unix timestamp of last save
 };
 
+// ---- Fine-map (piecewise) persistence, Phase 1.4 ----
+// Co-located in the LINEAR_EQ sector at a sub-offset so a v5 linear-eq save and a v8 fine-map save
+// preserve each other (whole-sector read-modify-write). v9 2D will be a further sub-offset. Points
+// are stored COMPACT (point_count, not the 100-pt capture buffer); agonist/antagonist are the
+// NEUTRAL baseline (co-contraction already removed at capture).
+#define FINE_MAP_V8_MAGIC 0xA11A1D08u            // distinct from v5 MAGIC_NUMBER (0xABCD1234)
+static constexpr int MAX_FINE_POINTS_FLASH = 24; // fine-maps are ~14 pts; downsample on save if more
+struct FineMapDofV8 {
+  uint8_t point_count;   // 0 = no fine-map for this DOF (stays LINEAR); else >= MIN_FINE_POINTS
+  uint8_t map_mode;      // MAP_PIECEWISE when point_count>0
+  uint8_t pw_valid;
+  uint8_t reserved;
+  float joint[MAX_FINE_POINTS_FLASH];       // ascending joint angle
+  float agonist[MAX_FINE_POINTS_FLASH];     // neutral baseline
+  float antagonist[MAX_FINE_POINTS_FLASH];
+  float joint_safe_min;                     // committed operating range (clamped span)
+  float joint_safe_max;
+  float q0_nominal;                         // reserved for the v9 2D map; 0.0 for now
+};
+struct FineMapDeviceDataV8 {
+  uint32_t magic;        // FINE_MAP_V8_MAGIC
+  uint16_t version;      // 8
+  uint16_t checksum;     // byte-sum over bytes AFTER the 8-byte header
+  uint8_t dof_count;
+  uint8_t reserved[3];
+  FineMapDofV8 dofs[MAX_DOFS];
+  uint32_t timestamp;
+};
+
+// 2D bilinear grid dimensions. Defined here (not in JointController.h) so the v9 2D flash record
+// below can size its arrays; DofGridData_t in JointController.h reuses these (it includes global.h).
+// 2026-07-10: M 6->7 (max q0-coupling rows that fit the 4KB sector with 2 slots, ~40B slack —
+// the static_assert in utils.cpp guards the layout). Axes are explicit, so use NON-UNIFORM
+// spacing (dense endpoints) for maximum effective resolution. Magic bumped (layout change):
+// any pre-densification v9 record is cleanly rejected at load (none existed: grids were 0).
+static constexpr int GRID_M_MAX = 7;   // q0 rows
+static constexpr int GRID_N_MAX = 16;  // q1 cols
+
+// ---- 2D bilinear-map persistence, v9 (further sub-offset in the LINEAR_EQ sector) ----
+// Co-located with the v5 linear-eq and v8 fine-map records via whole-sector read-modify-write, so a
+// v5/v8/v9 save preserves the others. Stores the per-DOF (q0 x q1) grid (row-major NEUTRAL baseline)
+// for the realistically-single bilinear DOF (DOF1); MAX_BILINEAR_DOFS=2 gives margin.
+#define FINE_MAP_V9_MAGIC 0xA11A2D01u
+static constexpr int MAX_BILINEAR_DOFS = 2;   // realistically only DOF1; 2 gives margin
+struct FineMap2DGridV9 {
+  uint8_t dof_index;     // 0xFF = empty slot
+  uint8_t grid_m;
+  uint8_t grid_n;
+  uint8_t reserved;
+  float q0_axis[GRID_M_MAX];
+  float q1_axis[GRID_N_MAX];
+  float agonist[GRID_M_MAX * GRID_N_MAX];
+  float antagonist[GRID_M_MAX * GRID_N_MAX];
+  float q0_nominal;
+};                       // 996 B (M=7,N=16, 2026-07-10 densification)
+struct FineMap2DDeviceDataV9 {
+  uint32_t magic;        // FINE_MAP_V9_MAGIC
+  uint16_t version;      // 9
+  uint16_t checksum;     // byte-sum over bytes AFTER the 8-byte header
+  uint8_t  n_grids;      // populated slots (0..MAX_BILINEAR_DOFS)
+  uint8_t  reserved[3];
+  FineMap2DGridV9 grids[MAX_BILINEAR_DOFS];
+  uint32_t timestamp;
+};                       // ~2008 B (fits the 2048B v9 window; static_assert guards)
+
 /**
  * @brief Flash structure for system settings (Version 6)
  * 

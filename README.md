@@ -9,6 +9,8 @@
 
 **Building humanoid mechanics inside real human proportions.**
 
+[![Firmware CI](https://github.com/aliahumanoid/alia-humanoid-core/actions/workflows/firmware-ci.yml/badge.svg)](https://github.com/aliahumanoid/alia-humanoid-core/actions/workflows/firmware-ci.yml)
+
 <table>
 <tr>
 <td width="70%">
@@ -30,7 +32,7 @@
 <tr>
 <td width="65%">
   <a href="https://youtu.be/4jU5Na2z-s8">
-    <img src="https://aliahumanoid.com/assets/knee-human-scale-overlay-annotated.png" alt="Knee joint overlay (Joint Design Log #002)" width="100%">
+    <img src="docs/media/hero/knee-human-scale-overlay-annotated.png" alt="Knee joint overlay (Joint Design Log #002)" width="100%">
   </a>
 </td>
 <td width="35%">
@@ -64,13 +66,20 @@
 
 A humanoid robot designed from the ground up to fit within real human dimensions and proportions. 
 
-Most humanoid projects scale UP for easier engineering — more space for motors, looser tolerances, simpler thermal management. We do the opposite: **building inside human constraints** forces radical design efficiency that replicates the elegance and efficiency of the human body and movement.
+Most humanoid projects scale UP for easier engineering — more space for motors, looser tolerances, simpler thermal management. We do the opposite: **building inside human constraints** forces design decisions — motor placement, transmission routing, thermal budget — that larger-envelope projects can avoid.
 
 The result? A robot that can fit human environments, wear human clothing, and interact at human scale — using tendon-driven actuation, custom motor placement, and tight mechanical integration.
 
 **Current Phase 0 Focus:** Lower body (hip + knee + ankle) — tendon-driven and direct-drive actuation.
 
+### How We Develop in the Open
+
+This repository carries the **replication core** — firmware, protocols, base host operation, hardware documentation, and results. Advanced lab tooling (calibration campaigns, learning-control experiments, gait tooling) is developed in a private suite and opens progressively as milestones mature. Results, videos, logs, and writeups continue to be published openly. We publish what fails alongside what works; simulation results are labeled as simulation results.
+
 ### Latest Updates
+- 2026-07: **Development drop** — control-loop rate hardening (bench-validated to 625 Hz on the ankle), joint-map capture improvements, saved-offset warm-boot fast path, MOTION GUARD V2 (gait-aware safety guards; ships disabled, bench validation pending), host impedance-stream `tau_ff` channel — [details](PUBLIC_UPDATES.md)
+- 2026-07-18: **Technical note published:** [Deterministic boot-time offset reconstruction for tendon-driven joints](https://aliahumanoid.com/notes/deterministic-boot-offset-reconstruction.html) — method published as prior art
+- 2026-07: **License change:** software is GPLv3 from this release (prior MIT snapshots remain MIT); protocol specs stay MIT; hardware licensing unchanged — [rationale](PUBLIC_UPDATES.md)
 - 2026-06-04: **First natural walking gait in simulation** — motion-tracking RL on the lower body, ONNX-verified locally — [X thread](https://x.com/AliaHumanoid/status/2062545958991265831) · [details](PUBLIC_UPDATES.md)
 - 2026-06: Per-joint power board (`rev_d_power`) bench-validated end-to-end — closed-loop motor control on real hardware, 0.08° tracking error ([report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md))
 - 2026-04: Hip hybrid firmware path implemented (3 DOF / 5 motors) — roll bench bring-up in progress
@@ -109,28 +118,87 @@ The result? A robot that can fit human environments, wear human clothing, and in
 
 ---
 
-## Gallery
+## What Works ✅ / What Doesn't ⚠️
 
-<table>
-<tr>
-<td width="50%">
-<img src="docs/media/gallery/prototype-photo-full-leg.jpg" alt="Physical Prototype">
-<p align="center"><i>Physical prototype assembly (Phase 0)</i></p>
-</td>
-<td width="50%">
-<img src="docs/media/gallery/ankle-cutaway-internal.png" alt="Ankle Internal Mechanisms">
-<p align="center"><i>Ankle cutaway showing tendon routing</i></p>
-</td>
-</tr>
-</table>
+We document **both successes and failures** transparently.
+
+**Current validation snapshot: knee and ankle closed as architecture baselines; per-joint power board bench-validated; hip firmware complete, bench bring-up in progress; natural walking gait achieved in simulation**
+
+### ✅ Validated On Hardware (Phase 0)
+
+- Knee validated as single-controller baseline (`L1` closed) — [Joint Design Log #002](https://youtu.be/4jU5Na2z-s8)
+- Ankle validated as single-controller baseline (`L2` closed) — [Joint Design Log #001](https://youtu.be/1Z9GlTnYEFs)
+- Multi-joint Jetson coordination operational on bench (`KNEE_RIGHT + ANKLE_RIGHT`) — [milestone log](PUBLIC_UPDATES.md)
+- Protocol v1.0 freeze documented for the current knee+ankle bench baseline — [CAN system architecture §4.5](software/docs/CAN_SYSTEM_ARCHITECTURE.md)
+- Ankle kinematics achieve target ROM (2 DOF within human envelope) — [joint specs](docs/specs/README.md)
+- Knee ROM and tendon-driven position control validated (0-100 degrees)
+- UHMWPE tendons validated for current bench loads and pulley compatibility — [tendon specs](docs/specs/TENDON_SPECIFICATIONS.md)
+- PA12 structure passes current static/load validation
+- Peak torque within biomechanics requirements at the validated bench conditions — [motor specs](docs/specs/MOTOR_SPECIFICATIONS.md)
+- Rolling impedance control via CAN with cascade PID on the validated tendon-driven joints — [operational guide](software/docs/SET_IMPEDANCE_OPERATIONAL_GUIDE.md)
+- Per-joint power board (`rev_d_power`) validated end-to-end: power rails, hot-swap protection, health telemetry, closed-loop motor control (0.08° tracking error) — [bench report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md)
+
+### 🧪 Validated In Simulation (Not Hardware)
+
+- Natural full-amplitude walking gait via motion-tracking RL (knee ROM ~57°, foot clearance ~14 cm)
+- Policy exported to ONNX and verified locally with observation-parity checks
+- Robustness via domain randomization (actuator gains, latency, mass) grounded in measured bench data
+- **Honest boundary:** simulation results are simulation results — hardware walking requires foot sole, batteries and full-leg integration first
+
+### 🛠️ Implemented In Firmware, Pending Hip Bench Validation
+
+- Hip hybrid model in firmware (`3 DOF / 5 motors`)
+- Per-DOF `DriveType` / `DofCapabilityFlags`
+- Direct-drive runtime path for hip axial roll
+- Hybrid-aware auto-mapping path (tendon DOFs only)
+- `HIP_ROLL_BENCH_*` single-motor bench profiles
+- MOTION GUARD V2 — gait-aware divergence/stall guards behind a runtime mode switch (ships in LEGACY mode = current behavior; SHADOW/ACTIVE pending bench validation)
+
+### ⚠️ Still Iterating
+
+- Hip roll bench bring-up and per-DOF gain tuning
+- Full hip 3-DOF integrated validation (L3)
+- Multi-controller integrated test (L4: hip + knee + ankle on Jetson)
+- Walking gait as integrated lower-body system **on hardware**
+- Sim-to-real transfer (policy deployment on the onboard computer; gated by foot sole, power boards at scale, batteries)
+- Power board high-current stress testing (22A continuous / ~38A peak)
+
 
 ---
 
-## Current Status (Phase 0 — June 2026)
+## Architecture
+
+```
+Jetson host (Python)          RP2350 joint controller (C++)          Motors
+SET_IMPEDANCE @50Hz  --CAN-->  core0: encoders (MT6835, SPI)   --CAN--> antagonistic
+per-DOF gains/tau_ff           core1: cascade PID + safety              tendon pairs
+                               (bench-validated to 625 Hz)              (+ direct-drive hip roll)
+```
+
+- [CAN system architecture](software/docs/CAN_SYSTEM_ARCHITECTURE.md) — protocol, IDs, freeze policy
+- [SET_IMPEDANCE operational guide](software/docs/SET_IMPEDANCE_OPERATIONAL_GUIDE.md) — the impedance streaming interface
+- [Firmware update protocol spec](software/docs/CAN_FIRMWARE_UPDATE_PROTOCOL_SPEC.md) — CAN-based firmware updates
+
+## Build & Run
+
+**Host (runs without hardware):**
+```bash
+cd software/host && python3 -m venv venv && . venv/bin/activate
+pip install -r requirements.txt && python main.py   # web UI on :5001
+```
+
+**Firmware (PlatformIO, RP2350 Pico 2):**
+```bash
+cd software/firmware/joint_controller && pio run
+```
+
+Bench bring-up: [Jetson single-controller checklist](software/docs/JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md). Minimum bench: one joint controller board, CAN adapter, 24V supply.
+
+## Current Status (Phase 0 — July 2026)
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
-| **Software** | ✅ Public | MIT | Python host + C++ firmware (RP2350 Pico 2) |
+| **Software** | ✅ Public | GPLv3 | Python host + C++ firmware (RP2350 Pico 2); releases before July 2026 remain MIT |
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | Assembly guides, BOM, design specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
 | **Electronics** | ✅ Public | CC BY-NC-ND | RP2350 controller board + per-joint power board (KiCad source, Gerber, STEP) |
@@ -148,53 +216,26 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 - 📝 **[Public Updates](PUBLIC_UPDATES.md)** — Public milestone log and release notes
 - 📖 **[Documentation](software/README.md)** — Software architecture, protocols, build guides
 - 📐 **[Technical Specs](docs/specs/README.md)** — Joint specifications, motor specs, tendon specs
+- 🗒️ **[Technical Notes](https://aliahumanoid.com/notes/deterministic-boot-offset-reconstruction.html)** — Method writeups published as prior art
+
+**Evaluating this project? Start here:** (1) watch a [joint design log](https://youtu.be/1Z9GlTnYEFs), (2) read the [boot-reconstruction technical note](https://aliahumanoid.com/notes/deterministic-boot-offset-reconstruction.html), (3) read the firmware control loop (`software/firmware/joint_controller/src/JointController_ControlLoop.cpp`). Issues with findings are welcome.
 
 ---
 
-## What Works ✅ / What Doesn't ⚠️
+## Gallery
 
-We document **both successes and failures** transparently.
-
-**Current validation snapshot: knee and ankle closed as architecture baselines; per-joint power board bench-validated; hip firmware complete, bench bring-up in progress; natural walking gait achieved in simulation**
-
-### ✅ Validated On Hardware (Phase 0)
-
-- Knee validated as single-controller baseline (`L1` closed)
-- Ankle validated as single-controller baseline (`L2` closed)
-- Multi-joint Jetson coordination operational on bench (`KNEE_RIGHT + ANKLE_RIGHT`)
-- Protocol v1.0 freeze documented for the current knee+ankle bench baseline
-- Ankle kinematics achieve target ROM (2 DOF within human envelope)
-- Knee ROM and tendon-driven position control validated (0-100 degrees)
-- UHMWPE tendons validated for load capacity and pulley compatibility
-- PA12 structure passes current static/load validation
-- Peak torque matches biomechanics requirements
-- Rolling impedance control via CAN with cascade PID on the validated tendon-driven joints
-- Per-joint power board (`rev_d_power`) validated end-to-end: power rails, hot-swap protection, health telemetry, closed-loop motor control (0.08° tracking error)
-
-### 🧪 Validated In Simulation (Not Hardware)
-
-- Natural full-amplitude walking gait via motion-tracking RL (knee ROM ~57°, foot clearance ~14 cm)
-- Policy exported to ONNX and verified locally with observation-parity checks
-- Robustness via domain randomization (actuator gains, latency, mass) grounded in measured bench data
-- **Honest boundary:** simulation results are simulation results — hardware walking requires foot sole, batteries and full-leg integration first
-
-### 🛠️ Implemented In Firmware, Pending Hip Bench Validation
-
-- Hip hybrid model in firmware (`3 DOF / 5 motors`)
-- Per-DOF `DriveType` / `DofCapabilityFlags`
-- Direct-drive runtime path for hip axial roll
-- Hybrid-aware auto-mapping path (tendon DOFs only)
-- `HIP_ROLL_BENCH_*` single-motor bench profiles
-
-### ⚠️ Still Iterating
-
-- Hip roll bench bring-up and per-DOF gain tuning
-- Full hip 3-DOF integrated validation (L3)
-- Multi-controller integrated test (L4: hip + knee + ankle on Jetson)
-- Walking gait as integrated lower-body system **on hardware**
-- Sim-to-real transfer (policy deployment on the onboard computer; gated by foot sole, power boards at scale, batteries)
-- Power board high-current stress testing (22A continuous / ~38A peak)
-
+<table>
+<tr>
+<td width="50%">
+<img src="docs/media/gallery/prototype-photo-full-leg.jpg" alt="Physical Prototype">
+<p align="center"><i>Physical prototype assembly (Phase 0)</i></p>
+</td>
+<td width="50%">
+<img src="docs/media/gallery/ankle-cutaway-internal.png" alt="Ankle Internal Mechanisms">
+<p align="center"><i>Ankle cutaway showing tendon routing</i></p>
+</td>
+</tr>
+</table>
 
 ---
 
@@ -216,9 +257,9 @@ We document **both successes and failures** transparently.
 - **Timeline:** TBD
 
 ### Phase 3 — Open-Core Model
-- **Focus:** Distinguish core (fully open) from premium components
-- **Release:** Transparent separation, commercial options if needed
-- **Timeline:** TBD
+- **Focus:** The software open-core boundary is active now (formalized early, July 2026): this repo = replication core; advanced lab tooling opens progressively as milestones mature
+- **Release:** Hardware follows the phased CC roadmap above; private components promote to public at milestone gates
+- **Timeline:** Boundary active; promotions ongoing
 
 ---
 
@@ -264,16 +305,17 @@ In Alia's implementation, this concept has been extended and generalized to a mu
 - Dynamic modulation of cascade influence and stiffness reference
 - Synchronized trajectory generation for agonist–antagonist motor pairs
 
-This implementation is an independent engineering development released under the MIT License.
+This implementation is an independent engineering development released under the GNU GPLv3 (releases before July 2026: MIT).
 
 ---
 
 ## License
 
-- **Software:** [MIT License](LICENSE)
-- **Hardware:** See [hardware/LICENSE.md](hardware/LICENSE.md) for phased licensing roadmap
+- **Software (firmware + host):** [GNU GPLv3](LICENSE) from the July 2026 release onward. Releases published before July 2026 were MIT and remain MIT — irrevocable for anyone who obtained them.
+- **Protocol specifications** ([CAN system architecture](software/docs/CAN_SYSTEM_ARCHITECTURE.md), [firmware-update protocol](software/docs/CAN_FIRMWARE_UPDATE_PROTOCOL_SPEC.md)): **MIT**, so third-party tools can integrate without copyleft obligations.
+- **Hardware:** unchanged — see [hardware/LICENSE.md](hardware/LICENSE.md) for the phased CC roadmap.
 
-By contributing code, you license it under MIT. Hardware design feedback is welcome now; canonical hardware geometry changes will open later as the hardware release surface expands.
+By contributing code, you license it under GPLv3 (DCO sign-off required). Hardware design feedback is welcome now; canonical hardware geometry changes will open later as the hardware release surface expands.
 
 ---
 
@@ -297,6 +339,6 @@ This asserts compliance with the [Developer Certificate of Origin](https://devel
 
 ---
 
-**Project Status:** Phase 0 active development | Last updated: June 2026
+**Project Status:** Phase 0 active development
 
 ---

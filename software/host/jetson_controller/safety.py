@@ -5,6 +5,7 @@ E-stop sends CAN 0x000 immediately. Always available regardless of FSM state.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Iterable
 
@@ -29,7 +30,7 @@ class SafetyManager:
     _MOVEMENT_BLOCKING_ACTIVE_FAULTS = frozenset({
         "HOST_WATCHDOG_TIMEOUT",
         "ENCODER_INVALID",
-        "ENCODER_STALE",
+        "MOTOR_FEEDBACK_INVALID",
         "MOTOR_TIMEOUT",
         "SAFETY_LIMIT",
         "MAPPING_LIMIT",
@@ -49,7 +50,7 @@ class SafetyManager:
         "ESTOP_LATCHED": "Recover motor power with PRETENSION_ALL or power-cycle the joint controller.",
         "HOST_WATCHDOG_TIMEOUT": "Re-seed impedance targets from live telemetry and confirm host keepalive timing.",
         "ENCODER_INVALID": "Check encoder wiring, power, and angle validity before moving.",
-        "ENCODER_STALE": "Check encoder streaming cadence and bus health before moving.",
+        "MOTOR_FEEDBACK_INVALID": "Check 0xA1 replies, 0x92 re-anchor health, and motor-CAN counters before moving.",
         "MOTOR_TIMEOUT": "Check motor CAN bus, power stage, and motor responsiveness.",
         "SAFETY_LIMIT": "Inspect joint pose and clear the safety condition before moving again.",
         "MAPPING_LIMIT": "Verify mapping limits and recalibrate the joint before moving.",
@@ -71,14 +72,27 @@ class SafetyManager:
         self._estop_sent = False
 
     async def send_estop(self, can_bus: CanBus, reason: int = 0) -> None:
-        """Send emergency stop broadcast. Safe to call multiple times."""
+        """Send emergency stop broadcast. Safe to call multiple times.
+
+        REPEAT-SEND x3 spaced >=12ms (2026-07-05 finding): the board's host-CAN MCP2515
+        buffers exactly 2 frames and core1 drains it once per control cycle (4ms nominal,
+        up to ~6.3ms under load) — a SINGLE 0x000 frame landing in a full inter-poll window
+        is silently hard-dropped (the same live-proven mechanism that dropped LOOP_FREQUENCY
+        2/2 on the loaded ankle), and a lost e-stop has NO automatic backstop (the impedance
+        watchdog freezes into an ACTIVELY DRIVEN hold, it does not de-energize). Three sends
+        spaced beyond the worst inter-poll window hit statistically independent windows
+        (residual drop ~1e-3); the e-stop handler is idempotent, repeats are harmless.
+        """
         if not can_bus.connected:
             logger.warning("Cannot send E-stop: CAN not connected")
             return
         arb_id, data = encode_emergency_stop(reason)
-        await can_bus.send(arb_id, data)
+        for attempt in range(3):
+            await can_bus.send(arb_id, data)
+            if attempt < 2:
+                await asyncio.sleep(0.012)
         self._estop_sent = True
-        logger.critical(f"EMERGENCY STOP sent (reason={reason})")
+        logger.critical(f"EMERGENCY STOP sent x3 (reason={reason})")
 
     async def configure_watchdog(self, can_bus: CanBus, joint_id: int,
                                  timeout_ms: int) -> None:

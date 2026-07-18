@@ -901,9 +901,9 @@
                                     <label for="innerLoopPeriod" class="block text-sm font-medium text-gray-700">
                                         Inner Loop Period (µs):
                                     </label>
-                                    <input id="innerLoopPeriod" type="number" value="2000" min="500" max="10000" step="100"
+                                    <input id="innerLoopPeriod" type="number" value="4000" min="4000" max="10000" step="100"
                                         class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                                    <span id="innerLoopFreqDisplay" class="text-xs text-gray-500">= 500 Hz</span>
+                                    <span id="innerLoopFreqDisplay" class="text-xs text-gray-500">= 250 Hz</span>
                                 </div>
                                 <div>
                                     <label for="outerLoopDivisor" class="block text-sm font-medium text-gray-700">
@@ -911,7 +911,7 @@
                                     </label>
                                     <input id="outerLoopDivisor" type="number" value="1" min="1" max="20" step="1"
                                         class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                                    <span id="outerLoopFreqDisplay" class="text-xs text-gray-500">= 500.0 Hz</span>
+                                    <span id="outerLoopFreqDisplay" class="text-xs text-gray-500">= 250.0 Hz</span>
                                 </div>
                                 <div class="flex items-end">
                                     <button onclick="updateLoopFrequencies()"
@@ -923,7 +923,8 @@
                             <p class="text-xs text-gray-500 mt-2">
                                 <i class="fas fa-info-circle mr-1"></i>
                                 Inner loop controls motor PID rate. Outer loop controls joint PID rate (inner ÷ divisor).
-                                Default: Inner=500Hz, Outer=500Hz (divisor=1 for reduced vibrations)
+                                Default: Inner=250Hz, Outer=250Hz (divisor=1). 250Hz (4000µs) is the 2-DOF tendon-ankle
+                                safe floor — the firmware rejects a shorter period to avoid the motor-CAN loop overrun.
                             </p>
                         </div>
 
@@ -1917,6 +1918,95 @@
                             <!-- Charts will be created dynamically here -->
                             <!-- Each DOF will have two charts: one for measured data and one for interpolated data -->
                         </div>
+                        </div>
+                    </div>
+
+                    <!-- Fine Remap (command-and-record piecewise fine-map calibration) -->
+                    <div class="bg-white rounded-lg shadow-md p-6 mb-8">
+                        <h2 class="text-xl font-semibold mb-4 section-header" onclick="toggleSection('fineRemapContent')">
+                            <span>Fine Remap</span>
+                            <i class="fas fa-chevron-up chevron-icon"></i>
+                        </h2>
+
+                        <div id="fineRemapContent" class="section-content">
+
+                        <div class="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                            <h3 class="text-sm font-semibold mb-2 text-gray-700">Command &amp; Record</h3>
+                            <p class="text-xs text-gray-600 mb-3">
+                                Manually command joint positions under normal impedance, then record each settled
+                                (joint, agonist, antagonist) point. Commit installs the per-DOF piecewise map on the
+                                firmware. Telemetry only &mdash; this panel never pushes map coefficients; the firmware
+                                is the sole map authority.
+                            </p>
+
+                            <!-- DOF selector -->
+                            <div class="mb-3 flex items-center gap-2">
+                                <label for="fineRemapDofSelect" class="text-xs font-semibold text-gray-700">Tendon DOF:</label>
+                                <select id="fineRemapDofSelect"
+                                    class="border border-gray-300 rounded px-2 py-1 text-sm">
+                                    <option value="0">DOF 0</option>
+                                    <option value="1" selected>DOF 1</option>
+                                </select>
+                            </div>
+
+                            <!-- Capture controls -->
+                            <div class="grid grid-cols-3 gap-2 mb-2">
+                                <button id="fineRemapStartBtn" onclick="fineRemapAction('start')"
+                                    class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-play mr-1"></i>Start
+                                </button>
+                                <button id="fineRemapRecordBtn" onclick="fineRemapAction('record')"
+                                    class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-crosshairs mr-1"></i>Record Point
+                                </button>
+                                <button id="fineRemapStopBtn" onclick="fineRemapAction('stop')"
+                                    class="bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-stop mr-1"></i>Stop
+                                </button>
+                                <button id="fineRemapCommitBtn" onclick="fineRemapAction('commit')"
+                                    class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-check mr-1"></i>Commit
+                                </button>
+                                <button id="fineRemapAbortBtn" onclick="fineRemapAction('abort')"
+                                    class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-3 rounded text-sm">
+                                    <i class="fas fa-ban mr-1"></i>Abort
+                                </button>
+                                <button id="fineRemapSaveBtn" onclick="sendCommand('fine-capture-save')"
+                                    class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-3 rounded text-sm"
+                                    title="Persist the committed piecewise fine-map to flash (SAVE_FINE_MAP, CAN 0x01C)">
+                                    <i class="fas fa-save mr-1"></i>Save to Flash
+                                </button>
+                            </div>
+
+                            <!-- Status line -->
+                            <div id="fineRemapStatus" class="mt-2 p-2 bg-white border border-gray-200 rounded text-xs font-mono text-gray-600">
+                                Idle &mdash; press Start to begin a capture session.
+                            </div>
+                        </div>
+
+                        <!-- Readouts -->
+                        <div class="mb-4 grid grid-cols-3 gap-2">
+                            <div class="p-2 bg-white border border-gray-200 rounded text-center">
+                                <div class="text-xs text-gray-500">Points</div>
+                                <div id="fineRemapPointCount" class="text-lg font-bold text-gray-800">0</div>
+                            </div>
+                            <div class="p-2 bg-white border border-gray-200 rounded text-center">
+                                <div class="text-xs text-gray-500">Coverage vs 60% gate</div>
+                                <div id="fineRemapCoverage" class="text-sm font-bold text-gray-800">&mdash;</div>
+                            </div>
+                            <div class="p-2 bg-white border border-gray-200 rounded text-center">
+                                <div class="text-xs text-gray-500">Monotonicity</div>
+                                <div id="fineRemapMonotonicity" class="text-sm font-bold">
+                                    <i class="fas fa-circle text-gray-300"></i> <span>n/a</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Live capture plot -->
+                        <div style="height: 280px; position: relative;">
+                            <canvas id="fineRemapChart"></canvas>
+                        </div>
+
                         </div>
                     </div>
 

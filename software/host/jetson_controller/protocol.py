@@ -70,6 +70,7 @@ CAN_ID_FW_UPDATE_PROGRESS = 0x590
 # Sentinel for unused DOF slots
 UNUSED_DOF = 0x7FFF
 FAULT_SNAPSHOT_UNUSED_I16 = 0x7FFF
+FAULT_SNAPSHOT_UNUSED_U16 = 0xFFFF
 
 # Inter-frame delay for multi-frame sequences (3 ms = ~1.5 control loops @ 500 Hz)
 MULTI_FRAME_DELAY_S = 0.003
@@ -82,8 +83,34 @@ FAULT_SNAPSHOT_CTRL_SUBCMDS = {
     0x03: "CLEAR_SNAPSHOT",
 }
 
+IMPEDANCE_CTRL_DISABLE = 0x00
+IMPEDANCE_CTRL_ENABLE = 0x01
+IMPEDANCE_CTRL_WATCHDOG = 0x02
+IMPEDANCE_CTRL_ACTUATION_MODE = 0x03
+IMPEDANCE_CTRL_LOOP2_MAXSPEED = 0x04
+IMPEDANCE_CTRL_LOOP2_STEP = 0x05
+IMPEDANCE_CTRL_SLOPE_SCALING = 0x06
+IMPEDANCE_CTRL_SCHED_INTERLEAVE = 0x08
+IMPEDANCE_CTRL_ADAPTIVE_HOLD = 0x10
+IMPEDANCE_ACTUATION_LOOP1 = 0x00
+IMPEDANCE_ACTUATION_LOOP2 = 0x01
+
+ADAPTIVE_HOLD_RETENSION = 0x0001
+ADAPTIVE_HOLD_COMPLIANCE = 0x0002
+ADAPTIVE_HOLD_SOFT_HOLD = 0x0004
+ADAPTIVE_HOLD_ANTI_SLACK = 0x0008
+ADAPTIVE_HOLD_DEFAULT_MASK = (
+    ADAPTIVE_HOLD_RETENSION
+    | ADAPTIVE_HOLD_COMPLIANCE
+    | ADAPTIVE_HOLD_SOFT_HOLD
+    | ADAPTIVE_HOLD_ANTI_SLACK
+)
+
 FAULT_SNAPSHOT_LAYOUT_NAMES = {
     1: "FIXED_V1",
+    2: "FIXED_V2",
+    3: "FIXED_V3",
+    4: "FIXED_V4",
 }
 
 FAULT_SNAPSHOT_DOF_STATE_NAMES = {
@@ -98,7 +125,7 @@ DIAG_FAULT_NAMES = {
     2: "LOOP_OVERRUN",
     3: "HOST_WATCHDOG_TIMEOUT",
     4: "ENCODER_INVALID",
-    5: "ENCODER_STALE",
+    5: "MOTOR_FEEDBACK_INVALID",
     6: "MOTOR_TIMEOUT",
     7: "SAFETY_LIMIT",
     8: "MAPPING_LIMIT",
@@ -129,6 +156,7 @@ DIAG_EVENT_NAMES = {
     0x0F: "LOOP_OVERRUN_BURST",
     0x10: "SNAPSHOT_FROZEN",
     0x11: "SNAPSHOT_AVAILABLE",
+    0x12: "MOTOR_FEEDBACK_INVALID",
 }
 
 DIAG_SOURCE_NAMES = {
@@ -713,10 +741,40 @@ def _decode_snapshot_dof_flags(flags: int) -> dict[str, bool]:
     }
 
 
+def _decode_motor_feedback_flags(flags: int) -> dict[str, bool]:
+    return {
+        "rev_tracking_initialized": bool(flags & 0x01),
+        "bootstrap_done": bool(flags & 0x02),
+        "need_0x92": bool(flags & 0x04),
+        "recovering_after_a1_miss": bool(flags & 0x08),
+        "last_reply_a_valid": bool(flags & 0x10),
+        "last_reply_b_valid": bool(flags & 0x20),
+        "jump_seen": bool(flags & 0x40),
+    }
+
+
+def _decode_motor_feedback_reason(mask: int) -> list[str]:
+    reason_names = {
+        0x01: "NAN_A",
+        0x02: "NAN_B",
+        0x04: "RANGE_A",
+        0x08: "RANGE_B",
+        0x10: "A1_MISS",
+        0x20: "JUMP",
+    }
+    return [name for bit, name in reason_names.items() if mask & bit]
+
+
 def _decode_optional_i16(value: int, *, scale: float = 1.0) -> Optional[float]:
     if value == FAULT_SNAPSHOT_UNUSED_I16:
         return None
     return value / scale
+
+
+def _decode_optional_u16(value: int) -> Optional[int]:
+    if value == FAULT_SNAPSHOT_UNUSED_U16:
+        return None
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -792,13 +850,20 @@ def encode_encoder_stream_ctrl(start: bool) -> tuple[int, bytes]:
     return CAN_ID_ENCODER_STREAM_CTRL, payload
 
 
-def encode_loop_frequency(inner_period_us: int, outer_divisor: int) -> tuple[int, bytes]:
+def encode_loop_frequency(
+    inner_period_us: int,
+    outer_divisor: int,
+    *,
+    debug_override: bool = False,
+) -> tuple[int, bytes]:
     """Encode loop frequency update (0x006).
 
     byte 0-1: inner loop period in microseconds (uint16 LE)
     byte 2: outer loop divisor (uint8)
+    byte 3: 0xDB debug override for reviewed out-of-window bench tests
     """
-    payload = struct.pack("<HB", inner_period_us, outer_divisor).ljust(8, b"\x00")
+    override = 0xDB if debug_override else 0x00
+    payload = struct.pack("<HBB", inner_period_us, outer_divisor, override).ljust(8, b"\x00")
     return CAN_ID_LOOP_FREQUENCY, payload
 
 
@@ -806,11 +871,78 @@ def encode_impedance_ctrl(joint_id: int, sub_cmd: int,
                           param: int = 0) -> tuple[int, bytes]:
     """Encode IMPEDANCE_CTRL (0x01E).
 
-    sub_cmd: 0x00=disable, 0x01=enable, 0x02=set_watchdog_ms
+    sub_cmd: 0x00=disable, 0x01=enable, 0x02=set_watchdog_ms,
+             0x03=set actuation mode, 0x04=set Loop2 maxSpeed,
+             0x05=set Loop2 target step, 0x10=set adaptive-hold feature mask
     """
     payload = struct.pack("<BBH", joint_id, sub_cmd, param)
     payload = payload.ljust(8, b'\x00')
     return CAN_ID_IMPEDANCE_CTRL, payload
+
+
+def encode_impedance_actuation_mode(joint_id: int, dof: int, mode: int) -> tuple[int, bytes]:
+    """Set per-DOF inner actuation mode: 0=Loop1 torque cascade, 1=Loop2 dual-position 0xA4."""
+    param = (int(dof) & 0xFF) | ((int(mode) & 0xFF) << 8)
+    return encode_impedance_ctrl(joint_id, IMPEDANCE_CTRL_ACTUATION_MODE, param)
+
+
+def encode_loop2_maxspeed(joint_id: int, dof: int, maxspeed: int) -> tuple[int, bytes]:
+    """Set Loop2 LKM 0xA4 maxSpeed, raw units, range [10, 10000].
+
+    Wire (2026-07-03): buf[2]=dof, buf[4:6]=maxSpeed u16 LE. (Was a maxSpeed/10 byte,
+    capping the field at 2550 units. The vendor 0xA4 LSB is unpinned - rotor vs output
+    dps, factor 10 - and no bench run has been maxSpeed-bound yet; the u16 field keeps
+    headroom either way. The Loop2 joint speed is normally bound by the target STEP:
+    joint_dps ~= step_deg * loop_hz / map_slope - size maxSpeed generously so the step
+    stays the binding knob.)
+    """
+    clamped = max(10, min(10000, int(maxspeed)))
+    payload = struct.pack("<BBBxH", int(joint_id) & 0xFF, IMPEDANCE_CTRL_LOOP2_MAXSPEED,
+                          int(dof) & 0xFF, clamped)
+    payload = payload.ljust(8, b'\x00')
+    return CAN_ID_IMPEDANCE_CTRL, payload
+
+
+def encode_loop2_target_step(joint_id: int, dof: int, step_deg: float) -> tuple[int, bytes]:
+    """Set Loop2 motor-target slew limit in degrees per control cycle."""
+    packed = max(1, min(255, round(float(step_deg) * 100.0)))
+    param = (int(dof) & 0xFF) | (packed << 8)
+    return encode_impedance_ctrl(joint_id, IMPEDANCE_CTRL_LOOP2_STEP, param)
+
+
+def encode_cascade_slope_scaling(joint_id: int, enable: bool) -> tuple[int, bytes]:
+    """Toggle the cascade per-tendon dth slope scaling (IMPEDANCE_CTRL 0x06, global, opt-in).
+
+    When enabled the firmware scales the per-tendon 0.5*dth term by S_x/S_bar from a
+    finite-difference eval of the live map (matters at range extremes); default OFF at
+    boot = the legacy unscaled formula.
+    """
+    return encode_impedance_ctrl(joint_id, IMPEDANCE_CTRL_SLOPE_SCALING,
+                                 1 if enable else 0)
+
+
+def encode_sched_interleave(joint_id: int, enable: bool) -> tuple[int, bytes]:
+    """Toggle the O1 strict-interleave motor-CAN scheduler (IMPEDANCE_CTRL 0x08, global, opt-in).
+
+    When enabled the firmware control loop interleaves the two tendon DOFs' motor-CAN pair
+    round-trips (fire A -> compute B during A's flight -> drain A -> fire B -> drain B),
+    hiding one DOF's control math inside the other's ~500-600us pair flight window; default
+    OFF at boot = the historical strictly serial per-DOF order (compute/fire/drain per DOF).
+    """
+    return encode_impedance_ctrl(joint_id, IMPEDANCE_CTRL_SCHED_INTERLEAVE,
+                                 1 if enable else 0)
+
+
+def encode_sched_bits(joint_id: int, bits: int) -> tuple[int, bytes]:
+    """Set the Stage-1/2 scheduler bitmask (IMPEDANCE_CTRL 0x08, global, latching, opt-in).
+
+    bit0 = O1 strict-interleave (Stage 1); bit1 = S2 cross-cycle CARRY; bit2 = S2
+    substitute-fire 0x92 watchdog. bits==0 clears all (boot default, strictly serial).
+    Superset of encode_sched_interleave (which only drives bit0). Range 0..7.
+    """
+    if not 0 <= bits <= 0x07:
+        raise ValueError(f"sched bits out of range 0..7: {bits}")
+    return encode_impedance_ctrl(joint_id, IMPEDANCE_CTRL_SCHED_INTERLEAVE, bits)
 
 
 # ---------------------------------------------------------------------------
@@ -1289,6 +1421,140 @@ def decode_fault_snapshot_chunk(data: bytes, joint_id: int) -> FaultSnapshotChun
     )
 
 
+RECORDER_FREEZE_EVENT_SENTINEL = 0xEE  # META.freeze_event_code value flagging a recorder-ring download
+
+# Hi-rate (250 Hz) motion recorder download. The META sentinel lives in byte[1] (not the
+# freeze_event_code slot used by the recorder ring / fault snapshots) and the chunk counts are u16,
+# so it has its own decode path. One record per control cycle; index * (1/HIRATE_HZ) = time in window.
+RECORDER_HIRATE_FREEZE_SENTINEL = 0xED  # META byte[1] sentinel flagging a hi-rate download
+HIRATE_RECORD_SIZE = 14                 # bytes per packed hi-rate record (7 * int16 LE)
+HIRATE_HZ = 250.0                       # control-cycle rate the recorder samples at (4 ms / record)
+
+
+@dataclass
+class HirateMeta:
+    """Decoded hi-rate META (0x540+joint): u16 chunk/byte counts, per-record size."""
+    joint_id: int
+    dump_id: int
+    sentinel: int          # byte[1]; should equal RECORDER_HIRATE_FREEZE_SENTINEL
+    total_chunks: int      # u16 LE
+    payload_bytes: int     # u16 LE
+    record_size: int       # bytes per record (=HIRATE_RECORD_SIZE)
+    seq: int
+
+    @property
+    def is_hirate(self) -> bool:
+        return self.sentinel == RECORDER_HIRATE_FREEZE_SENTINEL
+
+
+def decode_hirate_meta(data: bytes, joint_id: int) -> HirateMeta:
+    """Decode the hi-rate recorder META frame (0x540+joint).
+
+    Layout (8 bytes):
+      byte 0:    dump_id
+      byte 1:    sentinel (0xED — distinguishes from 0xEE recorder ring / fault snapshots)
+      byte 2-3:  total_chunks (u16 LE)
+      byte 4-5:  payload_bytes (u16 LE)
+      byte 6:    record_size (=14)
+      byte 7:    seq
+    """
+    dump_id = data[0]
+    sentinel = data[1]
+    total_chunks = data[2] | (data[3] << 8)
+    payload_bytes = data[4] | (data[5] << 8)
+    record_size = data[6]
+    seq = data[7]
+    return HirateMeta(
+        joint_id=joint_id,
+        dump_id=dump_id,
+        sentinel=sentinel,
+        total_chunks=total_chunks,
+        payload_bytes=payload_bytes,
+        record_size=record_size,
+        seq=seq,
+    )
+
+
+def decode_hirate_chunk(data: bytes, joint_id: int) -> tuple[int, bytes]:
+    """Decode one hi-rate DATA chunk (0x550+joint): u16 LE chunk_index + <=6 payload bytes.
+
+    Returns (chunk_index, payload). Differs from the recorder-ring chunk (single-byte index): the
+    hi-rate window can need >255 chunks, so the index is u16 and the payload is bytes [2:8].
+    """
+    chunk_index = data[0] | (data[1] << 8)
+    return chunk_index, bytes(data[2:8])
+
+
+def decode_hirate_blob(blob: bytes) -> list[dict[str, object]]:
+    """Decode the hi-rate motion-recorder blob into per-cycle dicts (oldest-first, sequential).
+
+    Each record is 14 bytes, 7 * int16 little-endian:
+      q_x100, qdes_x100, dth_x100, iqA, iqB, resA_x100, resB_x100
+    q/qdes/dth/resA/resB are degrees x100; iqA/iqB are raw torque-current counts (no scaling).
+    Record index i maps to time t_s = i / HIRATE_HZ (250 Hz -> 4 ms/record).
+    """
+    records: list[dict[str, object]] = []
+    n = len(blob) // HIRATE_RECORD_SIZE
+    for i in range(n):
+        off = i * HIRATE_RECORD_SIZE
+        q, qdes, dth, iqA, iqB, resA, resB = struct.unpack_from("<hhhhhhh", blob, off)
+        records.append(
+            {
+                "index": i,
+                "t_s": i / HIRATE_HZ,
+                "q_deg": q / 100.0,
+                "qdes_deg": qdes / 100.0,
+                "dth_deg": dth / 100.0,
+                "iqA": iqA,
+                "iqB": iqB,
+                "resA_deg": resA / 100.0,
+                "resB_deg": resB / 100.0,
+            }
+        )
+    return records
+
+
+def decode_recorder_blob(data: bytes) -> list[dict[str, object]]:
+    """Decode the diagnostic recorder-ring blob: 12-byte DiagRecords, oldest-first.
+
+    Each record is either an event (rec_type 0) or a control sample (rec_type 1, the signals
+    that determine the torque for one DOF: joint angle, outer output dth, integral term, torque).
+    """
+    records: list[dict[str, object]] = []
+    for off in range(0, (len(data) // 12) * 12, 12):
+        uptime_ms, rec_type, dof = struct.unpack_from("<HBB", data, off)
+        if rec_type == 0:
+            event_code, flags, src_kind, src_idx, d0, d1 = struct.unpack_from("<BBBBBB", data, off + 4)
+            records.append(
+                {
+                    "uptime_ms": uptime_ms,
+                    "type": "event",
+                    "dof": dof,
+                    "event_code": event_code,
+                    "event": DIAG_EVENT_NAMES.get(event_code, f"CODE_{event_code}"),
+                    "flags": flags,
+                    "source_kind": src_kind,
+                    "source_index": src_idx,
+                    "detail0": d0,
+                    "detail1": d1,
+                }
+            )
+        else:
+            q, dth, outer_i, torque = struct.unpack_from("<hhhh", data, off + 4)
+            records.append(
+                {
+                    "uptime_ms": uptime_ms,
+                    "type": "ctrl",
+                    "dof": dof,
+                    "q_deg": q / 100.0,
+                    "dth": dth / 100.0,
+                    "outer_i": outer_i / 100.0,
+                    "torque": torque,
+                }
+            )
+    return records
+
+
 def decode_fault_snapshot_blob(data: bytes) -> dict[str, object]:
     """Decode the fixed-layout v0.1 fault snapshot payload."""
     if len(data) < 20:
@@ -1352,6 +1618,112 @@ def decode_fault_snapshot_blob(data: bytes) -> dict[str, object]:
             }
         )
 
+    loop_profile = None
+    if layout_version >= 2 and len(data) >= offset + 14:
+        (
+            max_dof_us,
+            max_outer_us,
+            max_eq_us,
+            max_can_us,
+            max_pid_us,
+            max_torque_us,
+            max_safety_us,
+        ) = struct.unpack_from("<HHHHHHH", data, offset)
+        offset += 14
+        loop_profile = {
+            "max_dof_us": max_dof_us,
+            "max_outer_us": max_outer_us,
+            "max_eq_us": max_eq_us,
+            "max_can_us": max_can_us,
+            "max_pid_us": max_pid_us,
+            "max_torque_us": max_torque_us,
+            "max_safety_us": max_safety_us,
+        }
+
+    motor_bus = None
+    if layout_version >= 3:
+        if len(data) < offset + 8:
+            raise ValueError(
+                f"Fault snapshot truncated in motor bus record: {len(data)} bytes"
+            )
+        (
+            tx_fail,
+            rx_miss,
+            rx_overflow,
+            motor_can_rx_error_count_v3,
+            motor_can_eflg,
+        ) = struct.unpack_from("<HHHBB", data, offset)
+        offset += 8
+        motor_bus = {
+            "tx_fail": tx_fail,
+            "rx_miss": rx_miss,
+            "rx_overflow": rx_overflow,
+            "motor_can_rx_error_count": motor_can_rx_error_count_v3,
+            "motor_can_eflg": motor_can_eflg,
+        }
+
+        for dof_index in range(dof_count):
+            if len(data) < offset + 10:
+                raise ValueError(
+                    f"Fault snapshot truncated in motor feedback record {dof_index}: "
+                    f"{len(data)} bytes"
+                )
+            (
+                feedback_flags,
+                a1_miss_count,
+                watchdog_cycle_count,
+                watchdog_err_a_x100,
+                watchdog_err_b_x100,
+                invalid_reason,
+                last_reply_mask,
+            ) = struct.unpack_from("<BBHhhBB", data, offset)
+            offset += 10
+            dof_records[dof_index]["motor_feedback"] = {
+                "flags": _decode_motor_feedback_flags(feedback_flags),
+                "raw_flags": feedback_flags,
+                "a1_miss_count": a1_miss_count,
+                "watchdog_cycle_count": watchdog_cycle_count,
+                "watchdog_err_a_deg": _decode_optional_i16(
+                    watchdog_err_a_x100,
+                    scale=100.0,
+                ),
+                "watchdog_err_b_deg": _decode_optional_i16(
+                    watchdog_err_b_x100,
+                    scale=100.0,
+                ),
+                "invalid_reason": _decode_motor_feedback_reason(invalid_reason),
+                "invalid_reason_raw": invalid_reason,
+                "last_reply_mask": last_reply_mask,
+                "last_reply": {
+                    "A": bool(last_reply_mask & 0x01),
+                    "B": bool(last_reply_mask & 0x02),
+                },
+            }
+
+    if layout_version >= 4:
+        for dof_index in range(dof_count):
+            if len(data) < offset + 10:
+                raise ValueError(
+                    f"Fault snapshot truncated in host command timing record {dof_index}: "
+                    f"{len(data)} bytes"
+                )
+            (
+                last_age_ms,
+                last_gap_ms,
+                max_gap_ms,
+                accepted_count,
+                late_gap_count,
+            ) = struct.unpack_from("<HHHHH", data, offset)
+            offset += 10
+            dof_records[dof_index]["host_command_timing"] = {
+                "last_age_ms": _decode_optional_u16(last_age_ms),
+                "last_gap_ms": last_gap_ms,
+                "max_gap_ms": max_gap_ms,
+                "accepted_count": accepted_count,
+                "late_gap_count": late_gap_count,
+                "late_gap_threshold_ms": 40,
+            }
+
     primary_fault_code = None if primary_fault_code_raw == 0xFF else primary_fault_code_raw
     return {
         "layout_version": layout_version,
@@ -1383,4 +1755,6 @@ def decode_fault_snapshot_blob(data: bytes) -> dict[str, object]:
             "can_recovery_count": can_recovery_count,
         },
         "dofs": dof_records,
+        "loop_profile": loop_profile,
+        "motor_bus": motor_bus,
     }

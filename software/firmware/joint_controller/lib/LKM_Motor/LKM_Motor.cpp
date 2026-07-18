@@ -7,6 +7,7 @@
 
 #include "LKM_Motor.h"
 #include <debug.h>
+#include <hot_path.h>
 
 namespace {
 
@@ -55,7 +56,7 @@ LKM_Motor::LKM_Motor(MCP_CAN *canInterface, unsigned int motorID, float reductio
  * Initialize motor (CAN bus must be already initialized)
  */
 void LKM_Motor::init() {
-  LOG_C1_DEBUG("LKM_Motor initialized with ID: " + String(_motorID));
+  LOG_C1_DEBUG_F("LKM_Motor initialized with ID: %u", _motorID);
 }
 
 // ===================================================================
@@ -127,9 +128,10 @@ void LKM_Motor::initRevTracking(int64_t absMotorAngle_centideg, uint16_t current
     uint8_t idx = _motorID < 4 ? _motorID : 0;
     uint32_t now = millis();
     if (now - lastLogMs[idx] > 2000) {
-      LOG_C1_WARN("[RevTrack] Motor " + String(_motorID) + " init discrepancy: " +
-                  String(error, 2) + "° (0x92=" + String(actuatorAngle_deg, 2) +
-                  " tracked=" + String(trackedAngle, 2) + ")");
+      char f1[48], f2[48], f3[48];
+      LOG_C1_WARN_F("[RevTrack] M%u init discrepancy: %s° (0x92=%s trk=%s)",
+                    _motorID, c1f(f1, error, 2), c1f(f2, actuatorAngle_deg, 2),
+                    c1f(f3, trackedAngle, 2));
       lastLogMs[idx] = now;
     }
   }
@@ -142,7 +144,7 @@ void LKM_Motor::initRevTracking(int64_t absMotorAngle_centideg, uint16_t current
  * the encoder range. The tracked revolutions are actuator/output revolutions,
  * matching the single-turn actuator position encoded in the 0xA1 response.
  */
-void LKM_Motor::updateRevTracking(uint16_t currentEncoder) {
+void HOT_FUNC(LKM_Motor::updateRevTracking)(uint16_t currentEncoder) {
   if (!_revTrackInit) return;
 
   int32_t halfRange = (int32_t)(_encoderCountsPerRev / 2);
@@ -164,11 +166,21 @@ void LKM_Motor::updateRevTracking(uint16_t currentEncoder) {
  * Combines actuator/output revolution count with the current single-turn
  * actuator position from 0xA1, then applies offset and inversion.
  */
-float LKM_Motor::getTrackedAngle() const {
+float HOT_FUNC(LKM_Motor::getTrackedAngle)() const {
   float outputAngle = (float)_revolutions * 360.0f +
                       (float)_prevEncoder / (float)_encoderCountsPerRev * 360.0f;
   outputAngle = (outputAngle - offsetEncoder) * (invertEncoder ? -1.0f : 1.0f);
   return outputAngle;
+}
+
+void HOT_FUNC(LKM_Motor::setTrackedAngleFromAbsolute)(int64_t absMotorAngle_centideg) {
+  // Measurement-path advance for S2 substitute-fire: correct the revolution count ONLY, from the just-
+  // validated 0x92 absolute, keeping the live single-turn encoder (_prevEncoder) as the sub-revolution
+  // source. Same _revolutions formula as initRevTracking() (whose rev-anchor use stays untouched).
+  if (!_revTrackInit) return;  // nothing to advance until bootstrap has anchored the tracking
+  double actuatorAngle_deg = (absMotorAngle_centideg / 100.0) / (double)_reductionGear;
+  double encoderAngle_deg  = (double)_prevEncoder / (double)_encoderCountsPerRev * 360.0;
+  _revolutions = (int32_t)round((actuatorAngle_deg - encoderAngle_deg) / 360.0);
 }
 
 bool LKM_Motor::isRevTrackInit() const {
@@ -220,10 +232,10 @@ bool LKM_Motor::motorStop() {
   unsigned long targetID = 0x140 + _motorID;
   unsigned char buf[8]   = {0x81, 0, 0, 0, 0, 0, 0, 0};
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_C1_INFO("Command: Motor STOP sent.");
+    // (chatter log removed, v2 String pass 2026-07-06)
     return true;
   }
-  LOG_C1_ERROR("Error sending Motor STOP.");
+  LOG_C1_ERROR_F("Error sending Motor STOP.");
   return false;
 }
 
@@ -242,10 +254,10 @@ bool LKM_Motor::setSpeed(float speed) {
   buf[6]                 = (speedCentesimi >> 16) & 0xFF;
   buf[7]                 = (speedCentesimi >> 24) & 0xFF;
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_C1_INFO(String("SET_SPEED sent with value: ") + String(speedCentesimi));
+    // (chatter log removed, v2 String pass 2026-07-06)
     return true;
   }
-  LOG_C1_ERROR("Error sending SET_SPEED.");
+  LOG_C1_ERROR_F("Error sending SET_SPEED.");
   return false;
 }
 
@@ -255,7 +267,7 @@ bool LKM_Motor::setSpeed(float speed) {
  * Torque value range: -2048 to 2048 (approximately -33A to 33A)
  * Torque is automatically limited to _maxTorque and inverted if encoder is inverted.
  */
-bool LKM_Motor::setTorque(int torque) {
+bool HOT_FUNC(LKM_Motor::setTorque)(int torque) {
   // Limit torque to maximum value
   if (torque > _maxTorque) {
     torque = _maxTorque;
@@ -275,7 +287,7 @@ bool LKM_Motor::setTorque(int torque) {
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
     return true;
   }
-  LOG_C1_ERROR("Error sending SET_TORQUE.");
+  LOG_C1_ERROR_F("Error sending SET_TORQUE.");
   return false;
 }
 
@@ -295,7 +307,8 @@ void LKM_Motor::setMaxTorque(int16_t maxTorque) {
  */
 void LKM_Motor::zeroEncoderOffset() {
   offsetEncoder = -getMultiAngleSync(false).angle;
-  LOG_C1_INFO(String("Encoder offset set to: ") + String(offsetEncoder));
+  char f1[48];
+  LOG_C1_INFO_F("Encoder offset set to: %s", c1f(f1, offsetEncoder, 2));
 }
 
 /**
@@ -476,11 +489,10 @@ bool LKM_Motor::sendMultiLoopAngle2Command(float angleControl, uint16_t maxSpeed
   buf[6]                 = (uint8_t)((angleControlCentesimi >> 16) & 0xFF);
   buf[7]                 = (uint8_t)((angleControlCentesimi >> 24) & 0xFF);
   if (_can->sendMsgBuf(targetID, 0, 8, buf) == CAN_OK) {
-    LOG_C1_INFO(String("ML_ANGLE2 sent: angleControl=") + String(angleControlCentesimi) +
-             " maxSpeed=" + String(maxSpeed));
+    // (chatter log removed, v2 String pass 2026-07-06)
     return true;
   }
-  LOG_C1_ERROR("Error sending ML_ANGLE2.");
+  LOG_C1_ERROR_F("Error sending ML_ANGLE2.");
   return false;
 }
 
@@ -921,7 +933,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
     if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
       if (retry == MAX_RETRIES - 1 &&
           shouldLogMotorReadFailure(last_send_error_log_ms, _motorID)) {
-        LOG_C1_ERROR("ERROR sending READ_SL_ANGLE (after " + String(MAX_RETRIES) + " retries).");
+        LOG_C1_ERROR_F("ERROR sending READ_SL_ANGLE (after %d retries).", MAX_RETRIES);
       }
       delayMicroseconds(100);
       continue;
@@ -955,7 +967,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getSingleAngleSync() {
   }
 
   if (shouldLogMotorReadFailure(last_timeout_log_ms, _motorID)) {
-    LOG_C1_WARN("Timeout: no response from READ_SL_ANGLE (motor " + String(_motorID) + ").");
+    LOG_C1_WARN_F("Timeout: no response from READ_SL_ANGLE (motor %u).", _motorID);
   }
   return data;
 }
@@ -1004,7 +1016,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   if (flushed >= 3) {
     static uint32_t last_flush_log = 0;
     if (millis() - last_flush_log > 10000) {
-      LOG_C1_WARN("[CAN] Flushed " + String(flushed) + " stale messages before motor " + String(_motorID) + " read");
+      LOG_C1_WARN_F("[CAN] Flushed %d stale messages before motor %u read", flushed, _motorID);
       last_flush_log = millis();
     }
   }
@@ -1016,7 +1028,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
     if (_can->sendMsgBuf(targetID, 0, 8, cmd) != CAN_OK) {
       if (retry == MAX_RETRIES - 1 &&
           shouldLogMotorReadFailure(last_send_error_log_ms, _motorID)) {
-        LOG_C1_ERROR("ERROR sending READ_ML_ANGLE (after " + String(MAX_RETRIES) + " retries).");
+        LOG_C1_ERROR_F("ERROR sending READ_ML_ANGLE (after %d retries).", MAX_RETRIES);
       }
       delayMicroseconds(100);  // Brief pause before retry
       continue;
@@ -1063,7 +1075,7 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
   
   // All retries failed
   if (shouldLogMotorReadFailure(last_timeout_log_ms, _motorID)) {
-    LOG_C1_WARN("Timeout: no response from READ_ML_ANGLE (motor " + String(_motorID) + ").");
+    LOG_C1_WARN_F("Timeout: no response from READ_ML_ANGLE (motor %u).", _motorID);
   }
   return data;  // Returns NAN angle to indicate error
 }
@@ -1074,6 +1086,23 @@ LKM_Motor::MultiAngleData LKM_Motor::getMultiAngleSync(bool applyOffset) {
  * Sends 0x92 to both motors back-to-back, then polls for both responses
  * in a single loop. Both motors must share the same CAN bus instance.
  */
+// Parse an 0x92 multi-turn angle reply (DATA[1..7] = signed 56-bit motor-side centideg, little-endian)
+// into output-space degrees + the raw centideg (for rev-tracking init). Factored out of the inline lambda
+// in getMultiAnglePairPipelined() so a ROUTED 0x92 reply (S2 substitute-fire, collectPair) parses through
+// the SAME conversion. Byte layout and math are verbatim from the historical lambda. waitTime = 0 (a
+// carried/routed reply has no round-trip window; the pipelined caller overwrites it with micros()-t0).
+void HOT_FUNC(LKM_Motor::parseMultiAngleReply)(LKM_Motor *motor, const unsigned char *buf, MultiAngleData &data) {
+  data.waitTime = 0;
+  uint64_t temp = ((uint64_t)buf[7] << 48) | ((uint64_t)buf[6] << 40) |
+                  ((uint64_t)buf[5] << 32) | ((uint64_t)buf[4] << 24) |
+                  ((uint64_t)buf[3] << 16) | ((uint64_t)buf[2] << 8) |
+                  ((uint64_t)buf[1]);
+  int64_t motorAngle = ((int64_t)temp << 8) >> 8;
+  data.rawMotorAngle_centideg = motorAngle;
+  data.angle = (motorAngle / 100.0) / motor->_reductionGear;
+  data.angle = (data.angle - motor->offsetEncoder) * (motor->invertEncoder ? -1 : 1);
+}
+
 PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
     LKM_Motor *motorA, LKM_Motor *motorB) {
   PipelinedAngleData result;
@@ -1104,7 +1133,7 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
   if (flushed >= 3) {
     static uint32_t last_flush_log = 0;
     if (millis() - last_flush_log > 10000) {
-      LOG_C1_WARN("[CAN PIPE] Flushed " + String(flushed) + " stale messages");
+      LOG_C1_WARN_F("[CAN PIPE] Flushed %d stale messages", flushed);
       last_flush_log = millis();
     }
   }
@@ -1115,7 +1144,7 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
     // --- Send command to motor A (non-blocking) ---
     if (can->sendMsgBufNoWait(idA, 0, 8, cmd) != CAN_OK) {
       if (retry == MAX_RETRIES - 1) {
-        LOG_C1_ERROR("[CAN PIPE] Send failed motor A (id " + String(motorA->_motorID) + ") after retries");
+        LOG_C1_ERROR_F("[CAN PIPE] Send failed motor A (id %u) after retries", motorA->_motorID);
       }
       delayMicroseconds(100);
       continue;
@@ -1124,7 +1153,7 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
     // --- Send command to motor B (non-blocking, back-to-back) ---
     if (can->sendMsgBufNoWait(idB, 0, 8, cmd) != CAN_OK) {
       if (retry == MAX_RETRIES - 1) {
-        LOG_C1_ERROR("[CAN PIPE] Send failed motor B (id " + String(motorB->_motorID) + ") after retries");
+        LOG_C1_ERROR_F("[CAN PIPE] Send failed motor B (id %u) after retries", motorB->_motorID);
       }
       delayMicroseconds(100);
       continue;
@@ -1141,15 +1170,8 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
         if (can->readMsgBuf(&canId, &len, rcvBuf) == CAN_OK && rcvBuf[0] == 0x92) {
 
           auto parseAngle = [&](LKM_Motor *motor, MultiAngleData &data) {
-            data.waitTime = micros() - t0;
-            uint64_t temp = ((uint64_t)rcvBuf[7] << 48) | ((uint64_t)rcvBuf[6] << 40) |
-                            ((uint64_t)rcvBuf[5] << 32) | ((uint64_t)rcvBuf[4] << 24) |
-                            ((uint64_t)rcvBuf[3] << 16) | ((uint64_t)rcvBuf[2] << 8) |
-                            ((uint64_t)rcvBuf[1]);
-            int64_t motorAngle = ((int64_t)temp << 8) >> 8;
-            data.rawMotorAngle_centideg = motorAngle;
-            data.angle = (motorAngle / 100.0) / motor->_reductionGear;
-            data.angle = (data.angle - motor->offsetEncoder) * (motor->invertEncoder ? -1 : 1);
+            parseMultiAngleReply(motor, rcvBuf, data);  // factored: same byte layout + conversion
+            data.waitTime = micros() - t0;              // pipelined round-trip window (unchanged)
           };
 
           if (canId == idA && !gotA) {
@@ -1178,8 +1200,9 @@ PipelinedAngleData LKM_Motor::getMultiAnglePairPipelined(
   result.totalTime = micros() - t0;
   static uint32_t last_pipe_timeout_log = 0;
   if (millis() - last_pipe_timeout_log > 5000) {
-    LOG_C1_WARN("[CAN PIPE] Timeout: A=" + String(!isnan(result.dataA.angle) ? "OK" : "FAIL") +
-                " B=" + String(!isnan(result.dataB.angle) ? "OK" : "FAIL"));
+    LOG_C1_WARN_F("[CAN PIPE] Timeout: A=%s B=%s",
+                  !isnan(result.dataA.angle) ? "OK" : "FAIL",
+                  !isnan(result.dataB.angle) ? "OK" : "FAIL");
     last_pipe_timeout_log = millis();
   }
   return result;
@@ -1263,7 +1286,7 @@ PipelinedTorqueResponseData LKM_Motor::setTorquePairPipelined(
   if (flushed >= 3) {
     static uint32_t last_flush_log = 0;
     if (millis() - last_flush_log > 10000) {
-      LOG_C1_WARN("[CAN TRQ PIPE] Flushed " + String(flushed) + " stale messages");
+      LOG_C1_WARN_F("[CAN TRQ PIPE] Flushed %d stale messages", flushed);
       last_flush_log = millis();
     }
   }
@@ -1278,7 +1301,7 @@ PipelinedTorqueResponseData LKM_Motor::setTorquePairPipelined(
     // --- Send torque to motor A (non-blocking) ---
     if (can->sendMsgBufNoWait(idA, 0, 8, bufA) != CAN_OK) {
       if (retry == MAX_RETRIES - 1) {
-        LOG_C1_ERROR("[CAN TRQ PIPE] Send failed motor A (id " + String(motorA->_motorID) + ")");
+        LOG_C1_ERROR_F("[CAN TRQ PIPE] Send failed motor A (id %u)", motorA->_motorID);
       }
       delayMicroseconds(100);
       continue;
@@ -1287,7 +1310,7 @@ PipelinedTorqueResponseData LKM_Motor::setTorquePairPipelined(
     // --- Send torque to motor B (non-blocking, back-to-back) ---
     if (can->sendMsgBufNoWait(idB, 0, 8, bufB) != CAN_OK) {
       if (retry == MAX_RETRIES - 1) {
-        LOG_C1_ERROR("[CAN TRQ PIPE] Send failed motor B (id " + String(motorB->_motorID) + ")");
+        LOG_C1_ERROR_F("[CAN TRQ PIPE] Send failed motor B (id %u)", motorB->_motorID);
       }
       // [P1 fix] Motor A was sent — drain its pending response before retrying
       // to prevent stale A response from pairing with fresh B response on next attempt
@@ -1355,9 +1378,207 @@ PipelinedTorqueResponseData LKM_Motor::setTorquePairPipelined(
   result.totalTime = micros() - t0;
   static uint32_t last_trq_timeout_log = 0;
   if (millis() - last_trq_timeout_log > 5000) {
-    LOG_C1_WARN("[CAN TRQ PIPE] Timeout: A=" + String(result.dataA.valid ? "OK" : "FAIL") +
-                " B=" + String(result.dataB.valid ? "OK" : "FAIL"));
+    LOG_C1_WARN_F("[CAN TRQ PIPE] Timeout: A=%s B=%s",
+                  result.dataA.valid ? "OK" : "FAIL",
+                  result.dataB.valid ? "OK" : "FAIL");
     last_trq_timeout_log = millis();
   }
   return result;
+}
+
+// ===================================================================
+// NON-BLOCKING TORQUE (fire now, collect next cycle)
+// ===================================================================
+
+void HOT_FUNC(LKM_Motor::ingestTorqueReply)(const unsigned char *buf) {
+  // Same parse as setTorquePairPipelined's parseResponse (minus the result-struct write).
+  motorTemperature2    = (int8_t)buf[1];
+  motorTorqueCurrent   = ((int16_t)buf[3] << 8) | buf[2];
+  motorSpeed           = ((int16_t)buf[5] << 8) | buf[4];
+  motorEncoderPosition = ((uint16_t)buf[7] << 8) | buf[6];
+  if (_revTrackInit) {
+    updateRevTracking(motorEncoderPosition);  // exactly once per reply, in arrival order
+  }
+}
+
+// --- Bus-health diagnostic counters (cumulative since resetBusDiag()) ---
+static uint32_t s_tx_fail = 0;
+static uint32_t s_rx_miss = 0;
+static uint32_t s_rx_overflow = 0;
+static bool     s_ovr_prev = false;
+// S2 CARRY correctness signal (G1): residual WAIT of a carried collect AFTER the pre-sweep. When the
+// carry hides the flight, the replies are already buffered -> the pre-sweep gets both -> the WAIT loop
+// is skipped -> residual ~0. A non-zero residual means the carry is NOT fully hiding the round-trip
+// (compute too short / flight too long) — the direct carry-correctness number for the G1 bench gate.
+static uint32_t s_carry_collect_count = 0;    // carried (presweep) collects total
+static uint32_t s_carry_wait_over_count = 0;  // carried collects whose residual wait exceeded the threshold
+static uint32_t s_carry_wait_max_us = 0;      // worst carried residual wait (us)
+static const uint32_t S_CARRY_WAIT_OVER_US = 100;  // "not hidden" threshold (a hidden carry is ~a buffered read)
+// 500Hz Stage-1 instrumentation: fire->reply latency histogram (us). Buckets:
+// <200, <300, <400, <500, <700, <1000, <1500, >=1500. Resolves the design-study
+// estimate spread (1450 vs 1800 us cycle) and sizes the Stage-2 drain windows.
+static uint32_t s_lat_hist[8] = {0};
+static const uint16_t HOT_DATA_ATTR("lat_edges") s_lat_edges[7] = {200, 300, 400, 500, 700, 1000, 1500};
+static inline void HOT_FUNC(latRecord)(uint32_t dt_us) {
+  int b = 7;
+  for (int i = 0; i < 7; i++) { if (dt_us < s_lat_edges[i]) { b = i; break; } }
+  s_lat_hist[b]++;
+}
+// O4a: MCP2515 /INT-gated draining. CANINTE RX0IE|RX1IE are set at init (mcp_can.cpp:588),
+// so /INT is LOW while an RX buffer holds a frame. A GPIO read (~ns) replaces most ~4us SPI
+// checkReceive polls. -1 = disabled (pure SPI poll, the legacy behavior). The SPI fallback
+// every 16 idle spins runs regardless, so an unwired/non-asserting INT line can NEVER hang
+// the drain - it only costs the old poll rate.
+static int s_collect_int_pin = -1;
+uint32_t LKM_Motor::txFailCount()     { return s_tx_fail; }
+uint32_t LKM_Motor::rxMissCount()     { return s_rx_miss; }
+const uint32_t *LKM_Motor::latencyHistogram() { return s_lat_hist; }
+void LKM_Motor::resetLatencyHistogram() { for (int i = 0; i < 8; i++) s_lat_hist[i] = 0; }
+uint32_t LKM_Motor::rxOverflowCount() { return s_rx_overflow; }
+void     LKM_Motor::resetBusDiag()    { s_tx_fail = 0; s_rx_miss = 0; s_rx_overflow = 0; s_ovr_prev = false; }
+uint32_t LKM_Motor::carryCollectCount()  { return s_carry_collect_count; }
+uint32_t LKM_Motor::carryWaitOverCount() { return s_carry_wait_over_count; }
+uint32_t LKM_Motor::carryWaitMaxUs()     { return s_carry_wait_max_us; }
+void     LKM_Motor::resetCarryWaitStats(){ s_carry_collect_count = 0; s_carry_wait_over_count = 0; s_carry_wait_max_us = 0; }
+
+bool HOT_FUNC(LKM_Motor::fireCommand)(const unsigned char *buf) {
+  // Send a pre-built command frame non-blocking; record the outstanding transaction. CHECK the TX
+  // return: with only 3 MCP2515 TX buffers, an un-checked back-to-back send can be silently dropped.
+  _fire_canId = 0x140 + _motorID;
+  _fire_cmd = buf[0];       // command byte (0xA1/0xA4/0x92) — collectPair routes the reply by this
+  _last_reply_valid = false;
+  if (_can->sendMsgBufNoWait(_fire_canId, 0, 8, (unsigned char *)buf) != CAN_OK) {
+    _fire_pending = false;   // TX queue refused it -> no reply will come
+    s_tx_fail++;
+    return false;
+  }
+  _fire_t_us = micros();
+  _fire_pending = true;
+  return true;
+}
+
+bool HOT_FUNC(LKM_Motor::fireTorque)(int torque) {
+  int t = torque;
+  if (t > _maxTorque) t = _maxTorque;
+  else if (t < -_maxTorque) t = -_maxTorque;
+  if (invertEncoder) t = -t;
+  unsigned char buf[8] = {0xA1, 0, 0, 0, 0, 0, 0, 0};
+  buf[4] = t & 0xFF;
+  buf[5] = (t >> 8) & 0xFF;
+  return fireCommand(buf);
+}
+
+bool LKM_Motor::fireAngle2(float angle, uint16_t maxSpeed) {
+  // Same conversion as sendMultiLoopAngle2Command (invert + offsetEncoder + reductionGear + centideg).
+  int8_t invert = invertEncoder ? -1 : 1;
+  int32_t c = (int32_t)((angle + (invert * offsetEncoder)) * invert * _reductionGear * 100.0);
+  unsigned char buf[8] = {0xA4, 0, 0, 0, 0, 0, 0, 0};
+  buf[2] = (uint8_t)(maxSpeed & 0xFF);
+  buf[3] = (uint8_t)((maxSpeed >> 8) & 0xFF);
+  buf[4] = (uint8_t)(c & 0xFF);
+  buf[5] = (uint8_t)((c >> 8) & 0xFF);
+  buf[6] = (uint8_t)((c >> 16) & 0xFF);
+  buf[7] = (uint8_t)((c >> 24) & 0xFF);
+  return fireCommand(buf);
+}
+
+bool HOT_FUNC(LKM_Motor::fire92)() {
+  // 0x92 = multi-turn angle READ (no payload). Same non-blocking fire discipline as fireTorque/fireAngle2:
+  // fireCommand records _fire_pending/_fire_t_us/_fire_canId and _fire_cmd=0x92, so collectPair/carry track
+  // and route this transaction identically to a torque pair. The reply carries the same CAN id (0x140+ID)
+  // as an 0xA1/0xA4 reply but with DATA[0]=0x92, so collectPair distinguishes it by _fire_cmd.
+  unsigned char buf[8] = {0x92, 0, 0, 0, 0, 0, 0, 0};
+  return fireCommand(buf);
+}
+
+int HOT_FUNC(LKM_Motor::flushStaleRx)(int maxDrain) {
+  int n = 0;
+  while (_can->checkReceive() == CAN_MSGAVAIL && n < maxDrain) {
+    unsigned long dId; unsigned char dLen; unsigned char dBuf[8];
+    _can->readMsgBuf(&dId, &dLen, dBuf);
+    n++;
+  }
+  return n;
+}
+
+void LKM_Motor::setCollectIntPin(int pin) { s_collect_int_pin = pin; }
+
+void HOT_FUNC(LKM_Motor::collectPair)(LKM_Motor *mA, LKM_Motor *mB, uint32_t timeout_us, bool presweep) {
+  MCP_CAN *can = mA->_can;
+  uint32_t t0 = micros();
+  uint32_t idle_spin = 0;
+  // Reply router (S2 sub92): a reply frame carries the same CAN id (0x140+ID) whether it answers an 0xA1
+  // torque, an 0xA4 position, or an 0x92 angle-read; the ECHOED command byte (rxBuf[0]) distinguishes them.
+  // Route a frame to a pending motor ONLY when its id AND its fired command byte (_fire_cmd) match. An 0x92
+  // substitute-fire reply is parsed into _last92 (parseMultiAngleReply); an 0xA1/0xA4 reply goes through
+  // ingestTorqueReply (rev-tracking advance) exactly as before. Bit-identical when no 0x92 was fired
+  // (_fire_cmd is 0xA1/0xA4 so an 0x92 frame — which never appears then — could not match). Lambda has full
+  // private access via the enclosing static member. Returns true if the frame was consumed by this motor.
+  auto route = [](LKM_Motor *m, unsigned long rxId, const unsigned char *rxBuf) HOT_LAMBDA_ATTR("route") -> bool {
+    if (!m->_fire_pending || rxId != m->_fire_canId || rxBuf[0] != m->_fire_cmd) return false;
+    if (rxBuf[0] == 0x92) {
+      parseMultiAngleReply(m, rxBuf, m->_last92);
+    } else {
+      m->ingestTorqueReply(rxBuf);
+    }
+    m->_fire_pending = false;
+    m->_last_reply_valid = true;
+    return true;
+  };
+  // S2 CARRY (FATAL-2): one UNCONDITIONAL non-blocking pass over the frames ALREADY in the RX buffers
+  // BEFORE the deadline loop. A carried pair's replies landed while the loop preamble ran (age > flight),
+  // so the deadline-shrunk WAIT below would otherwise time out to a spurious MISS without ever reading
+  // them. Route them here first (same id filter as the main loop); the WAIT then only covers not-yet-
+  // arrived frames. Bounded (<=4 frames = 2 RX buffers + slack) so a flooded bus can't hang the pass.
+  if (presweep) {
+    int swept = 0;
+    while ((mA->_fire_pending || mB->_fire_pending) &&
+           can->checkReceive() == CAN_MSGAVAIL && swept < 4) {
+      swept++;
+      unsigned long rxId; unsigned char len; unsigned char rxBuf[8];
+      if (can->readMsgBuf(&rxId, &len, rxBuf) != CAN_OK) continue;
+      if (rxBuf[0] != 0xA1 && rxBuf[0] != 0xA4 && rxBuf[0] != 0x92) continue;  // motor state / angle reply
+      // NOTE: no latRecord() here. A pre-swept reply is (almost always) a CARRIED pair whose
+      // _fire_t_us is from the PREVIOUS cycle, so micros()-_fire_t_us is the cross-cycle age
+      // (~period+flight), not the fire->reply round-trip — it would inflate the LATHIST tail
+      // that COLLECT_FLOOR_US is sized from. Carried-pair timing belongs in [S2DIAG], not LATHIST.
+      // route() also matches _fire_cmd, so a carried 0x92 pair parses into _last92 (sub92) here.
+      if (!route(mA, rxId, rxBuf)) route(mB, rxId, rxBuf);
+    }
+  }
+  const uint32_t t_after_presweep = presweep ? micros() : 0;  // residual-wait start (carried collects only;
+                                                              // no added read on the serial/non-carry path)
+  // Only this ONE pair is outstanding (<=2), so the 2-deep MCP2515 RX buffer never overflows: drain
+  // each reply as it arrives, routed by CAN id, until BOTH are in or the short timeout elapses.
+  while ((mA->_fire_pending || mB->_fire_pending) && (micros() - t0) < timeout_us) {
+    if (s_collect_int_pin >= 0 && HOT_DIGITAL_READ(s_collect_int_pin) == HIGH &&
+        ((++idle_spin) & 0x0F) != 0) {
+      continue;  // /INT high = no RX pending; SPI fallback poll every 16th spin regardless
+    }
+    if (can->checkReceive() != CAN_MSGAVAIL) continue;
+    unsigned long rxId; unsigned char len; unsigned char rxBuf[8];
+    if (can->readMsgBuf(&rxId, &len, rxBuf) != CAN_OK) continue;
+    if (rxBuf[0] != 0xA1 && rxBuf[0] != 0xA4 && rxBuf[0] != 0x92) continue;  // motor state / angle reply
+    if (route(mA, rxId, rxBuf)) {
+      latRecord(micros() - mA->_fire_t_us);
+    } else if (route(mB, rxId, rxBuf)) {
+      latRecord(micros() - mB->_fire_t_us);
+    }
+  }
+  // S2 carry residual-wait: how long the WAIT loop ran AFTER the pre-sweep, for carried collects only.
+  // ~0 when the carry hid the flight (pre-sweep got both); >threshold = the carry did not fully hide.
+  if (presweep) {
+    const uint32_t residual = micros() - t_after_presweep;
+    s_carry_collect_count++;
+    if (residual > s_carry_wait_max_us) s_carry_wait_max_us = residual;
+    if (residual > S_CARRY_WAIT_OVER_US) s_carry_wait_over_count++;
+  }
+  // Still pending after the short timeout = a genuine miss.
+  if (mA->_fire_pending) { mA->_fire_pending = false; mA->_last_reply_valid = false; s_rx_miss++; }
+  if (mB->_fire_pending) { mB->_fire_pending = false; mB->_last_reply_valid = false; s_rx_miss++; }
+  // RX overflow (MCP2515 EFLG RX0OVR|RX1OVR, bits 6-7) — rising-edge count (flag not clearable here).
+  const uint8_t RX_OVR_MASK = (1 << 6) | (1 << 7);
+  bool ovr = (can->getError() & RX_OVR_MASK) != 0;
+  if (ovr && !s_ovr_prev) s_rx_overflow++;
+  s_ovr_prev = ovr;
 }

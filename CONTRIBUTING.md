@@ -222,11 +222,12 @@ We don't have automated tests yet (Phase 0), but manual validation is expected.
 
 By contributing you agree:
 
-- **Code contributions:** Licensed under MIT (same as project software)
+- **Code contributions:** Licensed under GPLv3 (same as project software from July 2026)
 - **Hardware contributions:** Subject to phased licensing roadmap (see `hardware/LICENSE.md`)
   - Your contributions remain attributed
   - You agree to licensing transitions as hardware matures
-  - No retroactive license changes on code (MIT stays MIT)
+  - Already-published releases keep the license they shipped under (irrevocable for obtained
+    copies); license terms for future releases follow the public roadmap
 
 ---
 

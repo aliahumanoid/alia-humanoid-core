@@ -102,12 +102,16 @@ public:
    * @param uff Feedforward control term (default: 0)
    * @param ki_scale Per-call integral gain scaling (default: 1)
    * @param freeze_integrator When true, skip only the integral increment for this call
+   * @param dt_override When > 0, use this measured elapsed time (seconds) for the
+   *        time-scaled terms (integral, derivative, derivative filter) instead of the
+   *        fixed member Ts. <= 0 (default) keeps the legacy fixed-Ts behaviour. Pass the
+   *        real loop dt so an overrun-stretched cycle does not inject a derivative kick.
    * @return Saturated control output in range [umin, umax]
    *
    * @note Call this method at regular intervals matching the sampling period Ts
    */
   float control(float xsp, float x, float uff = 0, float ki_scale = 1.0f,
-                bool freeze_integrator = false);
+                bool freeze_integrator = false, float dt_override = 0.0f);
   
   /**
    * @brief Reset PID internal state to zero
@@ -145,6 +149,31 @@ public:
    *               Use 0 if starting from no-load condition
    */
   void initializeState(float measurement, float setpoint, float output = 0);
+
+  /**
+   * @brief Clamp the stored output accumulator (uprev) to an EXTERNAL, tighter range
+   *
+   * control() back-calculation bounds uprev at the PID's own [umin, umax]; when a
+   * DOWNSTREAM guard (e.g. the map-corridor governor) clamps the issued command to a
+   * TIGHTER range, the accumulator can still wind up to the PID's limits while the
+   * plant only ever sees the guard's edge — the stored-excess windup family: after
+   * the error reverses, the excess must unwind (at Ki rate) before the output can
+   * leave the edge. Call this with the guard's range whenever the guard clamps, so
+   * the accumulator tracks what was actually issued.
+   *
+   * Bumpless: only touches uprev; error/measurement history and the derivative
+   * filter state are untouched.
+   *
+   * @param lo Lower bound of the externally-issued command range
+   * @param hi Upper bound of the externally-issued command range
+   */
+  void clampAccumulator(float lo, float hi) {
+    if (uprev > hi) {
+      uprev = hi;
+    } else if (uprev < lo) {
+      uprev = lo;
+    }
+  }
 
   // ===================================================================
   // PARAMETER ACCESS

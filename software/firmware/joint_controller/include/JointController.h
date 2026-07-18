@@ -51,6 +51,7 @@
 #include <JointConfig.h>
 #include <LKM_Motor.h>
 #include <PID.h>
+#include <hot_path.h>
 #include <global.h>
 #include <shared_data.h>
 #include <Arduino.h>
@@ -89,6 +90,33 @@ struct LinearRegressionCoefficients {
   bool valid;      // Validity flag
 };
 
+// Joint↔motor mapping representation for a DOF
+enum MapMode : uint8_t {
+  MAP_LINEAR = 0,    // y = slope*x + intercept (default)
+  MAP_PIECEWISE = 1, // piecewise-linear interpolation over dof_mappings[] points (fine map)
+  MAP_BILINEAR = 2,  // bilinear (q0,q1) grid over q0_axis x q1_axis
+};
+
+// Minimum captured points required for a usable piecewise (fine) map
+static constexpr int MIN_FINE_POINTS = 8;
+
+// 2D bilinear (q0,q1) grid descriptor + RAM storage (sibling to DofMappingData_t).
+// GRID_M_MAX / GRID_N_MAX live in global.h (so the v9 2D flash record can size its arrays);
+// they are visible here because JointController.h includes global.h above.
+struct DofGridData_t {                 // ~859 B; sibling to DofMappingData_t (NOT a reinterpret)
+  uint8_t grid_m;                      // active q0 rows (>=1)
+  uint8_t grid_n;                      // active q1 cols (>= MIN_FINE_POINTS)
+  bool bl_valid;
+  float q0_axis[GRID_M_MAX];           // ascending DOF0 (q0) sweep points
+  float q1_axis[GRID_N_MAX];           // ascending DOF1 (q1) points
+  float agonist[GRID_M_MAX * GRID_N_MAX];     // row-major cell = r*grid_n + c, NEUTRAL baseline
+  float antagonist[GRID_M_MAX * GRID_N_MAX];
+};
+
+// q0 source DOF for the bilinear DOF1 coupling.
+static constexpr uint8_t Q0_DOF = 0;  // ankle plantar/dorsi DOF0 = the coupling source for the bilinear DOF1
+static_assert(Q0_DOF < MAX_DOFS, "Q0_DOF out of range");
+
 // Linear equations for a DOF
 struct DofLinearEquations {
   LinearRegressionCoefficients agonist;    // Equation for agonist motor
@@ -102,6 +130,10 @@ struct DofLinearEquations {
   float antagonist_safe_min;               // Safe min antagonist motor angle
   float antagonist_safe_max;               // Safe max antagonist motor angle
   bool limits_valid;                       // Whether limits were calculated
+  uint8_t map_mode;                        // MapMode: LINEAR (slope/intercept) or PIECEWISE (fine map)
+  bool pw_valid;                           // Piecewise (fine) map validated & usable
+  bool bl_valid;                           // bilinear (2D) grid validated & usable
+  float q0_nominal;                        // q0 of the captured 1D slice (used when no live q0 supplied); default 0
 };
 
 /**
@@ -116,9 +148,52 @@ private:
   PID **outer_pid_controllers;    // PID controller per DOF (outer loop) - handles filtering & anti-windup
   DofMovementData *dof_movement;  // Movement data per DOF
   DofMappingData_t *dof_mappings; // Mapping data per DOF (RAW from auto‑mapping)
+  DofGridData_t dof_grids[MAX_DOFS]; // Bilinear (q0,q1) grid per DOF (zero-init: bl_valid=false on boot)
   
   // Inter-core flash save request (Core1 requests, Core0 executes)
   volatile bool _pending_flash_save = false;
+
+  // Fine remap ("command and record"): operator commands positions under normal
+  // impedance and records (joint, agonist, antagonist) points; on commit they
+  // become a per-DOF piecewise map. Scratch buffer holds one DOF's capture.
+  bool _fine_capture_active = false;
+  uint8_t _fine_capture_dof = 0;
+  float _fc_joint[MAX_MAPPING_DATA_SIZE];
+  float _fc_agonist[MAX_MAPPING_DATA_SIZE];
+  float _fc_antagonist[MAX_MAPPING_DATA_SIZE];
+  int _fc_size = 0;
+  // Per-DOF co-contraction offset the cascade applied this cycle
+  // (cascade_influence * 0.5 * stiffness_ref_effective). recordFinePoint subtracts it from
+  // the measured agonist / adds it to the antagonist so the stored fine-map is the NEUTRAL
+  // (zero co-contraction) baseline — otherwise the cascade would double-apply stiffness.
+  float _cocontraction_offset[MAX_DOFS] = {0.0f};
+
+  // Grid capture ("2D bilinear map"): the host drives a per-row 1D fine capture (reusing the
+  // _fc_* scratch), then harvests each settled row at a q0 coordinate via recordGridRow, which
+  // resamples it onto a shared q1_axis so the grid stays rectangular. The in-progress grid is
+  // kept bl_valid=false; only a successful commitGridCapture makes it usable (MAP_BILINEAR).
+  bool _grid_capture_active = false;
+  uint8_t _grid_dof = 0;
+  // Capture SCRATCH: the in-progress grid is built here and NEVER touches the live dof_grids[dof]
+  // until a successful commitGridCapture atomically publishes it. An abort therefore leaves any
+  // previously-committed live grid intact, and a torn capture can never be read by the control loop.
+  DofGridData_t _grid_scratch;
+
+  // Blended-row monotonicity guard for a 2D grid (the hysteresis discriminator). Factored out so it
+  // runs at BOTH commitGridCapture (capture-time) AND loadGridFromFlash (boot-time defense against
+  // flash corruption). Returns true iff every interior blend of adjacent q0-rows stays monotonic.
+  bool gridBlendedRowsMonotonic(const DofGridData_t &g);
+
+  // Per-row monotonicity guard: every stored raw row (agonist + antagonist) must be strictly
+  // monotonic. Run at commit (validate the captured rows) and at load (defense-in-depth vs flash
+  // bit-rot, since the blended-row guard alone could pass on individually-corrupt rows).
+  bool gridRowsMonotonic(const DofGridData_t &g);
+
+  // Atomically publish a validated grid into the LIVE dof_grids[dof] slot while the control loop on
+  // Core1 may be reading it (commit runs on Core1, the CAN flash-load on Core0). Demote map_mode away
+  // from BILINEAR first (so the loop stops using the about-to-be-overwritten grid), barrier, copy the
+  // grid + recompute safe limits, barrier, then promote map_mode back to BILINEAR last.
+  void publishBilinearGrid(uint8_t dof, const DofGridData_t &src, float q0_nominal);
 
   // Interpolation functions
   float interpolate_data(float target_value, float *data1, float *data2, int size);
@@ -239,7 +314,8 @@ public:
    * @param check_motors If true also check associated motor ranges
    * @return true if all DOFs are within limits, false otherwise
    */
-  bool checkSafetyForAllDofs(String &violation_message, bool check_motors = false);
+  bool checkSafetyForAllDofs(char *violation_message, size_t violation_msg_size,
+                             bool check_motors = false);
 
   /**
    * @brief Run safety checks for a single DOF
@@ -249,8 +325,11 @@ public:
    * @param check_motors If true also check associated motor ranges
    * @return true if DOF is within limits, false otherwise
    */
-  bool checkSafetyForDof(uint8_t dof_index, float current_angle, String &violation_message,
-                         bool check_motors = false,
+  // violation_message is a caller STACK buffer (heap-free v2 pass 2026-07-06: the old
+  // String& forced a malloc(1)+free through the cross-core mutex EVERY moving outer cycle,
+  // even with no violation). Built ONLY on the violation branch; empty string otherwise.
+  bool checkSafetyForDof(uint8_t dof_index, float current_angle, char *violation_message,
+                         size_t violation_msg_size, bool check_motors = false,
                          SafetyViolationType *violation_type = nullptr);
   bool getMappingSafeRange(uint8_t dof_index, float &min_safe, float &max_safe);
   bool canDirectDriveRecoverTowardSafeRange(uint8_t dof_index, float current_angle,
@@ -295,7 +374,7 @@ public:
    * Use this to access the outer PID directly for control operations.
    * The returned PID handles derivative filtering and anti-windup automatically.
    */
-  PID *getOuterPID(uint8_t dof_index) {
+  HOT_INLINE PID *getOuterPID(uint8_t dof_index) {
     if (dof_index >= config.dof_count || outer_pid_controllers == nullptr) return nullptr;
     return outer_pid_controllers[dof_index];
   }
@@ -330,6 +409,16 @@ public:
    * This ensures the PID integral and derivative terms are scaled correctly.
    */
   void setOuterLoopSamplingPeriod(float new_ts);
+
+  /**
+   * @brief Update inner (motor) loop sampling period for all motor PIDs
+   * @param new_ts New sampling period in seconds
+   *
+   * The constructors seed Ts from the preset motion.sampling_period, which can
+   * diverge from the runtime inner_loop_period_us; call this when the inner loop
+   * frequency changes so Ki*Ts / Kd/Ts scale on the real period.
+   */
+  void setInnerLoopSamplingPeriod(float new_ts);
 
   // ==========================================================================
   // PRETENSION & RELEASE
@@ -392,6 +481,18 @@ public:
   void stopAllMotors();
 
   /**
+   * @brief S2 CARRY choke point — abandon any pair the Stage-2 cross-cycle CARRY left in flight.
+   *
+   * The last pair fired in a control cycle can stay outstanding across the cycle boundary (knob
+   * bit1). Any motor-drive entry point reachable from pollHostCan that bypasses the control loop's
+   * injection resolve (stopAllMotors, pretension/release, recalc, the diag-loop arm*) must call
+   * this FIRST so a carried pair's _fire_pending flags + stale RX frames are cleared before it
+   * touches the motor bus. Defined in JointController_ControlLoop.cpp (owner of the s2_carry slot).
+   * Core-affinity guarded: a no-op (+ wrong-core counter) if called from core0.
+   */
+  void abandonCarriedPair();
+
+  /**
    * @brief Stop motors of a specific DOF
    * @param dof_index DOF index
    */
@@ -440,7 +541,7 @@ public:
    * This function verifies that motors are within mapped ranges with safety margin.
    * If a motor exceeds these limits, it could indicate tendon breakage.
    */
-  bool checkMotorsInRange(uint8_t dof_index, String &violation_message);
+  bool checkMotorsInRange(uint8_t dof_index, char *violation_message, size_t violation_msg_size);
 
   /**
    * @brief Execute joint-motor mapping
@@ -532,6 +633,59 @@ public:
   bool transferAutoMappingData(const AutoMappingState_t &auto_mapping_state);
 
   // ==========================================================================
+  // FINE REMAP ("command and record") — manual point capture with cascade PID
+  // running, producing a per-DOF piecewise (non-linear) joint↔motor map.
+  // ==========================================================================
+
+  /** @brief Begin a fine capture session for one tendon DOF (clears scratch buffer). */
+  bool startFineCapture(uint8_t dof_index);
+
+  /** @brief Record the current settled (joint, agonist, antagonist) sample for the active DOF.
+   *  Uses cached angles (no extra SPI). Returns false if not active / not settled / buffer full. */
+  bool recordFinePoint();
+
+  /** @brief End capture without committing (keeps buffer for a subsequent commit). */
+  void stopFineCapture();
+
+  /** @brief Validate the captured points and, on success, install them as the DOF's
+   *  piecewise map (map_mode=PIECEWISE). On failure the previous map is left intact. */
+  bool commitFineCapture(uint8_t dof_index);
+
+  /** @brief Discard the capture session and buffer. */
+  void abortFineCapture();
+
+  /** @brief Whether a fine capture is currently active. */
+  bool isFineCaptureActive() const { return _fine_capture_active; }
+
+  /** @brief DOF being captured (valid when isFineCaptureActive()). */
+  uint8_t fineCaptureDof() const { return _fine_capture_dof; }
+
+  /** @brief Number of points captured so far in the active/last session. */
+  int fineCaptureCount() const { return _fc_size; }
+
+  // ==========================================================================
+  // GRID CAPTURE (2D bilinear map) — host drives a 1D fine capture per q0 row,
+  // then harvests it as a grid row resampled onto a shared q1_axis. Stays DEAD
+  // until commitGridCapture validates the full grid and sets MAP_BILINEAR.
+  // ==========================================================================
+
+  /** @brief Begin a grid-capture session for one tendon DOF (clears the in-progress grid,
+   *  bl_valid=false). The host then drives per-row 1D fine captures + recordGridRow. */
+  bool startGridCapture(uint8_t dof);
+
+  /** @brief Harvest the CURRENT 1D fine-capture scratch as grid row `row` at q0 coordinate `q0`,
+   *  resampled onto the shared q1_axis. Row 0 must be recorded first (it establishes q1_axis).
+   *  Returns false (and logs) if the row is non-monotonic or out of order. */
+  bool recordGridRow(uint8_t dof, uint8_t row, float q0);
+
+  /** @brief Validate the full grid (ascending q0, blended-row monotonicity) and, on success,
+   *  install it as the DOF's bilinear map (map_mode=BILINEAR). On failure leaves bl_valid=false. */
+  bool commitGridCapture(uint8_t dof);
+
+  /** @brief Discard the grid-capture session (leaves the committed grid, if any, untouched). */
+  void abortGridCapture();
+
+  // ==========================================================================
   // FLASH STORAGE (PERSISTENCE)
   // ==========================================================================
 
@@ -559,7 +713,50 @@ public:
    * @return true if loading succeeded
    */
   bool loadLinearEquationsFromFlash();
-  
+
+  /**
+   * @brief Save the per-DOF piecewise (fine) map to flash (v8 record)
+   *
+   * Co-located with the v5 linear-eq record in the LINEAR_EQ sector. Only DOFs whose committed
+   * map is PIECEWISE/valid with >= MIN_FINE_POINTS points are persisted; others stay LINEAR.
+   * @return true if the write was issued
+   * @note Should only be called from Core0 to avoid flash access conflicts
+   */
+  bool saveFineMapToFlash();
+
+  /**
+   * @brief Restore the per-DOF piecewise (fine) map from flash (v8 record)
+   *
+   * Best-effort: absence/corruption/validation failure leaves the DOF LINEAR (never bricks).
+   * @return true if a valid fine-map record was found
+   */
+  bool loadFineMapFromFlash();
+
+  /**
+   * @brief Save the per-DOF 2D bilinear grid to flash (v9 record)
+   *
+   * Co-located with the v5 linear-eq and v8 fine-map records in the LINEAR_EQ sector. Only DOFs
+   * whose committed map is BILINEAR/valid with a usable grid are persisted; others are left out.
+   * @return true if the write was issued
+   * @note Should only be called from Core0 to avoid flash access conflicts
+   */
+  bool saveGridToFlash();
+
+  /** Deliberately write EMPTY v8/v9 refined-map records (bypass of the accidental-clobber
+   *  guards BY DESIGN): call after a successful coarse re-map, when every refined map is
+   *  stale-by-construction, so a reboot cannot re-promote old-geometry maps. */
+  bool invalidateRefinedMapsInFlash();
+
+  /**
+   * @brief Restore the per-DOF 2D bilinear grid from flash (v9 record)
+   *
+   * Best-effort overlay on top of the v5/v8 baseline: absence/corruption/validation failure leaves
+   * the affected DOF at its v5/v8 mode (never bricks). Each restored slot re-runs the blended-row
+   * monotonicity guard (defense-in-depth against flash corruption).
+   * @return true if at least one valid grid was restored
+   */
+  bool loadGridFromFlash();
+
   /**
    * @brief Recalculate safe limits based on current equations and physical limits
    * 
@@ -638,6 +835,7 @@ public:
    */
   bool applySavedOffsetsToMotors(uint8_t dof_index);
 
+
   /**
    * @brief Check offset drift using cached motor angles (zero CAN overhead)
    * 
@@ -681,16 +879,18 @@ public:
   bool hasValidEquations(uint8_t dof_index) const;
 
   // Compute motor angle using linear equations
-  // Version with separate inputs for agonist and antagonist
+  // Version with separate inputs for agonist and antagonist.
+  // q_other: live q0 (DOF0) for the bilinear (MAP_BILINEAR) branch; NAN -> use eq.q0_nominal.
   bool calculateMotorAnglesWithEquations(uint8_t dof_index, float agonist_joint_angle,
                                          float antagonist_joint_angle, float &agonist_angle,
-                                         float &antagonist_angle);
+                                         float &antagonist_angle, float q_other = NAN);
 
   // Compute joint angle using inverse linear equations (motor → joint)
-  // Unified version with separate inputs for agonist and antagonist
+  // Unified version with separate inputs for agonist and antagonist.
+  // q_other: live q0 (DOF0) for the bilinear (MAP_BILINEAR) branch; NAN -> use eq.q0_nominal.
   bool calculateJointAnglesWithEquations(uint8_t dof_index, float agonist_motor_angle,
                                          float antagonist_motor_angle, float &agonist_joint_angle,
-                                         float &antagonist_joint_angle);
+                                         float &antagonist_joint_angle, float q_other = NAN);
 
   // ==========================================================================
   // SYSTEM STATUS & MONITORING
@@ -744,6 +944,38 @@ public:
    * @return true if any DOF is actively moving
    */
   bool executeControlLoop();
+
+  // Free/compliant hand-capture cycle — SEPARATE from executeControlLoop (the validated control loop
+  // is never entered while free-capture is active). Zero-torques both tendons of `dof` (back-drivable)
+  // and appends one hi-rate record this cycle. If `pending_exit`, re-seeds the impedance hold at the
+  // current pose and returns true (caller clears free_capture_active so control resumes holding there
+  // -> no jerk). Returns false otherwise.
+  bool runFreeCaptureCycle(uint8_t dof, bool pending_exit);
+
+  // True only if `dof` can safely ENTER free-capture: motor cache warm, rev-tracking bootstrapped on
+  // both tendons, and the DOF currently HOLDING. The ENTER handler rejects otherwise (else free-capture
+  // would zero-torque with no/garbage angles and leave the fragile joint free-to-fall).
+  bool isFreeCaptureReady(uint8_t dof);
+
+  // Vel-test (diag A): characterise the motor's internal velocity/position loop vs the torque cascade.
+  // armVelTest validates + picks the direction at ENTER (pos_mode also precomputes the map far-end target);
+  // runVelTestCycle drives one tendon in velocity (0xA2 setSpeed) OR position (0xA4 angle+maxSpeed) + the
+  // other holding torque, records q, and de-powers (fail-safe) on EXIT / position guard.
+  bool armVelTest(uint8_t dof, bool pos_mode);
+  bool runVelTestCycle(uint8_t dof, bool pending_exit);
+
+  // TORQUE-SWEEP (diag 0x0C/0x0D): armTorqueSweep seeds a firmware-driven smooth impedance-segment ramp and
+  // keeps impedance active so the NORMAL executeControlLoop cascade tracks it (clean matched-speed torque
+  // baseline, no host q_x100 stepping); torqueSweepStop is the de-power fail-safe on EXIT / backstop.
+  bool armTorqueSweep(uint8_t dof);
+  void torqueSweepStop();
+
+  // fireAngle2 NO-MOTION ping (diag 0x10/0x11): Loop 2 step-2 primitive confirm — hold BOTH motors at their
+  // current angle via non-blocking 0xA4 (fireAngle2) + collectPair, no motion, to validate the 0xA4 send +
+  // auto-reply + collectPair routing before any Loop 2 motion. armFireAngle2Ping seeds; runFireAngle2PingCycle
+  // drives one guarded cycle (joint motion-abort -> de-power).
+  bool armFireAngle2Ping(uint8_t dof);
+  bool runFireAngle2PingCycle(uint8_t dof, bool pending_exit);
 };
 
 #endif // JOINT_CONTROLLER_H

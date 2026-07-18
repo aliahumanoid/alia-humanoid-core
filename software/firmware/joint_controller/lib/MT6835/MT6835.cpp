@@ -6,6 +6,7 @@
  */
 
 #include <MT6835.h>
+#include <hot_path.h>
 
 #define _2PI 6.283185307179586476925286766559f  ///< 2 * PI constant (float precision)
 
@@ -30,7 +31,7 @@ void MT6835::init(SPIClass *_spi) {
   spi = _spi;
   if (nCS >= 0) {
     pinMode(nCS, OUTPUT);
-    digitalWrite(nCS, HIGH);
+    HOT_DIGITAL_WRITE(nCS, HIGH);
   }
   spi->begin();
 }
@@ -39,7 +40,7 @@ void MT6835::init(SPIClass *_spi) {
 // ANGLE READING
 // ============================================================================
 
-float MT6835::getCurrentAngle() {
+float HOT_FUNC(MT6835::getCurrentAngle)() {
   uint32_t rawangle = readRawAngle21();
   if (checkcrc) {
     if (lastcrc != calcCrc(rawangle, laststatus)) {
@@ -66,7 +67,7 @@ float MT6835::getCurrentAngle() {
  * @param status 3-bit status value
  * @return Calculated CRC8 checksum
  */
-uint8_t MT6835::calcCrc(uint32_t angle, uint8_t status) {
+uint8_t HOT_FUNC(MT6835::calcCrc)(uint32_t angle, uint8_t status) {
   uint8_t crc = 0x00;
 
   uint8_t input = angle >> 13;
@@ -87,7 +88,7 @@ uint8_t MT6835::calcCrc(uint32_t angle, uint8_t status) {
   return crc;
 };
 
-uint32_t MT6835::readRawAngle21() {
+uint32_t HOT_FUNC(MT6835::readRawAngle21)() {
   uint8_t data[6]; // transact 48 bits
   data[0] = (MT6835_OP_ANGLE << 4);
   data[1] = MT6835_REG_ANGLE1;
@@ -97,17 +98,17 @@ uint32_t MT6835::readRawAngle21() {
   data[5] = 0;
   spi->beginTransaction(settings);
   if (nCS >= 0)
-    digitalWrite(nCS, LOW);
+    HOT_DIGITAL_WRITE(nCS, LOW);
   spi->transfer(data, 6);
   if (nCS >= 0)
-    digitalWrite(nCS, HIGH);
+    HOT_DIGITAL_WRITE(nCS, HIGH);
   spi->endTransaction();
   laststatus = data[4] & 0x07;
   lastcrc    = data[5];
   return (data[2] << 13) | (data[3] << 5) | (data[4] >> 3);
 };
 
-uint8_t MT6835::getStatus() {
+uint8_t HOT_FUNC(MT6835::getStatus)() {
   return laststatus;
 };
 
@@ -118,10 +119,10 @@ uint8_t MT6835::getCalibrationStatus() {
 
   spi->beginTransaction(settings);
   if (nCS >= 0)
-    digitalWrite(nCS, LOW);
+    HOT_DIGITAL_WRITE(nCS, LOW);
   spi->transfer(data, 3);
   if (nCS >= 0)
-    digitalWrite(nCS, HIGH);
+    HOT_DIGITAL_WRITE(nCS, HIGH);
   spi->endTransaction();
 
   return data[2] >> 6;
@@ -274,10 +275,10 @@ void MT6835::transfer24(MT6835Command *outValue) {
   uint32_t buff = swap_bytes(outValue->val);
   spi->beginTransaction(settings);
   if (nCS >= 0)
-    digitalWrite(nCS, LOW);
+    HOT_DIGITAL_WRITE(nCS, LOW);
   spi->transfer(&buff, 3);
   if (nCS >= 0)
-    digitalWrite(nCS, HIGH);
+    HOT_DIGITAL_WRITE(nCS, HIGH);
   spi->endTransaction();
   outValue->val = swap_bytes(buff);
 };

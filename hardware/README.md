@@ -11,8 +11,9 @@
 
 This directory contains all mechanical design assets for the Alia humanoid robot. CAD files, STL exports, URDF models, and manufacturing documentation are organized following ROS/URDF naming conventions for seamless simulation integration.
 
-If you just want the currently released printable parts, start here:
+If you just want the currently released printable STL parts, start here:
 
+- [Simple STL Release](stl/phase0_rev_a/)
 - [Mechanical Release Guide](mechanical/README.md)
 - [Electronics Hardware](electronics/)
 - [Hardware License](LICENSE.md)
@@ -30,6 +31,7 @@ hardware/
 │   ├── visual/        → High-quality STL for RViz/Gazebo rendering
 │   └── collision/     → Simplified collision meshes (performance)
 │
+├── stl/               → Simple public STL release entrypoint
 ├── mechanical/        → CAD sources & manufacturing files
 │   ├── BOM.csv        → Bill of Materials (complete parts catalog)
 │   ├── lower_leg/     → Shank structure (tibia/fibula analog)
@@ -46,7 +48,13 @@ hardware/
 
 ## Released STL Files (Phase 0)
 
-**19 files currently available for printing:**
+**19 files currently available for printing.**
+
+Simple download path:
+
+- [hardware/stl/phase0_rev_a](stl/phase0_rev_a/)
+
+Traceable mechanical source paths are listed below.
 
 ### Right Ankle Assembly (6 parts)
 - `ankle_inversion_eversion_frame.stl` — Main frame for inversion/eversion motion

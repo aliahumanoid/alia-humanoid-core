@@ -340,11 +340,20 @@ class CanManager:
     # ------------------------------------------------------------------
 
     def send_emergency_stop(self, reason_code: int = 0) -> Dict[str, Any]:
-        """Broadcast emergency stop frame."""
+        """Broadcast emergency stop frame.
+
+        REPEAT-SEND x3 spaced >=12ms (2026-07-05 finding): the joint's host-CAN chip buffers
+        only 2 frames and is drained once per control cycle (4-6.3ms under load) — a single
+        0x000 landing in a full window is silently hard-dropped and a lost e-stop has NO
+        automatic backstop. Spaced repeats hit independent windows; the handler is idempotent.
+        """
         self._ensure_connection()
         payload = bytes([reason_code & 0xFF]) + bytes(7)
-        self._send_frame(0x000, payload, context=f"E-Stop reason={reason_code}")
-        return {"reason": reason_code}
+        for attempt in range(3):
+            self._send_frame(0x000, payload, context=f"E-Stop reason={reason_code} ({attempt + 1}/3)")
+            if attempt < 2:
+                time.sleep(0.012)
+        return {"reason": reason_code, "sends": 3}
 
     def send_identify_request(self) -> Dict[str, Any]:
         """
@@ -1050,6 +1059,42 @@ class CanManager:
         payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
         self._send_frame(0x019, payload,
                          context=f"Load linear eq {joint_name}")
+        return {"success": True}
+
+    def save_fine_map_via_can(self, joint_name: str) -> Dict[str, Any]:
+        """Send save-fine-map-to-flash command via CAN (0x01C).
+
+        Persists the committed piecewise fine-map (co-located with the linear-eq
+        record via a whole-sector RMW) so it survives a power-cycle — firmware Phase 1.4.
+        """
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        payload = bytes([joint_id, 0, 0, 0, 0, 0, 0, 0])
+        self._send_frame(0x01C, payload,
+                         context=f"Save fine-map {joint_name}")
+        return {"success": True}
+
+    # Fine remap ("command and record") actions, CAN 0x01B [joint, action, dof]
+    FINE_CAPTURE_ACTIONS = {
+        "start": 0, "record": 1, "stop": 2, "commit": 3, "abort": 4,
+    }
+
+    def fine_capture_via_can(self, joint_name: str, action: str,
+                             dof_index: int = 0) -> Dict[str, Any]:
+        """Send a fine-remap capture control command via CAN (0x01B).
+
+        action: one of start/record/stop/commit/abort. dof_index selects the
+        tendon DOF for start/commit (ignored by record/stop/abort which act on
+        the active session).
+        """
+        if action not in self.FINE_CAPTURE_ACTIONS:
+            raise ValueError(f"Unknown fine-capture action: {action}")
+        self._ensure_connection()
+        joint_id = JOINTS[joint_name]["id"]
+        code = self.FINE_CAPTURE_ACTIONS[action]
+        payload = bytes([joint_id, code, dof_index, 0, 0, 0, 0, 0])
+        self._send_frame(0x01B, payload,
+                         context=f"Fine capture {action} {joint_name} DOF {dof_index}")
         return {"success": True}
 
     def set_auto_start_via_can(self, joint_name: str, enabled: int,

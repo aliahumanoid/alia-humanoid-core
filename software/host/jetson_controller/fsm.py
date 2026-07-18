@@ -100,7 +100,9 @@ class StartupFSM:
 
     async def run_startup(self, can_bus: CanBus, config: ControllerConfig,
                           telemetry: TelemetryManager,
-                          safety: SafetyManager) -> bool:
+                          safety: SafetyManager,
+                          startup_torque: int = 0,
+                          startup_duration: int = 0) -> bool:
         """Run startup sequence (pretension → startup → stream → gains → home).
 
         Expects joints to be already discovered.
@@ -122,7 +124,13 @@ class StartupFSM:
                 allow_estop_recovery=recovering_after_estop,
                 context="Startup precheck",
             )
-            await self._startup(can_bus, config, telemetry)
+            await self._startup(
+                can_bus,
+                config,
+                telemetry,
+                startup_torque=startup_torque,
+                startup_duration=startup_duration,
+            )
 
             # After a host-side E-stop the firmware keeps announcing ready=True,
             # but motor-moving commands stay rejected until PRETENSION(_ALL)
@@ -380,7 +388,9 @@ class StartupFSM:
                         f"Discovered {len(discovered)}/{len(expected)} joints")
 
     async def _startup(self, can_bus: CanBus, config: ControllerConfig,
-                       telemetry: TelemetryManager) -> None:
+                       telemetry: TelemetryManager,
+                       startup_torque: int = 0,
+                       startup_duration: int = 0) -> None:
         self._set_state(FSMState.STARTUP, "Running startup sequence")
 
         for key, jcfg in config.joints.items():
@@ -425,7 +435,18 @@ class StartupFSM:
             if evt:
                 evt.clear()
 
-            arb_id, data = encode_startup_sequence(jcfg.joint_id)
+            if startup_torque > 0 or startup_duration > 0:
+                logger.info(
+                    "Startup override for %s: torque=%d duration=%dms",
+                    key,
+                    startup_torque,
+                    startup_duration,
+                )
+            arb_id, data = encode_startup_sequence(
+                jcfg.joint_id,
+                torque=startup_torque,
+                duration=startup_duration,
+            )
             await can_bus.send(arb_id, data)
 
             # Wait for COMPLETE or FAILED

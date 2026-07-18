@@ -1,5 +1,8 @@
 # CAN Firmware Update Protocol Specification
 
+> **License:** this specification is released under the MIT License (unlike the GPLv3
+> firmware/host code) so third-party tools can implement it without copyleft obligations.
+
 **Status:** Draft Technical Specification
 **Date:** 2026-04-08
 **Implementation state:** Flash map regions, slot linker targets, metadata

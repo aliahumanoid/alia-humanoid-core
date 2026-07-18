@@ -6,6 +6,40 @@ Structured log of outward-facing progress notes. Updates published as milestones
 
 ---
 
+## 2026-07 — Development drop, a published method note, and a software license change
+
+**What ships** (curated release from the private working tree):
+- **Firmware:** control-loop rate hardening (bench-validated to 625 Hz on the ankle), joint-map
+  fine-capture and 2D-grid improvements, a saved-offset warm-boot fast path (warm boots skip the
+  full recalibration when saved offsets are still valid), MOTION GUARD V2 — a gait-aware
+  redesign of the divergence/stall safety guards behind a runtime mode switch (ships in LEGACY
+  mode = current behavior; bench validation gates any active use), and malloc-free hot-path
+  logging on the control core.
+- **Host:** impedance-stream `tau_ff` channel, echo-verified one-shot CAN commands with salvo
+  pacing, configuration and protocol evolution matching the firmware.
+- **Docs:** CAN system architecture and diagnostics operational guides updated.
+
+**Technical note published (2026-07-18):** [Deterministic boot-time offset reconstruction for
+antagonistic tendon-driven joints](https://aliahumanoid.com/notes/deterministic-boot-offset-reconstruction.html)
+— we published the method deliberately as prior art, with an independent web-archive snapshot.
+The firmware implementation is part of the private development tree; the note is sufficient for
+an independent implementation.
+
+**License change (software):** from this release, firmware and host software are licensed under
+**GPLv3** (previously MIT; already-published MIT snapshots remain MIT — that grant is
+irrevocable for anyone who obtained them). **Protocol specifications stay MIT** so third-party
+tools can integrate without copyleft obligations. **Hardware licensing is unchanged** (phased CC
+roadmap). Rationale: the project owns its copyright fully, and copyleft keeps openness intact
+for replicators and researchers while requiring derivatives to share their source.
+
+**Open-core boundary formalized:** this repository carries the replication core — firmware,
+protocols, base host operation, hardware documentation, and results. Advanced lab tooling
+(calibration campaigns, learning-control experiments, gait tooling) is developed in a private
+suite and opens progressively as milestones mature. Results, videos, logs and writeups continue
+to be published openly. No stealth pivot — this paragraph is the announcement.
+
+---
+
 ## 2026-06-04 — First natural walking gait achieved in simulation
 
 **Milestone:** Alia's lower body walks with a natural, full-amplitude gait in physics simulation, trained via motion-tracking reinforcement learning (BeyondMimic-style approach on the MuJoCo/mjlab stack).

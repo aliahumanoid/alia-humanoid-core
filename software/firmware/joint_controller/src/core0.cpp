@@ -23,6 +23,7 @@
 #include "IntercoreSync.h"
 #include "RuntimeProvisioning.h"
 #include "pico/unique_id.h"
+#include <hot_path.h>
 
 #undef ACTIVE_JOINT
 #define ACTIVE_JOINT getRuntimeJointId()
@@ -564,6 +565,33 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
   pushStartupEvent(STARTUP_EVT_BEGIN, 0, STARTUP_REASON_OK,
                    (uint16_t)(millis() - startup_start_time));
 
+  // ALREADY-READY GUARD (2026-07-09): refuse to re-run the recalc when the system is
+  // already movement-ready. Re-triggering STARTUP_SEQUENCE on a live/HOLDING board
+  // relaunches the recalc (pretension + dither drive the motors) concurrent with the
+  // active control loop / re-anchors the offset under the running cascade -> the motor
+  // drives open-loop -> encoder JUMP -> MOTOR_FEEDBACK_INVALID (observed 2026-07-09,
+  // plantar runaway, safety froze it). A genuine re-calibration requires a board reset
+  // first (which clears motor_offsets_calibrated). Report ready and skip the recalc.
+  if (active_joint_controller != nullptr &&
+      active_joint_controller->isSystemReadyForMovement()) {
+    LOG_WARN("Startup requested but system already movement-ready — skipping recalc "
+             "(reset the board to force a re-calibration).");
+    for (uint8_t dof = 0; dof < cfg.dof_count; dof++) {
+      SERIAL_COM_LN("EVT:STARTUP_DOF_READY(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+      pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
+                       (uint16_t)(millis() - startup_start_time));
+    }
+    // Terminal event: every consumer (host FSM 15s wait, TUI) keys on COMPLETE/FAILED —
+    // without it an already-ready startup would look like a host-side timeout.
+    {
+      uint16_t total_time_ms = (uint16_t)(millis() - startup_start_time);
+      SERIAL_COM_LN("RSP:STARTUP_COMPLETE(" + String(ACTIVE_JOINT) + "):TIME_MS=" +
+                    String(total_time_ms) + ":ALREADY_READY=1");
+      pushStartupEvent(STARTUP_EVT_COMPLETE, 0, STARTUP_REASON_OK, total_time_ms);
+    }
+    return true;
+  }
+
   // For each DOF: try applying saved offsets first, fallback to full recalc
   bool all_success = true;
   uint8_t last_successful_dof = 0;
@@ -605,10 +633,79 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       continue;
     }
 
-    // --- Phase 1: DISABLED (BUG-2: validateSavedOffsets hangs Core1) ---
-    // Smart startup bypassed — always do full recalc
-    // TODO: re-enable when BUG-0 (SPI1 deadlock in getMultiAngleSync) is fixed
-    LOG_INFO("DOF " + String(dof) + ": smart startup disabled, running full recalc...");
+    // --- Phase 1: saved-offset validate/apply ---
+    // Re-enabled 2026-07-08. The historical BUG-0 "SPI1 deadlock in
+    // getMultiAngleSync" was cross-core SPI1 contention from the era when
+    // Core0 polled Host-CAN during startup; since ALL CAN moved to Core1
+    // (see core0_main_loop note) the deadlock precondition no longer exists.
+    // The dispatch below is the same double-buffered command path used daily
+    // by CMD_RECALC_OFFSET. Kill switch: build with -DSMART_STARTUP_SAVED_OFFSETS=0.
+#ifndef SMART_STARTUP_SAVED_OFFSETS
+#define SMART_STARTUP_SAVED_OFFSETS 1
+#endif
+#if SMART_STARTUP_SAVED_OFFSETS
+    LOG_INFO("DOF " + String(dof) + ": checking saved offsets...");
+    shared_data_ext.flag = 0;
+
+    {
+      int next_buf = (active_buffer + 1) % 2;
+      while (buffer_ready[next_buf]) { sleep_us(100); }
+      command_buffer[next_buf].joint_id = ACTIVE_JOINT;
+      command_buffer[next_buf].dof_index = dof;
+      pending_command_type = CMD_APPLY_SAVED_OFFSETS;
+      // RELEASE BARRIER (2026-07-08): shared_data_ext is NOT volatile and the
+      // command handshake is barrier-free. The `flag = 0` store above can drain
+      // to SRAM AFTER Core1 (having observed buffer_ready) writes its result
+      // flag, clobbering it back to 0 → Core0 polls forever → 30s timeout. The
+      // full recalc masked this (its ~3s handler let flag=0 drain first); the
+      // fast validate handler exposes it. Order flag=0 + the command
+      // fields before buffer_ready=true so Core1 can never race the reset.
+      __sync_synchronize();
+      buffer_ready[next_buf] = true;
+      active_buffer = next_buf;
+    }
+
+    // Poll for Core1 completion (validate ~10ms)
+    bool phase1_timeout = false;
+    while (shared_data_ext.flag == 0) {
+      updateSharedDofAngles();
+      drainCore1LogQueue();  // surface Core1's validate logs live during the poll
+      if (emergency_stop_requested) { phase1_timeout = true; break; }
+      if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
+        phase1_timeout = true; emergency_stop_requested = true; break;
+      }
+      delay(10);
+    }
+
+    if (phase1_timeout) {
+      LOG_ERROR("Startup timed out during saved-offset check on DOF " + String(dof));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_FAILED(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof) + ":REASON=TIMEOUT");
+      pushStartupEvent(STARTUP_EVT_DOF_FAILED, dof, STARTUP_REASON_GLOBAL_TIMEOUT,
+                       (uint16_t)(millis() - startup_start_time));
+      shared_data_ext.flag = 0;
+      all_success = false;
+      startup_failure_reason = STARTUP_REASON_GLOBAL_TIMEOUT;
+      break;
+    }
+
+    if (shared_data_ext.flag == CMD1_END_MOVE) {
+      // Saved offsets valid — skip full recalc
+      last_successful_dof = dof;
+      LOG_INFO("DOF " + String(dof) + " SKIP recalc: " + String(shared_data_ext.message));
+      SERIAL_COM_LN("EVT:STARTUP_DOF_SKIP(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+      pushStartupEvent(STARTUP_EVT_DOF_READY, dof, STARTUP_REASON_OK,
+                       (uint16_t)(millis() - startup_start_time));
+      shared_data_ext.flag = 0;
+      continue;  // Next DOF
+    }
+
+    // --- Phase 2: saved offsets unavailable or drifted — full recalc (original path) ---
+    LOG_INFO("DOF " + String(dof) + " saved offsets unavailable (" +
+             String(shared_data_ext.message) + "), running full recalc...");
+    SERIAL_COM_LN("EVT:STARTUP_DOF_RECALC(" + String(ACTIVE_JOINT) + "):DOF=" + String(dof));
+#else
+    LOG_INFO("DOF " + String(dof) + ": smart startup disabled at build time, full recalc...");
+#endif
     shared_data_ext.flag = 0;
 
     int pretension = (custom_torque > 0) ? (int)custom_torque : 0;
@@ -622,6 +719,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       command_buffer[next_buf].recalc_offset_torque = pretension;
       command_buffer[next_buf].recalc_offset_duration = duration;
       pending_command_type = CMD_RECALC_OFFSET;
+      __sync_synchronize();  // release: flag=0 + command fields visible before buffer_ready (see Phase-1)
       buffer_ready[next_buf] = true;
       active_buffer = next_buf;
     }
@@ -630,6 +728,9 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
     bool dof_timeout = false;
     while (shared_data_ext.flag == 0) {
       updateSharedDofAngles();
+      drainCore1LogQueue();  // surface recalc logs (RECALC_DITHER/convergence) live during
+                             // the poll — else they are trapped in the queue and a healthy
+                             // recalc looks like a hang (mirrors the Phase-1 poll drain).
       if (emergency_stop_requested) { dof_timeout = true; break; }
       if (millis() - startup_start_time > STARTUP_TIMEOUT_MS) {
         dof_timeout = true; emergency_stop_requested = true; break;
@@ -745,6 +846,7 @@ static bool executeStartupSequence(int16_t custom_torque, int16_t custom_duratio
       LOG_INFO("DOF " + String(dof) + " impedance invalidated on startup");
     }
     resetImpedanceSegment(dof);
+    forceLoop1ActuationMode(dof);
 
     // Step 3: Set HOLDING if encoder is valid, otherwise leave IDLE and warn
     if (shared_dof_angles.valid[dof]) {
@@ -848,7 +950,7 @@ static float shortestWrappedAngleDiffDeg(float current_deg, float previous_deg) 
  * DIRECT ENCODER READING: Uses DirectEncoders class to read MT6835 sensors
  * directly via SPI0, without intermediate encoder Pico.
  */
-void updateSharedDofAngles() {
+void HOT_FUNC(updateSharedDofAngles)() {
   static uint32_t last_update_us = 0;
   static uint32_t last_encoder_read_us = 0;
   
@@ -934,8 +1036,15 @@ void updateSharedDofAngles() {
       const auto &limits = controller->getConfig().dofs[dof].limits;
       new_angle = normalizeAngleToPhysicalWindow(new_angle, limits.min_angle, limits.max_angle);
       
-      // Reset error counter on successful read
-      consecutive_errors[dof] = 0;
+      // Successful read: DECAY the error counter by 1 (saturating at 0) instead of
+      // resetting to 0. A flapping encoder (invalid ~half the cycles) cannot clear
+      // the count with a single good read, so its recent-invalid DENSITY still
+      // climbs to error_threshold_cycles and fires the e-stop; an isolated noise
+      // invalid (invalid << valid) keeps the counter near 0 and never trips.
+      // Floored at 0 (unsigned, no underflow).
+      if (consecutive_errors[dof] > 0) {
+        consecutive_errors[dof]--;
+      }
       
       // Calculate velocity if we have a previous reading
       if (dt_s > 0.0001f && shared_dof_angles.valid[dof]) {
@@ -973,6 +1082,15 @@ void updateSharedDofAngles() {
   shared_dof_angles.updated = true;
   last_update_us = now_us;
 
+  // Payload-publish fence (ITEM 6): ensure every plain payload store above is globally
+  // visible BEFORE the closing seq increment. The payload writes are non-atomic, so on
+  // an out-of-order core they could in principle be reordered past the seq bump, letting
+  // a Core1 reader observe an even (consistent-looking) seq with stale payload. RP2350 is
+  // in-order so this cannot happen today, but the explicit release fence makes the
+  // ordering correct BY CONSTRUCTION and pairs with the reader's __ATOMIC_ACQUIRE loads.
+  // No behavioral change in nominal operation — it only constrains store visibility order.
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+
   // End sequence-locked write
   __atomic_fetch_add(&shared_dof_angles.seq, 1, __ATOMIC_ACQ_REL);
 }
@@ -981,7 +1099,7 @@ void updateSharedDofAngles() {
 // CORE0 MAIN LOOP
 // ============================================================================
 
-void core0_main_loop() {
+void HOT_FUNC(core0_main_loop)() {
 
 #pragma region Init Core1 and SharedData
   // Start the second core if it is not already running
@@ -1160,6 +1278,28 @@ void core0_main_loop() {
       }
     }
   }
+  // Poll CAN-triggered fine-map (piecewise) save flag (set by Core1 on CAN 0x01C)
+  if (can_save_fine_map_requested) {
+    can_save_fine_map_requested = false;
+    if (active_joint_controller != nullptr) {
+      if (active_joint_controller->saveFineMapToFlash()) {
+        LOG_INFO("[CAN] Fine-map saved to flash");
+      } else {
+        LOG_ERROR("[CAN] Failed to save fine-map to flash");
+      }
+    }
+  }
+  // Poll CAN-triggered 2D bilinear grid save flag (set by Core1 on CAN 0x01B action 9)
+  if (can_save_grid_requested) {
+    can_save_grid_requested = false;
+    if (active_joint_controller != nullptr) {
+      if (active_joint_controller->saveGridToFlash()) {
+        LOG_INFO("[CAN] 2D bilinear grid saved to flash");
+      } else {
+        LOG_ERROR("[CAN] Failed to save 2D bilinear grid to flash");
+      }
+    }
+  }
 #pragma endregion
 
 #pragma region CAN Auto-Start Setting Poll
@@ -1221,7 +1361,8 @@ void core0_main_loop() {
                         ":SOURCE=" + String(runtimeJointProfileFromFlash() ? "FLASH" :
                                             (runtimeJointProfileProvisioned() ? "RUNTIME" : "UNPROVISIONED")) +
                         ":UID=" + String(board_uid_hex) +
-                        ":FW=" + String(FW_VERSION));
+                        ":FW=" + String(FW_VERSION) +
+                        ":BUILD=" + String(BUILD_GIT_SHA) + "@" + String(BUILD_DATE));
         } else if (strncmp(actual_command, SERIAL_CMD_SET_JOINT_PROFILE ":",
                            strlen(SERIAL_CMD_SET_JOINT_PROFILE) + 1) == 0) {
           const char *profile_str = actual_command + strlen(SERIAL_CMD_SET_JOINT_PROFILE) + 1;
@@ -1806,6 +1947,12 @@ void core0_main_loop() {
         // Save equations to flash (from Core0 - thread safe)
         if (active_joint_controller->saveLinearEquationsToFlash()) {
           SERIAL_COM_LN("RSP:LINEAR_EQUATIONS_SAVED(" + String(shared_data_ext.joint_id) + ")");
+          // A successful coarse re-map makes every REFINED map (fine/grid) stale by
+          // construction: invalidate their flash records too, or the next power-cycle
+          // (expected after any e-stop on rev_d) re-promotes the old-geometry maps that
+          // transferAutoMappingData only demoted in RAM.
+          active_joint_controller->invalidateRefinedMapsInFlash();
+          SERIAL_COM_LN("RSP:REFINED_MAPS_INVALIDATED(" + String(shared_data_ext.joint_id) + ")");
         } else {
           SERIAL_COM_LN("RSP:LINEAR_EQUATIONS_SAVE_FAILED(" + String(shared_data_ext.joint_id) + ")");
         }

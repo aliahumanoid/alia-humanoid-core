@@ -156,4 +156,4 @@ interface under arm64 avoids this and works **without** sudo. For ad-hoc reads u
 
 ## License
 
-MIT License - see repository root `LICENSE` file.
+GPLv3 (from the July 2026 release; earlier MIT snapshots remain MIT) - see repository root `LICENSE` file.

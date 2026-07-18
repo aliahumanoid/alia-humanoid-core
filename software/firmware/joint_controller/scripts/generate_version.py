@@ -20,18 +20,25 @@ from datetime import datetime, timezone
 
 Import("env")
 
-def _git(cmd, default="unknown"):
-    """Execute git command and return output, or default if fails."""
+def _git(args, default="unknown"):
+    """Run a git command (argument list) and return output, or default if it fails.
+
+    Args are passed as a list with shell=False so paths containing spaces
+    (e.g. ".../Project Alia/...") are handled correctly. Using shell=True with
+    an unquoted path previously broke `git -C <path>` and yielded "unknown".
+    """
     try:
-        out = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT)
+        out = subprocess.check_output(args, stderr=subprocess.STDOUT)
         return out.decode("utf-8").strip()
     except Exception:
         return default
 
-def _is_dirty():
-    """Check if git working directory has uncommitted changes."""
+def _is_dirty(proj_dir):
+    """Check if the firmware git working tree has uncommitted changes."""
     try:
-        subprocess.check_call("git diff-index --quiet HEAD --", shell=True)
+        subprocess.check_call(
+            ["git", "-C", proj_dir, "diff-index", "--quiet", "HEAD", "--"]
+        )
         return False
     except Exception:
         return True
@@ -42,8 +49,8 @@ print("PRE-BUILD: Generating version.h...")
 print("=" * 70)
 
 proj_dir = env.subst("$PROJECT_DIR")
-sha = _git(f"git -C {proj_dir} rev-parse --short=8 HEAD")
-dirty = _is_dirty()
+sha = _git(["git", "-C", proj_dir, "rev-parse", "--short=8", "HEAD"])
+dirty = _is_dirty(proj_dir)
 date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # ============================================================================
@@ -55,7 +62,9 @@ PROTO_VERSION = "0.1"
 
 # FIRMWARE VERSION: Automatically detected from git tags
 # To update: git tag v0.2.0 && git push --tags
-fw_version = _git(f"git -C {proj_dir} describe --tags --abbrev=0", default="0.1.0")
+fw_version = _git(
+    ["git", "-C", proj_dir, "describe", "--tags", "--abbrev=0"], default="0.1.0"
+)
 # ============================================================================
 
 if dirty:

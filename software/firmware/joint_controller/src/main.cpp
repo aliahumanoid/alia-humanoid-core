@@ -20,6 +20,23 @@
 #include "FirmwareUpdateMetadata.h"
 #include "RuntimeProvisioning.h"
 
+// --- Overclock support (env pico2_debug_rev_d_oc200: board_build.f_cpu > 150MHz) -----------
+// Compiled out entirely at the default 150MHz -> all non-OC envs stay bit-identical.
+#if defined(PICO_RP2350) && (F_CPU > 150000000)
+#include <hardware/vreg.h>
+#include <hardware/clocks.h>
+// arduino-pico raises the core regulator for overclocks ONLY on RP2040 (framework main.cpp:
+// the vreg bump sits inside #if defined(PICO_RP2040)); on RP2350 set_sys_clock_khz would run
+// at the default 1.10V. Raise to 1.15V BEFORE the framework's clock raise:
+// __attribute__((constructor)) runs in runtime_init, ahead of the framework's overclock code,
+// while the chip still runs the boot clock. ~1ms settle mirrors the framework's own RP2040
+// pattern (SYS_CLK_VREG_VOLTAGE_AUTO_ADJUST_DELAY_US).
+static void __attribute__((constructor)) _oc_raise_vreg(void) {
+  vreg_set_voltage(VREG_VOLTAGE_1_15);
+  busy_wait_us(1000);
+}
+#endif
+
 #ifndef MOTOR_CAN_MCP_BITRATE
 #define MOTOR_CAN_MCP_BITRATE CAN_1000KBPS
 #endif
@@ -62,10 +79,15 @@ volatile bool suspend_host_can_polling = false;     // Core0 writes, Core1 reads
 SystemSettingsData system_settings = {};
 bool system_settings_loaded = false;
 // Control loop timing (configurable via CAN)
-volatile uint16_t inner_loop_period_us = 2000;  // 2000µs = 500Hz (default)
-volatile uint8_t outer_loop_divisor = 1;        // 500Hz/1 = 500Hz (default, same as inner)
+volatile uint16_t inner_loop_period_us = 4000;  // 4000µs = 250Hz (default) — 500Hz overran the
+                                                // setTorque budget on multi-motor joints (loop overrun);
+                                                // 250Hz runs clean. Still runtime-settable via CAN 0x006.
+volatile uint8_t outer_loop_divisor = 1;        // 250Hz/1 = 250Hz (default, same as inner)
+volatile uint32_t wp_watchdog_interval = 250;   // S2 sub92 0x92 watchdog interval in cycles (rate-scaled):
+                                                // 1e6/4000µs = 250 @250Hz default (~1.0s wall). Recomputed on
+                                                // boot (setup) + the 0x006 handler via deriveWpWatchdogInterval().
 volatile uint16_t torque_ramp_time_ms = 100;    // Time for 0→max torque (default: 100ms, 0=disabled)
-volatile uint16_t encoder_error_threshold_ms = 100;  // Encoder error threshold (default: 100ms)
+volatile uint16_t encoder_error_threshold_ms = 30;   // Encoder error threshold (default: 30ms — fast e-stop; torque is also cut per-DOF on invalid encoder)
 // CAN error detection: time-window based (more robust to EMI glitches)
 volatile uint16_t can_error_window_ms = 50;      // 50ms window (default)
 volatile uint8_t can_error_threshold = 5;         // 5 errors in window = emergency stop
@@ -81,7 +103,7 @@ volatile float outer_hold_ki_scale = 0.10f;
 volatile uint16_t outer_hold_ki_ramp_ms = 1000;
 volatile float outer_hold_integral_freeze_error_deg = 0.25f;
 volatile float outer_hold_integral_freeze_velocity_deg_s = 0.5f;
-volatile bool retension_probe_enabled = true;
+volatile bool retension_probe_enabled = false;
 volatile float retension_probe_boost_deg = 3.0f;
 volatile uint16_t retension_probe_pulse_ms = 250;
 volatile uint16_t retension_probe_start_delay_ms = 2000;
@@ -91,8 +113,10 @@ volatile float retension_probe_min_hold_q_deg = 0.0f;
 volatile uint16_t diag_hold_min_samples = 1;
 volatile uint16_t diag_hold_ema_settled_samples = 500;
 volatile uint16_t diag_hold_period_ms = 500;
+volatile uint16_t diag_move_period_ms = 20;   // Period of [DIAG_MOVE] motion telemetry (~50 Hz) — TELEMETRY ONLY
 volatile uint16_t trim_dry_run_min_samples = 7500;
 volatile uint16_t trim_dry_run_period_ms = 3000;
+volatile bool compliance_detection_enabled = false;
 volatile float hold_error_threshold_deg = 6.0f;
 volatile uint16_t hold_time_threshold_ms = 120;
 volatile float hold_release_threshold_deg = 2.0f;
@@ -104,15 +128,35 @@ volatile float move_velocity_ratio = 0.2f;
 volatile uint16_t move_time_threshold_ms = 300;
 volatile uint8_t velocity_filter_samples = 5;
 volatile float anti_slack_margin_deg = 5.0f;
-volatile bool anti_slack_enabled = true;
+volatile bool anti_slack_enabled = false;
 volatile float soft_hold_torque_ratio = 0.3f;   // 30% torque during compliance
 volatile float min_tension_torque = 20.0f;
 volatile uint16_t soft_hold_ramp_down_ms = 600;   // Torque release ramp (ms)
 volatile uint16_t soft_hold_ramp_up_ms = 800;     // Torque recovery ramp (ms)
-volatile bool soft_hold_enabled = true;
-volatile bool friction_ff_enabled = true;           // ON by default (overcomes motor deadband)
-volatile float friction_ff_torque = 30.0f;          // Matches motor deadband (~30 units at bench)
-volatile float friction_ff_speed_thresh = 3.0f;     // From stick-slip analysis: threshold ~3 deg/s
+volatile bool soft_hold_enabled = false;
+volatile bool friction_ff_enabled = false;          // OPT-IN (default OFF): the friction-FF is now the GMS
+                                                     // break-away bristle (updateGmsFriction), validated OFFLINE
+                                                     // only -> arm per bench session via CAN 0x015 param0=1.
+volatile float friction_ff_torque = 30.0f;          // Now Fs = the GMS break-away level (offline seed ~55); tune via 0x015
+volatile float friction_ff_speed_thresh = 3.0f;     // GMS sigma1 OVER-SLIP DAMPING (bench-validated 3.0), NOT a speed
+                                                     // gate (the old trapezoidal gate is gone; name kept for ABI).
+volatile bool cascade_slope_scaling_enabled = false; // OPT-IN (default OFF): per-tendon dth slope scaling S_x/S_bar
+                                                     // in the cascade formula (review P1 2026-07-02, range-extremes
+                                                     // defect); toggle via IMPEDANCE_CTRL 0x06.
+volatile bool sched_interleave_enabled = false;      // OPT-IN (default OFF = the historical serial order): O1 strict
+                                                     // interleave of the per-DOF motor-CAN pair round-trips in the
+                                                     // control loop (500Hz Stage 1); IMPEDANCE_CTRL 0x08 bit0.
+volatile bool sched_carry_enabled = false;           // OPT-IN (default OFF): Stage-2 cross-cycle CARRY — the last pair
+                                                     // fired in a cycle stays in flight across the boundary and re-enters
+                                                     // the Stage-1 pending machinery next cycle; IMPEDANCE_CTRL 0x08 bit1.
+volatile bool sched_sub92_enabled = false;           // OPT-IN (default OFF): Stage-2 SUBSTITUTE-FIRE 0x92 — on a watchdog-due
+                                                     // cycle the DOF fires the 2-frame 0x92 pair INSTEAD of the torque pair
+                                                     // (same <=2-frame footprint), motors hold the previous torque one cycle
+                                                     // (ZOH), and the reply is carried + compared next cycle; IMPEDANCE_CTRL 0x08 bit2.
+volatile float friction_ff_torque_neg = 0.0f;        // GMS Fs for the NEGATIVE commanded direction; 0 = symmetric
+                                                     // (use friction_ff_torque both ways). The knee 2x2 showed the
+                                                     // FF SHIFTS the direction asymmetry instead of removing it ->
+                                                     // per-direction Fs is the evidence-backed lever (0x015 param 3).
 volatile ComplianceRecoveryPolicy recovery_policy = RECOVERY_STAY_AT_CURRENT;
 volatile uint16_t recovery_ramp_back_ms = 1000;
 ComplianceState compliance_state[MAX_DOFS] = {};
@@ -173,6 +217,12 @@ volatile bool can_load_pid_requested = false;
 volatile bool can_save_linear_eq_requested = false;
 volatile bool can_load_linear_eq_requested = false;
 
+// CAN-triggered fine-map (piecewise) flash save (Core1 sets flag, Core0 executes)
+volatile bool can_save_fine_map_requested = false;
+
+// CAN-triggered 2D bilinear grid flash save (Core1 sets flag, Core0 executes)
+volatile bool can_save_grid_requested = false;
+
 // CAN-triggered auto-start setting (Core1 sets params + flag, Core0 executes flash save)
 volatile bool can_set_auto_start_requested = false;
 volatile uint8_t can_auto_start_enabled = 0;
@@ -195,6 +245,10 @@ queue_t diag_event_notice_queue;
 PIDDiagnostics pid_diagnostics = {0};
 volatile bool pid_diag_stream_active = false;
 volatile bool pid_diag_terms_enabled = false;  // OFF by default — P/I/D breakdown
+// Root-fix A/B flag: feed the PID's time-scaled terms (I/D/filter) the REAL measured loop dt
+// (gms_dt_s) instead of the fixed member Ts. OFF by default so the bench can A/B the oscillation
+// fix against the gain re-tune via CAN_ID_PID_MEASURED_DT_CTRL without a reflash.
+volatile bool pid_measured_dt_enabled = false;
 
 // Holding diagnostics (Phase 1 — written by core0, read by core1 for CAN send)
 DiagHoldData diag_hold_data[MAX_DOFS] = {};
@@ -230,6 +284,21 @@ volatile uint32_t impedance_watchdog_ms = 100;  // 100ms default watchdog
 InnerPidBackup inner_pid_backup[MAX_DOFS][2] = {};  // [dof][0=agonist, 1=antagonist]
 OuterLoopBackup outer_loop_backup[MAX_DOFS] = {};
 volatile bool inner_pid_reinit_after_impedance[MAX_DOFS] = {};
+volatile uint8_t inner_actuation_mode[MAX_DOFS] = {
+    INNER_ACTUATION_LOOP1_TORQUE,
+    INNER_ACTUATION_LOOP1_TORQUE,
+    INNER_ACTUATION_LOOP1_TORQUE,
+};
+volatile uint16_t loop2_angle_max_speed[MAX_DOFS] = {
+    LOOP2_DEFAULT_ANGLE_MAXSPEED,
+    LOOP2_DEFAULT_ANGLE_MAXSPEED,
+    LOOP2_DEFAULT_ANGLE_MAXSPEED,
+};
+volatile uint16_t loop2_target_step_x100[MAX_DOFS] = {
+    LOOP2_DEFAULT_TARGET_STEP_X100,
+    LOOP2_DEFAULT_TARGET_STEP_X100,
+    LOOP2_DEFAULT_TARGET_STEP_X100,
+};
 
 // Control flag for sending mapping data
 bool auto_mapping_data_ready_to_send = false; // true = auto‑mapping data ready to send to host
@@ -278,6 +347,9 @@ command_data_extended_t command_buffer[2] = {0};
 volatile int active_buffer                = 0;
 volatile bool buffer_ready[2]             = {false, false};
 volatile uint8_t pending_command_type     = 0;
+#if MOTION_GUARD_V2
+volatile uint8_t motion_guard_mode        = 0;  // MG2-S: 0 LEGACY / 1 SHADOW / 2 ACTIVE (RAM-only)
+#endif
 
 // Separate emergency flag for extra safety (atomic for cross-core access)
 std::atomic<bool> emergency_stop_requested{false};
@@ -522,6 +594,16 @@ void setup() {
   identify_broadcast_start_ms = millis();
   identify_broadcast_last_emit_ms = 0;  // Force immediate first emit
 
+#if defined(PICO_RP2350) && (F_CPU > 150000000)
+  // set_sys_clock_pll (run by the framework for the overclock) re-bases clk_peri onto the
+  // 48MHz USB PLL (PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK=0 is baked into libpico.a),
+  // so the mcp_can 10MHz SPI request would derive 48/(2*3) = 8MHz — SLOWER than the 9.375MHz
+  // we get today at 150MHz. Re-point clk_peri at clk_sys BEFORE the first SPI transaction
+  // (mcp_can caches its SPISettings, so spi_init runs once at the first CAN access):
+  // 200/(2*10) = 10.0MHz exact, the MCP2515 maximum.
+  clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS, F_CPU, F_CPU);
+#endif
+
   // Configure SPI1 - CANBUS
   SPI1.setRX(12);
   SPI1.setTX(11);
@@ -548,6 +630,12 @@ void setup() {
   if (CAN.begin(MCP_ANY, MOTOR_CAN_MCP_BITRATE, MCP_8MHZ) == CAN_OK) {
     LOG_INFO("Motor CAN (J4) initialized successfully on SPI1, CS=GP" + String(CAN_CS_PIN) +
              ", bitrate=" + String(MOTOR_CAN_BITRATE_KBPS) + " kbps");
+    // O4a (500Hz Stage 1): /INT-gated reply draining. CANINTE RX0IE|RX1IE are set by the
+    // library at init; the pin has been wired since rev_d but never used. The SPI fallback
+    // inside collectPair makes a dead INT line harmless (first bench session verifies it
+    // via the reply-latency histogram + BUSDIAG).
+    pinMode(CAN_INT_PIN, INPUT);
+    LKM_Motor::setCollectIntPin(CAN_INT_PIN);
   } else {
     LOG_ERROR("Failed to initialize Motor CAN on SPI1!");
     LOG_INFO("Continuing without Motor CAN (normal for serial-only testing)");
@@ -666,6 +754,12 @@ void setup() {
     setRuntimeJointProfile(JOINT_NONE, false);
     system_settings_loaded = true;
   }
+
+  // S2 substitute-fire (bit2): derive the rate-scaled 0x92 watchdog interval from the boot inner-loop
+  // period. Gated on SUB92 (bit2): rate-scaled only when sub92 is ON, else the fixed Stage-1 cadence
+  // (500) so the boot default (0x00) is bit-identical. Re-derived on 0x006 (rate) + 0x08 (bit2 toggle).
+  wp_watchdog_interval = sched_sub92_enabled ? deriveWpWatchdogInterval(inner_loop_period_us)
+                                             : WP_WATCHDOG_INTERVAL_FIXED;
 
   FirmwareUpdateMetadataRecord update_metadata = {};
   if (ensure_firmware_update_metadata_initialized(&update_metadata)) {

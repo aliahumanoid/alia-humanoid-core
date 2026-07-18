@@ -1,8 +1,10 @@
 # Battery Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Design Reference (work in progress)
-> **Last Updated**: 2026-03-18
-> **Note**: This document supports battery selection during design. It will evolve into the final project specification.
+> **Last Updated**: 2026-07-06
+> **Note**: This document supports battery selection during design. The voltage/pack architecture
+> (**9S LiPo now, 48 V-ready infrastructure, 24 V buck for all motors**) is decided in the internal
+> hardware-architecture roadmap (source of truth); this doc holds the sizing detail.
 
 ---
 
@@ -11,8 +13,9 @@
 | Parameter | Value | Source |
 |-----------|-------|--------|
 | Robot total weight | ~25 kg (target) | project-specs-master |
-| Bus voltage | 24V DC | MOTOR_SPECIFICATIONS |
-| Motor count (full robot) | 16+ | MOTOR_SPECIFICATIONS |
+| Main rail voltage | ~33 V (9S) now; 48 V-ready wiring/BMS | hardware-architecture-roadmap |
+| Motor sub-rail | 24 V (buck, sized for ALL motors) | hardware-architecture-roadmap |
+| Motor count (full robot) | 22 (11/leg) | MOTOR_SPECIFICATIONS |
 | Motor classes | 50mm (420g, 4.4A cont.) + 40mm (183g, 1.6A cont.) | MOTOR_SPECIFICATIONS |
 | Locomotion type | Walking only (no running) | Design goal |
 | Drive architecture | Tendon-driven antagonistic | project-specs-master |
@@ -25,7 +28,7 @@
 
 | Subsystem | Estimated Power | Notes |
 |-----------|----------------|-------|
-| Actuators (walking ~1 km/h) | 40–80 W | 16+ motors at partial load, see §3 |
+| Actuators (walking ~1 km/h) | 40–80 W | 22 motors at partial load, see §3 |
 | Computing (RPi5 + controllers) | 10–20 W | RPi5 ~8W, RP2350 controllers ~2W total |
 | Sensors, communication | 5–10 W | IMU, encoders, CAN transceivers |
 | **Total (walking)** | **~60–100 W** | Conservative estimate |
@@ -68,16 +71,20 @@ Antagonistic tendon-driven joints use 2 motors per DOF. Efficiency depends on co
 
 > **Recommended target**: 100–150 Wh (~1–1.5 hours walking). This keeps battery weight under 4% of total robot weight while providing meaningful operational time.
 
-> **Space planning**: Current estimates cover lower body only (16+ motors). The full robot with upper limbs (arms, hands, neck) will roughly double the motor count and power draw. The torso battery compartment should be sized for **~200–300 Wh** to accommodate full-body operation without redesigning the frame.
+> **Space planning**: Current estimates cover lower body only (22 motors; 27 with the pelvis). Adding the upper limbs (2 arms + head) scales the two budgets **differently**: motor **count / CAN / compute ≈ 2×** (arms are DOF-rich), but **power ≈ 1.5×** (arms don't bear weight + reduced-power motors → upper ≈ 50 % of the legs). The torso battery compartment should still be sized for **~200–300 Wh** to cover full-body operation without redesigning the frame (internal roadmap: Upper-body reserve).
 
-### LiPo Configuration (24V bus)
+### LiPo Configuration — 9S (decided 2026-07-06)
 
-| Configuration | Nominal Voltage | Capacity for ~100 Wh | Capacity for ~150 Wh |
-|---------------|----------------|----------------------|----------------------|
-| 6S (22.2V) | 22.2V | 4500 mAh | 6750 mAh |
-| **7S (25.9V)** | **25.9V** | **3900 mAh** | **5800 mAh** |
+| Configuration | Nominal Voltage | Max (full) | Capacity for ~100 Wh | Capacity for ~150 Wh |
+|---------------|----------------|-----------|----------------------|----------------------|
+| **9S** | **33.3 V** | **37.8 V** | **~3000 mAh** | **~4500 mAh** |
 
-> **Note**: 7S matches the 24V bus better (25.9V nominal, 29.4V fully charged). 6S may be slightly under-voltage at discharge end (18.6V min). Final choice depends on motor driver input range.
+> **Why 9S:** its full-charge 37.8 V stays **under the MG5010E-i10 40 V ceiling** (10S would hit
+> 42 V and over-volt them). It sits well above 24 V for torque headroom, and the **24 V MG4005
+> ankles are fed from a buck** — sized for *all* motor positions, so any legacy MG5010 can also run
+> at 24 V once the main rail later moves to 48 V-native motors. Infrastructure (BMS, connectors,
+> wiring, buck input) is rated **48 V-ready** so that transition is a drop-in 13S pack.
+> Rationale in `hardware-architecture-roadmap.md` §3.
 
 ---
 
@@ -133,8 +140,8 @@ Alia's lower Wh/kg ratio is justified by:
 
 ## 7) Open Questions
 
-- [ ] Exact motor driver input voltage range (min/max) → determines 6S vs 7S
-- [ ] Peak current draw during walking (measure on prototype)
+- [x] ~~6S vs 7S~~ → **RESOLVED: 9S** (2026-07-06; MG5010 12–40 V range confirms headroom). MG4005 ankles on the 24 V buck.
+- [ ] Peak current draw during walking (measure on prototype) — **the gate for final capacity/C-rate**
 - [ ] Co-contraction energy cost (measure idle vs walking power delta)
 - [ ] Battery placement effect on CoM (simulation needed)
 - [ ] Integrated BMS vs external BMS
@@ -143,11 +150,11 @@ Alia's lower Wh/kg ratio is justified by:
 
 ## 8) Next Steps
 
-1. Measure actual power consumption on lower-body prototype (tethered 24V PSU)
+1. Measure actual power consumption on lower-body prototype (tethered 24V PSU) — incl. co-contraction idle draw
 2. Determine peak vs average current profiles during walking
-3. Select 6S vs 7S based on motor driver specs
-4. Source candidate batteries for physical fit test in torso
-5. Design battery tray CAD
+3. ~~Select 6S vs 7S~~ → **done: 9S** (see §3); size final mAh from the measurement above
+4. Source candidate 9S LiPo packs for physical fit test in torso
+5. Design the PMB (power management board) + battery tray CAD — after the current measurement
 
 ---
 

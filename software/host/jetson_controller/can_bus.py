@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import glob
+import json
 import logging
+import os
 import queue
 import struct
 import sys
@@ -149,11 +151,13 @@ def _decode_tx(arb_id: int, data: bytes) -> str:
     if arb_id == CAN_ID_LOOP_FREQUENCY and len(data) >= 3:
         inner_period_us = struct.unpack_from("<H", data, 0)[0]
         outer_divisor = data[2]
+        debug_override = len(data) >= 4 and data[3] == 0xDB
         inner_hz = 1000000.0 / inner_period_us if inner_period_us else 0.0
         outer_hz = inner_hz / outer_divisor if outer_divisor else 0.0
         return (
             f"LOOP_FREQUENCY inner={inner_period_us}us ({inner_hz:.1f}Hz) "
             f"outer_div={outer_divisor} ({outer_hz:.1f}Hz)"
+            f"{' debug_override' if debug_override else ''}"
         )
 
     if arb_id == CAN_ID_STARTUP_SEQUENCE:
@@ -171,7 +175,15 @@ def _decode_tx(arb_id: int, data: bytes) -> str:
         joint_id = data[0]
         sub_cmd = data[1]
         param = struct.unpack_from("<H", data, 2)[0]
-        sub_names = {0x00: "DISABLE", 0x01: "ENABLE", 0x02: "WATCHDOG"}
+        sub_names = {
+            0x00: "DISABLE",
+            0x01: "ENABLE",
+            0x02: "WATCHDOG",
+            0x03: "ACTUATION_MODE",
+            0x04: "LOOP2_MAXSPEED",
+            0x05: "LOOP2_STEP",
+            0x10: "ADAPTIVE_HOLD",
+        }
         sub = sub_names.get(sub_cmd, f"sub=0x{sub_cmd:02X}")
         return f"IMPEDANCE_CTRL joint={joint_id} {sub} param={param}"
 
@@ -520,6 +532,8 @@ class CanBus:
         self._listener_stop = threading.Event()
         self._sender_stop = threading.Event()
         self._tx_lock = threading.Lock()
+        self._raw_trace_lock = threading.Lock()
+        self._raw_trace_file = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Stats
@@ -532,6 +546,56 @@ class CanBus:
         self._last_enc_log: dict[int, float] = {}  # joint_id → last log time
         self._imp_summary_time = 0.0
         self._imp_summary_count = 0
+
+    def start_raw_trace(self, path: str) -> None:
+        """Write raw TX/RX CAN frames to JSONL until stop_raw_trace()/disconnect().
+
+        This trace is intentionally below TelemetryManager: it keeps recording when
+        telemetry is stopped so recorder/hi-rate downloads cannot hide fault/status
+        frames in the critical cleanup window.
+        """
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with self._raw_trace_lock:
+            if self._raw_trace_file is not None:
+                self._raw_trace_file.close()
+            self._raw_trace_file = open(path, "a", buffering=1, encoding="utf-8")
+            self._raw_trace_file.write(json.dumps({
+                "event": "trace_start",
+                "wall_time_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+                "path": os.path.abspath(path),
+            }) + "\n")
+        logger.info("Raw CAN trace started: %s", os.path.abspath(path))
+
+    def stop_raw_trace(self) -> None:
+        with self._raw_trace_lock:
+            if self._raw_trace_file is None:
+                return
+            self._raw_trace_file.write(json.dumps({
+                "event": "trace_stop",
+                "wall_time_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+            }) + "\n")
+            self._raw_trace_file.close()
+            self._raw_trace_file = None
+
+    def _trace_frame(self, direction: str, arb_id: int, data: bytes,
+                     *, can_timestamp: float | None = None) -> None:
+        with self._raw_trace_lock:
+            f = self._raw_trace_file
+            if f is None:
+                return
+            f.write(json.dumps({
+                "event": "frame",
+                "direction": direction,
+                "wall_time_ns": time.time_ns(),
+                "monotonic_ns": time.monotonic_ns(),
+                "can_timestamp": can_timestamp,
+                "arb_id": arb_id,
+                "arb_id_hex": f"0x{arb_id:03X}",
+                "dlc": len(data),
+                "data": bytes(data).hex(),
+            }) + "\n")
 
     @property
     def connected(self) -> bool:
@@ -654,6 +718,12 @@ class CanBus:
                 if getattr(msg, "is_rx", True) is False:
                     continue
                 self.rx_count += 1
+                self._trace_frame(
+                    "rx",
+                    msg.arbitration_id,
+                    bytes(msg.data),
+                    can_timestamp=getattr(msg, "timestamp", None),
+                )
                 # Thread-safe put into asyncio queue
                 if self._loop is not None and self._rx_queue is not None:
                     self._loop.call_soon_threadsafe(self._enqueue, msg)
@@ -716,6 +786,7 @@ class CanBus:
         )
         await future
         self.tx_count += 1
+        self._trace_frame("tx", arb_id, bytes(data))
 
         # Log TX frame — decoded and throttled
         self._log_tx(arb_id, data)
@@ -729,7 +800,12 @@ class CanBus:
             joint_id = data[0] if data else 0
             flags = data[1] if len(data) > 1 else 0
             dof = flags & 0x0F
-            key = (joint_id, dof)
+            # Key includes the seq nibble: the armed tau_ff stream alternates
+            # frame0/frame3 for the SAME (joint, dof) every cycle, so a
+            # (joint, dof)-only key sees the payload "change" on every frame and
+            # defeats the throttle (100 Hz console spam). Legacy single-frame
+            # streaming only ever sends seq=0 -> key (j, d, 0), behavior unchanged.
+            key = (joint_id, dof, (flags >> 4) & 0x07)
 
             prev = self._last_imp_log.get(key)
             self._imp_summary_count += 1
@@ -803,4 +879,5 @@ class CanBus:
             self._bus.shutdown()
             self._bus = None
         self._tx_queue = None
+        self.stop_raw_trace()
         logger.info("CAN bus disconnected")

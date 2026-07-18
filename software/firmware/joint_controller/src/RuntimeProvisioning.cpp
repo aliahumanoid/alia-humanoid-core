@@ -1,4 +1,5 @@
 #include "RuntimeProvisioning.h"
+#include <hot_path.h>
 
 #include "commands.h"
 #include "config_presets.h"
@@ -38,7 +39,7 @@ void setRuntimeJointProfile(uint8_t joint_profile, bool from_flash) {
   g_runtime_joint_profile_from_flash = from_flash;
 }
 
-uint8_t getRuntimeJointId() {
+uint8_t HOT_FUNC(getRuntimeJointId)() {
   return g_runtime_joint_profile;
 }
 

@@ -139,6 +139,43 @@ The TUI exposes:
 - latest `EVENT_NOTICE`
 - health counters and fault epoch
 
+## Diagnostic Scripts (host bench tools)
+
+Repeatable bench tools that drive the CAN diagnostic surfaces above. Run from `software/host`
+(`PYTHONPATH="$(pwd)" arch -arm64 .venv/bin/python -m jetson_controller.<script>`).
+
+### Black box — `read_blackbox.py`
+
+Retrieves + decodes the firmware FAULT SNAPSHOT over CAN (query `0x01F` sub `0x00` → meta `0x540`; if
+`snapshot_present`, dump sub `0x01` → chunks `0x550` → decoded blob). Shows the freeze event, the active +
+latched faults, the per-DOF / per-motor state AT the freeze, and the health counters. Use it whenever a
+joint "went wild" or e-stopped and you need to know WHY.
+
+- **KEY GOTCHA:** the snapshot lives in RAM. The MCU stays powered over USB even after the MOTOR power rail
+  is cut, so the snapshot SURVIVES a motor-rail e-stop / power cut — **retrieve it BEFORE rebooting or
+  USB-power-cycling the board**, or it is lost.
+
+### 250 Hz motion recorder — `capture_hirate_dof1.py`, `capture_holdperturb_dof1.py`
+
+Arms the firmware hi-rate windowed recorder (diag `CTRL 0x05`), runs a motion, then dumps the ~7 s / 1800-
+record buffer (q, qdes, dth = outer-PID output, iqA/iqB, motor residuals) for offline analysis.
+
+- `capture_hirate_dof1.py` — a slow-ramp sweep (the stick-slip / smoothness probe).
+- `capture_holdperturb_dof1.py` — hold at center + record. Flags: `--hand` (operator hand-vibration with a
+  timed GO/STOP signal), `--measured-dt` (toggle the PID measured-dt flag, CAN `0x005`), `--ab` (single-
+  connection mid-window A/B toggle).
+- **Metric:** report SLIPS/° (burst-segmented), NOT freeze% (a sub-LSB quantization artefact at slow speed).
+- **GOTCHAS:** (1) GRACEFUL SHUTDOWN — these de-power the motors BEFORE stopping the host stream, so the
+  stream-end never leaves a tensioned cascade that freezes into the overrun oscillation. (2) DE-POWER
+  BETWEEN RUNS — a rev_d e-stop cuts GP22 motor power; power-cycle before the next motor run. (3) Do NOT A/B
+  back-to-back — the gap / re-startup between two runs is itself a trigger; use the single-connection `--ab`.
+
+### Single-motor loop probes — `capture_veltest_dof1.py`, `capture_postest_dof1.py`
+
+Drive ONE motor by the LKM internal VELOCITY (`0xA2`, diag `0x09/0x0A`) or POSITION (`0xA4`, diag `0x0B`)
+loop — joint-encoder-guarded + de-power-on-exit — to measure the motor-internal friction rejection vs the
+torque cascade. These are the harness reused for the Loop 2 (motor-position) prototype.
+
 ## Recommended Operator Workflow
 
 ### Nominal Integrated Bring-Up

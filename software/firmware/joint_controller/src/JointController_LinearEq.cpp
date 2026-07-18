@@ -14,7 +14,9 @@
 
 #include <JointController.h>
 #include <debug.h>
+#include <utils.h>  // free interpolate_data() used by bilinear_eval
 #include <cmath>
+#include <hot_path.h>
 
 // ============================================================================
 // LINEAR EQUATIONS & CALIBRATION
@@ -79,6 +81,16 @@ JointController::calculateLinearRegression(float *x_data, float *y_data, int dat
 
   // Compute MSE (Mean Square Error)
   result.mse = ss_res / data_count;
+
+  // Reject non-finite fits. The denominator guard above only covers the x (joint
+  // encoder) variance: with a dead/unpowered motor bus the y samples are NaN, the
+  // fit propagates NaN through slope/intercept/mse while R^2 collapses to 0, and
+  // the result would still be marked valid and PERSISTED (bench 2026-07-02: the
+  // no-24V knee mapping saved "y = nan*x + nan" to flash as valid equations,
+  // clobbering the map slot). Silent return - Core1 context, no LOG allowed.
+  if (!isfinite(result.slope) || !isfinite(result.intercept) || !isfinite(result.mse)) {
+    return result; // result.valid is still false from the initializer
+  }
 
   result.data_points = data_count;
   result.valid       = true;
@@ -216,7 +228,7 @@ DofLinearEquations *JointController::getLinearEquations(uint8_t dof_index) {
   return &linear_equations[dof_index];
 }
 
-bool JointController::hasValidEquations(uint8_t dof_index) const {
+bool HOT_FUNC(JointController::hasValidEquations)(uint8_t dof_index) const {
   if (dof_index >= config.dof_count) {
     return false;
   }
@@ -225,30 +237,104 @@ bool JointController::hasValidEquations(uint8_t dof_index) const {
          linear_equations[dof_index].antagonist.valid && linear_equations[dof_index].limits_valid;
 }
 
-// NEW: Compute motor angle using linear equations (alternate method)
+// Bilinear lookup over a row-major (q0 x q1) grid: bracket q0 among the M rows (clamp at ends),
+// interpolate each bracketing row over q1 (interpolate_data, verbatim), then blend in q0. A
+// degenerate M==1 grid is bit-for-bit the 1D piecewise eval (same primitive, same clamp).
+static float HOT_FUNC(bilinear_eval)(const float *table, const float *q0_axis, const float *q1_axis,
+                           int M, int N, float q0, float q1) {
+  int r0 = 0, r1 = 0;
+  float t = 0.0f;
+  if (M > 1) {
+    if (q0 <= q0_axis[0]) {            r0 = r1 = 0; }
+    else if (q0 >= q0_axis[M - 1]) {   r0 = r1 = M - 1; }
+    else {
+      r1 = 1;
+      while (r1 < M - 1 && q0_axis[r1] < q0) r1++;
+      r0 = r1 - 1;
+      float denom = q0_axis[r1] - q0_axis[r0];
+      t = (denom > 1e-9f) ? (q0 - q0_axis[r0]) / denom : 0.0f;
+      if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    }
+  }
+  float v0 = interpolate_data(q1, q1_axis, table + r0 * N, N);
+  float v1 = (r1 == r0) ? v0 : interpolate_data(q1, q1_axis, table + r1 * N, N);
+  return v0 + t * (v1 - v0);
+}
+
+// Inverse of bilinear_eval: invert each bracketing row (motor->q1 via interpolate_data, the row is
+// commit-monotone) then blend the two q1 results in JOINT space. q_other = q0.
+static float inverse_bilinear(const float *table, const float *q0_axis, const float *q1_axis,
+                              int M, int N, float q0, float motor) {
+  int r0 = 0, r1 = 0; float t = 0.0f;
+  if (M > 1) {
+    if (q0 <= q0_axis[0]) { r0 = r1 = 0; }
+    else if (q0 >= q0_axis[M - 1]) { r0 = r1 = M - 1; }
+    else {
+      r1 = 1; while (r1 < M - 1 && q0_axis[r1] < q0) r1++;
+      r0 = r1 - 1;
+      float denom = q0_axis[r1] - q0_axis[r0];
+      t = (denom > 1e-9f) ? (q0 - q0_axis[r0]) / denom : 0.0f;
+      if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+    }
+  }
+  float j0 = interpolate_data(motor, table + r0 * N, q1_axis, N);
+  float j1 = (r1 == r0) ? j0 : interpolate_data(motor, table + r1 * N, q1_axis, N);
+  return j0 + t * (j1 - j0);
+}
+
+// Compute motor angle from joint angle (forward map).
+// Mode LINEAR: y = m*x + b. Mode PIECEWISE: linear interpolation over captured points.
+// Mode BILINEAR: 2D (q0,q1) grid lookup (q_other = live q0; NAN -> eq.q0_nominal slice).
 // Version with separate inputs for agonist and antagonist
-bool JointController::calculateMotorAnglesWithEquations(uint8_t dof_index,
+bool HOT_FUNC(JointController::calculateMotorAnglesWithEquations)(uint8_t dof_index,
                                                         float agonist_joint_angle,
                                                         float antagonist_joint_angle,
                                                         float &agonist_angle,
-                                                        float &antagonist_angle) {
+                                                        float &antagonist_angle,
+                                                        float q_other) {
   // Validate DOF index
   if (dof_index >= config.dof_count) {
     return false;
   }
 
-  // Ensure linear equations are computed
-  if (!linear_equations[dof_index].calculated || !linear_equations[dof_index].agonist.valid ||
-      !linear_equations[dof_index].antagonist.valid || !linear_equations[dof_index].limits_valid) {
+  DofLinearEquations &eq = linear_equations[dof_index];
+
+  // BILINEAR (2D) map: row-major (q0 x q1) grid lookup. q_other carries the live q0;
+  // NAN falls back to the captured-slice q0_nominal (center slice). On any invalid grid
+  // this returns false so the caller's equations_ok==false fallback keeps motion safe.
+  if (eq.map_mode == MAP_BILINEAR) {
+    DofGridData_t &g = dof_grids[dof_index];
+    if (!eq.bl_valid || !g.bl_valid || g.grid_m < 1 || g.grid_n < MIN_FINE_POINTS) {
+      return false;  // invalid grid -> caller's equations_ok==false fallback (must be safe)
+    }
+    float q0 = isnan(q_other) ? eq.q0_nominal : q_other;
+    agonist_angle    = bilinear_eval(g.agonist, g.q0_axis, g.q1_axis, g.grid_m, g.grid_n, q0,
+                                     agonist_joint_angle);
+    antagonist_angle = bilinear_eval(g.antagonist, g.q0_axis, g.q1_axis, g.grid_m, g.grid_n, q0,
+                                     antagonist_joint_angle);
+    return true;
+  }
+
+  // PIECEWISE (fine) map: interpolate over captured points (sorted by joint angle).
+  if (eq.map_mode == MAP_PIECEWISE) {
+    DofMappingData_t &m = dof_mappings[dof_index];
+    if (!eq.pw_valid || m.flag != 1 || m.size < MIN_FINE_POINTS) {
+      return false;
+    }
+    agonist_angle = interpolate_data(agonist_joint_angle, m.joint_data, m.agonist_data, m.size);
+    antagonist_angle =
+        interpolate_data(antagonist_joint_angle, m.joint_data, m.antagonist_data, m.size);
+    return true;
+  }
+
+  // LINEAR map: ensure equations are computed
+  if (!eq.calculated || !eq.agonist.valid || !eq.antagonist.valid || !eq.limits_valid) {
     return false;
   }
 
   // Compute angles using linear equations: y = m x + b
-  agonist_angle = linear_equations[dof_index].agonist.slope * agonist_joint_angle +
-                  linear_equations[dof_index].agonist.intercept;
-
-  antagonist_angle = linear_equations[dof_index].antagonist.slope * antagonist_joint_angle +
-                     linear_equations[dof_index].antagonist.intercept;
+  agonist_angle = eq.agonist.slope * agonist_joint_angle + eq.agonist.intercept;
+  antagonist_angle = eq.antagonist.slope * antagonist_joint_angle + eq.antagonist.intercept;
 
   return true;
 }
@@ -259,10 +345,38 @@ bool JointController::calculateJointAnglesWithEquations(uint8_t dof_index,
                                                         float agonist_motor_angle,
                                                         float antagonist_motor_angle,
                                                         float &agonist_joint_angle,
-                                                        float &antagonist_joint_angle) {
+                                                        float &antagonist_joint_angle,
+                                                        float q_other) {
   // Validate DOF index
   if (dof_index >= config.dof_count) {
     return false;
+  }
+
+  // BILINEAR (2D) inverse map: invert each bracketing q0-row (motor -> q1, the row is commit-
+  // monotone) then blend in JOINT space. q_other carries the live q0; NAN -> eq.q0_nominal slice.
+  if (linear_equations[dof_index].map_mode == MAP_BILINEAR) {
+    DofLinearEquations &eq = linear_equations[dof_index];
+    DofGridData_t &g = dof_grids[dof_index];
+    if (!eq.bl_valid || !g.bl_valid || g.grid_m < 1 || g.grid_n < MIN_FINE_POINTS) return false;
+    float q0 = isnan(q_other) ? eq.q0_nominal : q_other;
+    agonist_joint_angle    = inverse_bilinear(g.agonist, g.q0_axis, g.q1_axis, g.grid_m, g.grid_n,
+                                              q0, agonist_motor_angle);
+    antagonist_joint_angle = inverse_bilinear(g.antagonist, g.q0_axis, g.q1_axis, g.grid_m,
+                                              g.grid_n, q0, antagonist_motor_angle);
+    return true;
+  }
+
+  // PIECEWISE (fine) map: inverse interpolation motor → joint. Requires the motor
+  // arrays to be monotonic vs joint (enforced at commit) so the bracket search is valid.
+  if (linear_equations[dof_index].map_mode == MAP_PIECEWISE) {
+    DofMappingData_t &m = dof_mappings[dof_index];
+    if (!linear_equations[dof_index].pw_valid || m.flag != 1 || m.size < MIN_FINE_POINTS) {
+      return false;
+    }
+    agonist_joint_angle = interpolate_data(agonist_motor_angle, m.agonist_data, m.joint_data, m.size);
+    antagonist_joint_angle =
+        interpolate_data(antagonist_motor_angle, m.antagonist_data, m.joint_data, m.size);
+    return true;
   }
 
   // Ensure linear equations are computed

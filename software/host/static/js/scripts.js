@@ -976,6 +976,22 @@ $(document).ready(function() {
         }
     });
 
+    // Fine remap: live captured point stream (FINE_MAP_POINT)
+    socket.on('fine_map_point', function(data) {
+        // data: { joint, dof, index, joint_angle, agonist, antagonist }
+        const currentJoint = $("#jointSelect").val();
+        if (data.joint && data.joint !== currentJoint) return;
+        addFineRemapPoint(data);
+    });
+
+    // Fine remap: status/feedback lines (FINE_CAPTURE_* / FINE_COMMIT_* / FINE_POINT_REJECT)
+    socket.on('fine_capture_status', function(data) {
+        // data: { joint, line }
+        const currentJoint = $("#jointSelect").val();
+        if (data.joint && data.joint !== currentJoint) return;
+        updateFineRemapStatus(data.line);
+    });
+
     // CAN control handlers
     $("#connectCanBtn").on('click', connectCanInterface);
     $("#disconnectCanBtn").on('click', disconnectCanInterface);
@@ -7882,3 +7898,245 @@ function updateDiagHoldChart(dof) {
     diagHoldChart.data.datasets[4].data = hist.map(h => h.trim);
     diagHoldChart.update();
 }
+
+// ============================================================================
+// Fine Remap ("command and record") — TELEMETRY + COMMAND ONLY.
+// This panel NEVER pushes map coefficients to the firmware; it only issues the
+// fine-capture control commands (start/record/stop/commit/abort) and plots the
+// (joint, agonist, antagonist) points the firmware streams back. The firmware
+// validates and installs the piecewise map on commit; it is the sole authority.
+// ============================================================================
+
+// Must mirror firmware JointController_AutoMapping.cpp:
+//   FINE_MIN_SPAN_FRACTION = 0.6 (captured span must cover >=60% of phys range)
+//   fineIsMonotonic uses MIN_STEP = 0.01 deg, strict, after sorting by joint angle.
+const FINE_REMAP_MIN_SPAN_FRACTION = 0.6;
+const FINE_REMAP_MONO_MIN_STEP = 0.01;
+
+let fineRemapChart = null;
+// Captured points keyed by DOF so switching the selector keeps each DOF's set.
+let fineRemapPointsByDof = { 0: [], 1: [] };
+
+function getFineRemapDof() {
+    return parseInt($("#fineRemapDofSelect").val(), 10) || 0;
+}
+
+/**
+ * Issue a fine-capture control command for the selected DOF.
+ * Reuses the shared sendCommand() POST to /command (cmd: fine-capture-<action>).
+ * On 'start' the local point buffer for that DOF is cleared.
+ */
+function fineRemapAction(action) {
+    const dof = getFineRemapDof();
+    if (action === 'start') {
+        fineRemapPointsByDof[dof] = [];
+        renderFineRemapChart();
+        updateFineRemapReadouts();
+    }
+    sendCommand(`fine-capture-${action}`, { dof: dof });
+}
+
+/**
+ * Mirror of firmware fineIsMonotonic(): strictly monotonic (either direction),
+ * each consecutive step at least MIN_STEP in magnitude. Requires >= 2 samples.
+ */
+function fineRemapIsMonotonic(values) {
+    const n = values.length;
+    if (n < 2) return false;
+    const increasing = values[n - 1] > values[0];
+    for (let i = 1; i < n; i++) {
+        const d = values[i] - values[i - 1];
+        if (increasing && d < FINE_REMAP_MONO_MIN_STEP) return false;
+        if (!increasing && d > -FINE_REMAP_MONO_MIN_STEP) return false;
+    }
+    return true;
+}
+
+/**
+ * Append a freshly captured point (or replace one with the same index) and refresh
+ * the plot + readouts. Called from the 'fine_map_point' socket handler.
+ */
+function addFineRemapPoint(point) {
+    const dof = Number(point.dof);
+    if (!fineRemapPointsByDof[dof]) fineRemapPointsByDof[dof] = [];
+    const list = fineRemapPointsByDof[dof];
+    const existing = list.findIndex(p => p.index === point.index);
+    const entry = {
+        index: point.index,
+        joint: point.joint_angle,
+        agonist: point.agonist,
+        antagonist: point.antagonist,
+    };
+    if (existing >= 0) {
+        list[existing] = entry;
+    } else {
+        list.push(entry);
+    }
+    // Only redraw / update readouts for the DOF currently shown.
+    if (dof === getFineRemapDof()) {
+        renderFineRemapChart();
+        updateFineRemapReadouts();
+    }
+}
+
+/**
+ * Coverage + monotonicity readouts for the selected DOF, evaluated against the
+ * firmware commit gates so the operator knows the commit will pass beforehand.
+ */
+function updateFineRemapReadouts() {
+    const dof = getFineRemapDof();
+    const pts = (fineRemapPointsByDof[dof] || []).slice();
+
+    // Point count
+    $("#fineRemapPointCount").text(pts.length);
+
+    // Sort by joint angle (firmware sorts before validating).
+    const sorted = pts.slice().sort((a, b) => a.joint - b.joint);
+
+    // Coverage vs 60% gate of physical DOF range (from loaded joint config).
+    const coverageEl = $("#fineRemapCoverage");
+    const dofConfig = getDofConfigForJoint($("#jointSelect").val(), dof);
+    if (sorted.length >= 2 && dofConfig &&
+        dofConfig.min_angle !== undefined && dofConfig.max_angle !== undefined) {
+        const physRange = Number(dofConfig.max_angle) - Number(dofConfig.min_angle);
+        const covered = sorted[sorted.length - 1].joint - sorted[0].joint;
+        const gate = FINE_REMAP_MIN_SPAN_FRACTION * physRange;
+        const pass = physRange <= 1.0 || covered >= gate;
+        coverageEl.html(
+            `${covered.toFixed(1)}° / ${gate.toFixed(1)}°`
+        );
+        coverageEl.removeClass('text-green-600 text-red-600 text-gray-800')
+            .addClass(pass ? 'text-green-600' : 'text-red-600');
+    } else {
+        coverageEl.text('—').removeClass('text-green-600 text-red-600').addClass('text-gray-800');
+    }
+
+    // Monotonicity light: both agonist and antagonist monotonic vs sorted joint angle.
+    const monoEl = $("#fineRemapMonotonicity");
+    if (sorted.length >= 2) {
+        const agMono = fineRemapIsMonotonic(sorted.map(p => p.agonist));
+        const antaMono = fineRemapIsMonotonic(sorted.map(p => p.antagonist));
+        const ok = agMono && antaMono;
+        monoEl.html(
+            `<i class="fas fa-circle ${ok ? 'text-green-500' : 'text-red-500'}"></i> ` +
+            `<span class="${ok ? 'text-green-600' : 'text-red-600'}">${ok ? 'OK' : 'NOT MONOTONIC'}</span>`
+        );
+    } else {
+        monoEl.html('<i class="fas fa-circle text-gray-300"></i> <span class="text-gray-500">n/a</span>');
+    }
+}
+
+/**
+ * Reflect a firmware fine_capture_status line (FINE_CAPTURE_*, FINE_COMMIT_*,
+ * FINE_POINT_REJECT) in the panel's status line, color-coded by outcome.
+ */
+function updateFineRemapStatus(line) {
+    const el = $("#fineRemapStatus");
+    if (!el.length) return;
+    let cls = 'text-gray-600';
+    if (line.includes('COMMIT_OK')) cls = 'text-green-600';
+    else if (line.includes('COMMIT_FAIL') || line.includes('REJECT') || line.includes('FAIL')) cls = 'text-red-600';
+    else if (line.includes('ABORT')) cls = 'text-amber-600';
+    el.text(line).removeClass('text-gray-600 text-green-600 text-red-600 text-amber-600').addClass(cls);
+}
+
+/**
+ * Build/refresh the Fine Remap scatter+interpolation plot for the selected DOF.
+ * Reuses the existing Chart.js approach (same scatter-of-points + connecting line
+ * style as the auto-mapping measured/interpolated charts).
+ */
+function renderFineRemapChart() {
+    const canvas = document.getElementById('fineRemapChart');
+    if (!canvas) return;
+    const dof = getFineRemapDof();
+    const sorted = (fineRemapPointsByDof[dof] || []).slice().sort((a, b) => a.joint - b.joint);
+
+    const agPoints = sorted.map(p => ({ x: p.joint, y: p.agonist }));
+    const antaPoints = sorted.map(p => ({ x: p.joint, y: p.antagonist }));
+
+    if (!fineRemapChart) {
+        fineRemapChart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: [
+                    {
+                        label: 'Agonist (captured)',
+                        data: agPoints,
+                        borderColor: 'rgba(255, 99, 132, 1)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                        borderWidth: 2,
+                        fill: false,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                        showLine: false,
+                    },
+                    {
+                        label: 'Antagonist (captured)',
+                        data: antaPoints,
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                        borderWidth: 2,
+                        fill: false,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                        showLine: false,
+                    },
+                    {
+                        label: 'Agonist (piecewise)',
+                        data: agPoints,
+                        borderColor: 'rgba(255, 99, 132, 0.9)',
+                        borderWidth: 3,
+                        fill: false,
+                        pointRadius: 0,
+                        borderDash: [5, 5],
+                    },
+                    {
+                        label: 'Antagonist (piecewise)',
+                        data: antaPoints,
+                        borderColor: 'rgba(54, 162, 235, 0.9)',
+                        borderWidth: 3,
+                        fill: false,
+                        pointRadius: 0,
+                        borderDash: [5, 5],
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                resizeDelay: 0,
+                animation: false,
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        title: { display: true, text: 'Motor Angle (deg)' },
+                    },
+                    x: {
+                        type: 'linear',
+                        position: 'bottom',
+                        title: { display: true, text: `Joint Angle DOF ${dof} (deg)` },
+                    },
+                },
+                plugins: {
+                    title: { display: true, text: `Fine Remap — DOF ${dof}`, font: { size: 12 } },
+                    legend: { display: true, position: 'top' },
+                },
+                interaction: { intersect: false, mode: 'nearest' },
+            },
+        });
+    } else {
+        fineRemapChart.data.datasets[0].data = agPoints;
+        fineRemapChart.data.datasets[1].data = antaPoints;
+        fineRemapChart.data.datasets[2].data = agPoints;
+        fineRemapChart.data.datasets[3].data = antaPoints;
+        fineRemapChart.options.scales.x.title.text = `Joint Angle DOF ${dof} (deg)`;
+        fineRemapChart.options.plugins.title.text = `Fine Remap — DOF ${dof}`;
+        fineRemapChart.update();
+    }
+}
+
+// Switching the DOF selector re-renders the plot/readouts for that DOF's buffer.
+$(document).on('change', '#fineRemapDofSelect', function() {
+    renderFineRemapChart();
+    updateFineRemapReadouts();
+});

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <math.h>
 #include "main_common.h"  // For shared_dof_angles
+#include <hot_path.h>
 
 // ============================================================================
 // EXTERNAL VARIABLES & HELPER FUNCTIONS
@@ -42,6 +43,9 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
   dof_movement    = new DofMovementData[config.dof_count];
   dof_mappings    = new DofMappingData_t[config.dof_count](); // Initialize to zero
 
+  // Zero-init bilinear (q0,q1) grids (so bl_valid=false on boot, like dof_mappings)
+  memset(dof_grids, 0, sizeof(dof_grids));
+
   // NEW: Allocate memory for linear equations
   linear_equations = new DofLinearEquations[config.dof_count]();
 
@@ -52,6 +56,10 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
     linear_equations[i].agonist.valid    = false;
     linear_equations[i].antagonist.valid = false;
     linear_equations[i].limits_valid     = false;
+    linear_equations[i].map_mode         = MAP_LINEAR; // default: linear; fine map opts in per-DOF
+    linear_equations[i].pw_valid         = false;
+    linear_equations[i].bl_valid         = false;       // bilinear (2D) grid not usable until captured
+    linear_equations[i].q0_nominal       = 0.0f;        // center slice default
   }
 
   // Allocate and initialize array for offset calibration flags
@@ -100,8 +108,6 @@ JointController::JointController(const JointConfig &cfg, MCP_CAN *can, DirectEnc
     // Set inversion flag directly in encoders object
     if (encoder_channel < DIRECT_ENCODER_COUNT) {
       encoders->setEncoderInvert(encoder_channel, invert);
-      LOG_C1_DEBUG("Set inversion flag for encoder " + String(encoder_channel) + ": " +
-                String(invert ? "true" : "false"));
     }
   }
 
@@ -216,12 +222,7 @@ void JointController::applyDefaultPidTunings(bool log_details) {
     if (pid_controllers && pid_controllers[i] != nullptr) {
       pid_controllers[i]->setTunings(kp, ki, kd, tau);
     }
-
-    if (log_details) {
-      LOG_C1_DEBUG("  Motor " + String(i) + ": kp=" + String(kp, 3) +
-                ", ki=" + String(ki, 3) + ", kd=" +
-                String(kd, 3) + ", tau=" + String(tau, 4));
-    }
+    // (chatter log removed, v2 String pass 2026-07-06)
   }
 
   if (log_details) {
@@ -299,7 +300,7 @@ static bool safeSleepMs(int ms) {
     safety_watchdog_kick();
 
     if (emergency_stop_requested) {
-      LOG_C1_WARN("[SAFETY] Emergency stop detected during blocking operation");
+      LOG_C1_WARN_F("[SAFETY] Emergency stop detected during blocking operation");
       return false;
     }
   }
@@ -308,13 +309,16 @@ static bool safeSleepMs(int ms) {
 
 // Pretension motors of a specific DOF
 bool JointController::pretension(uint8_t dof_index, int torque, int duration_ms) {
+  // S2 CARRY choke point (MAJOR amendment): abandon any carried pair before the setTorque drives below
+  // (also covers pretensionAll, which calls pretension per DOF). Idempotent; core-affinity guarded.
+  abandonCarriedPair();
   if (dof_index >= config.dof_count) {
     return false;
   }
 
   if (!dofSupportsPretension(dof_index)) {
-    LOG_C1_WARN("Pretension not supported for DOF " + String(dof_index) + " (" +
-                String(config.dofs[dof_index].name) + ")");
+    LOG_C1_WARN_F("Pretension not supported for DOF %d (%s)", dof_index,
+                  config.dofs[dof_index].name);
     return false;
   }
 
@@ -373,7 +377,7 @@ bool JointController::pretensionAll() {
   }
 
   if (!any_supported) {
-    LOG_C1_WARN("PretensionAll requested, but no DOF supports pretension");
+    LOG_C1_WARN_F("PretensionAll requested, but no DOF supports pretension");
     return false;
   }
 
@@ -393,13 +397,16 @@ bool JointController::pretensionAll() {
 
 // Release motors of a specific DOF (inverse torque compared to pretensioning)
 bool JointController::release(uint8_t dof_index, int torque, int duration_ms) {
+  // S2 CARRY choke point (MAJOR amendment): abandon any carried pair before the setTorque drives below
+  // (also covers releaseAll, which calls release per DOF). Idempotent; core-affinity guarded.
+  abandonCarriedPair();
   if (dof_index >= config.dof_count) {
     return false;
   }
 
   if (!dofSupportsPretension(dof_index)) {
-    LOG_C1_WARN("Release not supported for DOF " + String(dof_index) + " (" +
-                String(config.dofs[dof_index].name) + ")");
+    LOG_C1_WARN_F("Release not supported for DOF %d (%s)", dof_index,
+                  config.dofs[dof_index].name);
     return false;
   }
 
@@ -459,7 +466,7 @@ bool JointController::releaseAll() {
   }
 
   if (!any_supported) {
-    LOG_C1_WARN("ReleaseAll requested, but no DOF supports release");
+    LOG_C1_WARN_F("ReleaseAll requested, but no DOF supports release");
     return false;
   }
 
@@ -497,7 +504,7 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
     }
 
     if (direct_motor == nullptr) {
-      LOG_C1_ERROR("Set Reference failed: no direct-drive motor for DOF " + String(dof_index));
+      LOG_C1_ERROR_F("Set Reference failed: no direct-drive motor for DOF %d", dof_index);
       return false;
     }
 
@@ -506,8 +513,8 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
     if (isnan(current_angle.angle)) {
       diag_note_motor_timeout(dof_index,
                               direct_motor_idx >= 0 ? static_cast<uint8_t>(direct_motor_idx) : 0xFF);
-      LOG_C1_ERROR("Set Reference failed: no single-turn angle from direct-drive motor DOF " +
-                   String(dof_index));
+      LOG_C1_ERROR_F("Set Reference failed: no single-turn angle from direct-drive motor DOF %d",
+                     dof_index);
       return false;
     }
 
@@ -540,12 +547,17 @@ bool JointController::setZeroCurrentPos(uint8_t dof_index) {
 // Stop all motors
 // Can be safely called from both Core0 and Core1 (noInterrupts() protects SPI1 access)
 void JointController::stopAllMotors() {
+  // S2 CARRY choke point (MAJOR amendment): abandon any carried pair BEFORE touching the motor bus,
+  // so its stale _fire_pending / buffered replies can't corrupt these motorStop transactions. This
+  // covers the e-stop, torqueSweepStop, free-capture EXIT, and pretension/release tail paths that all
+  // funnel through stopAllMotors. Core-affinity guarded inside (core0 startup calls are a no-op).
+  abandonCarriedPair();
   for (int i = 0; i < config.motor_count; i++) {
     if (motors[i] != nullptr) {
       motors[i]->motorStop();
     }
   }
-  LOG_C1_INFO("Stopping all motors in JointController");
+  LOG_C1_INFO_F("Stopping all motors in JointController");
 }
 
 // Stop motors for a specific DOF
@@ -616,7 +628,7 @@ float JointController::getCurrentAngle(uint8_t dof_index, bool &is_valid) {
 }
 
 // Check if an angle is within a DOF's limits
-bool JointController::isAngleInLimits(uint8_t dof_index, float angle) {
+bool HOT_FUNC(JointController::isAngleInLimits)(uint8_t dof_index, float angle) {
   if (dof_index >= config.dof_count) {
     return false;
   }
@@ -634,9 +646,23 @@ bool JointController::isAngleInLimits(uint8_t dof_index, float angle) {
 static const float LIMIT_TOLERANCE = 0.5f;  // Allow 0.5° beyond limits
 static const float CONSERVATIVE_MARGIN = 2.0f;
 
-bool JointController::getMappingSafeRange(uint8_t dof_index, float &min_safe, float &max_safe) {
+bool HOT_FUNC(JointController::getMappingSafeRange)(uint8_t dof_index, float &min_safe, float &max_safe) {
   if (dof_index >= config.dof_count) {
     return false;
+  }
+
+  // FINE-CAPTURE WIDE-BAND EXCEPTION (2026-07-10, safe-range RATCHET fix): while a fine
+  // capture is active for THIS DOF, clamp against the wide physical band instead of the
+  // committed fine span. Without this a fine map can never be recaptured WIDER than the
+  // current one: commitFineCapture narrows joint_safe to the captured span and the NEXT
+  // capture's motion (SET_IMPEDANCE clamp + MAPPING_LIMIT) rides this same range — every
+  // settle-undershoot ratchets the span inward (bench history: +17.8 -> +9.85). The
+  // FF-only capture sweep at this band is the same trust level as the coarse auto-map,
+  // which sweeps the identical physical-minus-margin band routinely.
+  if (_fine_capture_active && dof_index == _fine_capture_dof) {
+    min_safe = config.dofs[dof_index].limits.min_angle + CONSERVATIVE_MARGIN - LIMIT_TOLERANCE;
+    max_safe = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN + LIMIT_TOLERANCE;
+    return true;
   }
 
   if (hasValidEquations(dof_index)) {
@@ -650,7 +676,7 @@ bool JointController::getMappingSafeRange(uint8_t dof_index, float &min_safe, fl
   return true;
 }
 
-bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
+bool HOT_FUNC(JointController::isAngleInMappingLimits)(uint8_t dof_index, float angle) {
   if (dof_index >= config.dof_count) {
     return false;
   }
@@ -664,11 +690,20 @@ bool JointController::isAngleInMappingLimits(uint8_t dof_index, float angle) {
   bool in_limits = (angle >= min_angle && angle <= max_angle);
 
   if (!in_limits) {
-    const bool has_equations = hasValidEquations(dof_index);
-    LOG_C1_WARN("Angle " + String(angle, 2) + "° for DOF " + String(dof_index) +
-             (has_equations ? " outside safe limits [" : " outside conservative limits [") +
-             String(min_angle, 2) + "°, " + String(max_angle, 2) + "°]" +
-             (has_equations ? " (from equations)" : " (equations unavailable)"));
+    // Rate-limited 250ms (deliberate behavior change, v2 String pass 2026-07-06): this WARN
+    // fires EVERY moving outer cycle while grazing/recovering outside the safe range — it was
+    // an unthrottled per-cycle heap log inside a HOT_FUNC.
+    static uint32_t last_mapping_limit_warn_ms[MAX_DOFS] = {0};
+    if (millis() - last_mapping_limit_warn_ms[dof_index] > 250) {
+      last_mapping_limit_warn_ms[dof_index] = millis();
+      const bool has_equations = hasValidEquations(dof_index);
+      char f1[48], f2[48], f3[48];
+      LOG_C1_WARN_F("Angle %s° for DOF %d%s%s°, %s°]%s",
+                    c1f(f1, angle, 2), dof_index,
+                    has_equations ? " outside safe limits [" : " outside conservative limits [",
+                    c1f(f2, min_angle, 2), c1f(f3, max_angle, 2),
+                    has_equations ? " (from equations)" : " (equations unavailable)");
+    }
   }
 
   return in_limits;
@@ -702,9 +737,10 @@ bool JointController::canDirectDriveRecoverTowardSafeRange(uint8_t dof_index, fl
 }
 
 // Check if a DOF's motors are within their mapping ranges
-bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_message) {
+bool HOT_FUNC(JointController::checkMotorsInRange)(uint8_t dof_index, char *violation_message,
+                                                   size_t violation_msg_size) {
   if (dof_index >= config.dof_count) {
-    violation_message = "DOF index out of range";
+    snprintf(violation_message, violation_msg_size, "DOF index out of range");
     return false;
   }
 
@@ -714,7 +750,7 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
 
   if (!hasValidEquations(dof_index)) {
     // If equations are invalid, the entire movement should not be authorized
-    violation_message = "Equation limits unavailable";
+    snprintf(violation_message, violation_msg_size, "Equation limits unavailable");
     return false;
   }
 
@@ -728,70 +764,107 @@ bool JointController::checkMotorsInRange(uint8_t dof_index, String &violation_me
   // cached_motor_angles. Using the cache eliminates ~2ms delay per motor that
   // was caused by blocking CAN reads, reducing safety check overhead from
   // ~4000µs to ~50µs.
-  
+
+  // Persistence counter for "cannot trust cached motor angles" conditions.
+  // A MOMENTARY stale/invalid cache (normal during a CAN retry, or in IDLE) must NOT
+  // fault — historically this fell open (returned in-range). But a PERSISTENTLY
+  // stale/garbage cache means we have NO real motor feedback, so we cannot certify
+  // the tendons are intact; once it persists we must treat the DOF as out-of-range
+  // so the caller's MOTOR_RANGE handling engages instead of silently passing.
+  // Core1-only state (checkMotorsInRange runs only on Core1, same core as the cache).
+  static uint8_t cache_untrusted_streak[MAX_DOFS] = {0};
+  // checkMotorsInRange is invoked at most ~every 40 ms (HOLDING safety check, every 10
+  // inner cycles at the 250Hz/4ms default), so a streak of 5 ≈ 0.2 s of continuously-
+  // untrusted feedback before we fault — well past any single CAN retry, while still well
+  // inside the downstream MOTOR_RANGE escalation persistence so a genuine loss of motor
+  // feedback ultimately latches power off.
+  const uint8_t CACHE_UNTRUSTED_FAULT_CYCLES = 5;
+
   // Check if cache is valid for this DOF
+  bool cache_untrusted = false;
+  const char *untrusted_reason = nullptr;
   if (!cached_motor_angles.valid[dof_index]) {
-    // Cache not yet populated - this is normal on first few cycles after startup
-    // Skip motor check but don't fail (joint limits are still checked)
+    // Cache not yet populated - normal on first cycles after startup, but if it
+    // NEVER populates we have no motor feedback at all.
+    cache_untrusted = true;
+    untrusted_reason = "cache not populated";
+  } else if ((millis() - cached_motor_angles.last_update_ms) > 100) {
+    // Cache is stale - control loop may not be feeding it.
+    cache_untrusted = true;
+    untrusted_reason = "cache stale";
+  } else if (abs(cached_motor_angles.agonist[dof_index]) > 10000.0f ||
+             abs(cached_motor_angles.antagonist[dof_index]) > 10000.0f) {
+    // Garbage values.
+    cache_untrusted = true;
+    untrusted_reason = "cache garbage";
+  }
+
+  if (cache_untrusted) {
+    if (cache_untrusted_streak[dof_index] < 0xFF) {
+      cache_untrusted_streak[dof_index]++;
+    }
+    static uint32_t last_untrusted_warn = 0;
+    if (millis() - last_untrusted_warn > 1000) {
+      LOG_C1_WARN_F("[Safety] Motor angle cache untrusted (%s) for DOF %d streak=%d",
+                    untrusted_reason, dof_index, cache_untrusted_streak[dof_index]);
+      last_untrusted_warn = millis();
+    }
+    if (cache_untrusted_streak[dof_index] >= CACHE_UNTRUSTED_FAULT_CYCLES) {
+      // Persistently no trustworthy motor feedback — fail the motor check (out-of-range).
+      snprintf(violation_message, violation_msg_size,
+               "MOTOR FEEDBACK LOST (%s) DOF %d — cannot verify tendon integrity",
+               untrusted_reason, dof_index);
+      return false;
+    }
+    // Momentary: preserve the historical fail-open so a single CAN retry doesn't fault.
     return true;
   }
-  
-  // Check cache freshness (should be updated within last 100ms during active control)
-  uint32_t cache_age_ms = millis() - cached_motor_angles.last_update_ms;
-  if (cache_age_ms > 100) {
-    // Cache is stale - control loop may not be running
-    // Log warning but don't fail safety check (might be in IDLE state)
-    static uint32_t last_stale_warn = 0;
-    if (millis() - last_stale_warn > 1000) {
-      LOG_C1_WARN("[Safety] Motor angle cache stale (" + String(cache_age_ms) + "ms old) for DOF " + 
-               String(dof_index));
-      last_stale_warn = millis();
-    }
-    return true;  // Don't fail, just skip motor check
-  }
-  
+
+  // Cache trusted this cycle — clear the streak.
+  cache_untrusted_streak[dof_index] = 0;
+
   // Get cached angles
   float agonist_angle = cached_motor_angles.agonist[dof_index];
   float antagonist_angle = cached_motor_angles.antagonist[dof_index];
-  
-  // Validate cached values (sanity check)
-  if (abs(agonist_angle) > 10000.0f || abs(antagonist_angle) > 10000.0f) {
-    LOG_C1_WARN("[Safety] Cached motor angles invalid for DOF " + String(dof_index) + 
-             ": A=" + String(agonist_angle, 1) + " B=" + String(antagonist_angle, 1));
-    return true;  // Skip check rather than fail on bad cache data
-  }
-  
+
   // Check agonist motor limits
   if (agonist_angle < agonist_min || agonist_angle > agonist_max) {
-    violation_message = "!!! POSSIBLE TENDON BREAKAGE !!! AGONIST motor DOF " +
-                        String(dof_index) + " out of range: " + String(agonist_angle, 1) +
-                        " deg [safe range: " + String(agonist_min, 1) + " / " +
-                        String(agonist_max, 1) + "]";
+    char f1[48], f2[48], f3[48];
+    snprintf(violation_message, violation_msg_size,
+             "!!! POSSIBLE TENDON BREAKAGE !!! AGONIST motor DOF %d out of range: %s deg "
+             "[safe range: %s / %s]",
+             dof_index, c1f(f1, agonist_angle, 1), c1f(f2, agonist_min, 1),
+             c1f(f3, agonist_max, 1));
     return false;
   }
   
   // Check antagonist motor limits
   if (antagonist_angle < antagonist_min || antagonist_angle > antagonist_max) {
-    violation_message = "!!! POSSIBLE TENDON BREAKAGE !!! ANTAGONIST motor DOF " +
-                        String(dof_index) + " out of range: " + String(antagonist_angle, 1) +
-                        " deg [safe range: " + String(antagonist_min, 1) + " / " +
-                        String(antagonist_max, 1) + "]";
+    char f1[48], f2[48], f3[48];
+    snprintf(violation_message, violation_msg_size,
+             "!!! POSSIBLE TENDON BREAKAGE !!! ANTAGONIST motor DOF %d out of range: %s deg "
+             "[safe range: %s / %s]",
+             dof_index, c1f(f1, antagonist_angle, 1), c1f(f2, antagonist_min, 1),
+             c1f(f3, antagonist_max, 1));
     return false;
   }
 
   return true; // All motors are within limits
 }
 
-bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
-                                        String &violation_message, bool check_motors,
+bool HOT_FUNC(JointController::checkSafetyForDof)(uint8_t dof_index, float current_angle,
+                                        char *violation_message, size_t violation_msg_size,
+                                        bool check_motors,
                                         SafetyViolationType *violation_type) {
-  violation_message = "";
+  // Heap-free (v2 pass): a single byte store on the happy path — the old String& cleared
+  // an Arduino String here = malloc(1)+free under the cross-core mutex every check.
+  if (violation_msg_size) violation_message[0] = '\0';
   if (violation_type != nullptr) {
     *violation_type = SAFETY_VIOLATION_LIMIT;
   }
 
   if (dof_index >= config.dof_count) {
-    violation_message = "DOF index out of range";
+    snprintf(violation_message, violation_msg_size, "DOF index out of range");
     return false;
   }
 
@@ -800,10 +873,11 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
     if (violation_type != nullptr) {
       *violation_type = SAFETY_VIOLATION_LIMIT;
     }
-    violation_message           = "JOINT LIMIT VIOLATED - DOF " + String(dof_index) +
-                        ": angle=" + String(current_angle, 2) + " deg " +
-                        "[physical range: " + String(dof_config.limits.min_angle, 1) + " / " +
-                        String(dof_config.limits.max_angle, 1) + "]";
+    char f1[48], f2[48], f3[48];
+    snprintf(violation_message, violation_msg_size,
+             "JOINT LIMIT VIOLATED - DOF %d: angle=%s deg [physical range: %s / %s]",
+             dof_index, c1f(f1, current_angle, 2), c1f(f2, dof_config.limits.min_angle, 1),
+             c1f(f3, dof_config.limits.max_angle, 1));
     return false;
   }
 
@@ -822,14 +896,15 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
       max_safe = config.dofs[dof_index].limits.max_angle - CONSERVATIVE_MARGIN;
     }
 
-    violation_message = "MAPPING LIMIT VIOLATED - DOF " + String(dof_index) +
-                        ": angle=" + String(current_angle, 2) + " deg " +
-                        "[safe range: " + String(min_safe, 1) + " / " + String(max_safe, 1) + "]";
+    char f1[48], f2[48], f3[48];
+    snprintf(violation_message, violation_msg_size,
+             "MAPPING LIMIT VIOLATED - DOF %d: angle=%s deg [safe range: %s / %s]",
+             dof_index, c1f(f1, current_angle, 2), c1f(f2, min_safe, 1), c1f(f3, max_safe, 1));
     return false;
   }
 
   if (check_motors && config.dofs[dof_index].drive_type != DRIVE_DIRECT_DRIVE) {
-    if (!checkMotorsInRange(dof_index, violation_message)) {
+    if (!checkMotorsInRange(dof_index, violation_message, violation_msg_size)) {
       if (violation_type != nullptr) {
         *violation_type = SAFETY_VIOLATION_MOTOR_RANGE;
       }
@@ -840,18 +915,20 @@ bool JointController::checkSafetyForDof(uint8_t dof_index, float current_angle,
   return true;
 }
 
-bool JointController::checkSafetyForAllDofs(String &violation_message, bool check_motors) {
-  violation_message = "";
+bool JointController::checkSafetyForAllDofs(char *violation_message,
+                                            size_t violation_msg_size, bool check_motors) {
+  if (violation_msg_size) violation_message[0] = '\0';
 
   for (int dof = 0; dof < config.dof_count; dof++) {
     // Use shared_dof_angles (updated by Core0)
     if (!shared_dof_angles.valid[dof]) {
-      violation_message = "Invalid encoder reading for DOF " + String(dof);
+      snprintf(violation_message, violation_msg_size, "Invalid encoder reading for DOF %d", dof);
       return false;
     }
     float current_angle = shared_dof_angles.angles[dof];
 
-    if (!checkSafetyForDof(dof, current_angle, violation_message, check_motors)) {
+    if (!checkSafetyForDof(dof, current_angle, violation_message, violation_msg_size,
+                           check_motors)) {
       return false;
     }
   }
@@ -866,29 +943,20 @@ bool JointController::checkSafetyForAllDofs(String &violation_message, bool chec
 // Implementation of recalculateMotorOffsets
 bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretension_torque,
                                               int pretension_duration_ms) {
+  // S2 CARRY choke point (MAJOR amendment): abandon any carried pair before this sequence drives the
+  // motor bus (pretension + offset probing). Idempotent; core-affinity guarded.
+  abandonCarriedPair();
   if (dof_index >= config.dof_count) {
-    LOG_C1_ERROR("DOF index out of range in recalculateMotorOffsets");
+    LOG_C1_ERROR_F("DOF index out of range in recalculateMotorOffsets");
     return false;
   }
 
   if (!dofSupportsRecalcOffset(dof_index)) {
-    LOG_C1_WARN("Recalc offset not supported for DOF " + String(dof_index) + " (" +
-                String(config.dofs[dof_index].name) + ")");
+    LOG_C1_WARN_F("Recalc offset not supported for DOF %d (%s)", dof_index,
+                  config.dofs[dof_index].name);
     return false;
   }
-
-  // DEBUG: Print detailed information about request
-  LOG_C1_DEBUG("=== DEBUG RECALC_OFFSET ===");
-  LOG_C1_DEBUG("Requested DOF: " + String(dof_index));
-  LOG_C1_DEBUG("DOF name: " + String(config.dofs[dof_index].name));
-  LOG_C1_DEBUG("Total motors in joint: " + String(config.motor_count));
-
-  // DEBUG: Print all motors and their DOFs
-  for (int i = 0; i < config.motor_count; i++) {
-    LOG_C1_DEBUG("Motor " + String(i) + ": ID=" + String(config.motors[i].id) + ", DOF=" +
-                String(config.motors[i].dof_index) + ", Name=" + String(config.motors[i].name) +
-                ", Agonist=" + String(config.motors[i].is_agonist ? "YES" : "NO"));
-  }
+  // (chatter log removed, v2 String pass 2026-07-06)
 
   // Identify motors associated with this DOF
   LKM_Motor *agonist_motor    = nullptr;
@@ -915,27 +983,20 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
     }
   }
 
-  LOG_C1_INFO("MOTOR SEARCH RESULT:");
-  LOG_C1_INFO(String("- Agonist: ") + String(agonist_motor != nullptr ? "FOUND" : "NOT FOUND") +
-           (agonist_motor_id >= 0 ? String(" (CAN ID ") + String(agonist_motor_id) + ")" : ""));
-  LOG_C1_INFO(String("- Antagonist: ") +
-           String(antagonist_motor != nullptr ? "FOUND" : "NOT FOUND") +
-           (antagonist_motor_id >= 0 ? String(" (CAN ID ") + String(antagonist_motor_id) + ")" :
-                                       ""));
-  LOG_C1_INFO("============================");
+  // (chatter log removed, v2 String pass 2026-07-06)
 
   // Verify that both motors are available
   if (agonist_motor == nullptr || antagonist_motor == nullptr) {
-    LOG_C1_ERROR("Both motors are not available for this DOF");
+    LOG_C1_ERROR_F("Both motors are not available for this DOF");
     return false;
   }
 
   // Verify that linear equations are available (only supported method)
   if (!linear_equations[dof_index].calculated || !linear_equations[dof_index].agonist.valid ||
       !linear_equations[dof_index].antagonist.valid || !linear_equations[dof_index].limits_valid) {
-    LOG_C1_ERROR("Unable to recalculate offsets - linear equations not available for DOF " + String(dof_index));
-    LOG_C1_WARN("Required: Perform auto-mapping to compute linear equations first");
-    LOG_C1_WARN("Alternatively: Load linear equations from flash with CMD:LOAD_LINEAR_EQUATIONS");
+    LOG_C1_ERROR_F("Unable to recalculate offsets - linear equations not available for DOF %d", dof_index);
+    LOG_C1_WARN_F("Required: Perform auto-mapping to compute linear equations first");
+    LOG_C1_WARN_F("Alternatively: Load linear equations from flash with CMD:LOAD_LINEAR_EQUATIONS");
     stopDofMotors(dof_index);
     return false;
   }
@@ -1024,19 +1085,19 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
         float new_torque = current_torque * TORQUE_INCREMENT_FACTOR;
         if (new_torque > max_allowed_torque) {
           new_torque = max_allowed_torque;
-          LOG_C1_WARN("Torque limited to max allowed: " + String((int)max_allowed_torque));
+          LOG_C1_WARN_F("Torque limited to max allowed: %d", (int)max_allowed_torque);
         }
         
         if (new_torque > current_torque) {
           current_torque = new_torque;
           LOG_C1_INFO("Tendons loose - increasing torque to " + String((int)current_torque) + " for next attempt");
         } else {
-          LOG_C1_WARN("Already at max torque, cannot increase further");
+          LOG_C1_WARN_F("Already at max torque, cannot increase further");
           break;  // No point in retrying at same torque
         }
       } else {
         // Both too stiff - increasing torque won't help
-        LOG_C1_WARN("Tendons appear too stiff - cannot improve with more torque");
+        LOG_C1_WARN_F("Tendons appear too stiff - cannot improve with more torque");
         break;
       }
     }
@@ -1048,16 +1109,16 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
                          antagonist_displacement > MAX_TENSION_DISPLACEMENT);
     
     if (is_too_loose) {
-      LOG_C1_ERROR("Tendon tension FAILED for DOF " + String(dof_index) + 
-               " after " + String(tension_attempt) + " attempts");
-      LOG_C1_ERROR("Tendons may be disconnected or severely slack");
-      LOG_C1_ERROR("Check tendon connections before retrying");
+      LOG_C1_ERROR_F("Tendon tension FAILED for DOF %d after %d attempts", dof_index,
+                     tension_attempt);
+      LOG_C1_ERROR_F("Tendons may be disconnected or severely slack");
+      LOG_C1_ERROR_F("Check tendon connections before retrying");
       stopDofMotors(dof_index);
       return false;  // FAIL - tendons too loose even with max torque
     } else {
       // Too stiff - this is unusual but not necessarily fatal
-      LOG_C1_WARN("Tendon tension suboptimal for DOF " + String(dof_index) + " (too stiff)");
-      LOG_C1_WARN("Continuing calibration; results may be suboptimal");
+      LOG_C1_WARN_F("Tendon tension suboptimal for DOF %d (too stiff)", dof_index);
+      LOG_C1_WARN_F("Continuing calibration; results may be suboptimal");
       // Don't fail - stiff tendons might just mean the system is already tensioned
     }
   } else {
@@ -1081,11 +1142,63 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   }
 
   // FIX: Maintain FULL pretension torque during measurement.
-  // Previously we reduced to (pretension_torque / 2), but this caused heavy joints 
+  // Previously we reduced to (pretension_torque / 2), but this caused heavy joints
   // to sag due to gravity, failing the stability check.
   agonist_motor->setTorque(effective_agonist_torque);
   antagonist_motor->setTorque(effective_antagonist_torque);
-  
+
+  // === STICTION-BREAK DITHER (2026-07-08) ===
+  // The convergence check below only waits for motion to STOP — but under tendon
+  // friction "stopped" is a STICTION-FROZEN position, hysteresis- and approach-
+  // dependent, NOT the true torque equilibrium. Recalc then anchors the encoder
+  // offsets to that stuck point, so every boot's offsets (and every downstream
+  // residual/ema) vary with the approach history — masquerading as thermal drift.
+  // Mirror the fine-capture dither fix: perturb the co-contraction balance a few
+  // times so the tendon slips to equilibrium, then let it settle before sampling.
+  // The [RECALC_DITHER] delta line reports how much stiction was broken.
+#ifndef RECALC_STICTION_DITHER
+#define RECALC_STICTION_DITHER 1
+#endif
+#if RECALC_STICTION_DITHER
+  {
+    const float RECALC_DITHER_FRACTION = 0.30f;  // co-contraction imbalance vs pretension
+    const int   RECALC_DITHER_CYCLES   = 2;      // back-and-forth wiggles
+    const int   RECALC_DITHER_DWELL_MS = 150;    // dwell at each extreme (let it slip)
+    const int   RECALC_DITHER_SETTLE_MS = 200;   // settle at nominal before converge
+    const float mag_cap = max_allowed_torque;    // never exceed the pretension safety cap
+    const float d = RECALC_DITHER_FRACTION;
+    // Scaling preserves the antagonistic sign structure; clamp only the raised side.
+    float ag_hi = fmaxf(-mag_cap, fminf(mag_cap, effective_agonist_torque    * (1.0f + d)));
+    float an_hi = fmaxf(-mag_cap, fminf(mag_cap, effective_antagonist_torque * (1.0f + d)));
+    float ag_lo = effective_agonist_torque    * (1.0f - d);
+    float an_lo = effective_antagonist_torque * (1.0f - d);
+    float pre_dither_joint = shared_dof_angles.valid[dof_index]
+                               ? shared_dof_angles.angles[dof_index] : NAN;
+    bool dither_ok = true;
+    for (int i = 0; i < RECALC_DITHER_CYCLES && dither_ok; i++) {
+      agonist_motor->setTorque(ag_hi);  antagonist_motor->setTorque(an_lo);
+      dither_ok = safeSleepMs(RECALC_DITHER_DWELL_MS);
+      if (dither_ok) { agonist_motor->setTorque(ag_lo);  antagonist_motor->setTorque(an_hi);
+        dither_ok = safeSleepMs(RECALC_DITHER_DWELL_MS); }
+    }
+    // Restore nominal pretension and let it slip to equilibrium before sampling.
+    agonist_motor->setTorque(effective_agonist_torque);
+    antagonist_motor->setTorque(effective_antagonist_torque);
+    if (!dither_ok || !safeSleepMs(RECALC_DITHER_SETTLE_MS)) {
+      stopDofMotors(dof_index);
+      return false;
+    }
+    float post_dither_joint = shared_dof_angles.valid[dof_index]
+                                ? shared_dof_angles.angles[dof_index] : NAN;
+    {
+      char f1[48], f2[48], f3[48];
+      LOG_C1_INFO_F("[RECALC_DITHER] DOF %d stiction break: joint %s -> %s (delta %s deg)",
+                    dof_index, c1f(f1, pre_dither_joint, 2), c1f(f2, post_dither_joint, 2),
+                    c1f(f3, post_dither_joint - pre_dither_joint, 2));
+    }
+  }
+#endif
+
   // === CONVERGENCE-BASED STABILITY CHECK ===
   // Instead of fixed delay, wait until motors STOP MOVING (or timeout).
   // This handles slack tendon recovery where motors need time to "wind up" slack.
@@ -1158,14 +1271,13 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   }
 
   if (!is_stable) {
-    LOG_C1_WARN("System not stable under tension for DOF " + String(dof_index) + 
-             " after " + String(total_wait_ms) + "ms");
-    LOG_C1_DEBUG(String("Final agonist movement: ") + String(stability_agonist));
-    LOG_C1_DEBUG(String("Final antagonist movement: ") + String(stability_antagonist));
-    LOG_C1_ERROR("Calibration failed - system did not converge. Possible causes:");
-    LOG_C1_ERROR("  - Tendons extremely slack (try again)");
-    LOG_C1_ERROR("  - Mechanical obstruction");
-    LOG_C1_ERROR("  - Motor communication issues");
+    LOG_C1_WARN_F("System not stable under tension for DOF %d after %dms", dof_index,
+                  total_wait_ms);
+    // (chatter log removed, v2 String pass 2026-07-06)
+    LOG_C1_ERROR_F("Calibration failed - system did not converge. Possible causes:");
+    LOG_C1_ERROR_F("  - Tendons extremely slack (try again)");
+    LOG_C1_ERROR_F("  - Mechanical obstruction");
+    LOG_C1_ERROR_F("  - Motor communication issues");
     stopDofMotors(dof_index);
     return false;
   } else {
@@ -1174,40 +1286,51 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
 
   // Read current joint angle from shared state (updated by Core0)
   if (!shared_dof_angles.valid[dof_index]) {
-    LOG_C1_ERROR("Cannot recalculate offsets: invalid encoder reading for DOF " +
-              String(dof_index));
+    LOG_C1_ERROR_F("Cannot recalculate offsets: invalid encoder reading for DOF %d",
+                   dof_index);
     stopDofMotors(dof_index);
     return false;
   }
   float current_joint_angle = shared_dof_angles.angles[dof_index];
 
-  // Calculate expected motor angles using linear equations (joint->motor)
+  // Calculate expected motor angles using linear equations (joint->motor). Pass the
+  // live q0 so the bilinear DOF1 anchor is captured on the SAME map surface the
+  // control loop uses (q_other=NAN would bake the center-slice q0-coupling bias of
+  // the calibration pose into the saved anchor, appearing later as a systematic
+  // residual against the live surface).
+  float recalc_q0_live = shared_dof_angles.valid[Q0_DOF] ? shared_dof_angles.angles[Q0_DOF] : NAN;
   float expected_agonist_angle, expected_antagonist_angle;
   bool equations_available =
       calculateMotorAnglesWithEquations(dof_index, current_joint_angle, current_joint_angle,
-                                        expected_agonist_angle, expected_antagonist_angle);
+                                        expected_agonist_angle, expected_antagonist_angle,
+                                        recalc_q0_live);
 
   if (!equations_available) {
-    LOG_C1_ERROR("Unable to recalculate offsets - linear equations not available for DOF " +
-              String(dof_index));
-    LOG_C1_WARN("Required: perform auto-mapping to compute linear equations first");
-    LOG_C1_WARN("Alternatively: load linear equations from flash with CMD:LOAD_LINEAR_EQUATIONS");
+    LOG_C1_ERROR_F("Unable to recalculate offsets - linear equations not available for DOF %d",
+                   dof_index);
+    LOG_C1_WARN_F("Required: perform auto-mapping to compute linear equations first");
+    LOG_C1_WARN_F("Alternatively: load linear equations from flash with CMD:LOAD_LINEAR_EQUATIONS");
     stopDofMotors(dof_index);
     return false;
   }
 
   LOG_C1_INFO("Using linear equations to compute expected angles");
 
-  LOG_C1_DEBUG(String("Current joint angle: ") + String(current_joint_angle));
-  LOG_C1_DEBUG(String("Expected agonist angle: ") + String(expected_agonist_angle));
-  LOG_C1_DEBUG(String("Expected antagonist angle: ") + String(expected_antagonist_angle));
-
   // Read current motor angles (without applying offset)
   float current_agonist_angle    = agonist_motor->getMultiAngleSync(false).angle;
   float current_antagonist_angle = antagonist_motor->getMultiAngleSync(false).angle;
 
-  LOG_C1_DEBUG(String("Current agonist motor angle (raw): ") + String(current_agonist_angle));
-  LOG_C1_DEBUG(String("Current antagonist motor angle (raw): ") + String(current_antagonist_angle));
+  // (chatter collapsed to one summary line, v2 String pass 2026-07-06)
+  if (LOG_LEVEL >= 3) {
+    char f1[48], f2[48], f3[48];
+    char ln[120]; int off = 0;
+    c1cat(ln, sizeof ln, &off, "Recalc DOF %d: joint=%s expected A=%s B=%s", dof_index,
+          c1f(f1, current_joint_angle, 2), c1f(f2, expected_agonist_angle, 2),
+          c1f(f3, expected_antagonist_angle, 2));
+    c1cat(ln, sizeof ln, &off, " raw A=%s B=%s", c1f(f1, current_agonist_angle, 2),
+          c1f(f2, current_antagonist_angle, 2));
+    LOG_C1_DEBUG_F("%s", ln);
+  }
 
   // Calculate new offsets
   float new_agonist_offset;
@@ -1226,8 +1349,11 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
       new_antagonist_offset = current_antagonist_angle - expected_antagonist_angle;
   }
 
-  LOG_C1_DEBUG(String("New agonist offset: ") + String(new_agonist_offset));
-  LOG_C1_DEBUG(String("New antagonist offset: ") + String(new_antagonist_offset));
+  {
+    char f1[48], f2[48];
+    LOG_C1_DEBUG_F("New offsets: agonist=%s antagonist=%s", c1f(f1, new_agonist_offset, 2),
+                   c1f(f2, new_antagonist_offset, 2));
+  }
 
   // Set new offsets
   agonist_motor->setOffsetEncoder(new_agonist_offset);
@@ -1236,8 +1362,6 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Verify that offsets were applied correctly
   float verified_agonist_angle    = agonist_motor->getMultiAngleSync().angle;
   float verified_antagonist_angle = antagonist_motor->getMultiAngleSync().angle;
-  LOG_C1_DEBUG(String("Verified agonist angle: ") + String(verified_agonist_angle));
-  LOG_C1_DEBUG(String("Verified antagonist angle: ") + String(verified_antagonist_angle));
 
   // Calculate residual error
   float agonist_error    = fabs(verified_agonist_angle - expected_agonist_angle);
@@ -1247,63 +1371,28 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
   // Use a higher threshold for inversion/eversion (DOF 1) due to greater elasticity
   float ERROR_THRESHOLD = 2.0f; // Standard threshold for other DOFs
 
-  if (agonist_error > ERROR_THRESHOLD || antagonist_error > ERROR_THRESHOLD) {
-    LOG_C1_WARN("Residual error after offset calibration");
-    LOG_C1_DEBUG(String("Agonist error: ") + String(agonist_error));
-    LOG_C1_DEBUG(String("Antagonist error: ") + String(antagonist_error));
-    LOG_C1_DEBUG(String("Allowed error threshold: ") + String(ERROR_THRESHOLD) + "°");
+  // (chatter collapsed to one summary line, v2 String pass 2026-07-06)
+  if (LOG_LEVEL >= 3) {
+    char f1[48], f2[48], f3[48];
+    char ln[120]; int off = 0;
+    c1cat(ln, sizeof ln, &off, "Recalc verify DOF %d: A=%s B=%s", dof_index,
+          c1f(f1, verified_agonist_angle, 2), c1f(f2, verified_antagonist_angle, 2));
+    c1cat(ln, sizeof ln, &off, " err A=%s B=%s (limit %s°)", c1f(f1, agonist_error, 2),
+          c1f(f2, antagonist_error, 2), c1f(f3, ERROR_THRESHOLD, 2));
+    LOG_C1_DEBUG_F("%s", ln);
+  }
 
-    // Advanced error analysis
-    LOG_C1_DEBUG("=== DETAILED ERROR ANALYSIS ===");
-    LOG_C1_DEBUG(String("Joint type: ") + String(config.name));
-    LOG_C1_DEBUG(String("DOF: ") + String(config.dofs[dof_index].name) + " (index " +
-              String(dof_index) + ")");
-    LOG_C1_DEBUG(String("Encoder inverted: ") +
-             String(config.dofs[dof_index].encoder_invert ? "YES" : "NO"));
-    LOG_C1_DEBUG(String("Encoder channel: ") + String(config.dofs[dof_index].encoder_channel));
-    LOG_C1_DEBUG(String("Angle limits: ") + String(config.dofs[dof_index].limits.min_angle) +
-              "° / " + String(config.dofs[dof_index].limits.max_angle) + "°");
-    LOG_C1_DEBUG(String("Current joint angle: ") + String(current_joint_angle) + "°");
-    LOG_C1_DEBUG(String("Agonist error %: ") +
-              String((agonist_error / fabs(expected_agonist_angle)) * 100, 1) + "%");
-    LOG_C1_DEBUG(String("Antagonist error %: ") +
-              String((antagonist_error / fabs(expected_antagonist_angle)) * 100, 1) + "%");
-    LOG_C1_DEBUG("====================================");
+  if (agonist_error > ERROR_THRESHOLD || antagonist_error > ERROR_THRESHOLD) {
+    LOG_C1_WARN_F("Residual error after offset calibration");
+    // (chatter log removed, v2 String pass 2026-07-06)
 
     // Stop motors on failure only
     stopDofMotors(dof_index);
     return false;
   }
 
-  LOG_C1_DEBUG("Offsets successfully recalculated for DOF " + String(dof_index));
-  LOG_C1_DEBUG("New agonist offset: " + String(new_agonist_offset));
-  LOG_C1_DEBUG("New antagonist offset: " + String(new_antagonist_offset));
-  LOG_C1_DEBUG("Residual agonist error: " + String(agonist_error) +
-            "° (limit: " + String(ERROR_THRESHOLD) + "°)");
-  LOG_C1_DEBUG("Residual antagonist error: " + String(antagonist_error) +
-            "° (limit: " + String(ERROR_THRESHOLD) + "°)");
-
-  // Calibration details
-  LOG_C1_DEBUG("AGONIST: raw=" + String(current_agonist_angle) +
-            " expected=" + String(expected_agonist_angle) +
-            " calibrated=" + String(verified_agonist_angle) +
-            " deviation=" + String(agonist_error));
-  LOG_C1_DEBUG("ANTAGONIST: raw=" + String(current_antagonist_angle) +
-            " expected=" + String(expected_antagonist_angle) +
-            " calibrated=" + String(verified_antagonist_angle) +
-            " deviation=" + String(antagonist_error));
-  LOG_C1_DEBUG("Joint angle: " + String(current_joint_angle));
-
-  // Tension and stability information
-  LOG_C1_DEBUG("Tension: agonist_disp=" + String(agonist_displacement) +
-            " antagonist_disp=" + String(antagonist_displacement));
-  LOG_C1_DEBUG("Stability: agonist=" + String(stability_agonist) +
-            " antagonist=" + String(stability_antagonist));
-  LOG_C1_DEBUG("Tendon tension: " + String(tension_ok ? "OK" : "NOT OPTIMAL") +
-            ", System stability: " + String(is_stable ? "OK" : "NOT OPTIMAL"));
-
-  // Method used
-  LOG_C1_DEBUG("Method: LINEAR EQUATIONS (direct computation)");
+  LOG_C1_DEBUG_F("Offsets successfully recalculated for DOF %d", dof_index);
+  // (chatter log removed, v2 String pass 2026-07-06)
 
   // NOTE: Motors NOT stopped here — pretension torque is maintained.
   // Core0 will inject HOLDING targets immediately after all DOFs complete,
@@ -1328,6 +1417,8 @@ bool JointController::recalculateMotorOffsets(uint8_t dof_index, float pretensio
 
 // Apply saved offsets from flash to motor encoder objects (skip full recalc)
 bool JointController::applySavedOffsetsToMotors(uint8_t dof_index) {
+  abandonCarriedPair();  // S2 carry choke: this drives motor-CAN (getMultiAngleSync -> 0x92);
+                         // a pair carried across the cycle boundary must not collide with it.
   if (dof_index >= config.dof_count) return false;
 
   if (!_saved_offsets[dof_index].valid) {
@@ -1359,7 +1450,7 @@ bool JointController::applySavedOffsetsToMotors(uint8_t dof_index) {
   }
 
   if (agonist_motor == nullptr || antagonist_motor == nullptr) {
-    LOG_C1_ERROR("Motors not found for DOF " + String(dof_index));
+    LOG_C1_ERROR_F("Motors not found for DOF %d", dof_index);
     return false;
   }
 
@@ -1397,6 +1488,7 @@ bool JointController::applySavedOffsetsToMotors(uint8_t dof_index) {
 
   return true;
 }
+
 
 // Verify if the system is ready for movement
 bool JointController::isSystemReadyForMovement() {
@@ -1481,8 +1573,7 @@ bool JointController::getPid(uint8_t dof_index, uint8_t motor_type, float &kp, f
   }
 
   if (motor_index == -1) {
-    LOG_C1_ERROR("Motor not found in getPid (DOF=" + String(dof_index) +
-              ", type=" + String(motor_type) + ")");
+    LOG_C1_ERROR_F("Motor not found in getPid (DOF=%d, type=%d)", dof_index, motor_type);
     return false;
   }
 
@@ -1500,7 +1591,7 @@ bool JointController::getPid(uint8_t dof_index, uint8_t motor_type, float &kp, f
 
     return true;
   } else {
-    LOG_C1_ERROR("PID controller not initialized");
+    LOG_C1_ERROR_F("PID controller not initialized");
     return false;
   }
 }
@@ -1510,7 +1601,16 @@ bool JointController::setPid(uint8_t dof_index, uint8_t motor_type, float kp, fl
                              float tau) {
   // Validate parameters
   if (dof_index >= config.dof_count || (motor_type != 1 && motor_type != 2 && motor_type != 3)) {
-    LOG_C1_ERROR("Invalid parameters in setPid");
+    LOG_C1_ERROR_F("Invalid parameters in setPid");
+    return false;
+  }
+
+  if (config.dofs[dof_index].drive_type == DRIVE_ANTAGONISTIC_TENDON &&
+      (motor_type == 1 || motor_type == 2) &&
+      kd < PID_MIN_TENDON_INNER_KD) {
+    char f1[48], f2[48];
+    LOG_C1_ERROR_F("Rejected unsafe tendon inner Kd for DOF %d, motor %d: Kd=%s < floor %s",
+                   dof_index, motor_type, c1f(f1, kd, 3), c1f(f2, PID_MIN_TENDON_INNER_KD, 3));
     return false;
   }
 
@@ -1537,8 +1637,7 @@ bool JointController::setPid(uint8_t dof_index, uint8_t motor_type, float kp, fl
   }
 
   if (motor_index == -1) {
-    LOG_C1_ERROR("Motor not found in setPid (DOF=" + String(dof_index) +
-              ", type=" + String(motor_type) + ")");
+    LOG_C1_ERROR_F("Motor not found in setPid (DOF=%d, type=%d)", dof_index, motor_type);
     return false;
   }
 
@@ -1553,7 +1652,7 @@ bool JointController::setPid(uint8_t dof_index, uint8_t motor_type, float kp, fl
 
     return true;
   } else {
-    LOG_C1_ERROR("PID controller not initialized");
+    LOG_C1_ERROR_F("PID controller not initialized");
     return false;
   }
 }
@@ -1561,7 +1660,7 @@ bool JointController::setPid(uint8_t dof_index, uint8_t motor_type, float kp, fl
 bool JointController::setOuterLoopParameters(uint8_t dof_index, float kp, float ki, float kd,
                                              float stiffness_deg, float cascade_influence) {
   if (dof_index >= config.dof_count) {
-    LOG_C1_ERROR("Invalid parameters in setOuterLoopParameters (DOF out of range)");
+    LOG_C1_ERROR_F("Invalid parameters in setOuterLoopParameters (DOF out of range)");
     return false;
   }
 
@@ -1589,15 +1688,19 @@ bool JointController::setOuterLoopParameters(uint8_t dof_index, float kp, float 
     outer_pid_controllers[dof_index]->setTunings(kp, ki, kd, DEFAULT_OUTER_LOOP_TAU);
   }
 
-  SERIAL_C1_COM_LN("Outer loop parameters updated for DOF " + String(dof_index));
-  SERIAL_C1_COM_LN("  Kp=" + String(kp, 4) + ", Ki=" + String(ki, 4) + ", Kd=" + String(kd, 4));
-  SERIAL_C1_COM_LN("  Stiffness=" + String(stiffness_deg, 4) +
-                 "°, Influence=" + String(cascade_influence * 100.0f, 1) + "%");
+  // HOST-PARSED echo (_extract_outer_update: marker line + Kp/Ki/Kd regex) — bytes must not change.
+  {
+    char f1[48], f2[48], f3[48];
+    SERIAL_C1_COM_LN_F("Outer loop parameters updated for DOF %d", dof_index);
+    SERIAL_C1_COM_LN_F("  Kp=%s, Ki=%s, Kd=%s", c1f(f1, kp, 4), c1f(f2, ki, 4), c1f(f3, kd, 4));
+    SERIAL_C1_COM_LN_F("  Stiffness=%s°, Influence=%s%%", c1f(f1, stiffness_deg, 4),
+                       c1f(f2, cascade_influence * 100.0f, 1));
+  }
 
   return true;
 }
 
-bool JointController::getOuterLoopParameters(uint8_t dof_index, float &kp, float &ki, float &kd,
+bool HOT_FUNC(JointController::getOuterLoopParameters)(uint8_t dof_index, float &kp, float &ki, float &kd,
                                              float &stiffness_deg, float &cascade_influence) const {
   if (dof_index >= config.dof_count) {
     return false;
@@ -1616,7 +1719,8 @@ bool JointController::getOuterLoopParameters(uint8_t dof_index, float &kp, float
 
 void JointController::setOuterLoopSamplingPeriod(float new_ts) {
   if (new_ts <= 0.0f || !std::isfinite(new_ts)) {
-    LOG_C1_WARN("Invalid sampling period for outer loop: " + String(new_ts, 6));
+    char f1[48];
+    LOG_C1_WARN_F("Invalid sampling period for outer loop: %s", c1f(f1, new_ts, 6));
     return;
   }
 
@@ -1626,6 +1730,27 @@ void JointController::setOuterLoopSamplingPeriod(float new_ts) {
     for (int i = 0; i < config.dof_count; i++) {
       if (outer_pid_controllers[i]) {
         outer_pid_controllers[i]->setSamplingPeriod(new_ts);
+      }
+    }
+  }
+}
+
+void JointController::setInnerLoopSamplingPeriod(float new_ts) {
+  if (new_ts <= 0.0f || !std::isfinite(new_ts)) {
+    char f1[48];
+    LOG_C1_WARN_F("Invalid sampling period for inner loop: %s", c1f(f1, new_ts, 6));
+    return;
+  }
+
+  // Update sampling period for all motor (inner) PID controllers. The constructors
+  // seed Ts from the PRESET motion.sampling_period (3000 us on the tendon presets),
+  // which diverges from the runtime inner_loop_period_us (4000 us boot default,
+  // 0x006-changeable) - the Ki*Ts / Kd/Ts scaling then runs on the wrong base.
+  // Called from the control loop's on-change sync alongside the outer twin.
+  if (pid_controllers) {
+    for (int i = 0; i < config.motor_count; i++) {
+      if (pid_controllers[i]) {
+        pid_controllers[i]->setSamplingPeriod(new_ts);
       }
     }
   }

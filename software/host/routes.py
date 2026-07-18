@@ -1509,6 +1509,29 @@ def register_routes(
                 else:
                     handler.send_new_command(joint, dof, COMMANDS['STOP_AUTO_MAPPING'])
                     message = f"Auto-mapping stopped via serial for {joint}"
+            elif cmd in ("fine-capture-start", "fine-capture-record", "fine-capture-stop",
+                         "fine-capture-commit", "fine-capture-abort"):
+                # Fine remap ("command and record") — CAN only (firmware 0x01B).
+                # Operator commands positions under normal impedance; record captures
+                # the settled (joint, agonist, antagonist) point; commit installs the
+                # per-DOF piecewise map.
+                action = cmd[len("fine-capture-"):]
+                dof_int = int(dof) if dof != 'ALL' else 0
+                if can_manager and can_manager.is_connected():
+                    can_manager.fine_capture_via_can(joint, action, dof_int)
+                    message = f"Fine capture {action} via CAN for {joint} DOF {dof_int}"
+                else:
+                    message = "CAN not connected — fine remap requires CAN"
+                    return jsonify({"status": "error", "message": message}), 503
+            elif cmd == "fine-capture-save":
+                # Persist the committed fine-map to flash (CAN 0x01C, firmware Phase 1.4) so it
+                # survives a power-cycle.
+                if can_manager and can_manager.is_connected():
+                    can_manager.save_fine_map_via_can(joint)
+                    message = f"Fine-map saved to flash via CAN for {joint}"
+                else:
+                    message = "CAN not connected — fine-map save requires CAN"
+                    return jsonify({"status": "error", "message": message}), 503
             elif cmd == "recalc-offset":
                 # Recalc-offset is operational → CAN first, serial fallback
                 dof_int = int(dof) if dof != 'ALL' else 0

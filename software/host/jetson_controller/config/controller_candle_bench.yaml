@@ -25,14 +25,14 @@ homing:
   tolerance_deg: 1.0      # Convergence threshold for homing complete
 
 nudge:
-  speed_deg_s: 15.0       # Degrees/second for +/- nudge commands
+  speed_deg_s: 8.0        # Degrees/second for +/- nudge commands (8 = fragile tendon-DOF safe per the bring-up playbook; was 50)
 
 default_joint: knee_right
 
 joints:
   knee_right:
     gains:
-      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      outer: { kp: 8.0, ki: 0.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
     home_position_deg:
@@ -40,16 +40,19 @@ joints:
 
   ankle_right:
     gains:
-      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      # outer kp 8->3, ki 8->0: 625Hz Kp-curve knee (bench 2026-07-09, DOF0). Map FF
+      # tracks; a modest kp trims the residual with far less motor oscillation (kp8 =
+      # 2.2x the tau oscillation of kp0). All bench characterization ran ki=0 (default).
+      outer: { kp: 3.0, ki: 0.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
-    stiffness_deg: 25.0
+    stiffness_deg: 25.0   # back to 25: stiffness 35 tripped MOTOR_RANGE on DOF1 (bad map + more co-contraction → motors out of range)
     home_position_deg:
       0: 0.0              # plantar-dorsal
       1: 0.0              # inversion-eversion
 
   hip_right:
     gains:
-      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      outer: { kp: 8.0, ki: 0.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
     dof_overrides:
@@ -63,7 +66,7 @@ joints:
 
   hip_left:
     gains:
-      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      outer: { kp: 8.0, ki: 0.0, kd: 0.08 }
       inner: { kp: 10.0, ki: 1.0, kd: 0.25 }
     stiffness_deg: 25.0
     dof_overrides:
@@ -77,7 +80,7 @@ joints:
 
   hip_roll_bench_right:
     gains:
-      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      outer: { kp: 8.0, ki: 0.0, kd: 0.08 }
       inner: { kp: 60.0, ki: 50.0, kd: 1.0 }
     stiffness_deg: 25.0
     home_position_deg:
@@ -85,7 +88,7 @@ joints:
 
   hip_roll_bench_left:
     gains:
-      outer: { kp: 8.0, ki: 8.0, kd: 0.08 }
+      outer: { kp: 8.0, ki: 0.0, kd: 0.08 }
       inner: { kp: 60.0, ki: 50.0, kd: 1.0 }
     stiffness_deg: 25.0
     home_position_deg:

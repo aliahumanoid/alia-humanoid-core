@@ -161,7 +161,8 @@ def _autodetect_can_channel(interface: str = "slcan") -> str:
 
 
 def load_config(yaml_path: Optional[str] = None,
-                selected_joints: Optional[list[str]] = None) -> ControllerConfig:
+                selected_joints: Optional[list[str]] = None,
+                autodetect_can: bool = True) -> ControllerConfig:
     """Load and merge configuration.
 
     Args:
@@ -363,7 +364,10 @@ def load_config(yaml_path: Optional[str] = None,
     # Auto-detect CAN channel if set to "auto" or empty
     can_channel = can_cfg.get("channel", "auto")
     if not can_channel or can_channel == "auto":
-        can_channel = _autodetect_can_channel(can_interface)
+        if not autodetect_can:
+            can_channel = "dry-run"
+        else:
+            can_channel = _autodetect_can_channel(can_interface)
 
     return ControllerConfig(
         can_interface=can_interface,

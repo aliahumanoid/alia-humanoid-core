@@ -1,9 +1,17 @@
 # CAN System Architecture for Alia Humanoid Robot
 
-**Document Version:** 2.3
-**Date:** 2026-03-31
+> **License:** this specification is released under the MIT License (unlike the GPLv3
+> firmware/host code) so third-party tools can implement it without copyleft obligations.
+
+**Document Version:** 2.4
+**Date:** 2026-06-30
 **Status:** Design Specification (v1.0 host↔controller freeze subset added)
 **Authors:** Alia Robotics Team
+
+**Changelog v2.4 (D067/DOF1 hardening):**
+- **IMPEDANCE_CTRL extended**: documents adaptive-HOLD mask and diagnostic Loop2 actuation subcommands
+- **FAULT_SNAPSHOT_CTRL added**: documents host retrieval control path at CAN ID `0x01F`
+- **CAN ID table corrected**: reserved range now starts at `0x020`
 
 **Changelog v2.3 (D034):**
 - **Protocol v1.0 freeze subset added**: documents the bench-validated host↔controller baseline for `KNEE_RIGHT` and `ANKLE_RIGHT`
@@ -27,7 +35,7 @@
 **Changelog v2.1:**
 - **CAN ID 0x01D**: Added SET_IMPEDANCE (variable-frame, 1-4 frames per command)
 - **CAN ID 0x01E**: Added IMPEDANCE_CTRL (disable/enable/watchdog)
-- **CAN ID Table**: Updated reserved range from 0x01D-0x13F to 0x01F-0x13F
+- **CAN ID Table**: Updated reserved range from 0x01D-0x13F to 0x01F-0x13F (superseded by v2.4: `0x01F` is now FAULT_SNAPSHOT_CTRL)
 
 **Changelog v2.0:**
 - **Consolidated**: Merged `CAN_CONTROL_PROTOCOL.md` and `jetson-streaming-can.md` into this document
@@ -322,7 +330,7 @@ Recommendation: Option A (separate legs)
 |----------|---------|----------|-----------|-----------|
 | 0x000 | Emergency Stop | **Level 0** (Highest) | On-demand | Host → All |
 | 0x002-0x004 | System Control (TimeSync, Encoder, PID Diag) | **Level 1** (System) | On-demand | Host → Ctrl |
-| 0x01D-0x01E | Impedance Commands (SET_IMPEDANCE, IMPEDANCE_CTRL) | **Level 1** (System) | 200 Hz | Host → Ctrl |
+| 0x01D-0x01F | Impedance/Fault Control (SET_IMPEDANCE, IMPEDANCE_CTRL, FAULT_SNAPSHOT_CTRL) | **Level 1** (System) | 200 Hz / sporadic | Host → Ctrl |
 | 0x140-0x280 | Motor Torque Commands | **Level 2** (CRITICAL) | 500 Hz | Ctrl → Motors |
 | ~~0x380-0x39F~~ | ~~Waypoint Commands~~ | | | **REMOVED (D033)** |
 | 0x400-0x4FF | Status/Feedback | **Level 3** (Lowest) | 10-50 Hz | Ctrl → Host |
@@ -542,7 +550,7 @@ Frame 3 (seq=3, optional — feedforward):
 
 #### 4.2.9 IMPEDANCE_CTRL (ID: 0x01E) — Impedance Mode Control
 
-**Purpose**: Enable/disable impedance mode and configure watchdog.
+**Purpose**: Enable/disable impedance mode, configure watchdog, and select diagnostic impedance actuation options.
 
 ```
 Byte 0:    uint8_t   joint_id
@@ -550,7 +558,11 @@ Byte 1:    uint8_t   sub_cmd
              0x00 = disable (all DOFs → HOLDING)
              0x01 = enable (informational, actual switch on SET_IMPEDANCE)
              0x02 = set watchdog timeout
-Byte 2-3:  uint16_t  param (e.g. watchdog timeout in ms for sub_cmd=0x02)
+             0x03 = set per-DOF actuation mode
+             0x04 = set Loop2 0xA4 maxSpeed
+             0x05 = set Loop2 target slew
+             0x10 = set adaptive-HOLD feature mask
+Byte 2-3:  uint16_t  param (subcommand-specific)
 Byte 4-7:  padding
 ```
 
@@ -560,12 +572,78 @@ the active impedance target.
 
 **Watchdog (0x02)**: Range 10-60000 ms.
 
-On timeout, firmware does **not** tear down the impedance controller anymore.
-Instead it:
+**Actuation mode (0x03)**: Diagnostic per-DOF inner actuation selector.
+
+```
+param byte 0: dof
+param byte 1: mode
+              0 = Loop1 torque cascade (default)
+              1 = Loop2 dual-position 0xA4 diagnostic branch
+```
+
+`DISABLE (0x00)`, E-stop, controller-service entry, startup recovery, and Loop2 safety faults always return all DOFs to
+Loop1 and reset Loop2 target state. Loop2 is not persisted and is not the robot-use default. Switching into Loop2 is
+accepted only while the DOF is `HOLDING`, with a valid tendon map and valid joint encoder feedback.
+
+**Loop2 maxSpeed (0x04)** (wire updated 2026-07-03):
+
+```
+byte 2:     dof
+byte 3:     reserved (0)
+bytes 4..5: maxSpeed, u16 LE, RAW LKM 0xA4 units, range [10, 10000]
+```
+
+Firmware clamps to `[LOOP2_MIN_ANGLE_MAXSPEED, LOOP2_MAX_ANGLE_MAXSPEED]` = `[10, 10000]`. (The previous
+`maxSpeed/10` single-byte packing capped the field at 2550 units.) NOTE: the vendor 0xA4 maxSpeed LSB is
+unpinned (rotor vs output dps, factor 10) and no bench run has been maxSpeed-bound yet; the Loop2 joint speed
+is normally bound by the target slew STEP (`joint_dps ~= step_deg * loop_hz / map_slope`) - size maxSpeed
+generously so the step stays the binding knob, and pin the LSB with a dedicated bench characterization.
+
+**Loop2 target slew (0x05)**:
+
+```
+param byte 0: dof
+param byte 1: target step in centideg per control cycle
+```
+
+The firmware slews each motor-angle target before issuing `fireAngle2()`, reapplies the per-motor mapping safe-band after
+the slew, limits the Loop2 co-contraction spread to the configured safe diagnostic stiffness envelope, and withholds 0xA4
+during 0x92 bootstrap/recovery. Loop2 maxSpeed/step changes are rejected while the DOF is `MOVING`.
+
+Loop2 uses terminal safety semantics for motor-feedback faults that would otherwise only skip a torque-cycle in Loop1:
+motor feedback NaN/range, motor-angle jump, missed 0xA4 reply after bootstrap, and dangerous oscillation latch motor
+power off and force Loop1 recovery. Since 2026-07-03 the feedback faults are streak-gated (3 consecutive bad cycles,
+~12 ms @250 Hz, mirroring the tendon-encoder cut) so a single transient no longer power-cuts; the oscillation latch
+uses a higher Loop2-specific amplitude threshold (6 deg vs 3) because its response is terminal.
+
+**Cascade slope scaling (0x06)** (added 2026-07-03, global, opt-in):
+
+```
+param byte 0 (buf[2]): 0 = off (boot default, legacy formula), 1 = on
+```
+
+When enabled, the cascade scales the per-tendon `0.5*dth` term by `S_x/S_bar` (local map slopes from a
+finite-difference eval of the live map, ratio clamped to [0.5, 2.0]) and feeds the same ratios into the
+map-corridor governor. Addresses the joint-space gain variation and per-tendon tension leak where the map
+slope varies (range extremes); mid-range behavior is essentially unchanged.
+
+**Adaptive-HOLD mask (0x10)**: Runtime switch for HOLD characterization and robot-use validation.
+Current bench default boot behavior is all bits disabled (`0x0000`). `0x000F` opt-in
+enables the adaptive HOLD package for robot-use validation while leaving the normal
+safety faults and passive governor active in either mode.
+
+- bit 0 (`0x0001`) = periodic retension probe (`RPROBE`)
+- bit 1 (`0x0002`) = compliance deflection/stall detection
+- bit 2 (`0x0004`) = soft-hold torque reduction during compliance
+- bit 3 (`0x0008`) = anti-slack clamp during compliance
+
+On timeout, firmware stops chasing the host stream and gates active impedance control until the next accepted
+`SET_IMPEDANCE`. In Loop2 it first stops the DOF motors and returns the DOF to Loop1 so a latched `0xA4` target cannot
+continue holding inside the motor controller. Then it:
 
 - freezes the current joint position as a firmware-local hold reference
 - stops trusting host keepalives for the current session
-- preserves the active outer/inner impedance overrides
+- holds active outer/inner impedance overrides inactive while `watchdog_timed_out=true`
 - keeps the DOF in local HOLDING until:
   - a new `SET_IMPEDANCE` arrives, or
   - an explicit disable / E-Stop / startup reset occurs
@@ -573,7 +651,27 @@ Instead it:
 This avoids the artificial kick that was previously caused by restoring the
 saved PID parameters exactly when the watchdog expired.
 
-#### 4.2.10 Motor Commands (ID: 0x140-0x1FF) — Motor CAN Bus
+#### 4.2.10 FAULT_SNAPSHOT_CTRL (ID: 0x01F) — Fault Snapshot Retrieval Control
+
+**Purpose**: Host control path for reading the firmware fault snapshot / blackbox metadata after a fault or safety stop.
+
+```
+Byte 0:    uint8_t   sub_cmd
+             0x00 = query metadata
+             0x01 = begin dump
+             0x02 = request chunk
+             0x03 = clear snapshot
+Byte 1:    uint8_t   joint_id
+Byte 2:    uint8_t   snapshot_id
+Byte 3-6:  uint8_t   args (subcommand-specific)
+Byte 7:    uint8_t   sequence
+```
+
+The host tooling uses this path to retrieve fault context, including motor feedback flags and host-command timing
+(`last_age_ms`, `last_gap_ms`, `max_gap_ms`, accepted/late counters) for diagnosing stale host commands versus
+firmware/control failures.
+
+#### 4.2.11 Motor Commands (ID: 0x140-0x1FF) — Motor CAN Bus
 
 **Bus**: Motor CAN (MCP2515, CS=GP9) — physically separate from Host CAN
 **Format**: LKM protocol (8 bytes)
@@ -581,7 +679,7 @@ saved PID parameters exactly when the watchdog expired.
 **Direction**: Controller → Motors
 Handled by existing `LKM_Motor` library. Traffic never crosses to the Host CAN bus.
 
-#### 4.2.11 Status Feedback (ID: 0x400-0x4FF)
+#### 4.2.12 Status Feedback (ID: 0x400-0x4FF)
 
 ```cpp
 struct CanStatus_Joint {
@@ -605,7 +703,7 @@ struct CanStatus_Joint {
 `STATUS_HOLDING` means there is no active local motion segment for the selected DOF.
 In `SET_IMPEDANCE` mode this refers to the rolling segment state, not to `valid=false`.
 
-#### 4.2.12 JOINT_STATE Broadcast (ID: 0x4F0+joint)
+#### 4.2.13 JOINT_STATE Broadcast (ID: 0x4F0+joint)
 
 **Purpose**: Real-time impedance feedback broadcast for the currently active joint.
 
@@ -626,9 +724,9 @@ Byte 7:    uint8_t   status bits
 - bit 1: holding (`1` = no active local rolling segment for this DOF)
 - bit 2: watchdog warning (`1` once elapsed time exceeds 80% of timeout while host stream is still armed)
 
-After watchdog timeout has been latched into firmware-local hold, bit 2 is
-suppressed again. This distinguishes "host keepalive is about to expire" from
-"host already timed out, but local hold is now stable and expected".
+After watchdog timeout has been latched into firmware-local hold, bit 2 is suppressed again. This distinguishes
+"host keepalive is about to expire" from "host already timed out; active impedance is gated until the next accepted
+`SET_IMPEDANCE`".
 
 This frame is intended for host-side monitoring and UI feedback. It is not required
 for the local rolling-segment controller to function.
@@ -652,7 +750,7 @@ These buses are electrically isolated. Bandwidth must be analyzed separately.
 |--------------|-----|-----------|---------|-----------|-------|
 | Time Sync | H→C | 10 | 10 | 0.14% | Per-channel fan-out (*) |
 | SET_IMPEDANCE | H→C | 200 | 200-800 | 2.8-11.4% | 1-4 frames per command |
-| IMPEDANCE_CTRL | H→C | sporadic | <10 | <0.14% | Enable/disable/watchdog |
+| IMPEDANCE_CTRL | H→C | sporadic | <10 | <0.14% | Enable/disable/watchdog/actuation/adaptive-HOLD |
 | Config/Commands | H→C | sporadic | <10 | <0.14% | PID set, etc. |
 | Encoder Stream | C→H | 100 | 100 | 1.4% | Optional |
 | PID Diagnostics | C→H | 50-100 | 100-200 | 1.4-2.8% | Optional (2-4 frames) |
@@ -1703,8 +1801,9 @@ Each joint controller has two physically separate CAN buses:
 | ~~0x01B~~ | ~~Re-anchor Interval~~ | | **REMOVED (D033)** |
 | ~~0x01C~~ | ~~WP Telemetry Request~~ | | **REMOVED (D033)** |
 | **0x01D** | **SET_IMPEDANCE (1-4 frames)** | Host → Ctrl | High |
-| **0x01E** | **IMPEDANCE_CTRL (disable/enable/watchdog)** | Host → Ctrl | High |
-| 0x01F-0x13F | Reserved (Future High Priority) | - | - |
+| **0x01E** | **IMPEDANCE_CTRL (disable/enable/watchdog/actuation/adaptive-HOLD)** | Host → Ctrl | High |
+| **0x01F** | **FAULT_SNAPSHOT_CTRL** | Host → Ctrl | High |
+| 0x020-0x13F | Reserved (Future High Priority) | - | - |
 | ~~0x380-0x393~~ | ~~Multi-DOF Waypoint Joint 0-19~~ | | **REMOVED (D033)** |
 | 0x400-0x40F | Status/Feedback | Ctrl → Host | Level 4 |
 | 0x410 | Encoder Stream Data | Ctrl → Host | Level 4 |

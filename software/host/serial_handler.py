@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 IDENTITY_RESPONSE_RE = re.compile(
-    r"^RSP:IDENTITY\((\d+)\):PROFILE=([A-Z_]+):STORED_PROFILE=([A-Z_]+):SOURCE=([A-Z_]+):UID=([0-9A-F]+):FW=(.+)$"
+    r"^RSP:IDENTITY\((\d+)\):PROFILE=([A-Z_]+):STORED_PROFILE=([A-Z_]+):SOURCE=([A-Z_]+):UID=([0-9A-F]+):FW=([^:]+)(?::BUILD=(.+))?$"
 )
 JOINT_PROFILE_SET_RE = re.compile(
     r"^RSP:JOINT_PROFILE_SET\((\d+)\):NEW_PROFILE=([A-Z_]+):REBOOT_REQUIRED=(\d+)$"
@@ -343,6 +343,35 @@ class SerialHandler:
                     logger.warning(f"Failed to parse STALL_ABORT message: {line}, error: {e}")
             else:
                 logger.warning(f"Failed to parse STALL_ABORT message: {line}")
+        elif "FINE_MAP_POINT:" in line:
+            # Fine remap live point stream: FINE_MAP_POINT:<dof>:IDX=<n>:JOINT=<j>:AG=<a>:ANTA=<b>
+            m = re.search(
+                r"FINE_MAP_POINT:(\d+):IDX=(\d+):JOINT=([-+]?\d*\.?\d+):AG=([-+]?\d*\.?\d+):ANTA=([-+]?\d*\.?\d+)",
+                line,
+            )
+            if m:
+                dof, idx, j, a, b = m.groups()
+                self.socketio.emit(
+                    "fine_map_point",
+                    {
+                        "joint": getattr(self, "detected_joint_name", None),
+                        "dof": int(dof),
+                        "index": int(idx),
+                        "joint_angle": float(j),
+                        "agonist": float(a),
+                        "antagonist": float(b),
+                    },
+                    namespace="/movement",
+                )
+            self.status_message.append(f"{line}")
+        elif ("FINE_COMMIT_" in line) or ("FINE_CAPTURE_" in line) or ("FINE_POINT_REJECT" in line):
+            # Fine remap status/feedback lines for the UI
+            self.socketio.emit(
+                "fine_capture_status",
+                {"joint": getattr(self, "detected_joint_name", None), "line": line},
+                namespace="/movement",
+            )
+            self.status_message.append(f"{line}")
         elif line.strip():  # Messages without EVT: prefix are only logged
             logger.info(f"Received non-EVT message (logged only): {line}")
             # Add to status messages for UI anyway, but with distinctive prefix
@@ -3054,7 +3083,8 @@ class SerialHandler:
         if not match:
             return None
 
-        active_joint_id, profile, stored_profile, source, uid, fw_version = match.groups()
+        (active_joint_id, profile, stored_profile, source, uid, fw_version,
+         build) = match.groups()
         return {
             "active_joint_id": int(active_joint_id),
             "profile": profile,
@@ -3062,6 +3092,7 @@ class SerialHandler:
             "source": source,
             "uid": uid,
             "fw_version": fw_version,
+            "build": build,  # "<git_sha>@<iso_date>" or None on older firmware
             "raw": line,
         }
 

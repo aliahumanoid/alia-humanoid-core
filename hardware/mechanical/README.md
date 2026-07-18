@@ -6,6 +6,10 @@ This is the direct entrypoint for the currently released mechanical assets.
 
 The current public Phase 0 release is centered on the **right lower leg + right ankle** plus reusable common hardware.
 
+For the simplest STL download path, use:
+
+- [hardware/stl/phase0_rev_a](../stl/phase0_rev_a/)
+
 Released printable parts live in:
 
 - [ankle/right/rev_a/stl](ankle/right/rev_a/stl)

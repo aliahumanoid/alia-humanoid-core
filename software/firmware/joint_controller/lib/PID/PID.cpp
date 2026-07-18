@@ -6,6 +6,7 @@
  */
 
 #include "PID.h"
+#include <hot_path.h>
 
 // ===================================================================
 // CONSTRUCTOR
@@ -53,16 +54,26 @@ PID::PID(float Ts, float kp, float ki, float kd, float umax, float umin, float t
  * - x: current measured value
  * - uff: feedforward control term
  */
-float PID::control(float xsp, float x, float uff, float ki_scale, bool freeze_integrator) {
+float HOT_FUNC(PID::control)(float xsp, float x, float uff, float ki_scale, bool freeze_integrator,
+                   float dt_override) {
   // Step 1: Calculate error
   float e = xsp - x;
 
+  // Measured-dt: when a positive dt_override (the real elapsed loop time, seconds) is
+  // supplied, use it for the TIME-SCALED terms (integral, derivative, derivative filter)
+  // instead of the fixed member Ts. When a cycle runs long — e.g. the real cycle is ~8ms
+  // not 4ms after a loop overrun — fixed-Ts over-weights the derivative (divides the
+  // legitimately larger second-difference by too small a dt -> a ~2x torque kick on the
+  // back-to-back resume) and under-integrates. ts = the real dt fixes both. dt_override<=0
+  // keeps the legacy fixed-Ts behaviour (and gates the runtime A/B flag at the call site).
+  float ts = (dt_override > 0.0f) ? dt_override : Ts;
+
   // Step 2: Proportional term (incremental)
-  // Uses error difference for velocity form
+  // Uses error difference for velocity form — time-independent, no dt scaling.
   float up = kp * (e - eprev[0]);
 
   // Step 3: Integral term with anti-windup
-  float ui = ki * ki_scale * Ts * e;
+  float ui = ki * ki_scale * ts * e;
   // Anti-windup: disable integration when output is saturated
   // This prevents integral windup during saturation
   if (freeze_integrator || uprev + uff >= umax || uprev + uff <= umin) {
@@ -74,11 +85,11 @@ float PID::control(float xsp, float x, float uff, float ki_scale, bool freeze_in
   // Raw derivative: -Kd/Ts * [x(k) - 2*x(k-1) + x(k-2)]
   // The negative sign is needed because we're differentiating x instead of e=(xsp-x)
   // When tracking a constant setpoint: d(xsp-x)/dt = -dx/dt, hence the sign change
-  float ud = -kd / Ts * (x - 2 * xprev[0] + xprev[1]);
-  
+  float ud = -kd / ts * (x - 2 * xprev[0] + xprev[1]);
+
   // Apply first-order low-pass filter to reduce noise
-  // Filter equation: y(k) = α*y(k-1) + (1-α)*x(k), where α = tau/(tau+Ts)
-  float udfilt = tau / (tau + Ts) * udfiltprev + Ts / (tau + Ts) * ud;
+  // Filter equation: y(k) = α*y(k-1) + (1-α)*x(k), where α = tau/(tau+ts)
+  float udfilt = tau / (tau + ts) * udfiltprev + ts / (tau + ts) * ud;
 
   // Store diagnostic outputs (for external monitoring)
   last_up = up;
@@ -89,19 +100,30 @@ float PID::control(float xsp, float x, float uff, float ki_scale, bool freeze_in
   // u(k) = u(k-1) + ΔP + I + D_filtered + feedforward
   float u = uprev + up + ui + udfilt + uff;
 
-  // Step 6: Update state for next iteration
-  eprev[1]   = eprev[0]; // Shift error history
-  eprev[0]   = e;
-  xprev[1]   = xprev[0]; // Shift measurement history (for derivative on measurement)
-  xprev[0]   = x;
-  uprev      = u - uff;  // Store output without feedforward
-  udfiltprev = udfilt;   // Store filtered derivative
-
-  // Step 7: Output saturation (hard limits)
+  // Step 6: Output saturation (hard limits) — applied BEFORE the accumulator
+  // is stored, so anti-windup is by back-calculation: uprev records the
+  // SATURATED output, never the unbounded pre-clamp value.
+  //
+  // Storing the pre-clamp u into uprev (the previous behaviour) let the
+  // accumulator wind far past [umin,umax], so the output stayed pinned at the
+  // saturation limit for extra cycles after the error had already collapsed
+  // (the controller had to subtract the accumulated excess before leaving
+  // saturation). On the inner motor PID that is the "hold a max command
+  // open-loop into the stop" tendon failure family; on the outer joint PID it
+  // pins delta_theta at ±30 past error reversal (the DOF1 saturated-P "scatti"
+  // limit cycle). Clamping first bounds the accumulator and removes both.
   if (u > umax)
     u = umax;
   else if (u < umin)
     u = umin;
+
+  // Step 7: Update state for next iteration
+  eprev[1]   = eprev[0]; // Shift error history
+  eprev[0]   = e;
+  xprev[1]   = xprev[0]; // Shift measurement history (for derivative on measurement)
+  xprev[0]   = x;
+  uprev      = u - uff;  // Store SATURATED output without feedforward (bounded -> no windup)
+  udfiltprev = udfilt;   // Store filtered derivative
 
   return u;
 }

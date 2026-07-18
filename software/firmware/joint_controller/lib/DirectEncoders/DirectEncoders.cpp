@@ -9,6 +9,7 @@
 #include "IntercoreSync.h"
 #include <debug.h>
 #include <cstring>
+#include <hot_path.h>
 
 /**
  * @brief Handshake with Core1 before flash operations.
@@ -137,9 +138,20 @@ void DirectEncoders::begin() {
 // UPDATE
 // ============================================================================
 
-void DirectEncoders::update() {
-  // Process any pending reset requests from Core1 FIRST
-  processPendingResets();
+void HOT_FUNC(DirectEncoders::update)() {
+  // Process any pending reset requests from Core1 FIRST. Guard hoisted here (2026-07-06
+  // round-2 review): the callee body is flash-resident (it can touch flash-save logic and
+  // must NOT move to RAM); the hoist keeps the every-cycle RAM path free of flash entries,
+  // entering the flash body only when a reset/save is actually pending (rare, event-driven).
+  {
+    bool pending = _pending_save_flash;
+    for (int i = 0; i < DIRECT_ENCODER_COUNT && !pending; i++) {
+      pending = _pending_reset[i];
+    }
+    if (pending) {
+      processPendingResets();
+    }
+  }
   
   unsigned long now_us = micros();
   unsigned long delta_us = now_us - _last_read_us;
@@ -192,7 +204,7 @@ void DirectEncoders::update() {
 // VALIDATION
 // ============================================================================
 
-float DirectEncoders::readEncoderWithValidation(uint8_t encoder_index, unsigned long delta_us) {
+float HOT_FUNC(DirectEncoders::readEncoderWithValidation)(uint8_t encoder_index, unsigned long delta_us) {
   if (encoder_index >= DIRECT_ENCODER_COUNT || _sensors[encoder_index] == nullptr) {
     return 0.0f;
   }
@@ -276,8 +288,8 @@ float DirectEncoders::readEncoderWithValidation(uint8_t encoder_index, unsigned 
     _error_counts[encoder_index]++;
     _dataValid = false;
     
-    LOG_ERROR_F("Encoder %d: All attempts failed. Consecutive errors = %u", 
-                encoder_index + 1, _error_counts[encoder_index]);
+    LOG_ERROR_F("Encoder %d: All attempts failed. Consecutive errors = %lu",
+                encoder_index + 1, (unsigned long)_error_counts[encoder_index]);
     
     // Return last valid value to avoid jumps
     return _last_valid_angles[encoder_index];
@@ -288,7 +300,7 @@ float DirectEncoders::readEncoderWithValidation(uint8_t encoder_index, unsigned 
 // GETTERS
 // ============================================================================
 
-float DirectEncoders::getAngle(uint8_t encoder_index) const {
+float HOT_FUNC(DirectEncoders::getAngle)(uint8_t encoder_index) const {
   if (encoder_index >= DIRECT_ENCODER_COUNT) return 0.0f;
   return _total_angles_deg[encoder_index];
 }
@@ -469,12 +481,12 @@ void DirectEncoders::processPendingResets() {
   }
 }
 
-uint32_t DirectEncoders::getErrorCount(uint8_t encoder_index) const {
+uint32_t HOT_FUNC(DirectEncoders::getErrorCount)(uint8_t encoder_index) const {
   if (encoder_index >= DIRECT_ENCODER_COUNT) return 0;
   return _error_counts[encoder_index];
 }
 
-bool DirectEncoders::isEncoderConnected(uint8_t encoder_index) const {
+bool HOT_FUNC(DirectEncoders::isEncoderConnected)(uint8_t encoder_index) const {
   if (encoder_index >= DIRECT_ENCODER_COUNT) return false;
   return _connected[encoder_index];
 }

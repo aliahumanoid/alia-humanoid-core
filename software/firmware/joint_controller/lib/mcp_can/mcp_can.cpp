@@ -22,6 +22,7 @@
   1301  USA
 */
 #include "mcp_can.h"
+#include <hot_path.h>
 
 #define spi_readwrite mcpSPI->transfer
 #define spi_read() spi_readwrite(0x00)
@@ -44,7 +45,7 @@ void MCP_CAN::mcp2515_reset(void)
 ** Function name:           mcp2515_readRegister
 ** Descriptions:            Read data register
 *********************************************************************************************************/
-INT8U MCP_CAN::mcp2515_readRegister(const INT8U address)                                                                     
+INT8U HOT_FUNC(MCP_CAN::mcp2515_readRegister)(const INT8U address)                                                                     
 {
     INT8U ret;
 
@@ -63,7 +64,7 @@ INT8U MCP_CAN::mcp2515_readRegister(const INT8U address)
 ** Function name:           mcp2515_readRegisterS
 ** Descriptions:            Reads successive data registers
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_readRegisterS(const INT8U address, INT8U values[], const INT8U n)
+void HOT_FUNC(MCP_CAN::mcp2515_readRegisterS)(const INT8U address, INT8U values[], const INT8U n)
 {
     INT8U i;
     mcpSPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
@@ -82,7 +83,7 @@ void MCP_CAN::mcp2515_readRegisterS(const INT8U address, INT8U values[], const I
 ** Function name:           mcp2515_setRegister
 ** Descriptions:            Sets data register
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_setRegister(const INT8U address, const INT8U value)
+void HOT_FUNC(MCP_CAN::mcp2515_setRegister)(const INT8U address, const INT8U value)
 {
     mcpSPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
     MCP2515_SELECT();
@@ -97,7 +98,7 @@ void MCP_CAN::mcp2515_setRegister(const INT8U address, const INT8U value)
 ** Function name:           mcp2515_setRegisterS
 ** Descriptions:            Sets successive data registers
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_setRegisterS(const INT8U address, const INT8U values[], const INT8U n)
+void HOT_FUNC(MCP_CAN::mcp2515_setRegisterS)(const INT8U address, const INT8U values[], const INT8U n)
 {
     INT8U i;
     mcpSPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
@@ -116,7 +117,7 @@ void MCP_CAN::mcp2515_setRegisterS(const INT8U address, const INT8U values[], co
 ** Function name:           mcp2515_modifyRegister
 ** Descriptions:            Sets specific bits of a register
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_modifyRegister(const INT8U address, const INT8U mask, const INT8U data)
+void HOT_FUNC(MCP_CAN::mcp2515_modifyRegister)(const INT8U address, const INT8U mask, const INT8U data)
 {
     mcpSPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
     MCP2515_SELECT();
@@ -132,7 +133,7 @@ void MCP_CAN::mcp2515_modifyRegister(const INT8U address, const INT8U mask, cons
 ** Function name:           mcp2515_readStatus
 ** Descriptions:            Reads status register
 *********************************************************************************************************/
-INT8U MCP_CAN::mcp2515_readStatus(void)                             
+INT8U HOT_FUNC(MCP_CAN::mcp2515_readStatus)(void)                             
 {
     INT8U i;
     mcpSPI->beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
@@ -653,7 +654,7 @@ INT8U MCP_CAN::mcp2515_init(const INT8U canIDMode, const INT8U canSpeed, const I
 ** Function name:           mcp2515_write_id
 ** Descriptions:            Write CAN ID
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_write_id( const INT8U mcp_addr, const INT8U ext, const INT32U id )
+void HOT_FUNC(MCP_CAN::mcp2515_write_id)( const INT8U mcp_addr, const INT8U ext, const INT32U id )
 {
     uint16_t canid;
     INT8U tbufdata[4];
@@ -718,7 +719,7 @@ void MCP_CAN::mcp2515_write_mf( const INT8U mcp_addr, const INT8U ext, const INT
 ** Function name:           mcp2515_read_id
 ** Descriptions:            Read CAN ID
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_read_id( const INT8U mcp_addr, INT8U* ext, INT32U* id )
+void HOT_FUNC(MCP_CAN::mcp2515_read_id)( const INT8U mcp_addr, INT8U* ext, INT32U* id )
 {
     INT8U tbufdata[4];
 
@@ -743,7 +744,7 @@ void MCP_CAN::mcp2515_read_id( const INT8U mcp_addr, INT8U* ext, INT32U* id )
 ** Function name:           mcp2515_write_canMsg
 ** Descriptions:            Write message
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_write_canMsg( const INT8U buffer_sidh_addr)
+void HOT_FUNC(MCP_CAN::mcp2515_write_canMsg)( const INT8U buffer_sidh_addr)
 {
     INT8U mcp_addr;
     mcp_addr = buffer_sidh_addr;
@@ -761,7 +762,7 @@ void MCP_CAN::mcp2515_write_canMsg( const INT8U buffer_sidh_addr)
 ** Function name:           mcp2515_read_canMsg
 ** Descriptions:            Read message
 *********************************************************************************************************/
-void MCP_CAN::mcp2515_read_canMsg( const INT8U buffer_sidh_addr)        /* read can msg                 */
+void HOT_FUNC(MCP_CAN::mcp2515_read_canMsg)( const INT8U buffer_sidh_addr)        /* read can msg                 */
 {
     INT8U mcp_addr, ctrl;
 
@@ -785,7 +786,7 @@ void MCP_CAN::mcp2515_read_canMsg( const INT8U buffer_sidh_addr)        /* read 
 ** Function name:           mcp2515_getNextFreeTXBuf
 ** Descriptions:            Send message
 *********************************************************************************************************/
-INT8U MCP_CAN::mcp2515_getNextFreeTXBuf(INT8U *txbuf_n)                 /* get Next free txbuf          */
+INT8U HOT_FUNC(MCP_CAN::mcp2515_getNextFreeTXBuf)(INT8U *txbuf_n)                 /* get Next free txbuf          */
 {
     INT8U res, i, ctrlval;
     INT8U ctrlregs[MCP_N_TXBUFFERS] = { MCP_TXB0CTRL, MCP_TXB1CTRL, MCP_TXB2CTRL };
@@ -1071,7 +1072,7 @@ INT8U MCP_CAN::init_Filt(INT8U num, INT32U ulData)
 ** Function name:           setMsg
 ** Descriptions:            Set can message, such as dlc, id, dta[] and so on
 *********************************************************************************************************/
-INT8U MCP_CAN::setMsg(INT32U id, INT8U rtr, INT8U ext, INT8U len, INT8U *pData)
+INT8U HOT_FUNC(MCP_CAN::setMsg)(INT32U id, INT8U rtr, INT8U ext, INT8U len, INT8U *pData)
 {
     int i = 0;
     m_nID     = id;
@@ -1105,7 +1106,7 @@ INT8U MCP_CAN::clearMsg()
 ** Function name:           sendMsg
 ** Descriptions:            Send message
 *********************************************************************************************************/
-INT8U MCP_CAN::sendMsg()
+INT8U HOT_FUNC(MCP_CAN::sendMsg)()
 {
     INT8U res, res1, txbuf_n;
     uint32_t uiTimeOut, temp;
@@ -1143,7 +1144,7 @@ INT8U MCP_CAN::sendMsg()
 ** Function name:           sendMsgBuf
 ** Descriptions:            Send message to transmitt buffer
 *********************************************************************************************************/
-INT8U MCP_CAN::sendMsgBuf(INT32U id, INT8U ext, INT8U len, INT8U *buf)
+INT8U HOT_FUNC(MCP_CAN::sendMsgBuf)(INT32U id, INT8U ext, INT8U len, INT8U *buf)
 {
     INT8U res;
 	
@@ -1157,7 +1158,7 @@ INT8U MCP_CAN::sendMsgBuf(INT32U id, INT8U ext, INT8U len, INT8U *buf)
 ** Function name:           sendMsgBuf
 ** Descriptions:            Send message to transmitt buffer
 *********************************************************************************************************/
-INT8U MCP_CAN::sendMsgBuf(INT32U id, INT8U len, INT8U *buf)
+INT8U HOT_FUNC(MCP_CAN::sendMsgBuf)(INT32U id, INT8U len, INT8U *buf)
 {
     INT8U ext = 0, rtr = 0;
     INT8U res;
@@ -1179,7 +1180,7 @@ INT8U MCP_CAN::sendMsgBuf(INT32U id, INT8U len, INT8U *buf)
 ** Descriptions:            Load TX buffer and trigger send, return immediately without waiting
 **                          for transmission to complete. Useful for pipelining multiple sends.
 *********************************************************************************************************/
-INT8U MCP_CAN::sendMsgNoWait()
+INT8U HOT_FUNC(MCP_CAN::sendMsgNoWait)()
 {
     INT8U res, txbuf_n;
     uint32_t uiTimeOut, temp;
@@ -1203,7 +1204,7 @@ INT8U MCP_CAN::sendMsgNoWait()
 ** Function name:           sendMsgBufNoWait
 ** Descriptions:            Send message without waiting for TX complete (non-blocking)
 *********************************************************************************************************/
-INT8U MCP_CAN::sendMsgBufNoWait(INT32U id, INT8U ext, INT8U len, INT8U *buf)
+INT8U HOT_FUNC(MCP_CAN::sendMsgBufNoWait)(INT32U id, INT8U ext, INT8U len, INT8U *buf)
 {
     setMsg(id, 0, ext, len, buf);
     return sendMsgNoWait();
@@ -1213,7 +1214,7 @@ INT8U MCP_CAN::sendMsgBufNoWait(INT32U id, INT8U ext, INT8U len, INT8U *buf)
 ** Function name:           readMsg
 ** Descriptions:            Read message
 *********************************************************************************************************/
-INT8U MCP_CAN::readMsg()
+INT8U HOT_FUNC(MCP_CAN::readMsg)()
 {
     INT8U stat, res;
 
@@ -1241,7 +1242,7 @@ INT8U MCP_CAN::readMsg()
 ** Function name:           readMsgBuf
 ** Descriptions:            Public function, Reads message from receive buffer.
 *********************************************************************************************************/
-INT8U MCP_CAN::readMsgBuf(INT32U *id, INT8U *ext, INT8U *len, INT8U buf[])
+INT8U HOT_FUNC(MCP_CAN::readMsgBuf)(INT32U *id, INT8U *ext, INT8U *len, INT8U buf[])
 {
     if(readMsg() == CAN_NOMSG)
 	return CAN_NOMSG;
@@ -1259,7 +1260,7 @@ INT8U MCP_CAN::readMsgBuf(INT32U *id, INT8U *ext, INT8U *len, INT8U buf[])
 ** Function name:           readMsgBuf
 ** Descriptions:            Public function, Reads message from receive buffer.
 *********************************************************************************************************/
-INT8U MCP_CAN::readMsgBuf(INT32U *id, INT8U *len, INT8U buf[])
+INT8U HOT_FUNC(MCP_CAN::readMsgBuf)(INT32U *id, INT8U *len, INT8U buf[])
 {
     if(readMsg() == CAN_NOMSG)
 	return CAN_NOMSG;
@@ -1283,7 +1284,7 @@ INT8U MCP_CAN::readMsgBuf(INT32U *id, INT8U *len, INT8U buf[])
 ** Function name:           checkReceive
 ** Descriptions:            Public function, Checks for received data.  (Used if not using the interrupt output)
 *********************************************************************************************************/
-INT8U MCP_CAN::checkReceive(void)
+INT8U HOT_FUNC(MCP_CAN::checkReceive)(void)
 {
     INT8U res;
     res = mcp2515_readStatus();                                         /* RXnIF in Bit 1 and 0         */
@@ -1311,9 +1312,22 @@ INT8U MCP_CAN::checkError(void)
 ** Function name:           getError
 ** Descriptions:            Returns error register value.
 *********************************************************************************************************/
-INT8U MCP_CAN::getError(void)
+INT8U HOT_FUNC(MCP_CAN::getError)(void)
 {
     return mcp2515_readRegister(MCP_EFLG);
+}
+
+/*********************************************************************************************************
+** Function name:           clearRxOverflow
+** Descriptions:            Clear the sticky RX overflow flags (EFLG RX0OVR/RX1OVR). They latch on the
+**                          first buffer overflow and NEVER self-clear, so getError() reads them set
+**                          forever after one drop — clearing them each poll turns the flag into a
+**                          per-interval edge signal (overflow-since-last-clear), the only way to see
+**                          ongoing drops rather than "ever dropped once".
+*********************************************************************************************************/
+void MCP_CAN::clearRxOverflow(void)
+{
+    mcp2515_modifyRegister(MCP_EFLG, MCP_EFLG_RX0OVR | MCP_EFLG_RX1OVR, 0);
 }
 
 /*********************************************************************************************************

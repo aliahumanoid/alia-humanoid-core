@@ -11,6 +11,7 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include <Arduino.h>
+#include <hot_path.h>
 #include <array>
 #include <cstring>
 
@@ -33,6 +34,22 @@ static constexpr uint16_t PID_FLASH_VERSION            = 4;  ///< PID-only forma
 static constexpr uint16_t LINEAR_EQ_FLASH_VERSION      = 5;  ///< Linear equations format version
 static constexpr uint16_t SYSTEM_SETTINGS_FLASH_VERSION = 6;  ///< System settings format version
 static constexpr uint16_t MOTOR_OFFSETS_FLASH_VERSION   = 7;  ///< Motor offsets format version
+static constexpr uint16_t FINE_MAP_FLASH_VERSION        = 8;  ///< Fine-map (piecewise) format version
+static constexpr uint16_t FINE_MAP_2D_FLASH_VERSION     = 9;  ///< Fine-map 2D (bilinear) format version
+
+// Sub-offsets within the LINEAR_EQ sector (whole-sector RMW co-locates v5 and v8 records).
+static constexpr uint32_t LINEAR_EQ_V5_SUBOFFSET = 0x000u;
+static constexpr uint32_t FINE_MAP_V8_SUBOFFSET  = 0x400u; // 0x800 reserved for v9 2D
+static constexpr uint32_t FINE_MAP_V9_SUBOFFSET  = 0x800u; // reserved (future 2D bilinear map)
+// Compile-time layout guards: if any record grows past its sub-offset window, fail the build
+// instead of silently corrupting the co-located record at flash-write time.
+static_assert(sizeof(struct LinearEquationsDeviceData) <= FINE_MAP_V8_SUBOFFSET,
+              "v5 linear-eq record overlaps the v8 fine-map sub-offset (0x400)");
+static_assert(FINE_MAP_V8_SUBOFFSET + sizeof(struct FineMapDeviceDataV8) <= FINE_MAP_V9_SUBOFFSET,
+              "v8 fine-map record overlaps the v9 (2D) reserved region (0x800)");
+// (The weaker `FINE_MAP_V9_SUBOFFSET <= FLASH_SECTOR_SIZE` guard is implied by the next one.)
+static_assert(FINE_MAP_V9_SUBOFFSET + sizeof(struct FineMap2DDeviceDataV9) <= FLASH_SECTOR_SIZE,
+              "v9 2D record exceeds the 4KB sector");
 
 // Time tracking globals for overflow handling
 unsigned long overflow_count;  ///< Number of micros() overflows
@@ -455,7 +472,7 @@ float get_current_time() {
  * 3. Linearly interpolate between corresponding data2 values
  * 4. Clamp to boundaries if out of range
  */
-float interpolate_data(float target_value, const float *data1, const float *data2, int size) {
+float HOT_FUNC(interpolate_data)(float target_value, const float *data1, const float *data2, int size) {
   // Determine data1 sequence direction
   bool is_increasing = data1[0] < data1[size - 1];
   float result_value = 0.0f;
@@ -497,58 +514,71 @@ float interpolate_data(float target_value, const float *data1, const float *data
 // FLASH STORAGE - LINEAR EQUATIONS SAVE/LOAD
 // ===================================================================
 
+// Whole-sector RMW writer for the LINEAR_EQ sector. Reads the current sector into RAM, patches the
+// v5, v8 and/or v9 record, then erases + reprograms the WHOLE sector in one window — so a v5 save
+// never wipes a co-located v8 fine-map or v9 2D grid, and vice-versa. Pass nullptr for any record
+// you are NOT updating.
+static void write_linear_eq_sector(const struct LinearEquationsDeviceData *v5,
+                                   const struct FineMapDeviceDataV8 *v8,
+                                   const struct FineMap2DDeviceDataV9 *v9) {
+  static uint8_t sector[FLASH_SECTOR_SIZE];  // .bss, not stack
+  memcpy(sector, (const void *)(XIP_BASE + FLASH_LINEAR_EQ_OFFSET), FLASH_SECTOR_SIZE);
+  if (v5) {
+    struct LinearEquationsDeviceData rec = *v5;
+    rec.magic_number = MAGIC_NUMBER;
+    rec.version      = LINEAR_EQ_FLASH_VERSION;
+    rec.timestamp    = millis();
+    rec.checksum     = calculate_checksum((uint8_t *)&rec + 8, sizeof(rec) - 8);
+    memcpy(sector + LINEAR_EQ_V5_SUBOFFSET, &rec, sizeof(rec));
+  }
+  if (v8) {
+    struct FineMapDeviceDataV8 rec = *v8;
+    rec.magic     = FINE_MAP_V8_MAGIC;
+    rec.version   = FINE_MAP_FLASH_VERSION;
+    rec.timestamp = millis();
+    rec.checksum  = calculate_checksum((uint8_t *)&rec + 8, sizeof(rec) - 8);
+    memcpy(sector + FINE_MAP_V8_SUBOFFSET, &rec, sizeof(rec));
+  }
+  if (v9) {
+    struct FineMap2DDeviceDataV9 rec = *v9;
+    rec.magic     = FINE_MAP_V9_MAGIC;
+    rec.version   = FINE_MAP_2D_FLASH_VERSION;
+    rec.timestamp = millis();
+    rec.checksum  = calculate_checksum((uint8_t *)&rec + 8, sizeof(rec) - 8);
+    memcpy(sector + FINE_MAP_V9_SUBOFFSET, &rec, sizeof(rec));
+  }
+  if (!wait_for_core1_flash_ready("linear-eq sector write")) {
+    LOG_ERROR("Sector write aborted: Core1 flash handshake failed");
+    return;
+  }
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_erase(FLASH_LINEAR_EQ_OFFSET, FLASH_SECTOR_SIZE);
+  for (size_t off = 0; off < FLASH_SECTOR_SIZE; off += FLASH_PAGE_SIZE) {
+    flash_range_program(FLASH_LINEAR_EQ_OFFSET + off, sector + off, FLASH_PAGE_SIZE);
+  }
+  restore_interrupts(ints);
+  end_core1_flash_pause();
+}
+
 /**
  * Save linear calibration equations to flash
- * 
+ *
  * Similar procedure to PID save but stores motor-joint mapping equations
  * with calibration metadata (R², MSE, safety limits).
+ *
+ * The actual flash write goes through write_linear_eq_sector() (whole-sector RMW) so a co-located
+ * v8 fine-map record in the same sector is preserved.
  */
 void save_linear_equations_data(struct LinearEquationsDeviceData data) {
-  // Populate header metadata
+  // Populate header metadata (the writer re-sets these too, but keep them for the prints below).
   data.magic_number = MAGIC_NUMBER;
   data.version      = LINEAR_EQ_FLASH_VERSION;  // Version with safety limits
   data.timestamp    = millis();                 // Save timestamp
 
-  // Calculate checksum (excludes header)
-  data.checksum = calculate_checksum((uint8_t *)&data + sizeof(uint32_t) + sizeof(uint16_t) * 2,
-                                     sizeof(LinearEquationsDeviceData) - sizeof(uint32_t) -
-                                         sizeof(uint16_t) * 2);
+  size_t data_size = sizeof(struct LinearEquationsDeviceData);
 
-  uint8_t *data_ptr = (uint8_t *)&data;
-  size_t data_size  = sizeof(struct LinearEquationsDeviceData);
-  size_t offset     = 0;
-
-  // Calculate number of sectors to erase
-  size_t num_sectors = (data_size + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
-
-  // Handshake: wait for Core1 to park in RAM before flash erase/program
-  if (!wait_for_core1_flash_ready("linear equations save")) {
-    LOG_ERROR("Linear equations save aborted: Core1 flash handshake failed");
-    return;
-  }
-  
-  // Atomic flash operation
-  uint32_t ints = save_and_disable_interrupts();
-
-  // Erase and program flash
-  flash_range_erase(FLASH_LINEAR_EQ_OFFSET, num_sectors * FLASH_SECTOR_SIZE);
-
-  while (offset < data_size) {
-    size_t chunk_size =
-        (data_size - offset > FLASH_PAGE_SIZE) ? FLASH_PAGE_SIZE : data_size - offset;
-
-    uint8_t flash_page[FLASH_PAGE_SIZE];
-    memset(flash_page, 0xFF, FLASH_PAGE_SIZE);
-    memcpy(flash_page, data_ptr + offset, chunk_size);
-
-    flash_range_program(FLASH_LINEAR_EQ_OFFSET + offset, flash_page, FLASH_PAGE_SIZE);
-    offset += FLASH_PAGE_SIZE;
-  }
-
-  restore_interrupts(ints);
-  
-  // Signal Core1 to resume normal operation
-  end_core1_flash_pause();
+  // Whole-sector read-modify-write: patches only the v5 record, preserves any v8/v9 records.
+  write_linear_eq_sector(&data, nullptr, nullptr);
 
   // Print confirmation with equation details
   SERIAL_COM_LN("Linear equations saved to flash successfully!");
@@ -652,6 +682,187 @@ bool load_linear_equations_data(struct LinearEquationsDeviceData *data) {
   SERIAL_COM_LN("Loaded " + String(valid_equations_count) + " valid linear equations");
 
   return true;
+}
+
+// ===================================================================
+// FLASH STORAGE - FINE-MAP (PIECEWISE) SAVE/LOAD  (v8, co-located in LINEAR_EQ sector)
+// ===================================================================
+
+/**
+ * Save the v8 fine-map record into the LINEAR_EQ sector (whole-sector RMW).
+ *
+ * Patches only the v8 sub-offset; any co-located v5 linear-eq record is preserved.
+ */
+void save_fine_map_data(const struct FineMapDeviceDataV8 *fm) {
+  if (fm == NULL) {
+    LOG_ERROR("Invalid fine-map pointer");
+    return;
+  }
+  write_linear_eq_sector(nullptr, fm, nullptr);
+  LOG_INFO("Fine-map (v8) saved to flash (DOF count " + String(fm->dof_count) + ")");
+}
+
+/**
+ * @brief Read and validate the v8 fine-map blob from flash (internal helper)
+ *
+ * Mirrors read_linear_equations_blob: validates magic, version, and checksum.
+ */
+static bool read_fine_map_blob(struct FineMapDeviceDataV8 *data, bool log_errors) {
+  if (data == NULL) {
+    if (log_errors) {
+      LOG_ERROR("Invalid fine-map pointer");
+    }
+    return false;
+  }
+
+  uint8_t *data_ptr = reinterpret_cast<uint8_t *>(data);
+  size_t data_size  = sizeof(struct FineMapDeviceDataV8);
+  const uint8_t *flash_ptr =
+      reinterpret_cast<const uint8_t *>(XIP_BASE + FLASH_LINEAR_EQ_OFFSET + FINE_MAP_V8_SUBOFFSET);
+
+  // Step 1: Read header to check magic number and version
+  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
+
+  if (data->magic != FINE_MAP_V8_MAGIC) {
+    if (log_errors) {
+      LOG_DEBUG("No fine-map found (missing magic number)");
+    }
+    return false;
+  }
+
+  if (data->version != FINE_MAP_FLASH_VERSION) {
+    if (log_errors) {
+      LOG_WARN("Fine-map version " + String(data->version) + " incompatible (expected " +
+               String(FINE_MAP_FLASH_VERSION) + ")");
+    }
+    return false;
+  }
+
+  // Step 2: Full copy now that the format is validated
+  memcpy(data_ptr, flash_ptr, data_size);
+
+  // Step 3: Verify checksum (excludes the 8-byte header: magic, version, checksum)
+  uint16_t calculated_checksum =
+      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  if (calculated_checksum != data->checksum) {
+    if (log_errors) {
+      LOG_ERROR("Invalid fine-map checksum");
+    }
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Load the v8 fine-map record from flash.
+ *
+ * @return true if a valid fine-map blob was found; false on absence/corruption (caller stays LINEAR).
+ */
+bool load_fine_map_data(struct FineMapDeviceDataV8 *data) {
+  return read_fine_map_blob(data, true);
+}
+
+// ===================================================================
+// FLASH STORAGE - FINE-MAP 2D (BILINEAR) SAVE/LOAD  (v9, co-located in LINEAR_EQ sector)
+// ===================================================================
+
+/**
+ * Save the v9 2D (bilinear) record into the LINEAR_EQ sector (whole-sector RMW).
+ *
+ * Patches only the v9 sub-offset; any co-located v5 linear-eq and v8 fine-map records are preserved.
+ */
+void save_fine_map_2d_data(const struct FineMap2DDeviceDataV9 *v9) {
+  if (v9 == NULL) {
+    LOG_ERROR("Invalid fine-map 2D pointer");
+    return;
+  }
+  write_linear_eq_sector(nullptr, nullptr, v9);
+  LOG_INFO("Fine-map 2D (v9) saved to flash (grids " + String(v9->n_grids) + ")");
+}
+
+/**
+ * @brief Save the v8 fine-map and the v9 2D grid in ONE whole-sector RMW (2026-07-10)
+ *
+ * Used by the fine-map save when it also drops a stale v9 grid slot: two separate
+ * saves would erase+program the same 4KB sector twice (double wear) and leave a
+ * non-atomic window (a crash after the v8 write but before the v9 drop persists the
+ * exact stale-grid re-promotion bug the drop exists to fix). Pass nullptr for any
+ * record you are not updating.
+ */
+void save_fine_map_and_2d(const struct FineMapDeviceDataV8 *v8,
+                          const struct FineMap2DDeviceDataV9 *v9) {
+  if (v8 == NULL && v9 == NULL) {
+    LOG_ERROR("save_fine_map_and_2d: both records null");
+    return;
+  }
+  write_linear_eq_sector(nullptr, v8, v9);
+  LOG_INFO("Fine-map v8+v9 saved in one sector write");
+}
+
+/**
+ * @brief Read and validate the v9 2D (bilinear) blob from flash (internal helper)
+ *
+ * Mirrors read_fine_map_blob: validates magic, version, and checksum.
+ */
+static bool read_fine_map_2d_blob(struct FineMap2DDeviceDataV9 *data, bool log_errors) {
+  if (data == NULL) {
+    if (log_errors) {
+      LOG_ERROR("Invalid fine-map 2D pointer");
+    }
+    return false;
+  }
+
+  uint8_t *data_ptr = reinterpret_cast<uint8_t *>(data);
+  size_t data_size  = sizeof(struct FineMap2DDeviceDataV9);
+  const uint8_t *flash_ptr =
+      reinterpret_cast<const uint8_t *>(XIP_BASE + FLASH_LINEAR_EQ_OFFSET + FINE_MAP_V9_SUBOFFSET);
+
+  // Step 1: Read header to check magic number and version
+  memcpy(data_ptr, flash_ptr, sizeof(uint32_t) + sizeof(uint16_t) * 2);
+
+  if (data->magic != FINE_MAP_V9_MAGIC) {
+    if (log_errors) {
+      LOG_DEBUG("No fine-map 2D found (missing magic number)");
+    }
+    return false;
+  }
+
+  if (data->version != FINE_MAP_2D_FLASH_VERSION) {
+    if (log_errors) {
+      LOG_WARN("Fine-map 2D version " + String(data->version) + " incompatible (expected " +
+               String(FINE_MAP_2D_FLASH_VERSION) + ")");
+    }
+    return false;
+  }
+
+  // Step 2: Full copy now that the format is validated
+  memcpy(data_ptr, flash_ptr, data_size);
+
+  // Step 3: Verify checksum (excludes the 8-byte header: magic, version, checksum)
+  uint16_t calculated_checksum =
+      calculate_checksum(data_ptr + sizeof(uint32_t) + sizeof(uint16_t) * 2,
+                         data_size - sizeof(uint32_t) - sizeof(uint16_t) * 2);
+
+  if (calculated_checksum != data->checksum) {
+    if (log_errors) {
+      LOG_ERROR("Invalid fine-map 2D checksum");
+    }
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Load the v9 2D (bilinear) record from flash.
+ *
+ * @return true if a valid 2D blob was found; false on absence/corruption (caller stays v5/v8).
+ */
+bool load_fine_map_2d_data(struct FineMap2DDeviceDataV9 *data) {
+  return read_fine_map_2d_blob(data, true);
 }
 
 // ===================================================================

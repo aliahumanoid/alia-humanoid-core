@@ -25,6 +25,7 @@
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
 #include "pico/unique_id.h"
+#include <hot_path.h>
 
 #undef ACTIVE_JOINT
 #define ACTIVE_JOINT getRuntimeJointId()
@@ -32,7 +33,7 @@
 
 // RAM-resident function for waiting during flash operations
 // This MUST be in RAM because flash is inaccessible during erase/program
-static void __not_in_flash_func(wait_for_flash_complete)(void) {
+static void __no_inline_not_in_flash_func(wait_for_flash_complete)(void) {
   // Signal Core0 that we are safely parked in RAM
   intercore_memory_barrier();
   core1_flash_acknowledged = true;
@@ -182,6 +183,7 @@ static CrossChipCanStatsRuntime run_cross_chip_can_stress_runtime(
 #define CAN_ID_TIME_SYNC 0x002
 #define CAN_ID_ENCODER_STREAM_CTRL 0x003  // Encoder streaming control (start/stop)
 #define CAN_ID_PID_DIAG_CTRL 0x004        // PID diagnostics streaming control
+#define CAN_ID_PID_MEASURED_DT_CTRL 0x005 // Root-fix A/B: PID measured-dt enable (byte0: 1=on / 0=off)
 #define CAN_ID_LOOP_FREQUENCY 0x006       // Control loop frequencies (inner/outer)
 #define CAN_ID_PID_DIAG_FREQ 0x007        // PID diagnostics stream frequency
 #define CAN_ID_IDENTIFY_REQUEST 0x008     // Joint identification request (broadcast)
@@ -219,9 +221,23 @@ static CrossChipCanStatsRuntime run_cross_chip_can_stress_runtime(
 #define CAN_ID_SAVE_LINEAR_EQ 0x018       // Save linear equations to flash (Host → Controller)
 #define CAN_ID_LOAD_LINEAR_EQ 0x019       // Load linear equations from flash (Host → Controller)
 #define CAN_ID_SET_AUTO_START 0x01A       // Set auto-start on boot (Host → Controller)
+#define CAN_ID_FINE_CAPTURE_CTRL 0x01B    // Fine remap capture control [joint,action,dof] (Host → Controller)
+#define CAN_ID_SAVE_FINE_MAP    0x01C     // Save fine-map (piecewise) to flash (Host → Controller)
 #define CAN_ID_SET_IMPEDANCE    0x01D     // Impedance target (Host → Controller, 1-4 frame accumulator)
 #define CAN_ID_IMPEDANCE_CTRL   0x01E     // Impedance control command (Host → Controller)
 #define CAN_ID_FAULT_SNAPSHOT_CTRL 0x01F  // Fault snapshot retrieval control (Host → Controller)
+#define IMPEDANCE_CTRL_ACTUATION_MODE 0x03 // param: [dof:8][mode:8], mode 0=Loop1 torque, 1=Loop2 0xA4 dual-position
+#define IMPEDANCE_CTRL_LOOP2_MAXSPEED 0x04 // buf[2]=dof, buf[4..5]=maxSpeed u16 LE (raw LKM 0xA4 units)
+#define IMPEDANCE_CTRL_LOOP2_STEP     0x05 // param: [dof:8][centideg_step:8], Loop2 motor target slew per control cycle
+#define IMPEDANCE_CTRL_SLOPE_SCALING  0x06 // buf[2]: 0/1, global cascade per-tendon dth slope scaling (opt-in)
+#define IMPEDANCE_CTRL_SCHED_INTERLEAVE 0x08 // buf[2]: 0/1, O1 strict-interleave motor-CAN scheduler (opt-in)
+#define IMPEDANCE_CTRL_ADAPTIVE_HOLD 0x10 // Runtime adaptive-HOLD feature mask
+#define IMPEDANCE_CTRL_MOTION_GUARD  0x21 // MG2-S mode: buf[2] 0=LEGACY 1=SHADOW 2=ACTIVE (RAM-only)
+#define ADAPTIVE_HOLD_RETENSION  0x0001
+#define ADAPTIVE_HOLD_COMPLIANCE 0x0002
+#define ADAPTIVE_HOLD_SOFT_HOLD  0x0004
+#define ADAPTIVE_HOLD_ANTI_SLACK 0x0008
+#define ADAPTIVE_HOLD_VALID_MASK (ADAPTIVE_HOLD_RETENSION | ADAPTIVE_HOLD_COMPLIANCE | ADAPTIVE_HOLD_SOFT_HOLD | ADAPTIVE_HOLD_ANTI_SLACK)
 #define CAN_ID_ENCODER_OFFSETS_DATA 0x4B0 // Encoder offsets response (Controller → Host, + joint_id)
 #define CAN_ID_ZERO_COMPLETE 0x4C0        // Zero complete notification (Controller → Host, + joint_id)
 #define CAN_ID_DIAG_HOLD_DATA    0x4D0   // Holding diagnostics (Controller → Host, + joint_id)
@@ -288,14 +304,39 @@ static constexpr uint8_t DIAG_CAN_WARN_CLEAR_SAMPLES = 2;
 static constexpr uint8_t DIAG_HEALTH_EXT_LOOP_TIMING = 0x00;
 static constexpr uint8_t DIAG_HEALTH_EXT_CAN_DETAILS = 0x01;
 static constexpr uint8_t DIAG_HEALTH_EXT_POWER_BOARD_STATE = 0x02;
-static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 1;
+static constexpr uint8_t DIAG_SNAPSHOT_LAYOUT_VERSION = 4;  // V4 appends host SET_IMPEDANCE timing per DOF
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_QUERY_META = 0x00;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_BEGIN_DUMP = 0x01;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_REQUEST_CHUNK = 0x02;
 static constexpr uint8_t DIAG_SNAPSHOT_CTRL_CLEAR = 0x03;
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_SELECT_RECORDER = 0x04;  // serialize the rolling recorder ring into the download buffer
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_ARM_HIRATE = 0x05;       // arm the hi-rate windowed motion capture (arg0=DOF, 0xFF=active)
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_SELECT_HIRATE = 0x06;    // stage the hi-rate capture buffer for download (streams from hirate_buf directly)
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_ENTER_FREE = 0x07;       // enter free/compliant hand-capture (zero-torque tendons + record); arg0=DOF (0xFF=active)
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_EXIT_FREE = 0x08;        // exit free-capture -> zero-torque + CUT MOTOR POWER, leave the joint free (no closed-loop resume); recover via power-cycle
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_ENTER_VELTEST = 0x09;    // enter motor velocity-test (one tendon setSpeed + the other holding torque, record) — arg0=DOF
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_EXIT_VELTEST = 0x0A;     // exit velocity-test -> stop + CUT MOTOR POWER (same fail-safe as EXIT_FREE); recover via power-cycle
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_ENTER_POSTEST = 0x0B;    // enter motor POSITION-test (one tendon 0xA4 angle+maxSpeed + the other holding torque, record) — arg0=DOF; EXIT reuses 0x0A
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_ENTER_TORQUESWEEP = 0x0C; // enter TORQUE-sweep: run the NORMAL cascade tracking a firmware-driven smooth impedance-segment ramp (clean matched-speed torque baseline, no host q_x100 stepping) — arg0=DOF
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_EXIT_TORQUESWEEP = 0x0D;  // exit torque-sweep -> stop + CUT MOTOR POWER (same fail-safe as EXIT_VELTEST); recover via power-cycle
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_ENTER_A2PING = 0x0E;      // enter fireAngle2 NO-MOTION ping (Loop 2 step-2: both motors held at current angle via 0xA4, confirm send+auto-reply+collectPair) — arg0=DOF
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_EXIT_A2PING = 0x0F;       // exit fireAngle2 ping -> stop + CUT MOTOR POWER (same fail-safe as EXIT_VELTEST)
+static constexpr uint8_t DIAG_SNAPSHOT_CTRL_EXIT_HIRATE_HOLD = 0x10;  // stop host-armed HOLD/MOVE hi-rate capture, cut motor power, preserve buffer for SELECT_HIRATE
 static constexpr int16_t DIAG_SNAPSHOT_UNUSED_I16 = 0x7FFF;
 static constexpr uint16_t DIAG_SNAPSHOT_CHUNK_BYTES = 6;
-static constexpr uint16_t DIAG_SNAPSHOT_MAX_BYTES = 96;
+static constexpr uint16_t DIAG_SNAPSHOT_MAX_BYTES = 600;  // holds either the fault snapshot (~70B) or the recorder ring (~480B)
+// Hi-rate windowed motion recorder — host-armed capture that records the live motion signals
+// EVERY control-loop cycle (~250 Hz) into a dedicated buffer (free of the host's 50 Hz telemetry
+// aliasing), then downloads over CAN. Completely SEPARATE from the 40-record DiagRecord ring,
+// which stays for fault snapshots. Records are streamed directly from hirate_buf during the dump
+// (NOT copied into the 600 B snapshot buffer). The 0xED META sentinel flags a hi-rate blob.
+static constexpr uint16_t HIRATE_CAPACITY = 1800;      // 7.2 s @ 250 Hz; 1800*14 = 25200 B (wide slow sweep -8..+9.7 deg)
+static constexpr uint8_t  HIRATE_FREEZE_EVENT_CODE = 0xED;  // META sentinel: hi-rate motion blob (vs 0xEE ring / fault snapshot)
+// Max DATA chunks streamed per core1 housekeeping tick (~50 Hz). A full 25200 B / 6 B = 4200-chunk
+// window at 32 chunks/tick downloads in ceil(4200/32)=132 ticks ≈ 2.6 s @ 50 Hz (≈3.3 s @ 40 Hz).
+// Bounded so the tick can never busy-wait the core1 loop: the batch also stops early the moment a
+// frame fails to enqueue (CAN TX mailbox full), resuming from that same chunk on the next tick.
+static constexpr uint16_t MAX_HIRATE_CHUNKS_PER_TICK = 32;
 
 enum DiagPhaseCode : uint8_t {
   DIAG_PHASE_BOOT = 0,
@@ -339,6 +380,21 @@ static uint32_t diag_transient_fault_until_ms[DIAG_FAULT_COUNT] = {};
 static uint8_t diag_watchdog_trip_count = 0;
 static uint8_t diag_can_recovery_count = 0;
 static uint8_t diag_loop_overrun_count = 0;
+// V2 snapshot: loop micro-profile worst-case per-section times (µs), pushed from the control loop.
+static uint16_t diag_prof_max_dof_us = 0;
+static uint16_t diag_prof_max_outer_us = 0;
+static uint16_t diag_prof_max_eq_us = 0;
+static uint16_t diag_prof_max_can_us = 0;
+static uint16_t diag_prof_max_pid_us = 0;
+static uint16_t diag_prof_max_torque_us = 0;
+static uint16_t diag_prof_max_safety_us = 0;
+DiagMotorFeedbackSnapshot diag_motor_feedback_snapshot[MAX_DOFS] = {};
+static constexpr uint16_t DIAG_HOST_CMD_LATE_GAP_MS = 40;  // >2 missed 50 Hz stream slots
+static uint32_t diag_imp_cmd_last_commit_ms[MAX_DOFS] = {};
+static uint16_t diag_imp_cmd_last_gap_ms[MAX_DOFS] = {};
+static uint16_t diag_imp_cmd_max_gap_ms[MAX_DOFS] = {};
+static uint16_t diag_imp_cmd_accepted_count[MAX_DOFS] = {};
+static uint16_t diag_imp_cmd_late_gap_count[MAX_DOFS] = {};
 static bool diag_host_can_warn_active = false;
 static bool diag_motor_can_warn_active = false;
 static uint8_t diag_host_can_warn_assert_samples = 0;
@@ -397,6 +453,167 @@ struct __attribute__((packed)) DiagSnapshotDofRecordV1 {
   uint8_t flags;
 };
 
+// V2: loop micro-profile (per-section worst-case µs since boot), appended after DOF records.
+struct __attribute__((packed)) DiagSnapshotProfileV1 {
+  uint16_t max_dof_us;
+  uint16_t max_outer_us;
+  uint16_t max_eq_us;
+  uint16_t max_can_us;
+  uint16_t max_pid_us;
+  uint16_t max_torque_us;
+  uint16_t max_safety_us;
+};
+
+// V3: motor feedback details, appended after the V2 loop profile.
+struct __attribute__((packed)) DiagSnapshotMotorBusV1 {
+  uint16_t tx_fail;
+  uint16_t rx_miss;
+  uint16_t rx_overflow;
+  uint8_t motor_can_rx_error_count;
+  uint8_t motor_can_eflg;
+};
+
+struct __attribute__((packed)) DiagSnapshotMotorFeedbackV1 {
+  uint8_t flags;
+  uint8_t a1_miss_count;
+  uint16_t watchdog_cycle_count;
+  int16_t watchdog_err_a_x100;
+  int16_t watchdog_err_b_x100;
+  uint8_t invalid_reason;
+  uint8_t last_reply_mask;
+};
+
+// V4: host command timing. This lets a fault snapshot distinguish stale host references
+// from PID/mapping/encoder failures when SET_IMPEDANCE jitter stays below the watchdog.
+struct __attribute__((packed)) DiagSnapshotHostCmdTimingV1 {
+  uint16_t last_age_ms;      // 0xFFFF = no accepted command yet
+  uint16_t last_gap_ms;      // gap between last two accepted SET_IMPEDANCE commits
+  uint16_t max_gap_ms;       // max accepted-command gap since boot, saturated
+  uint16_t accepted_count;   // accepted SET_IMPEDANCE commits, saturated
+  uint16_t late_gap_count;   // gaps > DIAG_HOST_CMD_LATE_GAP_MS, saturated
+};
+
+static uint16_t diagCapUint16(uint32_t value) {
+  return value > 65535U ? 65535U : (uint16_t)value;
+}
+
+static void diagNoteImpedanceCommandCommit(uint8_t dof, uint32_t now_ms) {
+  if (dof >= MAX_DOFS) return;
+
+  const uint32_t previous_ms = diag_imp_cmd_last_commit_ms[dof];
+  if (previous_ms != 0) {
+    const uint16_t gap_ms = diagCapUint16(now_ms - previous_ms);
+    diag_imp_cmd_last_gap_ms[dof] = gap_ms;
+    if (gap_ms > diag_imp_cmd_max_gap_ms[dof]) {
+      diag_imp_cmd_max_gap_ms[dof] = gap_ms;
+    }
+    if (gap_ms > DIAG_HOST_CMD_LATE_GAP_MS && diag_imp_cmd_late_gap_count[dof] < 65535U) {
+      ++diag_imp_cmd_late_gap_count[dof];
+    }
+  } else {
+    diag_imp_cmd_last_gap_ms[dof] = 0;
+  }
+
+  diag_imp_cmd_last_commit_ms[dof] = now_ms;
+  if (diag_imp_cmd_accepted_count[dof] < 65535U) {
+    ++diag_imp_cmd_accepted_count[dof];
+  }
+}
+
+// Diagnostic recorder ring — rolling "black box": an interleaved timeline of diagnostic
+// events AND per-cycle control samples (q / outer output dth / integral term / torque) for
+// the active DOF. Always recording, survives motor shutdown until reboot, downloadable over CAN.
+struct __attribute__((packed)) DiagRecord {
+  uint16_t uptime_ms;   // low 16 bits of millis() (window-relative, wraps ~65s)
+  uint8_t  rec_type;    // 0 = event, 1 = control sample
+  uint8_t  dof;         // DOF index (0xFF if N/A)
+  union {
+    struct { uint8_t event_code, flags, source_kind, source_index, detail0, detail1, pad0, pad1; } ev;
+    struct { int16_t q_x100, dth_x100, outer_i_x100, torque; } ctl;
+  } d;
+};  // 12 bytes
+static constexpr uint8_t DIAG_RECORDER_CAPACITY = 40;
+static DiagRecord diag_recorder[DIAG_RECORDER_CAPACITY] = {};
+static uint8_t diag_recorder_head = 0;    // next write index
+static uint8_t diag_recorder_count = 0;   // valid records (caps at capacity)
+
+static void diagRecorderPush(const DiagRecord &r) {
+  diag_recorder[diag_recorder_head] = r;
+  diag_recorder_head = (uint8_t)((diag_recorder_head + 1) % DIAG_RECORDER_CAPACITY);
+  if (diag_recorder_count < DIAG_RECORDER_CAPACITY) diag_recorder_count++;
+}
+
+// === HI-RATE WINDOWED MOTION RECORDER (dedicated buffer, separate from the ring above) ===
+// One record per control-loop cycle for the captured DOF. All signals are pre-scaled int16
+// (x100 where noted) — same scalings as the [DIAG_MOVE]/DIAG telemetry so the host decodes
+// identically. Little-endian (RP2350), 14 bytes, packed (no padding).
+struct __attribute__((packed)) HiRateRecord {
+  int16_t q_x100;     // joint angle (deg) * 100        — dof_data.angles[dof]
+  int16_t qdes_x100;  // impedance reference (deg) * 100 — theta_0_joint / getImpedanceHoldReference
+  int16_t dth_x100;   // live outer correction (deg) * 100 — delta_theta_smooth
+  int16_t iqA;        // agonist torque current (raw)   — trResp.dataA.torqueCurrent
+  int16_t iqB;        // antagonist torque current (raw) — trResp.dataB.torqueCurrent
+  int16_t resA_x100;  // agonist motor-space residual (deg) * 100
+  int16_t resB_x100;  // antagonist motor-space residual (deg) * 100
+};
+static_assert(sizeof(HiRateRecord) == 14, "HiRateRecord must be 14 bytes (packed, host-decodable)");
+
+static HiRateRecord hirate_buf[HIRATE_CAPACITY];  // ~25.2 KB dedicated capture buffer
+// Capture state machine. armed: waiting/recording; capturing: actively appending; done: latched
+// full window. All single-byte/word flags — the per-cycle append is an O(1) guarded store.
+static volatile bool    hirate_armed = false;
+static volatile bool    hirate_capturing = false;
+static volatile bool    hirate_done = false;
+static uint16_t         hirate_write_idx = 0;
+static uint8_t          hirate_capture_dof = 0xFF;  // DOF being captured (0xFF = none yet)
+static uint8_t          hirate_decim = 1;           // store every Nth control cycle (1 = every cycle);
+                                                    // lets a 500Hz window span the same seconds as 250Hz
+static uint8_t          hirate_skip = 0;            // decimation phase (armed to decim-1 -> first cycle stores)
+// Free/compliant hand-capture: a SEPARATE Core1 loop (JointController::runFreeCaptureCycle) replaces
+// the control loop while active — it zero-torques the tendons (back-drivable) and feeds the recorder.
+// The validated control loop body is untouched. See diagHandleSnapshotCtrl 0x07/0x08 + the core1_loop
+// branch. Enter only from a post-startup HOLDING state (rev-tracking must be bootstrapped).
+static volatile bool    free_capture_active = false;
+static volatile bool    free_capture_pending_exit = false;
+static volatile uint8_t free_capture_dof = 0xFF;
+static volatile uint32_t free_capture_start_ms = 0;    // millis() at ENTER, for the auto-exit timeout
+static constexpr uint32_t FREE_CAPTURE_MAX_MS = 12000; // backstop: auto-exit (cut power, leave free) if no host EXIT. Generous so it fires ONLY on a real host hang — the host EXITs ~3 s in, BEFORE the dump.
+// VEL-TEST (motor velocity-loop characterisation, diag 0x09/0x0A) — mirrors the free-capture state machine.
+static volatile bool     vel_test_active = false;
+static volatile bool     vel_test_pending_exit = false;
+static volatile uint8_t  vel_test_dof = 0xFF;
+static volatile uint32_t vel_test_start_ms = 0;
+static constexpr uint32_t VEL_TEST_MAX_MS = 7500;     // backstop net for a STUCK joint / dropped host EXIT (matches host
+                                                      // MOVE_WAIT_S=7.5 s; the slow -8..+10.2 traverse takes ~7 s). NOT an
+                                                      // eyelet net: it is IN-LOOP, so a hung loop bypasses it (operator
+                                                      // hand-on-power is the only net then). The per-cycle POSITION guard +
+                                                      // the clamped pos target + the valid/stale checks keep it off the eyelet.
+// TORQUE-SWEEP (clean matched-speed torque baseline, diag 0x0C/0x0D). Unlike vel/pos-test (which BYPASS the
+// cascade via setSpeed/0xA4), this keeps the NORMAL executeControlLoop running and only seeds a firmware-driven
+// smooth impedance-segment ramp, so the real outer->inner->burst-2 cascade tracks it (no host q_x100 stepping).
+static volatile bool     torque_sweep_active = false;
+static volatile bool     torque_sweep_pending_exit = false;
+static volatile uint8_t  torque_sweep_dof = 0xFF;
+static volatile uint32_t torque_sweep_start_ms = 0;
+static constexpr uint32_t TORQUE_SWEEP_MAX_MS = 7500;  // backstop (matches host MOVE_WAIT_S=7.5 s + the ~6.6 s sweep)
+
+// fireAngle2 NO-MOTION ping (Loop 2 step-2 primitive confirm, diag 0x0E/0x0F) — a SEPARATE loop like the vel-test:
+// both motors held at their current angle via fireAngle2 + collectPair, NO motion, to validate the never-yet-called
+// non-blocking 0xA4 path (send + auto-reply + collectPair routing) before any Loop 2 motion.
+static volatile bool     a2ping_active = false;
+static volatile bool     a2ping_pending_exit = false;
+static volatile uint8_t  a2ping_dof = 0xFF;
+static volatile uint32_t a2ping_start_ms = 0;
+static constexpr uint32_t A2PING_MAX_MS = 5000;        // short no-motion confirm window
+
+// Download staging for the SELECT_HIRATE path (streams from hirate_buf, not diag_snapshot_buffer).
+static bool             hirate_dump_active = false;
+static uint16_t         hirate_payload_bytes = 0;   // valid bytes = hirate_count * 14
+static uint16_t         hirate_total_chunks = 0;
+static uint16_t         hirate_dump_next_chunk = 0;
+static uint8_t          hirate_dump_id = 0;
+static uint16_t         hirate_count_frozen = 0;     // records captured at SELECT time (for partial windows)
+
 static uint8_t diag_snapshot_buffer[DIAG_SNAPSHOT_MAX_BYTES] = {};
 static uint16_t diag_snapshot_payload_bytes = 0;
 static uint8_t diag_snapshot_total_chunks = 0;
@@ -416,6 +633,22 @@ static constexpr uint8_t STARTUP_EVT_FAILED = 4;
 
 static inline uint16_t diagFaultMask(DiagFaultCode code) {
   return (uint16_t)1u << static_cast<uint8_t>(code);
+}
+
+static inline bool diagMotionLockoutActive() {
+  const uint16_t terminal_mask =
+      diagFaultMask(DIAG_FAULT_SAFETY_LIMIT) |
+      diagFaultMask(DIAG_FAULT_MAPPING_LIMIT) |
+      diagFaultMask(DIAG_FAULT_MOTOR_RANGE) |
+      diagFaultMask(DIAG_FAULT_ESTOP_LATCHED);
+  // Gate on CURRENTLY-ACTIVE terminal faults + the e-stop flags only. diag_latched_fault_bits
+  // is sticky diagnostic HISTORY (set by every designed-recoverable soft safety stop and by
+  // e-stop, and never cleared at runtime): gating on it turned a single transient soft-limit
+  // trip into a PERMANENT SET_IMPEDANCE lockout for ALL DOFs until reboot — even after the
+  // firmware's own recovery paths. Latched bits stay readable for diagnostics; they no longer gate.
+  return emergency_stop_requested.load() ||
+         diag_estop_latched ||
+         (diag_last_active_fault_bits & terminal_mask) != 0;
 }
 
 static inline bool diagFaultIndexValid(uint8_t idx) {
@@ -493,7 +726,11 @@ static bool diagSnapshotShouldFreezeForFault(uint8_t fault_code) {
   switch (fault_code) {
     case DIAG_FAULT_HOST_WATCHDOG_TIMEOUT:
     case DIAG_FAULT_ENCODER_INVALID:
+    case DIAG_FAULT_MOTOR_FEEDBACK_INVALID:
     case DIAG_FAULT_MOTOR_TIMEOUT:
+    case DIAG_FAULT_SAFETY_LIMIT:
+    case DIAG_FAULT_MAPPING_LIMIT:
+    case DIAG_FAULT_MOTOR_RANGE:
     case DIAG_FAULT_STARTUP_FAILED:
     case DIAG_FAULT_INTERNAL_ERROR:
       return true;
@@ -508,6 +745,8 @@ static uint8_t diagSnapshotFreezeEventForFault(uint8_t fault_code) {
       return DIAG_EVENT_WATCHDOG_TIMEOUT;
     case DIAG_FAULT_ENCODER_INVALID:
       return DIAG_EVENT_ENCODER_INVALID;
+    case DIAG_FAULT_MOTOR_FEEDBACK_INVALID:
+      return DIAG_EVENT_MOTOR_FEEDBACK_INVALID;
     case DIAG_FAULT_MOTOR_TIMEOUT:
       return DIAG_EVENT_MOTOR_TIMEOUT;
     case DIAG_FAULT_STARTUP_FAILED:
@@ -558,6 +797,7 @@ static void diagClearSnapshotData() {
 
 static void diagBuildSnapshotPayload(uint8_t freeze_event_code, uint8_t primary_fault_code,
                                      uint16_t active_fault_bits) {
+  const uint32_t snapshot_ms = millis();
   SharedDofAngles dof_snapshot = {};
   readSharedDofAnglesSnapshot(dof_snapshot);
 
@@ -583,7 +823,7 @@ static void diagBuildSnapshotPayload(uint8_t freeze_event_code, uint8_t primary_
   header.snapshot_flags = diagBuildSnapshotControllerFlags();
   header.active_fault_bits = active_fault_bits;
   header.latched_fault_bits = diag_latched_fault_bits;
-  header.freeze_uptime_s = (uint16_t)min<uint32_t>(millis() / 1000UL, 65535UL);
+  header.freeze_uptime_s = (uint16_t)min<uint32_t>(snapshot_ms / 1000UL, 65535UL);
   header.host_can_tx_error_count = diag_last_host_can_tx_error_count;
   header.host_can_rx_error_count = diag_last_host_can_rx_error_count;
   header.motor_can_tx_error_count = diag_last_motor_can_tx_error_count;
@@ -643,11 +883,216 @@ static void diagBuildSnapshotPayload(uint8_t freeze_event_code, uint8_t primary_
     offset += sizeof(record);
   }
 
+  // V2: append the loop micro-profile (worst-case per-section µs) after the DOF records.
+  DiagSnapshotProfileV1 prof = {};
+  prof.max_dof_us = diag_prof_max_dof_us;
+  prof.max_outer_us = diag_prof_max_outer_us;
+  prof.max_eq_us = diag_prof_max_eq_us;
+  prof.max_can_us = diag_prof_max_can_us;
+  prof.max_pid_us = diag_prof_max_pid_us;
+  prof.max_torque_us = diag_prof_max_torque_us;
+  prof.max_safety_us = diag_prof_max_safety_us;
+  if (offset + sizeof(prof) <= DIAG_SNAPSHOT_MAX_BYTES) {
+    memcpy(&diag_snapshot_buffer[offset], &prof, sizeof(prof));
+    offset += sizeof(prof);
+  }
+
+  // V3: bus counters and per-DOF Phase-2 motor-feedback state. This separates true
+  // joint-encoder invalidity from invalid LKM feedback/tracked-angle failures.
+  DiagSnapshotMotorBusV1 bus = {};
+  bus.tx_fail = diagCapUint16(LKM_Motor::txFailCount());
+  bus.rx_miss = diagCapUint16(LKM_Motor::rxMissCount());
+  bus.rx_overflow = diagCapUint16(LKM_Motor::rxOverflowCount());
+  bus.motor_can_rx_error_count = diag_last_motor_can_rx_error_count;
+  bus.motor_can_eflg = diag_last_motor_can_eflg;
+  if (offset + sizeof(bus) <= DIAG_SNAPSHOT_MAX_BYTES) {
+    memcpy(&diag_snapshot_buffer[offset], &bus, sizeof(bus));
+    offset += sizeof(bus);
+  }
+  for (uint8_t d = 0; d < dof_count; ++d) {
+    DiagSnapshotMotorFeedbackV1 fb = {};
+    fb.flags = diag_motor_feedback_snapshot[d].flags;
+    fb.a1_miss_count = diag_motor_feedback_snapshot[d].a1_miss_count;
+    fb.watchdog_cycle_count = diag_motor_feedback_snapshot[d].watchdog_cycle_count;
+    fb.watchdog_err_a_x100 = diag_motor_feedback_snapshot[d].watchdog_err_a_x100;
+    fb.watchdog_err_b_x100 = diag_motor_feedback_snapshot[d].watchdog_err_b_x100;
+    fb.invalid_reason = diag_motor_feedback_snapshot[d].invalid_reason;
+    fb.last_reply_mask = diag_motor_feedback_snapshot[d].last_reply_mask;
+    if (offset + sizeof(fb) > DIAG_SNAPSHOT_MAX_BYTES) break;
+    memcpy(&diag_snapshot_buffer[offset], &fb, sizeof(fb));
+    offset += sizeof(fb);
+  }
+
+  // V4: host SET_IMPEDANCE timing per DOF. Values are sampled at freeze time and
+  // decoded as dof.host_command_timing on the host.
+  for (uint8_t d = 0; d < dof_count; ++d) {
+    DiagSnapshotHostCmdTimingV1 timing = {};
+    const uint32_t last_commit_ms = diag_imp_cmd_last_commit_ms[d];
+    timing.last_age_ms = (last_commit_ms != 0)
+                             ? diagCapUint16(snapshot_ms - last_commit_ms)
+                             : 0xFFFFU;
+    timing.last_gap_ms = diag_imp_cmd_last_gap_ms[d];
+    timing.max_gap_ms = diag_imp_cmd_max_gap_ms[d];
+    timing.accepted_count = diag_imp_cmd_accepted_count[d];
+    timing.late_gap_count = diag_imp_cmd_late_gap_count[d];
+    if (offset + sizeof(timing) > DIAG_SNAPSHOT_MAX_BYTES) break;
+    memcpy(&diag_snapshot_buffer[offset], &timing, sizeof(timing));
+    offset += sizeof(timing);
+  }
+
   diag_snapshot_payload_bytes = min<uint16_t>(offset, DIAG_SNAPSHOT_MAX_BYTES);
   diag_snapshot_total_chunks =
       (uint8_t)((diag_snapshot_payload_bytes + DIAG_SNAPSHOT_CHUNK_BYTES - 1) /
                 DIAG_SNAPSHOT_CHUNK_BYTES);
   diag_snapshot_truncated = offset > DIAG_SNAPSHOT_MAX_BYTES;
+}
+
+// Serialize the rolling recorder ring (oldest-first) into the download buffer and mark it
+// available, so the existing META/chunk transfer ships it. freeze_event_code=0xEE flags the
+// host that this download is the recorder timeline, not a fault snapshot. (Overwrites any
+// fault snapshot currently staged in the shared buffer.)
+static void diagSerializeRecorder() {
+  uint16_t offset = 0;
+  uint8_t idx = (uint8_t)((diag_recorder_head + DIAG_RECORDER_CAPACITY - diag_recorder_count) %
+                          DIAG_RECORDER_CAPACITY);
+  for (uint8_t i = 0; i < diag_recorder_count; ++i) {
+    if (offset + sizeof(DiagRecord) > DIAG_SNAPSHOT_MAX_BYTES) break;
+    memcpy(&diag_snapshot_buffer[offset], &diag_recorder[idx], sizeof(DiagRecord));
+    offset += sizeof(DiagRecord);
+    idx = (uint8_t)((idx + 1) % DIAG_RECORDER_CAPACITY);
+  }
+  diag_snapshot_payload_bytes = offset;
+  diag_snapshot_total_chunks =
+      (uint8_t)((diag_snapshot_payload_bytes + DIAG_SNAPSHOT_CHUNK_BYTES - 1) /
+                DIAG_SNAPSHOT_CHUNK_BYTES);
+  diag_snapshot_truncated = false;
+  diag_snapshot_available = true;
+  diag_snapshot_freeze_event_code = 0xEE;  // sentinel: recorder ring, not a fault snapshot
+  diag_snapshot_id = (uint8_t)(diag_snapshot_id + 1);
+}
+
+// Push one control sample (active DOF) into the recorder ring. Called from the control loop,
+// downsampled. Captures the signals that determine the torque: q, outer output (dth),
+// integral term, and the commanded torque.
+void HOT_FUNC(diag_record_control_sample)(uint8_t dof, float q_deg, float dth, float outer_i,
+                                int16_t torque) {
+  auto clip100 = [](float v) -> int16_t {
+    float s = v * 100.0f;
+    if (s > 32767.0f) s = 32767.0f;
+    else if (s < -32768.0f) s = -32768.0f;
+    return (int16_t)s;
+  };
+  DiagRecord rec = {};
+  rec.uptime_ms = (uint16_t)millis();
+  rec.rec_type = 1;
+  rec.dof = dof;
+  rec.d.ctl.q_x100 = clip100(q_deg);
+  rec.d.ctl.dth_x100 = clip100(dth);
+  rec.d.ctl.outer_i_x100 = clip100(outer_i);
+  rec.d.ctl.torque = torque;
+  diagRecorderPush(rec);
+}
+
+// === HI-RATE CAPTURE: per-cycle append (called from the control loop) ===
+// O(1) guarded store. When NOT armed for this DOF the only cost is the leading bool/DOF check
+// and an early return — no float work, no logging, no control state touched. The caller passes
+// the live values it already computed this cycle ([DIAG_MOVE]-equivalent sources); residuals/iq
+// are pre-clipped int16. This ONLY writes hirate_buf + the write index; it never touches
+// delta_theta, the cascade, gates, torque, or the DiagRecord ring.
+static inline __attribute__((always_inline)) int16_t hirateClip100(float v) {
+  float s = v * 100.0f;
+  if (s > 32767.0f) s = 32767.0f;
+  else if (s < -32768.0f) s = -32768.0f;
+  return (int16_t)s;
+}
+
+// Cheap predicate the control loop checks BEFORE computing capture inputs, so the per-cycle
+// residual/iq math is skipped entirely when this DOF is not being captured (idle cost ≈ one
+// volatile-bool read + a compare). Defined in the header for the control-loop translation unit.
+bool HOT_FUNC(diag_hirate_is_capturing)(uint8_t dof) {
+  return hirate_capturing && dof == hirate_capture_dof;
+}
+
+void HOT_FUNC(diag_hirate_capture_sample)(uint8_t dof, float q_deg, float q_des_deg, float dth,
+                                int16_t iqA, int16_t iqB, float resA_deg, float resB_deg) {
+  // Guard first — cheapest possible path when idle.
+  if (!hirate_capturing) return;
+  if (dof != hirate_capture_dof) return;
+  if (hirate_decim > 1) {  // decimated window: store every Nth cycle for this DOF
+    if (++hirate_skip < hirate_decim) return;
+    hirate_skip = 0;
+  }
+  if (hirate_write_idx >= HIRATE_CAPACITY) {
+    hirate_capturing = false;  // window full; latch done (defensive — also latched below)
+    hirate_done = true;
+    return;
+  }
+  if (hirate_write_idx == 0) {
+    if (LOG_LEVEL >= 2) {
+      char f1[48], f2[48];
+      LOG_C1_INFO_F("[HIRATE] FIRST dof=%d q=%s qdes=%s", dof,
+                    c1f(f1, q_deg, 2), c1f(f2, q_des_deg, 2));
+    }
+  }
+  HiRateRecord &r = hirate_buf[hirate_write_idx];
+  r.q_x100 = hirateClip100(q_deg);
+  r.qdes_x100 = hirateClip100(q_des_deg);
+  r.dth_x100 = hirateClip100(dth);
+  r.iqA = iqA;
+  r.iqB = iqB;
+  r.resA_x100 = hirateClip100(resA_deg);
+  r.resB_x100 = hirateClip100(resB_deg);
+  hirate_write_idx++;
+  if (hirate_write_idx >= HIRATE_CAPACITY) {
+    hirate_capturing = false;
+    hirate_done = true;  // latch full window
+  }
+}
+
+// Host-armed start. Resets the write index, sets the target DOF, and arms the capture.
+// Re-arming while capturing resets it (start a fresh window). decim = store every Nth cycle
+// (0/1 = every cycle, clamped to 8): at 500Hz decim=2 keeps the 250Hz record cadence so the
+// 1800-record window spans the same ~7.2s instead of truncating at 3.6s.
+static void diagArmHiRate(uint8_t dof, uint8_t decim = 1) {
+  hirate_capturing = false;  // stop any in-progress capture before re-init (avoids a torn write)
+  hirate_write_idx = 0;
+  hirate_capture_dof = dof;
+  if (decim < 1) decim = 1;
+  if (decim > 8) decim = 8;
+  hirate_decim = decim;
+  hirate_skip = (uint8_t)(decim - 1);  // first captured cycle stores immediately
+  hirate_done = false;
+  hirate_armed = true;
+  hirate_capturing = true;   // begin capturing on the next control-loop cycle
+  LOG_C1_INFO("[HIRATE] ARM dof=" + String(dof) + " decim=" + String(decim));
+}
+
+// Stage the hi-rate buffer for download. Does NOT copy into diag_snapshot_buffer — the dump path
+// streams directly from hirate_buf. Freezes the captured count so a partial window downloads
+// cleanly even if the host SELECTs mid-capture.
+static void diagSelectHiRate() {
+  uint16_t count = hirate_write_idx;
+  if (count > HIRATE_CAPACITY) count = HIRATE_CAPACITY;
+  hirate_count_frozen = count;
+  hirate_payload_bytes = (uint16_t)(count * (uint16_t)sizeof(HiRateRecord));
+  hirate_total_chunks =
+      (uint16_t)((hirate_payload_bytes + DIAG_SNAPSHOT_CHUNK_BYTES - 1) / DIAG_SNAPSHOT_CHUNK_BYTES);
+  hirate_dump_next_chunk = 0;
+  hirate_dump_active = false;
+  hirate_dump_id = (uint8_t)(hirate_dump_id + 1);
+  LOG_C1_INFO("[HIRATE] SELECT count=" + String(count) +
+              " chunks=" + String(hirate_total_chunks) +
+              " capturing=" + String(hirate_capturing ? 1 : 0) +
+              " done=" + String(hirate_done ? 1 : 0));
+}
+
+static void diagRejectHiRateArm(uint8_t dof) {
+  hirate_capturing = false;
+  hirate_write_idx = 0;
+  hirate_capture_dof = dof;
+  hirate_done = false;
+  hirate_armed = false;
+  diagSelectHiRate();  // expose an empty hi-rate META so the host cannot dump a stale buffer
 }
 
 static bool diagSnapshotRequestMatches(uint8_t requested_snapshot_id) {
@@ -706,6 +1151,92 @@ static void diagTickSnapshotDump() {
   }
 }
 
+// === HI-RATE DOWNLOAD: META + chunk senders (stream directly from hirate_buf) ===
+// The hi-rate blob (up to 25200 B) needs uint16 chunk counts/indices, so it uses its own META
+// and chunk byte layouts (distinct from the snapshot/ring frames) flagged by the 0xED sentinel.
+// Same CAN IDs (META 0x540+joint, DATA 0x550+joint) — the host disambiguates on frame[1]==0xED.
+//
+// META frame (0x540+joint): [0]=dump_id  [1]=0xED sentinel  [2..3]=total_chunks (u16 LE)
+//                           [4..5]=payload_bytes (u16 LE)  [6]=record_size(=14)  [7]=seq
+static void diagSendHiRateMeta(uint8_t seq) {
+  uint8_t frame[8] = {0};
+  frame[0] = hirate_dump_id;
+  frame[1] = HIRATE_FREEZE_EVENT_CODE;  // 0xED — host: this is a hi-rate motion blob
+  frame[2] = (uint8_t)(hirate_total_chunks & 0xFF);
+  frame[3] = (uint8_t)((hirate_total_chunks >> 8) & 0xFF);
+  frame[4] = (uint8_t)(hirate_payload_bytes & 0xFF);
+  frame[5] = (uint8_t)((hirate_payload_bytes >> 8) & 0xFF);
+  frame[6] = (uint8_t)sizeof(HiRateRecord);  // 14 — record stride, lets the host self-describe
+  frame[7] = seq;
+  CAN_HOST.sendMsgBuf(CAN_ID_FAULT_SNAPSHOT_META + ACTIVE_JOINT, 0, 8, frame);
+}
+
+// DATA frame (0x550+joint): [0..1]=chunk_index (u16 LE)  [2..7]=up to 6 payload bytes
+// Returns the CAN send status (CAN_OK on success; non-OK if the TX mailbox was full / send timed
+// out) so the batched dump can stop and retry the same chunk on the next tick. An out-of-range
+// chunk is reported as CAN_OK (nothing to send, not an enqueue failure).
+static uint8_t diagSendHiRateChunk(uint16_t chunk_index) {
+  if (chunk_index >= hirate_total_chunks) return CAN_OK;
+  uint8_t frame[8] = {0};
+  frame[0] = (uint8_t)(chunk_index & 0xFF);
+  frame[1] = (uint8_t)((chunk_index >> 8) & 0xFF);
+  const uint16_t offset = (uint16_t)(chunk_index * DIAG_SNAPSHOT_CHUNK_BYTES);
+  const uint16_t remaining = (offset < hirate_payload_bytes) ? (hirate_payload_bytes - offset) : 0;
+  const uint8_t copy_len = min<uint16_t>(remaining, DIAG_SNAPSHOT_CHUNK_BYTES);
+  if (copy_len > 0) {
+    // Stream straight from hirate_buf — no 8.4 KB copy into diag_snapshot_buffer.
+    const uint8_t *src = reinterpret_cast<const uint8_t *>(hirate_buf);
+    memcpy(&frame[2], &src[offset], copy_len);
+  }
+  return CAN_HOST.sendMsgBuf(CAN_ID_FAULT_SNAPSHOT_DATA + ACTIVE_JOINT, 0, 8, frame);
+}
+
+// Stream a BATCH of DATA chunks per tick so a full window (~4200 chunks) downloads in a few seconds instead
+// of ~28 s at one chunk/tick. The loop is doubly bounded: it sends at most
+// MAX_HIRATE_CHUNKS_PER_TICK frames AND bails out the instant a send returns non-CAN_OK (TX mailbox
+// full / send timeout). On a failed enqueue the chunk is NOT consumed — hirate_dump_next_chunk
+// stays put so the same chunk is retried next tick, keeping the stream sequential and complete.
+// Never busy-waits the core1 loop (sendMsgBuf's own ≤2.5 ms timeout is the only wait, same as the
+// pre-existing single-chunk path).
+static void diagTickHiRateDump() {
+  if (suspend_host_can_polling) return;
+  if (!hirate_dump_active) return;
+  if (hirate_dump_next_chunk >= hirate_total_chunks) {
+    hirate_dump_active = false;
+    return;
+  }
+  for (uint16_t sent = 0; sent < MAX_HIRATE_CHUNKS_PER_TICK; ++sent) {
+    if (hirate_dump_next_chunk >= hirate_total_chunks) break;
+    if (diagSendHiRateChunk(hirate_dump_next_chunk) != CAN_OK) {
+      // Mailbox full / send timed out: stop for this tick, retry this same chunk next tick.
+      break;
+    }
+    hirate_dump_next_chunk++;
+  }
+  if (hirate_dump_next_chunk >= hirate_total_chunks) {
+    hirate_dump_active = false;
+  }
+}
+
+static bool diagHiRateDumpSelectIsSafe() {
+  if (safety_is_motor_power_enabled()) {
+    return false;
+  }
+  if (free_capture_active || vel_test_active || torque_sweep_active || a2ping_active) {
+    return false;
+  }
+  if (active_joint_controller == nullptr) {
+    return true;
+  }
+  const uint8_t dof_count = active_joint_controller->getConfig().dof_count;
+  for (uint8_t d = 0; d < dof_count && d < MAX_DOFS; ++d) {
+    if (impedance_target[d].valid || dof_state[d] != DofState::IDLE) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void diagFreezeSnapshotForFault(uint8_t fault_code, uint16_t active_fault_bits) {
   if (diag_snapshot_available) return;
   if (!diagSnapshotShouldFreezeForFault(fault_code)) return;
@@ -739,6 +1270,7 @@ static void diagHandleSnapshotCtrl(const unsigned char *buf, unsigned char len) 
   const uint8_t sub_cmd = buf[0];
   const uint8_t requested_snapshot_id = buf[2];
   const uint8_t arg0 = buf[3];
+  const uint8_t arg1 = buf[4];
   const uint8_t seq = buf[7];
 
   switch (sub_cmd) {
@@ -761,6 +1293,240 @@ static void diagHandleSnapshotCtrl(const unsigned char *buf, unsigned char len) 
       if (diagSnapshotRequestMatches(requested_snapshot_id)) {
         diagClearSnapshotData();
       }
+      break;
+    case DIAG_SNAPSHOT_CTRL_SELECT_RECORDER:
+      // Stage the rolling recorder ring into the download buffer, then send its META.
+      diagSerializeRecorder();
+      diagSendSnapshotMeta(seq);
+      break;
+    case DIAG_SNAPSHOT_CTRL_ARM_HIRATE: {
+      // Arm the hi-rate windowed capture. arg0 = DOF index, 0xFF = active DOF (first DOF with
+      // impedance active, else DOF0). Re-arming while capturing restarts the window.
+      uint8_t target_dof = arg0;
+      if (target_dof == 0xFF) {
+        target_dof = 0;
+        for (uint8_t d = 0; d < MAX_DOFS; ++d) {
+          if (impedance_target[d].valid) { target_dof = d; break; }
+        }
+      }
+      if (target_dof >= MAX_DOFS ||
+          active_joint_controller == nullptr ||
+          target_dof >= active_joint_controller->getConfig().dof_count ||
+          !safety_is_motor_power_enabled() ||
+          !active_joint_controller->isSystemReadyForMovement() ||
+          dof_state[target_dof] != DofState::HOLDING) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
+        diagRejectHiRateArm(target_dof);
+        diagSendHiRateMeta(seq);
+        break;
+      }
+      diagArmHiRate(target_dof, arg1);  // arg1 = decim (0/1 = every cycle)
+      // Echo back a META so the host can confirm the arm (count=0 until the window fills).
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_ENTER_FREE: {
+      // Enter free/compliant hand-capture: zero-torque the tendons (back-drivable) and record via the
+      // SEPARATE runFreeCaptureCycle loop. arg0 = DOF (0xFF=active). REJECTED unless the rail is up AND
+      // the DOF is ready (motor cache warm + rev-tracking bootstrapped + HOLDING) — otherwise free-capture
+      // would zero-torque with no/garbage angles and leave the fragile joint free-to-fall.
+      if (!safety_is_motor_power_enabled()) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      uint8_t target_dof = arg0;
+      if (target_dof == 0xFF) {
+        target_dof = 0;
+        for (uint8_t d = 0; d < MAX_DOFS; ++d) {
+          if (impedance_target[d].valid) { target_dof = d; break; }
+        }
+      }
+      if (target_dof >= MAX_DOFS) target_dof = 0;
+      if (active_joint_controller == nullptr ||
+          !active_joint_controller->isFreeCaptureReady(target_dof)) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);  // not ready -> refuse to go free
+        break;
+      }
+      // S2 CARRY choke point: free-capture has no arm* method (it just sets the flag), and entering it
+      // stops executeControlLoop (the carry-injection resolve). Abandon any carried pair before the
+      // free-capture loop drives the bus (setTorquePairPipelined) so its replies aren't left ownerless.
+      active_joint_controller->abandonCarriedPair();
+      // snapshot_id doubles as the hi-rate DECIMATION for the free window (2026-07-11):
+      // 0/1 = every cycle (2.4s ring @250Hz, the classic smoothness probe); N = every
+      // Nth cycle (ring covers N*2.4s — e.g. 25 -> ~60s @10Hz for slow MANUAL geometry
+      // probes where the operator hand-holds positions).
+      {
+        uint8_t free_decim = (requested_snapshot_id == 0) ? 1 : requested_snapshot_id;
+        diagArmHiRate(target_dof, free_decim);
+      }
+      free_capture_dof = target_dof;
+      free_capture_pending_exit = false;
+      free_capture_start_ms = millis();
+      free_capture_active = true;
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_EXIT_FREE:
+      // Deferred: runFreeCaptureCycle cuts motor power + parks every DOF IDLE + clears free_capture_active next cycle.
+      if (free_capture_active) free_capture_pending_exit = true;   // ignore EXIT when not in free-capture
+      diagSendHiRateMeta(seq);
+      break;
+    case DIAG_SNAPSHOT_CTRL_ENTER_VELTEST: {
+      // Enter the motor velocity-test (diag A): one tendon in setSpeed (the motor's fast internal loop) +
+      // the other holding tension, recorded via the SEPARATE runVelTestCycle loop. arg0 = DOF. Rejected
+      // unless the rail is up AND armVelTest accepts (motor cache warm + HOLDING + valid angle); armVelTest
+      // reads the start angle and picks the AWAY-from-start direction so the move is bounded by the mapping
+      // safe range. The velocity command bypasses the cascade's pre-send clamp, so the per-cycle joint-angle
+      // guard in runVelTestCycle is the safety net.
+      if (!safety_is_motor_power_enabled()) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      uint8_t target_dof = (arg0 >= MAX_DOFS) ? 0 : arg0;
+      if (active_joint_controller == nullptr ||
+          !active_joint_controller->armVelTest(target_dof, /*pos_mode=*/false)) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);   // not ready -> refuse
+        break;
+      }
+      diagArmHiRate(target_dof);
+      vel_test_dof = target_dof;
+      vel_test_pending_exit = false;
+      vel_test_start_ms = millis();
+      vel_test_active = true;
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_ENTER_POSTEST: {
+      // Enter the motor POSITION-test (diag A2): identical gating / guard / de-power / recorder as the
+      // velocity-test, but the driver tendon is commanded in 0xA4 multi-loop-angle (target + maxSpeed -> the
+      // motor's internal POSITION loop) instead of setSpeed. armVelTest(dof, /*pos*/true) precomputes the
+      // driver's map far-end target; EXIT reuses 0x0A (DIAG_SNAPSHOT_CTRL_EXIT_VELTEST). arg0 = DOF.
+      if (!safety_is_motor_power_enabled()) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      uint8_t target_dof = (arg0 >= MAX_DOFS) ? 0 : arg0;
+      if (active_joint_controller == nullptr ||
+          !active_joint_controller->armVelTest(target_dof, /*pos_mode=*/true)) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);   // not ready / no map target -> refuse
+        break;
+      }
+      diagArmHiRate(target_dof);
+      vel_test_dof = target_dof;
+      vel_test_pending_exit = false;
+      vel_test_start_ms = millis();
+      vel_test_active = true;
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_EXIT_VELTEST:
+      // Deferred: runVelTestCycle stops + cuts motor power + parks IDLE next cycle (same fail-safe as EXIT_FREE).
+      if (vel_test_active) vel_test_pending_exit = true;
+      diagSendHiRateMeta(seq);
+      break;
+    case DIAG_SNAPSHOT_CTRL_ENTER_TORQUESWEEP: {
+      // Enter the TORQUE-sweep (clean matched-speed torque baseline): UNLIKE vel/pos-test, this does NOT bypass
+      // the cascade. armTorqueSweep seeds a firmware-driven smooth impedance-segment ramp (start=current q,
+      // goal=far end of the mapping safe range, cruise=TORQUE_SWEEP_SPEED_DEG_S) and keeps impedance active, so
+      // the NORMAL executeControlLoop (outer->inner->burst-2 fireTorque/collectPair) tracks it with NO host
+      // q_x100 50 Hz stepping. The cascade's own guards (mapping-limit e-stop, encoder-fault cut, loop-overrun,
+      // anti-windup) stay fully active. Rejected unless the rail is up AND armTorqueSweep accepts (FINE map +
+      // cache warm + HOLDING + valid angle + existing impedance gains from the host's startup SET_IMPEDANCE).
+      if (!safety_is_motor_power_enabled()) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      // A corrupted/garbage frame (e.g. arg0=0xFF) must be REJECTED, NOT silently fall back to DOF0: this diag
+      // moves the joint autonomously, so an unintended DOF target is unsafe. (vel/pos-test fall back to 0; for a
+      // self-driving torque sweep we refuse.)
+      if (arg0 >= MAX_DOFS) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      uint8_t target_dof = arg0;
+      if (active_joint_controller == nullptr ||
+          !active_joint_controller->armTorqueSweep(target_dof)) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);   // not ready / no safe range / no gains -> refuse
+        break;
+      }
+      diagArmHiRate(target_dof, arg1);  // arg1 = decim (0/1 = every cycle)
+      torque_sweep_dof = target_dof;
+      torque_sweep_pending_exit = false;
+      torque_sweep_start_ms = millis();
+      torque_sweep_active = true;
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_EXIT_TORQUESWEEP:
+      // Deferred: the torque-sweep control-loop branch de-powers (torqueSweepStop) next cycle (same fail-safe as EXIT_VELTEST).
+      if (torque_sweep_active) torque_sweep_pending_exit = true;
+      diagSendHiRateMeta(seq);
+      break;
+    case DIAG_SNAPSHOT_CTRL_ENTER_A2PING: {
+      // Enter the fireAngle2 NO-MOTION ping (Loop 2 step 2): hold BOTH tendons of `dof` at their CURRENT angle via
+      // the non-blocking 0xA4 (fireAngle2) + collectPair, recording — confirms the just-built-but-never-called 0xA4
+      // path (send + LKM auto-reply + collectPair routing) with ZERO motion before any Loop 2 work. A SEPARATE loop
+      // (runFireAngle2PingCycle), like the vel-test. Rejected unless rail up AND armFireAngle2Ping accepts (cache
+      // warm + HOLDING + rev-tracking up + valid angle). Reject a corrupted DOF (no DOF0 fallback) — it commands 0xA4.
+      if (!safety_is_motor_power_enabled()) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      if (arg0 >= MAX_DOFS) { diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd); break; }
+      uint8_t target_dof = arg0;
+      if (active_joint_controller == nullptr ||
+          !active_joint_controller->armFireAngle2Ping(target_dof)) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);   // not ready -> refuse
+        break;
+      }
+      diagArmHiRate(target_dof);
+      a2ping_dof = target_dof;
+      a2ping_pending_exit = false;
+      a2ping_start_ms = millis();
+      a2ping_active = true;
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_EXIT_A2PING:
+      // Deferred: runFireAngle2PingCycle logs the bus-diag counters then de-powers next cycle (same fail-safe as EXIT_VELTEST).
+      if (a2ping_active) a2ping_pending_exit = true;
+      diagSendHiRateMeta(seq);
+      break;
+    case DIAG_SNAPSHOT_CTRL_EXIT_HIRATE_HOLD: {
+      // Generic host-armed hi-rate capture (0x05) runs through the NORMAL control loop, not a
+      // dedicated diag state machine. This explicit EXIT gives hold-perturb tests the same
+      // fail-safe teardown as the dedicated modes: stop appending, stop motors, cut GP22, park
+      // every DOF IDLE, and preserve hirate_write_idx so SELECT_HIRATE can download the window.
+      hirate_capturing = false;
+      if (active_joint_controller != nullptr) {
+        active_joint_controller->stopAllMotors();
+        safety_motor_power_disable();
+        const uint8_t dof_count = active_joint_controller->getConfig().dof_count;
+        for (uint8_t d = 0; d < dof_count && d < MAX_DOFS; ++d) {
+          restoreInnerPidGains(d, active_joint_controller);
+          restoreOuterLoopParameters(d, active_joint_controller);
+          impedance_target[d].watchdog_timed_out = false;
+          impedance_target[d].valid = false;
+          resetImpedanceSegment(d);
+          forceLoop1ActuationMode(d);
+          imp_acc[d].tau_ff = 0;
+          imp_acc[d].stg_tau_ff = 0;
+          resetDiagHoldState(d);
+          resetControlLoopFaultStreaks(d);
+          dof_state[d] = DofState::IDLE;
+        }
+      } else {
+        safety_motor_power_disable();
+      }
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      LOG_C1_INFO("[HIRATE] EXIT_HOLD dof=" + String(hirate_capture_dof) +
+                  " records=" + String(hirate_count_frozen));
+      break;
+    }
+    case DIAG_SNAPSHOT_CTRL_SELECT_HIRATE:
+      // Stage the hi-rate buffer for download (freezes captured count), then send its META and
+      // begin streaming directly from hirate_buf. arg0 = start chunk (0 for full window).
+      // Safety: this burst-streams thousands of Host-CAN frames from core1. Do not allow it while
+      // the same core is still running impedance/diag motion or while GP22 is enabled; callers must
+      // EXIT/de-power first, then download the frozen buffer.
+      if (!diagHiRateDumpSelectIsSafe()) {
+        diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
+        diagSendHiRateMeta(seq);
+        break;
+      }
+      diagSelectHiRate();
+      diagSendHiRateMeta(seq);
+      hirate_dump_next_chunk = min<uint16_t>(arg0, hirate_total_chunks);
+      hirate_dump_active = hirate_dump_next_chunk < hirate_total_chunks;
       break;
     default:
       diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
@@ -793,6 +1559,18 @@ static void diagQueueEvent(uint8_t event_code, uint8_t flags, uint8_t source_kin
   if (!queue_try_add(&diag_event_notice_queue, &evt)) {
     LOG_C1_WARN("[DIAG] Event queue full, dropping event code=" + String(event_code));
   }
+  // Also record into the rolling recorder ring (the black-box timeline).
+  DiagRecord rec = {};
+  rec.uptime_ms = (uint16_t)millis();
+  rec.rec_type = 0;
+  rec.dof = source_index;
+  rec.d.ev.event_code = event_code;
+  rec.d.ev.flags = flags;
+  rec.d.ev.source_kind = source_kind;
+  rec.d.ev.source_index = source_index;
+  rec.d.ev.detail0 = detail0;
+  rec.d.ev.detail1 = detail1;
+  diagRecorderPush(rec);
 }
 
 static uint8_t diagComputePhaseCode() {
@@ -966,6 +1744,12 @@ static void diagSampleCanHealthCounters() {
   diag_last_motor_can_tx_error_count = CAN.errorCountTX();
   diag_last_motor_can_rx_error_count = CAN.errorCountRX();
   diag_last_motor_can_eflg = CAN.getError();
+  // Clear the sticky RX-overflow flags AFTER sampling so the next health frame reports only
+  // NEW drops (2026-07-05: without this the host-CAN RX0OVR latched at the first dropped frame
+  // and read set for the entire run — the host could not tell whether drops kept happening).
+  // Turns host_can_eflg / motor_can_eflg into a per-1s edge signal. Cheap bit-modify at 1Hz.
+  CAN_HOST.clearRxOverflow();
+  CAN.clearRxOverflow();
   diag_last_host_can_warn_sample_ms = millis();
 
   const uint8_t host_peak = max(diag_last_host_can_tx_error_count, diag_last_host_can_rx_error_count);
@@ -1180,30 +1964,32 @@ static void sendHealthStatusData() {
   CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame4), (uint8_t *)&frame4);
 #endif
 
-  // Frame 4: loop timing (optional, same 1Hz cadence, zero impact on control loop)
-  // DISABLED pending investigation of startup timeout regression.
-  // The extra CAN_HOST.sendMsgBuf may interfere with SPI1 during
-  // recalc offset, or the 3-frame burst may overflow the SLCAN adapter.
-  // TODO: re-enable after confirming root cause
-#if 0
-  uint32_t prof_last_us, prof_avg_us, prof_max_us;
-  getLoopProfilingStats(prof_last_us, prof_avg_us, prof_max_us);
+  // Frame 5: LOOP TIMING (avg/max cycle + budget_us = inner_loop_period_us). RE-ENABLED 2026-07-05,
+  // gated OFF during startup — the original disable was a startup-timeout regression (an extra 1Hz
+  // Host-CAN TX frame in the timing-sensitive startup window); the SLCAN-overflow concern is moot on
+  // the candle adapter. Only sending post-startup removes the regression at the root while giving the
+  // runtime rate/cycle-time telemetry the Stage-2 bench needs on-wire (an ON-WIRE rate verify — the
+  // 400Hz debacle would have been caught here — plus live cycle-time for the G1/G3 GO-checks). The
+  // host already decodes it (DIAG_HEALTH_EXT_LOOP_TIMING=0x00, telemetry.py loop_avg/max/budget_us).
+  if (!diag_startup_in_progress) {
+    uint32_t prof_last_us, prof_avg_us, prof_max_us;
+    getLoopProfilingStats(prof_last_us, prof_avg_us, prof_max_us);
 
-  struct __attribute__((packed)) {
-    uint8_t frame_kind;    // 0x80
-    uint8_t seq;
-    uint16_t avg_us;       // EMA cycle time
-    uint16_t max_us;       // Max since last health report
-    uint16_t budget_us;    // inner_loop_period_us
-  } frame3;
+    struct __attribute__((packed)) {
+      uint8_t frame_kind;    // 0x80 | DIAG_HEALTH_EXT_LOOP_TIMING (0x00)
+      uint8_t seq;
+      uint16_t avg_us;       // EMA cycle time
+      uint16_t max_us;       // Max since last health report
+      uint16_t budget_us;    // inner_loop_period_us
+    } frame5;
 
-  frame3.frame_kind = 0x80;
-  frame3.seq = seq;
-  frame3.avg_us = (uint16_t)min<uint32_t>(prof_avg_us, 65535UL);
-  frame3.max_us = (uint16_t)min<uint32_t>(prof_max_us, 65535UL);
-  frame3.budget_us = inner_loop_period_us;
-  CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame3), (uint8_t *)&frame3);
-#endif
+    frame5.frame_kind = static_cast<uint8_t>(0x80 | DIAG_HEALTH_EXT_LOOP_TIMING);
+    frame5.seq = seq;
+    frame5.avg_us = (uint16_t)min<uint32_t>(prof_avg_us, 65535UL);
+    frame5.max_us = (uint16_t)min<uint32_t>(prof_max_us, 65535UL);
+    frame5.budget_us = inner_loop_period_us;
+    CAN_HOST.sendMsgBuf(CAN_ID_HEALTH_STATUS + ACTIVE_JOINT, 0, sizeof(frame5), (uint8_t *)&frame5);
+  }
 }
 
 static void sendFaultStatusData() {
@@ -1322,6 +2108,17 @@ void diag_set_estop_latched(bool latched) {
       diagComputePhaseCode());
 }
 
+void clearImpedanceTauFF(uint8_t dof) {
+  // A host that stopped streaming has forfeited its feedforward: clear the COMMITTED
+  // tau_ff in the SET_IMPEDANCE accumulator (both the committed value and the staging
+  // copy the next seq0 restages from). Without this, a session killed hard (SIGKILL /
+  // host power loss) with a learned tau_ff armed leaves the bias latched on the board,
+  // and the NEXT session's first frame0-only transaction silently re-commits it.
+  if (dof >= MAX_DOFS) return;
+  imp_acc[dof].tau_ff = 0;
+  imp_acc[dof].stg_tau_ff = 0;
+}
+
 void diag_note_watchdog_timeout(uint8_t dof, uint32_t elapsed_ms) {
   if (diag_watchdog_trip_count < 255) {
     ++diag_watchdog_trip_count;
@@ -1356,6 +2153,19 @@ void diag_note_loop_overrun() {
   }
 }
 
+void diag_note_loop_profile(uint32_t dof_us, uint32_t outer_us, uint32_t eq_us,
+                            uint32_t can_us, uint32_t pid_us, uint32_t torque_us,
+                            uint32_t safety_us) {
+  auto cap = [](uint32_t v) -> uint16_t { return v > 65535U ? 65535U : (uint16_t)v; };
+  diag_prof_max_dof_us = cap(dof_us);
+  diag_prof_max_outer_us = cap(outer_us);
+  diag_prof_max_eq_us = cap(eq_us);
+  diag_prof_max_can_us = cap(can_us);
+  diag_prof_max_pid_us = cap(pid_us);
+  diag_prof_max_torque_us = cap(torque_us);
+  diag_prof_max_safety_us = cap(safety_us);
+}
+
 void diag_note_motor_timeout(uint8_t dof, uint8_t motor_index) {
   const uint8_t source_index = (motor_index < MAX_MOTORS) ? motor_index : 0xFF;
   const uint8_t source_id = diagSourceIdForEventSource(DIAG_SRC_MOTOR, source_index);
@@ -1387,6 +2197,17 @@ void diag_note_encoder_invalid(uint8_t dof) {
       dof,
       DIAG_FAULT_ENCODER_INVALID,
       diagComputePhaseCode());
+}
+
+void diag_note_motor_feedback_invalid(uint8_t dof, uint8_t reason_flags) {
+  diagSetTransientFault(DIAG_FAULT_MOTOR_FEEDBACK_INVALID, dof, DIAG_ENCODER_INVALID_HOLD_MS, true);
+  diagQueueEvent(
+      DIAG_EVENT_MOTOR_FEEDBACK_INVALID,
+      diagBuildEventFlags(2, true, false, true, false, true),
+      DIAG_SRC_DOF,
+      dof,
+      reason_flags,
+      DIAG_FAULT_MOTOR_FEEDBACK_INVALID);
 }
 
 void diag_note_safety_violation(uint8_t dof, SafetyViolationType violation_type) {
@@ -1449,7 +2270,7 @@ uint32_t hostTimeToLocal(uint32_t host_time_ms) {
  * @brief Get current time in local milliseconds
  * @return Current local time (millis())
  */
-uint32_t getAbsoluteTimeMs() {
+uint32_t HOT_FUNC(getAbsoluteTimeMs)() {
   return millis();
 }
 
@@ -1507,10 +2328,13 @@ void restoreInnerPidGains(uint8_t dof, JointController *jc) {
     inner_pid_backup[dof][1].saved = false;
     inner_pid_reinit_after_impedance[dof] = true;
 
-    LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " direct-drive PID restored:"
-                " Kp=" + String(inner_pid_backup[dof][0].kp, 3) +
-                " Ki=" + String(inner_pid_backup[dof][0].ki, 3) +
-                " Kd=" + String(inner_pid_backup[dof][0].kd, 3));
+    if (LOG_LEVEL >= 2) {
+      char f1[48], f2[48], f3[48];
+      LOG_C1_INFO_F("[IMPEDANCE] DOF%d direct-drive PID restored: Kp=%s Ki=%s Kd=%s", dof,
+                    c1f(f1, inner_pid_backup[dof][0].kp, 3),
+                    c1f(f2, inner_pid_backup[dof][0].ki, 3),
+                    c1f(f3, inner_pid_backup[dof][0].kd, 3));
+    }
     return;
   }
 
@@ -1530,10 +2354,13 @@ void restoreInnerPidGains(uint8_t dof, JointController *jc) {
   // PID state is stale after direct inner loop — flag for bumpless reinit
   inner_pid_reinit_after_impedance[dof] = true;
 
-  LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " inner PID restored:"
-              " Kp=" + String(inner_pid_backup[dof][0].kp, 3) +
-              " Ki=" + String(inner_pid_backup[dof][0].ki, 3) +
-              " Kd=" + String(inner_pid_backup[dof][0].kd, 3));
+  if (LOG_LEVEL >= 2) {
+    char f1[48], f2[48], f3[48];
+    LOG_C1_INFO_F("[IMPEDANCE] DOF%d inner PID restored: Kp=%s Ki=%s Kd=%s", dof,
+                  c1f(f1, inner_pid_backup[dof][0].kp, 3),
+                  c1f(f2, inner_pid_backup[dof][0].ki, 3),
+                  c1f(f3, inner_pid_backup[dof][0].kd, 3));
+  }
 }
 
 void restoreOuterLoopParameters(uint8_t dof, JointController *jc) {
@@ -1544,10 +2371,11 @@ void restoreOuterLoopParameters(uint8_t dof, JointController *jc) {
                              backup.stiffness_deg, backup.cascade_influence);
   outer_loop_backup[dof].saved = false;
 
-  LOG_C1_INFO("[IMPEDANCE] DOF" + String(dof) + " outer loop restored:"
-              " Kp=" + String(backup.kp, 3) +
-              " Ki=" + String(backup.ki, 3) +
-              " Kd=" + String(backup.kd, 3));
+  if (LOG_LEVEL >= 2) {
+    char f1[48], f2[48], f3[48];
+    LOG_C1_INFO_F("[IMPEDANCE] DOF%d outer loop restored: Kp=%s Ki=%s Kd=%s", dof,
+                  c1f(f1, backup.kp, 3), c1f(f2, backup.ki, 3), c1f(f3, backup.kd, 3));
+  }
 }
 
 void resetImpedanceSegment(uint8_t dof) {
@@ -1912,6 +2740,7 @@ static void forceControllerServiceMode() {
       impedance_target[dof].watchdog_timed_out = false;
       impedance_target[dof].valid = false;
       resetImpedanceSegment(dof);
+      forceLoop1ActuationMode(dof);
       dof_state[dof] = DofState::IDLE;
       imp_acc[dof].tau_ff = 0;
       imp_acc[dof].stg_tau_ff = 0;
@@ -2482,7 +3311,7 @@ static float sampleImpedanceReferenceInternal(const ImpedanceRollingSegment &seg
   return q_ref;
 }
 
-bool evaluateImpedanceSegment(uint8_t dof, uint32_t now_ms, float &q_ref_deg, float &dq_ref_deg_s) {
+bool HOT_FUNC(evaluateImpedanceSegment)(uint8_t dof, uint32_t now_ms, float &q_ref_deg, float &dq_ref_deg_s) {
   if (dof >= MAX_DOFS) {
     q_ref_deg = 0.0f;
     dq_ref_deg_s = 0.0f;
@@ -2498,7 +3327,7 @@ bool evaluateImpedanceSegment(uint8_t dof, uint32_t now_ms, float &q_ref_deg, fl
   return seg.initialized;
 }
 
-float getImpedanceHoldReference(uint8_t dof) {
+float HOT_FUNC(getImpedanceHoldReference)(uint8_t dof) {
   if (dof >= MAX_DOFS) return 0.0f;
   const ImpedanceRollingSegment &seg = impedance_segment[dof];
   if (seg.initialized) {
@@ -2540,7 +3369,7 @@ static float getImpedanceMaxJointSpeedDegS(uint8_t dof, JointController *jc) {
  * - Bytes 4-5: int16_t dof2_angle (0.01° resolution, 0x7FFF if invalid)
  * - Bytes 6-7: uint16_t t_offset_ms (ms since last time sync)
  */
-void sendEncoderStreamData() {
+void HOT_FUNC(sendEncoderStreamData)() {
   if (!encoder_stream_can_active) return;
   
   // Skip if Host CAN is suspended (SPI1 bus conflict avoidance)
@@ -2613,7 +3442,8 @@ void sendEncoderStreamData() {
   if (millis() - last_debug_log > 10000) {
     // Only log if there were errors - silence is golden for normal operation
     if (error_count > 0) {
-      LOG_C1_WARN("[CAN] Encoder stream: " + String(error_count) + "/" + String(frame_count) + " errors");
+      LOG_C1_WARN_F("[CAN] Encoder stream: %lu/%lu errors",
+                    (unsigned long)error_count, (unsigned long)frame_count);
     }
     frame_count = 0;
     error_count = 0;
@@ -2630,7 +3460,7 @@ void sendEncoderStreamData() {
  * 
  * Called from core1_loop() at ~20Hz when diagnostic streaming is active.
  */
-void sendPIDDiagStreamData() {
+void HOT_FUNC(sendPIDDiagStreamData)() {
   if (!pid_diag_stream_active) return;
   if (!pid_diagnostics.valid) return;
   
@@ -2728,7 +3558,7 @@ void sendPIDDiagStreamData() {
  * Rate: reuses encoder stream interval (default 50 Hz).
  * Only sent when at least one DOF has active impedance.
  */
-void sendJointStateData() {
+void HOT_FUNC(sendJointStateData)() {
   // Skip if no DOF is in impedance mode
   bool any_impedance = false;
   uint8_t dof_count = active_joint_controller ? active_joint_controller->getConfig().dof_count : 0;
@@ -2822,7 +3652,7 @@ void sendJointStateData() {
  *
  * The second frame uses dof|0x80 as marker so Python can distinguish them.
  */
-void sendDiagHoldData() {
+void HOT_FUNC(sendDiagHoldData)() {
   if (suspend_host_can_polling) return;
 
   extern MCP_CAN CAN_HOST;
@@ -2896,7 +3726,7 @@ void sendDiagHoldData() {
  *   Frame 2 (0x500+joint_id): dof|0x40, during_ratio, delta_ratio, recruit_norm, class
  *   Frame 3 (0x500+joint_id): dof|0x80, pre_effort, boost, pulse_ms, min_samples
  */
-void sendRetensionProbeResultData() {
+void HOT_FUNC(sendRetensionProbeResultData)() {
   if (suspend_host_can_polling) return;
 
   extern MCP_CAN CAN_HOST;
@@ -3039,9 +3869,6 @@ void sendMovementMetrics(uint8_t dof) {
   
   // Clear the ready flag
   metrics_ready[dof] = false;
-  
-  LOG_C1_INFO("[CAN] Metrics sent for DOF " + String(dof) + ": rise=" + String(m.rise_time_ms) + 
-           "ms, settle=" + String(m.settling_time_ms) + "ms, smooth=" + String(m.score_smoothness) + "/100");
 }
 
 /**
@@ -3071,7 +3898,7 @@ void checkAndSendMetrics() {
  * 
  * Called from core1_loop() every iteration.
  */
-void pollHostCan() {
+void HOT_FUNC(pollHostCan)() {
   extern MCP_CAN CAN_HOST;  // Host CAN bus (separate from motor CAN)
 
   initFirmwareUpdateRuntimeStateOnce();
@@ -3090,15 +3917,7 @@ void pollHostCan() {
     return;
   }
   
-  // Debug: log Host CAN activity (throttled to 30s to reduce spam)
-  static uint32_t last_rx_log = 0;
-  static uint32_t rx_count = 0;
-  rx_count++;
-  if (millis() - last_rx_log > 30000) {
-    LOG_C1_DEBUG("[CAN_HOST] " + String(rx_count) + " messages received in 30s");
-    rx_count = 0;
-    last_rx_log = millis();
-  }
+  // (chatter log removed, v2 String pass 2026-07-06)
 
   // Process up to 3 messages per poll to limit jitter on the control loop.
   // At 500Hz loop rate, 3 msgs/cycle = 1500 msgs/s throughput (well above
@@ -3130,7 +3949,7 @@ void pollHostCan() {
     if (rx_id == CAN_ID_TIME_SYNC) {
       handleTimeSyncFrame(buf, len);
     } else if (rx_id == CAN_ID_EMERGENCY_STOP) {
-      LOG_C1_WARN("[CAN_HOST] RX EMERGENCY_STOP frame");
+      LOG_C1_WARN_F("[CAN_HOST] RX EMERGENCY_STOP frame");
       emergency_stop_requested = true;
     } else if (rx_id == CAN_ID_ENCODER_STREAM_CTRL) {
       // Encoder streaming control: byte 0 = 0x01 start, 0x00 stop
@@ -3189,6 +4008,15 @@ void pollHostCan() {
           LOG_C1_INFO("[CAN_HOST] PID diagnostics streaming STOPPED");
         }
       }
+    } else if (rx_id == CAN_ID_PID_MEASURED_DT_CTRL) {
+      // Root-fix A/B: enable/disable feeding the PID time-scaled terms the measured loop dt.
+      // byte 0 = 0x01 enable / 0x00 disable. Runtime-toggleable so the bench can A/B the
+      // oscillation fix vs the gain re-tune without a reflash.
+      if (len >= 1) {
+        pid_measured_dt_enabled = (buf[0] == 0x01);
+        LOG_C1_INFO(String("[CAN_HOST] PID measured-dt ") +
+                    (pid_measured_dt_enabled ? "ENABLED" : "DISABLED"));
+      }
     } else if (rx_id == CAN_ID_LOOP_FREQUENCY) {
       // Loop frequency control: 
       // byte 0-1: inner_loop_period_us (uint16_t, little-endian)
@@ -3197,19 +4025,45 @@ void pollHostCan() {
         uint16_t new_inner_period = buf[0] | (buf[1] << 8);
         uint8_t new_outer_div = buf[2];
         
-        // Validate: inner period 500-10000µs (100Hz-2000Hz), divisor 1-20
-        if (new_inner_period >= 500 && new_inner_period <= 10000 && 
+        // SAFETY (peer review): the 2-DOF tendon ankle cannot run faster than ~250Hz (4000µs) — a shorter
+        // budget overruns the dual tendon-pair motor-CAN round-trips. The 2026-06-30 low-rate screen also
+        // ran away at 125Hz (8000µs), so normal bench commands are clamped to the reviewed 200-250Hz window.
+        // A DEBUG OVERRIDE (buf[3]==0xDB) is required to leave that window in either direction.
+        const bool loopfreq_debug_override = (len >= 4 && buf[3] == 0xDB);
+        // Validate: normal inner period 4000-5000µs (200-250Hz), divisor 1-20.
+        // Debug override keeps the underlying 500-10000µs hardware range available for reviewed experiments.
+        if (new_inner_period < 4000 && !loopfreq_debug_override) {
+          // Text trimmed to fit the 119-byte log cap (v2 review); host-parsed substring
+          // 'REJECTED loop frequency' (knobs.py) unchanged.
+          LOG_C1_WARN_F("[CAN_HOST] REJECTED loop frequency: inner_period=%dµs"
+                        " < 4000µs 2-DOF-ankle safe floor. buf[3]=0xDB overrides.",
+                        new_inner_period);
+        } else if (new_inner_period > 5000 && !loopfreq_debug_override) {
+          LOG_C1_WARN_F("[CAN_HOST] REJECTED loop frequency: inner_period=%dµs"
+                        " > 5000µs reviewed low-rate ceiling. buf[3]=0xDB overrides.",
+                        new_inner_period);
+        } else if (new_inner_period >= 500 && new_inner_period <= 10000 &&
             new_outer_div >= 1 && new_outer_div <= 20) {
           inner_loop_period_us = new_inner_period;
           outer_loop_divisor = new_outer_div;
-          
+          // S2 substitute-fire (bit2): re-derive the rate-scaled 0x92 watchdog interval AND re-clamp each
+          // per-DOF watchdog counter to the new interval (a faster loop shortens the interval; a counter
+          // left above it would fire the watchdog every cycle). Same core (core1) that runs the loop.
+          s2RescaleWatchdogInterval(new_inner_period);
+          jcResetCycleProfiling();
+
           float inner_freq = 1000000.0f / new_inner_period;
           float outer_freq = inner_freq / new_outer_div;
-          LOG_C1_INFO("[CAN_HOST] Loop frequencies updated: inner=" + String(inner_freq, 1) + 
-                   "Hz, outer=" + String(outer_freq, 1) + "Hz");
+          // HOST-PARSED FORMAT, FROZEN: knobs.py confirms on the
+          // 'Loop frequencies updated: inner=...Hz' substring.
+          if (LOG_LEVEL >= 2) {
+            char f1[48], f2[48];
+            LOG_C1_INFO_F("[CAN_HOST] Loop frequencies updated: inner=%sHz, outer=%sHz",
+                          c1f(f1, inner_freq, 1), c1f(f2, outer_freq, 1));
+          }
         } else {
-          LOG_C1_WARN("[CAN_HOST] Invalid loop frequency: inner_period=" + String(new_inner_period) + 
-                   "µs, outer_div=" + String(new_outer_div));
+          LOG_C1_WARN_F("[CAN_HOST] Invalid loop frequency: inner_period=%dµs, outer_div=%d",
+                        new_inner_period, new_outer_div);
         }
       }
     } else if (rx_id == CAN_ID_PID_DIAG_FREQ) {
@@ -3465,9 +4319,11 @@ void pollHostCan() {
           case 0:  friction_ff_enabled = (val != 0.0f); break;
           case 1:  if (val >= 0.0f && val <= 100.0f) friction_ff_torque = val; break;
           case 2:  if (val >= 0.1f && val <= 50.0f) friction_ff_speed_thresh = val; break;
+          case 3:  if (val >= 0.0f && val <= 100.0f) friction_ff_torque_neg = val; break; // Fs neg dir; 0 = symmetric
           case 0xFF:
             LOG_C1_INFO("[CAN_HOST] FRICTION_FF applied: en=" +
                         String(friction_ff_enabled) + " torque=" + String(friction_ff_torque, 1) +
+                        " torque_neg=" + String(friction_ff_torque_neg, 1) +
                         " speed=" + String(friction_ff_speed_thresh, 1));
             break;
         }
@@ -3494,6 +4350,67 @@ void pollHostCan() {
           LOG_C1_ERROR("[CAN_HOST] Failed to stop auto-mapping");
         }
       }
+    } else if (rx_id == CAN_ID_FINE_CAPTURE_CTRL) {
+      // Fine remap capture control (1D): [joint_id, action, dof, 0,0,0,0,0]
+      // action: 0=start, 1=record point, 2=stop, 3=commit, 4=abort
+      //
+      // Grid capture (2D bilinear map) reuses this CAN id (0x01B-0x01F all taken). The grid
+      // actions drive a per-row 1D capture (reuse actions 0-2 to fill the scratch) then harvest:
+      //   payload [joint_id, action, dof, row, q0_f32_le(bytes4-7)]
+      //   action: 5=grid-start, 6=grid-record-row, 7=grid-commit, 8=grid-abort, 9=grid-save-flash
+      //   row = buf[3]; q0 = float from buf[4..7] little-endian (memcpy).
+      //   action 9 sets a volatile flag; Core0 executes the v9 flash save (mirror SAVE_FINE_MAP).
+      // Methods run on Core1 (same as auto-mapping); they touch Core1-side state only.
+      if (len >= 2 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
+        uint8_t action = buf[1];
+        uint8_t fc_dof = (len >= 3) ? buf[2] : 0;
+        switch (action) {
+        case 0: // start
+          active_joint_controller->startFineCapture(fc_dof);
+          break;
+        case 1: // record current settled point
+          active_joint_controller->recordFinePoint();
+          break;
+        case 2: // stop (keep buffer)
+          active_joint_controller->stopFineCapture();
+          break;
+        case 3: // commit (validate + install piecewise map)
+          active_joint_controller->commitFineCapture(fc_dof);
+          break;
+        case 4: // abort (discard)
+          active_joint_controller->abortFineCapture();
+          break;
+        case 5: // grid-start (begin 2D grid-capture session)
+          active_joint_controller->startGridCapture(fc_dof);
+          break;
+        case 6: { // grid-record-row: harvest current scratch as grid row at q0
+          // The q0 float lives in bytes 4..7; a frame shorter than 8 would truncate it to 0 and
+          // silently mis-place the row at q0=0. Reject instead of recording a bogus q0.
+          if (len < 8) {
+            LOG_C1_ERROR("GRID_ROW_FAIL: short frame");
+            break;
+          }
+          uint8_t grid_row = buf[3];
+          float grid_q0 = 0.0f;
+          memcpy(&grid_q0, &buf[4], sizeof(float)); // little-endian f32
+          active_joint_controller->recordGridRow(fc_dof, grid_row, grid_q0);
+          break;
+        }
+        case 7: // grid-commit (validate full grid + install bilinear map)
+          active_joint_controller->commitGridCapture(fc_dof);
+          break;
+        case 8: // grid-abort (discard grid-capture session)
+          active_joint_controller->abortGridCapture();
+          break;
+        case 9: // grid-save-flash (Core0 executes the v9 2D grid flash write)
+          LOG_C1_INFO("[CAN_HOST] SAVE_GRID requested");
+          can_save_grid_requested = true;
+          break;
+        default:
+          LOG_C1_ERROR("[CAN_HOST] FINE_CAPTURE unknown action " + String(action));
+          break;
+        }
+      }
     } else if (rx_id == CAN_ID_SAVE_LINEAR_EQ) {
       // Save linear equations to flash: [joint_id, 0,0,0,0,0,0,0]
       // Core0 executes flash write via volatile flag
@@ -3507,6 +4424,13 @@ void pollHostCan() {
       if (len >= 1 && buf[0] == ACTIVE_JOINT) {
         LOG_C1_INFO("[CAN_HOST] LOAD_LINEAR_EQ requested");
         can_load_linear_eq_requested = true;
+      }
+    } else if (rx_id == CAN_ID_SAVE_FINE_MAP) {
+      // Save fine-map (piecewise) to flash: [joint_id, 0,0,0,0,0,0,0]
+      // Core0 executes flash write via volatile flag
+      if (len >= 1 && buf[0] == ACTIVE_JOINT) {
+        LOG_C1_INFO("[CAN_HOST] SAVE_FINE_MAP requested");
+        can_save_fine_map_requested = true;
       }
     } else if (rx_id == CAN_ID_SET_AUTO_START) {
       // Set auto-start: [joint_id, enabled, torque_lo, torque_hi, dur_lo, dur_hi, 0, 0]
@@ -3545,12 +4469,6 @@ void pollHostCan() {
       // Parameters not sent in this command retain their previous values.
       // This preserves the 200 Hz fast path (1 frame) with occasional full gain updates.
       if (len >= 8 && buf[0] == ACTIVE_JOINT && active_joint_controller != nullptr) {
-        // SAFETY: Reject impedance commands if system not ready
-        if (!active_joint_controller->isSystemReadyForMovement()) {
-          LOG_C1_ERROR("[CAN_HOST] SET_IMPEDANCE REJECTED: System not ready");
-          break;
-        }
-
         uint8_t raw_flags = buf[1];
         uint8_t dof = raw_flags & 0x0F;
         uint8_t seq = (raw_flags >> 4) & 0x07;
@@ -3558,7 +4476,29 @@ void pollHostCan() {
 
         if (dof >= active_joint_controller->getConfig().dof_count) {
           LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE invalid DOF=" + String(dof));
-        } else {
+          diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+          break;
+        }
+
+        if (diagMotionLockoutActive()) {
+          static uint32_t last_lockout_reject_log_ms = 0;
+          const uint32_t now_ms = millis();
+          if (now_ms - last_lockout_reject_log_ms > 500) {
+            LOG_C1_ERROR("[CAN_HOST] SET_IMPEDANCE rejected: terminal motion lockout active "
+                         "(dof=" + String(dof) + ", seq=" + String(seq) + ")");
+            last_lockout_reject_log_ms = now_ms;
+          }
+          imp_acc[dof < MAX_DOFS ? dof : 0].seen_seq0 = false;
+          break;
+        }
+
+        // SAFETY: Reject impedance commands if system not ready
+        if (!active_joint_controller->isSystemReadyForMovement()) {
+          LOG_C1_ERROR("[CAN_HOST] SET_IMPEDANCE REJECTED: System not ready");
+          break;
+        }
+
+        {
           // Per-DOF accumulator (file-scope ImpAccum imp_acc[]) with staging buffer.
           // Committed gains persist across commands (gains not re-sent keep values).
           // Staging buffer isolates in-flight transactions: seq=1/2/3 only modify
@@ -3618,15 +4558,17 @@ void pollHostCan() {
             memcpy(&acc.stg_tau_ff, &buf[2], sizeof(int16_t));
           } else if (seq > 0) {
             // Orphan seq=1/2/3 without prior seq=0 — drop
-            LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                        " orphan seq=" + String(seq) + " dropped (no seq=0)");
+            // HOST-PARSED FORMAT, FROZEN: capture_loop1_pingpong_dof1.py greps the
+            // 'SET_IMPEDANCE DOF{dof} orphan seq=' substring.
+            LOG_C1_WARN_F("[CAN_HOST] SET_IMPEDANCE DOF%d orphan seq=%d dropped (no seq=0)",
+                          dof, seq);
             break;
           }
 
           // Apply when this is the last frame (has_more == false)
           if (!has_more && !acc.seen_seq0) {
-            LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                        " dropped: no seq=0 in this transaction");
+            LOG_C1_WARN_F("[CAN_HOST] SET_IMPEDANCE DOF%d dropped: no seq=0 in this transaction",
+                          dof);
           } else if (!has_more) {
             // Convert and validate staged parameters before committing.
             float q_deg = (float)acc.stg_q / 100.0f;
@@ -3639,6 +4581,16 @@ void pollHostCan() {
             float ki_inner = constrain((float)acc.stg_ki_inner_x100 / 100.0f, 0.0f, 20.0f);
             float kd_inner = constrain((float)acc.stg_kd_inner_x100 / 100.0f, 0.0f, 20.0f);
 
+            if (!active_joint_controller->isDirectDriveDof(dof) &&
+                kd_inner < PID_MIN_TENDON_INNER_KD) {
+              acc.seen_seq0 = false;
+              LOG_C1_ERROR("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                           " rejected: unsafe tendon inner Kd=" + String(kd_inner, 3) +
+                           " < floor " + String(PID_MIN_TENDON_INNER_KD, 3));
+              diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+              break;
+            }
+
             // Validate and clamp q_target against the active safe range.
             // For tendon DOFs this is equation-derived; for direct-drive DOFs it
             // falls back to the conservative physical range used by runtime safety.
@@ -3649,13 +4601,16 @@ void pollHostCan() {
               if (active_joint_controller->getMappingSafeRange(dof, safe_min, safe_max)) {
                 float old_q = q_deg;
                 q_deg = constrain(q_deg, safe_min, safe_max);
-                LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                            " q=" + String(old_q, 2) + "° clamped to safe [" +
-                            String(safe_min, 1) + "," + String(safe_max, 1) +
-                            "] → " + String(q_deg, 2) + "°");
+                char ln[120], f1[48], f2[48], f3[48];
+                int off = 0;
+                c1cat(ln, sizeof ln, &off, "[CAN_HOST] SET_IMPEDANCE DOF%d q=%s° clamped to safe [%s,%s",
+                      dof, c1f(f1, old_q, 2), c1f(f2, safe_min, 1), c1f(f3, safe_max, 1));
+                c1cat(ln, sizeof ln, &off, "] → %s°", c1f(f1, q_deg, 2));
+                LOG_C1_WARN_F("%s", ln);
               } else {
-                LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                            " q=" + String(q_deg, 2) + "° outside limits (no clamp range)");
+                char f1[48];
+                LOG_C1_WARN_F("[CAN_HOST] SET_IMPEDANCE DOF%d q=%s° outside limits (no clamp range)",
+                              dof, c1f(f1, q_deg, 2));
               }
             }
 
@@ -3665,24 +4620,60 @@ void pollHostCan() {
             if (impedance_segment[dof].initialized) {
               evaluateImpedanceSegment(dof, now_ms, q_ref_now, dq_ref_now);
             } else {
-              bool enc_valid = false;
-              float q_now = active_joint_controller->getCurrentAngle(dof, enc_valid);
+              // Seed the new segment from a sequence-locked snapshot of the cross-core
+              // shared angle (ITEM 5). getCurrentAngle() reads valid[]/angles[] WITHOUT
+              // the seqlock, so a concurrent Core0 update could hand back a torn pair
+              // (valid flag of one cycle, angle of another). readSharedDofAnglesSnapshot
+              // guarantees the valid flag and the angle come from the SAME write.
+              SharedDofAngles seed_snapshot;
+              readSharedDofAnglesSnapshot(seed_snapshot);
+              bool enc_valid = (dof < seed_snapshot.dof_count) && seed_snapshot.valid[dof];
               if (enc_valid) {
-                q_ref_now = q_now;
+                q_ref_now = seed_snapshot.angles[dof];
               } else if (impedance_target[dof].valid) {
                 q_ref_now = getImpedanceHoldReference(dof);
               }
             }
 
-            const float distance_deg = fabsf(q_deg - q_ref_now);
+            float distance_deg = fabsf(q_deg - q_ref_now);
             if (distance_deg > IMPEDANCE_HOLD_EPS_DEG &&
                 dq_abs_cmd_deg_s < IMPEDANCE_MIN_CRUISE_SPEED_DEG_S) {
-              acc.seen_seq0 = false;
-              LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                          " rejected: dq=0 with distant goal (" +
-                          String(distance_deg, 2) + "° > " +
-                          String(IMPEDANCE_HOLD_EPS_DEG, 2) + "°)");
-              break;
+              // dq=0 with a goal far from the running SEGMENT reference. This is a
+              // host "stop / hold HERE" command. Do NOT discard it (which would let
+              // the previously-armed segment keep driving toward the OLD goal). The
+              // ambiguity is only in the position field: re-aim the freeze at the
+              // ACTUAL physical joint angle so the joint stops where it is, bumplessly,
+              // while still committing the staged gains/stiffness/tau_ff below.
+              SharedDofAngles dof_snapshot;
+              readSharedDofAnglesSnapshot(dof_snapshot);
+              bool actual_valid = (dof < dof_snapshot.dof_count) &&
+                                  dof_snapshot.valid[dof];
+              if (actual_valid) {
+                float q_actual = dof_snapshot.angles[dof];
+                char ln[120], f1[48], f2[48], f3[48];
+                int off = 0;
+                c1cat(ln, sizeof ln, &off, "[CAN_HOST] SET_IMPEDANCE DOF%d dq=0 freeze: re-aimed from goal %s°",
+                      dof, c1f(f1, q_deg, 2));
+                c1cat(ln, sizeof ln, &off, " to ACTUAL joint %s° (seg ref was %s°)",
+                      c1f(f2, q_actual, 2), c1f(f3, q_ref_now, 2));
+                LOG_C1_WARN_F("%s", ln);
+                // Hold at the current physical angle; recompute against q_ref_now so
+                // the no-segment hold branch below is taken (speed 0, immediate hold).
+                q_deg = q_actual;
+                q_ref_now = q_actual;
+                distance_deg = 0.0f;
+              } else {
+                // No valid encoder: cannot safely re-aim. Preserve the existing safe
+                // behavior — reject the position-ambiguous command rather than freeze
+                // at an unknown angle.
+                acc.seen_seq0 = false;
+                LOG_C1_WARN("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
+                            " rejected: dq=0 with distant goal (" +
+                            String(distance_deg, 2) + "° > " +
+                            String(IMPEDANCE_HOLD_EPS_DEG, 2) +
+                            "°), no valid encoder to freeze on");
+                break;
+              }
             }
 
             const float dq_max_safe_deg_s = getImpedanceMaxJointSpeedDegS(dof, active_joint_controller);
@@ -3714,6 +4705,7 @@ void pollHostCan() {
             impedance_target[dof].last_update_ms = now_ms;
             impedance_target[dof].watchdog_timed_out = false;
             impedance_target[dof].valid = true;
+            diagNoteImpedanceCommandCommit(dof, now_ms);
 
             // Overwrite-only local segment: start from the current q_ref and
             // let the cascade PID chase a linearly moving reference.
@@ -3740,18 +4732,26 @@ void pollHostCan() {
             dof_state[dof] = seg.active ? DofState::MOVING : DofState::HOLDING;
 
             // Throttled logging (every 50th command)
+            // Heap-free build (2026-07-06): the String version cost ~0.3-0.6ms of core1 work
+            // on each echo cycle (whole-cycle [PROFILING] inflation). PARSER-CRITICAL FORMAT,
+            // FROZEN: the host gain-commit verify regex-parses Kp=/Ki=/Kd=/Kpi=/Kii=/Kdi=
+            // (capture_loop1_pingpong_dof1.py _extract_impedance_commit); c1f ==
+            // String(float,dp) byte-for-byte, throttle untouched.
             static uint16_t imp_log_counter = 0;
             if (++imp_log_counter >= 50) {
-              LOG_C1_INFO("[CAN_HOST] SET_IMPEDANCE DOF" + String(dof) +
-                          " start=" + String(q_ref_now, 2) +
-                          " goal=" + String(q_deg, 2) +
-                          " v=" + String(v_eff_deg_s, 1) +
-                          " Kp=" + String(kp, 2) + " Ki=" + String(ki, 2) +
-                          " Kd=" + String(kd, 2) +
-                          " Kpi=" + String(kp_inner, 2) + " Kii=" + String(ki_inner, 2) +
-                          " Kdi=" + String(kd_inner, 2) +
-                          " ff=" + String(acc.tau_ff) +
-                          (seg.active ? " [segment]" : " [hold]"));
+              if (LOG_LEVEL >= 2) {
+                char ln[120], f1[48], f2[48], f3[48];
+                int off = 0;
+                c1cat(ln, sizeof ln, &off, "[CAN_HOST] SET_IMPEDANCE DOF%d start=%s goal=%s v=%s",
+                      dof, c1f(f1, q_ref_now, 2), c1f(f2, q_deg, 2), c1f(f3, v_eff_deg_s, 1));
+                c1cat(ln, sizeof ln, &off, " Kp=%s Ki=%s Kd=%s",
+                      c1f(f1, kp, 2), c1f(f2, ki, 2), c1f(f3, kd, 2));
+                c1cat(ln, sizeof ln, &off, " Kpi=%s Kii=%s Kdi=%s",
+                      c1f(f1, kp_inner, 2), c1f(f2, ki_inner, 2), c1f(f3, kd_inner, 2));
+                c1cat(ln, sizeof ln, &off, " ff=%d%s", (int)acc.tau_ff,
+                      seg.active ? " [segment]" : " [hold]");
+                LOG_C1_INFO_F("%s", ln);
+              }
               imp_log_counter = 0;
             }
           }
@@ -3760,7 +4760,9 @@ void pollHostCan() {
     } else if (rx_id == CAN_ID_IMPEDANCE_CTRL) {
       // IMPEDANCE_CTRL: control commands for impedance mode
       // Frame: [joint_id, sub_cmd, param_lo, param_hi, 0, 0, 0, 0]
-      // sub_cmd: 0x00=disable (→ HOLDING), 0x01=enable, 0x02=set_watchdog_ms
+      // sub_cmd: 0x00=disable (→ HOLDING), 0x01=enable, 0x02=set_watchdog_ms,
+      //          0x03=set_actuation_mode, 0x04=Loop2 maxSpeed, 0x05=Loop2 step,
+      //          0x10=adaptive-HOLD feature mask
       if (len >= 2 && buf[0] == ACTIVE_JOINT) {
         uint8_t sub_cmd = buf[1];
         switch (sub_cmd) {
@@ -3770,6 +4772,7 @@ void pollHostCan() {
               // Reset tau_ff accumulator so next session starts clean
               imp_acc[d].tau_ff = 0;
               imp_acc[d].stg_tau_ff = 0;
+              forceLoop1ActuationMode(d);
 
               if (impedance_target[d].valid) {
                 restoreInnerPidGains(d, active_joint_controller);
@@ -3780,9 +4783,14 @@ void pollHostCan() {
                 // Set hold reference to current position.
                 // Fallback to last impedance target if encoder is momentarily invalid
                 // (avoids collapsing hold reference to 0°).
-                bool enc_valid = false;
-                float q_now = active_joint_controller->getCurrentAngle(d, enc_valid);
-                float q_hold = enc_valid ? q_now : getImpedanceHoldReference(d);
+                // Read the cross-core angle via the sequence lock (ITEM 5) so the valid
+                // flag and the angle are guaranteed consistent (getCurrentAngle reads
+                // valid[]/angles[] unlocked and could observe a torn pair).
+                SharedDofAngles disable_snapshot;
+                readSharedDofAnglesSnapshot(disable_snapshot);
+                bool enc_valid = (d < disable_snapshot.dof_count) && disable_snapshot.valid[d];
+                float q_hold = enc_valid ? disable_snapshot.angles[d]
+                                         : getImpedanceHoldReference(d);
                 resetImpedanceSegment(d);
                 dof_hold_angle[d] = q_hold;
                 dof_hold_time[d] = millis();
@@ -3794,7 +4802,44 @@ void pollHostCan() {
           }
           case 0x01: {
             // Enable impedance mode (informational, actual switch happens on SET_IMPEDANCE)
-            LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: enable acknowledged");
+            // (chatter log removed, v2 String pass 2026-07-06)
+            break;
+          }
+          case 0x20: {
+            // MAP_MODE_OVERRIDE (diagnostic, 2026-07-08): force a DOF's active map mode,
+            // RAM-only and NON-DESTRUCTIVE — the linear/fine/grid flash records are left
+            // untouched and a reboot restores the persisted mode. Frame:
+            // [joint, 0x20, dof, mode]; mode 0=LINEAR (always available), 1=PIECEWISE
+            // (only if pw_valid). Lets a linear-vs-fine A/B run live without a destructive
+            // coarse re-map. Refused while the DOF is MOVING: the switch steps the motor
+            // reference by the fine-vs-linear delta, so it must land at HOLDING/IDLE.
+            if (len >= 4) {
+              uint8_t dof = buf[2];
+              uint8_t mode = buf[3];
+              if (dof >= MAX_DOFS ||
+                  dof >= active_joint_controller->getConfig().dof_count) {
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
+                LOG_C1_WARN_F("[CAN_HOST] MAP_MODE_OVERRIDE: bad dof=%u", dof);
+              } else if (dof_state[dof] == DofState::MOVING) {
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
+                LOG_C1_WARN("[CAN_HOST] MAP_MODE_OVERRIDE refused: DOF MOVING");
+              } else {
+                DofLinearEquations *eq =
+                    active_joint_controller->getLinearEquations(dof);
+                if (eq != nullptr &&
+                    (mode == MAP_LINEAR ||
+                     (mode == MAP_PIECEWISE && eq->pw_valid))) {
+                  eq->map_mode = (MapMode)mode;
+                  __dmb();
+                  LOG_C1_INFO_F("[CAN_HOST] MAP_MODE_OVERRIDE: dof=%u mode=%u "
+                                "(0=LINEAR 1=PIECEWISE)", dof, mode);
+                } else {
+                  diag_note_bad_command(DIAG_SRC_HOST_CAN, sub_cmd);
+                  LOG_C1_WARN_F("[CAN_HOST] MAP_MODE_OVERRIDE: mode %u invalid "
+                                "for dof %u (piecewise needs pw_valid)", mode, dof);
+                }
+              }
+            }
             break;
           }
           case 0x02: {
@@ -3806,6 +4851,245 @@ void pollHostCan() {
               if (timeout_ms > 60000) timeout_ms = 60000;   // Maximum 60s
               impedance_watchdog_ms = timeout_ms;
               LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: watchdog=" + String(timeout_ms) + "ms");
+            }
+            break;
+          }
+          case IMPEDANCE_CTRL_ACTUATION_MODE: {
+            if (len >= 4) {
+              uint16_t param;
+              memcpy(&param, &buf[2], sizeof(uint16_t));
+              uint8_t dof = param & 0xFF;
+              uint8_t mode = (param >> 8) & 0xFF;
+              if (dof >= active_joint_controller->getConfig().dof_count) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL actuation invalid DOF=" + String(dof));
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              if (mode != INNER_ACTUATION_LOOP1_TORQUE &&
+                  mode != INNER_ACTUATION_LOOP2_POSITION) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL actuation invalid mode=" + String(mode));
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, mode);
+                break;
+              }
+              const JointConfig &cfg = active_joint_controller->getConfig();
+              if (mode == INNER_ACTUATION_LOOP2_POSITION &&
+                  cfg.dofs[dof].drive_type != DRIVE_ANTAGONISTIC_TENDON) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 rejected on non-tendon DOF" + String(dof));
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              if (inner_actuation_mode[dof] == mode) {
+                LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: DOF" + String(dof) +
+                            " actuation unchanged");
+                break;
+              }
+              if (dof_state[dof] != DofState::HOLDING) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL actuation rejected while DOF" +
+                            String(dof) + " is not HOLDING");
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              if (mode == INNER_ACTUATION_LOOP2_POSITION) {
+                float safe_min = 0.0f;
+                float safe_max = 0.0f;
+                if (!active_joint_controller->getMappingSafeRange(dof, safe_min, safe_max)) {
+                  LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 rejected: DOF" +
+                              String(dof) + " has no valid mapping safe range");
+                  diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                  break;
+                }
+                SharedDofAngles mode_snapshot;
+                readSharedDofAnglesSnapshot(mode_snapshot);
+                if (dof >= mode_snapshot.dof_count || !mode_snapshot.valid[dof]) {
+                  LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 rejected: DOF" +
+                              String(dof) + " encoder invalid");
+                  diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                  break;
+                }
+              }
+              if (mode == INNER_ACTUATION_LOOP1_TORQUE) {
+                forceLoop1ActuationMode(dof);
+              } else {
+                inner_actuation_mode[dof] = mode;
+                resetLoop2ActuationState(dof);
+                inner_pid_reinit_after_impedance[dof] = true;
+              }
+              LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: DOF" + String(dof) +
+                          " actuation=" +
+                          String(mode == INNER_ACTUATION_LOOP2_POSITION ? "LOOP2_0xA4" : "LOOP1_TORQUE"));
+            }
+            break;
+          }
+          case IMPEDANCE_CTRL_LOOP2_MAXSPEED: {
+            if (len >= 6) {
+              // Wire: buf[2]=dof, buf[4..5]=maxSpeed u16 LE in RAW LKM 0xA4 units.
+              // (Was [maxSpeed/10:8] in buf[3]: the single byte capped the field at 2550
+              // units. None of the 07-01 bench runs were maxSpeed-bound, so the vendor
+              // LSB - rotor vs output dps - is still unpinned; the u16 field gives
+              // headroom either way for the >=80 dps A/B. 2026-07-03.)
+              uint8_t dof = buf[2];
+              uint16_t max_speed;
+              memcpy(&max_speed, &buf[4], sizeof(uint16_t));
+              if (dof >= active_joint_controller->getConfig().dof_count) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 maxSpeed invalid DOF=" + String(dof));
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              if (dof_state[dof] == DofState::MOVING) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 maxSpeed rejected while DOF" +
+                            String(dof) + " is MOVING");
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              max_speed = (uint16_t)constrain((int)max_speed,
+                                              (int)LOOP2_MIN_ANGLE_MAXSPEED,
+                                              (int)LOOP2_MAX_ANGLE_MAXSPEED);
+              loop2_angle_max_speed[dof] = max_speed;
+              resetLoop2ActuationState(dof);
+              LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: DOF" + String(dof) +
+                          " Loop2 maxSpeed=" + String(max_speed));
+            }
+            break;
+          }
+          case IMPEDANCE_CTRL_LOOP2_STEP: {
+            if (len >= 4) {
+              uint16_t param;
+              memcpy(&param, &buf[2], sizeof(uint16_t));
+              uint8_t dof = param & 0xFF;
+              uint16_t step_x100 = (param >> 8) & 0xFF;
+              if (dof >= active_joint_controller->getConfig().dof_count) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 step invalid DOF=" + String(dof));
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              if (dof_state[dof] == DofState::MOVING) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL Loop2 step rejected while DOF" +
+                            String(dof) + " is MOVING");
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, dof);
+                break;
+              }
+              step_x100 = (uint16_t)constrain((int)step_x100,
+                                              (int)LOOP2_MIN_TARGET_STEP_X100,
+                                              (int)LOOP2_MAX_TARGET_STEP_X100);
+              loop2_target_step_x100[dof] = step_x100;
+              resetLoop2ActuationState(dof);
+              LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: DOF" + String(dof) +
+                          " Loop2 step=" + String(step_x100 * 0.01f, 2) + "deg/cycle");
+            }
+            break;
+          }
+          case IMPEDANCE_CTRL_SLOPE_SCALING: {
+            // buf[2]: 0 = off (legacy formula, boot default), 1 = on. Global knob for the
+            // per-tendon dth slope scaling in the cascade formula (bench A/B, opt-in).
+            if (len >= 3) {
+              cascade_slope_scaling_enabled = (buf[2] != 0);
+              LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: cascade slope scaling " +
+                          String(cascade_slope_scaling_enabled ? "ENABLED" : "disabled"));
+            }
+            break;
+          }
+          case IMPEDANCE_CTRL_SCHED_INTERLEAVE: {
+            // buf[2] is a BITMASK (backward compatible: legacy 0/1 map to OFF/interleave exactly):
+            //   bit0 = O1 strict-interleave (Stage 1)   bit1 = S2 cross-cycle CARRY (Stage 2)
+            //   bit2 = S2 SUBSTITUTE-FIRE 0x92 watchdog (Stage 2): on a watchdog-due cycle fire the 2-frame
+            //          0x92 pair INSTEAD of the torque pair (ZOH hold), reply carried+compared next cycle.
+            // Independently revertible; composes under serial (bit2), interleave (0b101) or carry (0b110/0b111).
+            // 0x00 = boot default = statement-identical serial. Unknown bits (>=bit3) are rejected.
+            if (len >= 3) {
+              const uint8_t bits = buf[2];
+              const uint8_t VALID = 0x07;  // bit0|bit1|bit2
+              if ((bits & (uint8_t)~VALID) != 0) {
+                // %x lowercase == String(x, HEX) byte-for-byte (knobs.py-adjacent format)
+                LOG_C1_WARN_F("[CAN_HOST] IMPEDANCE_CTRL: sched bits invalid 0x%x (valid 0x%x)",
+                              bits, VALID);
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, IMPEDANCE_CTRL_SCHED_INTERLEAVE);
+                break;
+              }
+              sched_interleave_enabled = (bits & 0x01) != 0;  // bit0
+              sched_carry_enabled      = (bits & 0x02) != 0;  // bit1
+              sched_sub92_enabled      = (bits & 0x04) != 0;  // bit2
+              // bit2 toggle changes the watchdog cadence (fixed 500 when OFF, rate-scaled when ON) —
+              // re-derive + re-clamp the per-DOF counters now so the change takes effect immediately
+              // and no counter exceeds the (possibly smaller) new interval.
+              s2RescaleWatchdogInterval(inner_loop_period_us);
+              jcResetCycleProfiling();  // knob toggle: pre-toggle cycles must not latch in the A/B windows
+              // HOST-PARSED FORMAT, FROZEN: knobs.py confirms on the
+              // 'interleave=%d carry=%d sub92=%d' echo; %x lowercase == String(x, HEX).
+              LOG_C1_INFO_F("[CAN_HOST] IMPEDANCE_CTRL: sched bits=0x%x interleave=%d carry=%d sub92=%d",
+                            bits, sched_interleave_enabled ? 1 : 0,
+                            sched_carry_enabled ? 1 : 0, sched_sub92_enabled ? 1 : 0);
+            }
+            break;
+          }
+          case IMPEDANCE_CTRL_MOTION_GUARD: {
+#if MOTION_GUARD_V2
+            // MG2-S mode select (RAM-only; boot default LEGACY; e-stop forces LEGACY).
+            // Rejected while faulted (a terminal lockout cannot be "unlocked" into ACTIVE)
+            // and while any DOF is MOVING (a cold guard envelope armed mid-gait would
+            // false-trip on the first healthy reversal — review F5).
+            uint8_t mg_mode = buf[2];
+            if (len < 3 || mg_mode > 2) {
+              LOG_C1_WARN_F("[MG2] invalid mode request (len=%d val=%d)", (int)len, (int)mg_mode);
+              diag_note_bad_command(DIAG_SRC_HOST_CAN, IMPEDANCE_CTRL_MOTION_GUARD);
+              break;
+            }
+            if (emergency_stop_requested || !safety_is_motor_power_enabled()) {
+              LOG_C1_WARN_F("[MG2] mode change rejected while faulted/depowered");
+              diag_note_bad_command(DIAG_SRC_HOST_CAN, IMPEDANCE_CTRL_MOTION_GUARD);
+              break;
+            }
+            {
+              bool mg_any_moving = false;
+              for (uint8_t d = 0; d < MAX_DOFS; d++) {
+                if (dof_state[d] == DofState::MOVING) {
+                  mg_any_moving = true;
+                  break;
+                }
+              }
+              if (mg_any_moving) {
+                LOG_C1_WARN_F("[MG2] mode change rejected while MOVING");
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, IMPEDANCE_CTRL_MOTION_GUARD);
+                break;
+              }
+            }
+            motionGuardV2ResetState();
+            motion_guard_mode = mg_mode;
+            LOG_C1_INFO_F("[MG2] motion guard mode -> %d (0=legacy 1=shadow 2=active)",
+                          (int)mg_mode);
+#else
+            // v2 not compiled in: NAK loudly — the host must never believe SHADOW/ACTIVE
+            // is armed on a build that cannot honor it (review F6).
+            LOG_C1_WARN_F("[MG2] motion guard v2 NOT COMPILED IN — mode request ignored");
+            diag_note_bad_command(DIAG_SRC_HOST_CAN, IMPEDANCE_CTRL_MOTION_GUARD);
+#endif
+            break;
+          }
+          case IMPEDANCE_CTRL_ADAPTIVE_HOLD: {
+            if (len >= 4) {
+              uint16_t mask;
+              memcpy(&mask, &buf[2], sizeof(uint16_t));
+              if ((mask & (uint16_t)~ADAPTIVE_HOLD_VALID_MASK) != 0) {
+                LOG_C1_WARN("[CAN_HOST] IMPEDANCE_CTRL adaptive_hold invalid mask=0x" +
+                            String(mask, HEX) + " valid=0x" + String(ADAPTIVE_HOLD_VALID_MASK, HEX));
+                diag_note_bad_command(DIAG_SRC_HOST_CAN, IMPEDANCE_CTRL_ADAPTIVE_HOLD);
+                break;
+              }
+              retension_probe_enabled = (mask & ADAPTIVE_HOLD_RETENSION) != 0;
+              compliance_detection_enabled = (mask & ADAPTIVE_HOLD_COMPLIANCE) != 0;
+              soft_hold_enabled = (mask & ADAPTIVE_HOLD_SOFT_HOLD) != 0;
+              anti_slack_enabled = (mask & ADAPTIVE_HOLD_ANTI_SLACK) != 0;
+
+              if (!compliance_detection_enabled) {
+                for (uint8_t d = 0; d < active_joint_controller->getConfig().dof_count && d < MAX_DOFS; d++) {
+                  compliance_state[d].reset();
+                }
+              }
+
+              LOG_C1_INFO("[CAN_HOST] IMPEDANCE_CTRL: adaptive_hold mask=0x" + String(mask, HEX) +
+                          " retension=" + String(retension_probe_enabled ? 1 : 0) +
+                          " compliance=" + String(compliance_detection_enabled ? 1 : 0) +
+                          " soft_hold=" + String(soft_hold_enabled ? 1 : 0) +
+                          " anti_slack=" + String(anti_slack_enabled ? 1 : 0));
             }
             break;
           }
@@ -3847,7 +5131,7 @@ void pollHostCan() {
  * - CMD_START_AUTO_MAPPING: Start automatic joint calibration
  * - CMD_STOP_AUTO_MAPPING: Stop automatic joint calibration
  */
-void core1_loop() {
+void HOT_FUNC(core1_loop)() {
   // NOTE: multicore_lockout_victim_init() was removed because it interferes
   // with core1 startup. Flash operations now use a simpler approach:
   // Core0 waits for Core1 to be in a safe state before flash write.
@@ -3874,7 +5158,7 @@ void core1_loop() {
     // === EMERGENCY STOP CHECK (immediately after CAN poll) ===
     // Must run BEFORE any motor commands to ensure zero-delay stop
     if (emergency_stop_requested) {
-      LOG_C1_INFO("Core1: Emergency stop requested");
+      LOG_C1_INFO_F("Core1: Emergency stop requested");
 
       // Cut motor power at hardware level (Rev B: <10µs via MOSFET gate)
       safety_motor_power_disable();
@@ -3883,29 +5167,75 @@ void core1_loop() {
       // Stop all motors via CAN (software stop — belt-and-suspenders with HW cutoff)
       if (active_joint_controller != nullptr) {
         active_joint_controller->stopAllMotors();
-        LOG_C1_INFO("Core1: All motors stopped");
+        LOG_C1_INFO_F("Core1: All motors stopped");
         
         // Reset all DOF states, impedance mode, restore inner PID
         for (uint8_t dof = 0; dof < active_joint_controller->getConfig().dof_count; dof++) {
           dof_state[dof] = DofState::IDLE;
+          // Invalidate tendon motor offsets: the e-stop cuts motor power (HW gate),
+          // so the LKM multi-turn counters lose truth — "movement ready" would be a
+          // lie the already-ready startup guard then trusts (THERMOTRIM FW7 P0: an
+          // e-stop + rail-cycle without board reset booted HOLDING on garbage
+          // offsets). Startup must re-establish offsets (recalc).
+          // Direct-drive DOFs keep their flash reference semantics (own invalidation).
+          if (active_joint_controller->getConfig().dofs[dof].drive_type ==
+              DRIVE_ANTAGONISTIC_TENDON) {
+            active_joint_controller->setMovementReadyForDof(dof, false);
+          }
           restoreInnerPidGains(dof, active_joint_controller);
           restoreOuterLoopParameters(dof, active_joint_controller);
           impedance_target[dof].watchdog_timed_out = false;
           impedance_target[dof].valid = false;
           resetImpedanceSegment(dof);
+          forceLoop1ActuationMode(dof);
           // Reset tau_ff accumulator so next session starts clean
           imp_acc[dof].tau_ff = 0;
           imp_acc[dof].stg_tau_ff = 0;
           // Reset session-local diagnostics (trim dry-run, bias EMA)
           resetDiagHoldState(dof);
+          // Reset per-DOF safety fault streaks so a streak never survives an e-stop
+          // (a single fresh trip next session must not latch power / cut torque).
+          resetControlLoopFaultStreaks(dof);
         }
-        LOG_C1_INFO("Core1: DOF states reset, impedance mode cleared");
+        LOG_C1_INFO_F("Core1: DOF states reset, impedance mode cleared");
+      }
+      // Deferred [Metrics] lines still in the 1-line-per-cycle drain window are the LAST-STROKE
+      // forensics — flush them now (bounded: <= 6*MAX_DOFS short lines into the log queue).
+      jcMetricsFlushPendingLogs();
+
+      // Free-capture must NOT survive an e-stop: otherwise the next loop iteration re-enters the free
+      // branch and keeps zero-torquing a powered-down rail -> the fragile joint stays free-to-fall,
+      // unrecoverable. Force the normal post-e-stop state (latched IDLE / power off).
+      free_capture_active = false;
+      free_capture_pending_exit = false;
+      // SAME for the vel-test, which is MORE dangerous (it actively DRIVES in velocity): an e-stop must not
+      // be silently undone by the next loop re-issuing setSpeed/setTorque. Clear the state + the recorder.
+      vel_test_active = false;
+      vel_test_pending_exit = false;
+      hirate_capturing = false;
+#if MOTION_GUARD_V2
+      // MG2-S guards revert to LEGACY across any e-stop (operational fail-safe: recovery
+      // and the next session start from the ratified guard behavior; SHADOW/ACTIVE are
+      // deliberate per-session opt-ins).
+      motion_guard_mode = 0;
+      motionGuardV2ResetState();
+#endif
+      // FINE/GRID CAPTURE must not survive an e-stop either (2026-07-10): while a fine
+      // capture is active, getMappingSafeRange returns the WIDE physical band for that DOF
+      // (the ratchet fix). A leaked flag after e-stop recovery (rail-cycle without board
+      // reset) would leave the MAPPING-LIMIT safety + the SET_IMPEDANCE clamp riding the
+      // near-physical band for the whole next session — the tendon/eyelet protection
+      // silently OFF. The host's single-frame FINE abort can be dropped (one-shot class),
+      // so the firmware must clear it here unconditionally.
+      if (active_joint_controller != nullptr) {
+        active_joint_controller->abortFineCapture();
+        active_joint_controller->abortGridCapture();
       }
 
       // Reset flag
       emergency_stop_requested = false;
 
-      LOG_C1_INFO("Core1: Emergency stop flag cleared");
+      LOG_C1_INFO_F("Core1: Emergency stop flag cleared");
 
       // Notify core0
       if (shared_data_ext.flag == 0) {
@@ -3913,7 +5243,7 @@ void core1_loop() {
         strcpy(shared_data_ext.message, "EMERGENCY STOP EXECUTED");
       }
 
-      SERIAL_C1_COM_LN("EMERGENCY STOP EXECUTED");
+      SERIAL_C1_COM_LN_F("EMERGENCY STOP EXECUTED");
       continue;
     }
 
@@ -3954,6 +5284,7 @@ void core1_loop() {
     sendFaultStatusData();
     sendEventNoticeData();
     diagTickSnapshotDump();
+    diagTickHiRateDump();  // stream a batch of hi-rate 6 B chunks per tick (mailbox-bounded), if active
 
     // === ENCODER OFFSET NOTIFICATION VIA CAN ===
     // Core0 sets this flag after zero (saveOffsetsToFlash) or boot (loadOffsetsFromFlash)
@@ -4054,7 +5385,72 @@ void core1_loop() {
     // Execute cascade control loop for all DOFs (impedance + holding)
     // This runs @ 500 Hz with precise timing (outer loop every outer_loop_divisor cycles)
     bool control_active = false;
-    if (active_joint_controller != nullptr && safety_is_motor_power_enabled()) {
+    if (vel_test_active) {
+      // VEL-TEST (SEPARATE loop, diag 0x09/0x0A): one tendon in velocity (setSpeed) + the other holding
+      // tension, to characterise the motor's internal velocity loop vs our torque cascade. On EXIT / the
+      // position guard / a bad read / the backstop, runVelTestCycle de-powers (same fail-safe as free-capture).
+      bool vt_exit = vel_test_pending_exit ||
+                     (millis() - vel_test_start_ms > VEL_TEST_MAX_MS);
+      if (active_joint_controller == nullptr ||
+          active_joint_controller->runVelTestCycle(vel_test_dof, vt_exit)) {
+        vel_test_active = false;
+        vel_test_pending_exit = false;
+        hirate_capturing = false;
+      }
+    } else if (free_capture_active) {
+      // Free/compliant hand-capture (SEPARATE loop): replaces the control loop while active. It
+      // zero-torques the tendons + records; on EXIT runFreeCaptureCycle stops ALL motors + CUTS MOTOR
+      // POWER + parks every DOF IDLE and returns true (NO closed-loop resume — resuming on the fragile
+      // DOF1 from a back-driven state triggered a saturated-P slam). A wall-clock backstop forces that
+      // same de-power EXIT even if no host EXIT arrives, so the joint never free-falls forever.
+      bool free_exit_req = free_capture_pending_exit ||
+                           (millis() - free_capture_start_ms > FREE_CAPTURE_MAX_MS);
+      // Clear the free flags on EXIT (runFreeCaptureCycle returns true) OR if there is no controller to
+      // capture with (defensive: mirrors the e-stop's unconditional clear so free-capture can never
+      // latch with no way out — unreachable today since active_joint_controller is set at boot).
+      if (active_joint_controller == nullptr ||
+          active_joint_controller->runFreeCaptureCycle(free_capture_dof, free_exit_req)) {
+        free_capture_active = false;
+        free_capture_pending_exit = false;
+        hirate_capturing = false;   // stop the recorder on exit so resumed control can't append controlled records into the free buffer
+      }
+    } else if (torque_sweep_active) {
+      // TORQUE-SWEEP (diag 0x0C/0x0D): keep the NORMAL cascade running (NOT a bypass) while the firmware-driven
+      // impedance-segment ramp seeded by armTorqueSweep moves the reference, so the real outer->inner->burst-2
+      // cascade tracks it — a clean matched-speed torque baseline. Refresh the impedance watchdog each cycle: the
+      // host sends NO SET_IMPEDANCE during the ~7 s window, so without this the 2 s watchdog (ControlLoop:1045)
+      // would freeze the segment to a local hold mid-sweep. De-power on EXIT / backstop / a cascade power-cut
+      // (the cascade's own mapping-limit e-stop), same fail-safe as vel-test.
+      bool ts_exit = torque_sweep_pending_exit ||
+                     (millis() - torque_sweep_start_ms > TORQUE_SWEEP_MAX_MS) ||
+                     !safety_is_motor_power_enabled();
+      if (active_joint_controller == nullptr || ts_exit) {
+        if (active_joint_controller != nullptr) active_joint_controller->torqueSweepStop();
+        torque_sweep_active = false;
+        torque_sweep_pending_exit = false;
+        hirate_capturing = false;
+      } else {
+        // Keep ALL valid impedance targets' watchdogs alive, not just the swept DOF: the host sends no
+        // SET_IMPEDANCE during the window, so without this the NON-swept DOF (e.g. DOF0) would watchdog-timeout
+        // at ~2 s and re-anchor to a local hold. On the ankle q0 feeds the DOF1 bilinear map, so a drifting/
+        // re-anchored DOF0 would be a confound — keep every held DOF steady through the sweep.
+        const uint32_t ts_now = millis();
+        for (uint8_t d = 0; d < MAX_DOFS; d++) {
+          if (impedance_target[d].valid) impedance_target[d].last_update_ms = ts_now;
+        }
+        control_active = active_joint_controller->executeControlLoop();
+      }
+    } else if (a2ping_active) {
+      // fireAngle2 NO-MOTION ping (SEPARATE loop, diag 0x0E/0x0F): hold both tendons at their ENTER angle via 0xA4
+      // + collectPair, confirm the path, abort + de-power on ANY joint motion. Same exit/de-power model as vel-test.
+      bool ap_exit = a2ping_pending_exit || (millis() - a2ping_start_ms > A2PING_MAX_MS);
+      if (active_joint_controller == nullptr ||
+          active_joint_controller->runFireAngle2PingCycle(a2ping_dof, ap_exit)) {
+        a2ping_active = false;
+        a2ping_pending_exit = false;
+        hirate_capturing = false;
+      }
+    } else if (active_joint_controller != nullptr && safety_is_motor_power_enabled()) {
       control_active = active_joint_controller->executeControlLoop();
     }
 
@@ -4065,7 +5461,7 @@ void core1_loop() {
     // === TIMING: Wait for next cycle (configurable frequency) ===
     // PID needs 500Hz both in MOVING and HOLDING (gains tuned for 2ms period).
     // control_active covers MOVING; check HOLDING (non-IDLE) separately.
-    bool pid_timing_needed = control_active;
+    bool pid_timing_needed = control_active || vel_test_active || free_capture_active || torque_sweep_active || a2ping_active;
     if (!pid_timing_needed && active_joint_controller != nullptr) {
       uint8_t dof_count = active_joint_controller->getConfig().dof_count;
       for (uint8_t d = 0; d < dof_count; d++) {
@@ -4084,6 +5480,23 @@ void core1_loop() {
 
       busy_wait_until(next_time);
       next_time += inner_loop_period_us;
+
+      // === LOOP-OVERRUN RESYNC (ITEM 3) ===
+      // A stall earlier in the iteration (e.g. a CAN timeout up to ~5 ms) can push the
+      // real time well past next_time. Without correction, the next several iterations
+      // would each find next_time already in the past and run back-to-back with zero
+      // pacing — a post-stall burst that hammers the motors/CAN at far above the design
+      // rate. Instead, if we are already more than one full period behind schedule,
+      // resync the phase to "now + period": at most ONE cycle catches up, every cycle
+      // after it is paced normally again.
+      //
+      // No-op in nominal operation: a healthy iteration finishes before next_time, so
+      // time_us_64() is at or just past the new next_time (less than one period behind),
+      // the condition is false, and pacing is unchanged (gains stay tuned for the period).
+      uint64_t now_us = time_us_64();
+      if (now_us > next_time + (uint64_t)inner_loop_period_us) {
+        next_time = now_us + inner_loop_period_us;
+      }
     } else {
       timing_initialized = false;
     }
@@ -4144,6 +5557,14 @@ void core1_loop() {
       sleep_us(100);
       continue;
     }
+
+    // ACQUIRE BARRIER (2026-07-08): pair with the release barrier in Core0's
+    // command dispatch. Guarantees the command fields and the reset result flag
+    // (shared_data_ext.flag = 0) written before Core0 set buffer_ready are
+    // observed here before we read the command and produce a result — otherwise
+    // a fast handler can write its result flag and have Core0's stale reset
+    // clobber it (30s startup timeout on the saved-offsets path).
+    __sync_synchronize();
 
     // Read the command from the active buffer
     uint8_t command  = pending_command_type;
@@ -4296,6 +5717,9 @@ void core1_loop() {
     case CMD_ZERO_MOTOR_ENCODERS:
       // Zero motor encoder offsets for a specific DOF (delegated from Core0)
       // This is called AFTER Core0 has reset the joint encoder
+      // S2 carry choke: zeroEncoderOffset() below drives per-motor 0x92 reads — a pair carried
+      // across the cycle boundary must be abandoned first (else 3rd frame / discarded replies).
+      if (controller != nullptr) controller->abandonCarriedPair();
       for (int m = 0; m < controller->getConfig().motor_count; m++) {
         if (controller->getConfig().motors[m].dof_index == dof_index) {
           LKM_Motor* motor = controller->getMotor(m);
@@ -4360,9 +5784,9 @@ void core1_loop() {
         if (controller->applySavedOffsetsToMotors(dof_index)) {
           // applySavedOffsetsToMotors logs: offsets applied + post-apply verification
           if (shared_data_ext.flag == 0) {
-            snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
-                     "Saved offsets applied (err: %.1f/%.1f deg)",
-                     vr.error_agonist_deg, vr.error_antagonist_deg);
+            // NO %f: newlib float formatting mallocs -> cross-core deadlock on Core1
+            // (the "hidden malloc" hazard). Err values are in the malloc-safe validation log.
+            strcpy(shared_data_ext.message, "Saved offsets applied");
             shared_data_ext.flag = CMD1_END_MOVE;
           }
         } else {
@@ -4372,15 +5796,19 @@ void core1_loop() {
             shared_data_ext.flag = CMD1_FAIL_MOVE;
           }
         }
-      } else {
-        // Offsets invalid or no data — signal caller to fall back to full recalc
-        LOG_C1_INFO("DOF " + String(dof_index) + " requires full recalc: " +
-                 String(vr.has_saved_data ? "offset drift detected" : "no saved data"));
+      } else if (vr.has_saved_data) {
+        // Offsets drifted — typically the multi-turn counter reset on a motor
+        // power cycle. Re-establish them with the full recalc.
+        LOG_C1_INFO("DOF " + String(dof_index) + " saved offsets drifted — full recalc");
         if (shared_data_ext.flag == 0) {
-          snprintf(shared_data_ext.message, sizeof(shared_data_ext.message),
-                   "OFFSETS_INVALID: %s (err: %.1f/%.1f deg)",
-                   vr.has_saved_data ? "drift" : "no_data",
-                   vr.error_agonist_deg, vr.error_antagonist_deg);
+          strcpy(shared_data_ext.message, "OFFSETS_INVALID: offsets drifted");
+          shared_data_ext.flag = CMD1_FAIL_MOVE;
+        }
+      } else {
+        // No saved data — full recalc is the only option
+        LOG_C1_INFO("DOF " + String(dof_index) + " requires full recalc: no saved data");
+        if (shared_data_ext.flag == 0) {
+          strcpy(shared_data_ext.message, "OFFSETS_INVALID: no_data");
           shared_data_ext.flag = CMD1_FAIL_MOVE;
         }
       }
@@ -4421,7 +5849,10 @@ void core1_loop() {
     case CMD_CAN_DIAG: {
       // CAN Bus Diagnostic Test - Motor CAN only (Host CAN disabled)
       LOG_C1_INFO("=== CAN BUS DIAGNOSTIC TEST ===");
-      
+      // S2 CARRY choke point: this self-test drives the motor bus (getMultiAngleSync flushes RX below),
+      // so abandon any carried pair first. Idempotent; core-affinity guarded.
+      if (controller != nullptr) controller->abandonCarriedPair();
+
       bool all_ok = true;
       int motors_responding = 0;
       int motors_failed = 0;
@@ -4619,10 +6050,15 @@ void core1_loop() {
         if (vr.has_saved_data) has_any_data = true;
         if (!vr.valid) all_valid = false;
 
-        snprintf(detail_buf, sizeof(detail_buf),
-                 "EVT:RECALC_STATUS(%d,%d,%s,%.2f,%.2f)",
-                 ACTIVE_JOINT, dof, status_str,
-                 vr.error_agonist_deg, vr.error_antagonist_deg);
+        {
+          // c1f, not %f: newlib float formatting mallocs -> cross-core deadlock on
+          // Core1 (the exact CMD_APPLY_SAVED_OFFSETS hang class, fixed 2026-07-09).
+          char fa[48], fb[48];
+          snprintf(detail_buf, sizeof(detail_buf),
+                   "EVT:RECALC_STATUS(%d,%d,%s,%s,%s)",
+                   ACTIVE_JOINT, dof, status_str,
+                   c1f(fa, vr.error_agonist_deg, 2), c1f(fb, vr.error_antagonist_deg, 2));
+        }
         SERIAL_C1_COM_LN(detail_buf);
       }
 
@@ -4630,9 +6066,11 @@ void core1_loop() {
       for (uint8_t dof = 0; dof < controller->getConfig().dof_count; dof++) {
         DofLinearEquations *eq = controller->getLinearEquations(dof);
         if (eq != nullptr && eq->calculated && eq->limits_valid) {
+          char fa[48], fb[48];
           snprintf(detail_buf, sizeof(detail_buf),
-                   "EVT:SAFE_LIMITS(%d,%d,%.2f,%.2f)",
-                   ACTIVE_JOINT, dof, eq->joint_safe_min, eq->joint_safe_max);
+                   "EVT:SAFE_LIMITS(%d,%d,%s,%s)",
+                   ACTIVE_JOINT, dof,
+                   c1f(fa, eq->joint_safe_min, 2), c1f(fb, eq->joint_safe_max, 2));
           SERIAL_C1_COM_LN(detail_buf);
         }
       }

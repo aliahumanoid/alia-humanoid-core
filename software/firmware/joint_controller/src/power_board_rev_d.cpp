@@ -1,4 +1,5 @@
 #include "power_board_rev_d.h"
+#include <hot_path.h>
 
 #ifdef SAFETY_BOARD_REV_D
 
@@ -78,7 +79,7 @@ void power_board_rev_d_init() {
   power_board_rev_d_update(false);
 }
 
-void power_board_rev_d_update(bool safety_en_asserted) {
+void HOT_FUNC(power_board_rev_d_update)(bool safety_en_asserted) {
   if (!initialized) {
     return;
   }

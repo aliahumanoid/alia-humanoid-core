@@ -468,6 +468,83 @@ public:
       LKM_Motor *motorB, int torqueB);
 
   // ---------------------------------------------------------------
+  // BURST-AWARE MOTOR COMMANDS (fire a pair, collect ≤2 replies, repeat)
+  // ---------------------------------------------------------------
+  // The MCP2515 motor bus has only 2 RX + 3 TX buffers, so we NEVER keep more than ONE pair (2
+  // motors) outstanding: the 250Hz loop fires a DOF's pair, poll-drains its ≤2 replies (short
+  // timeout), then fires the next pair. This respects the hardware buffers (firing all 4 at once
+  // overflows RX, and a 4th un-checked TX can be silently dropped), stays well under the 4ms budget
+  // (a parallel pair round-trip, NOT the old per-pair busy-wait), and is GENERIC over the command
+  // type — fireTorque (0xA1) and fireAngle2 (0xA4, Loop 2) both expect the SAME state reply, so
+  // collectPair handles both. Rev-tracking is per-motor (routed by CAN id). The synchronous
+  // setTorquePairPipelined() above stays for the off-loop consumers (free-capture, vel-test).
+
+  /** Send the 0xA1 torque command non-blocking. Returns false (and counts tx_fail) if the MCP2515 TX
+   *  queue refused it. On success records the outstanding transaction (lastReplyValid() reset false). */
+  bool fireTorque(int torque);
+
+  /** Send the 0xA4 position command (angle + maxSpeed) non-blocking — same transaction discipline as
+   *  fireTorque, for the Loop 2 motor-position inner loop. Returns false (counts tx_fail) on TX refuse. */
+  bool fireAngle2(float angle, uint16_t maxSpeed);
+
+  /** Send the 0x92 multi-turn angle READ command non-blocking — SAME transaction discipline as fireTorque
+   *  (records _fire_pending / _fire_t_us / _fire_canId / _fire_cmd=0x92) so collectPair/carry track it
+   *  identically. S2 SUBSTITUTE-FIRE: on a watchdog-due cycle the DOF fires this INSTEAD of the torque pair;
+   *  the reply is routed by collectPair to _last92 (via parseMultiAngleReply). Returns false (counts tx_fail)
+   *  on TX refuse. The motor holds its previous 0xA1 torque for this cycle (ZOH — no torque frame is sent). */
+  bool fire92();
+
+  /** Last ROUTED 0x92 reply parsed by collectPair (S2 substitute-fire). Valid only after a fire92()+collect
+   *  where lastReplyValid() is true. */
+  const MultiAngleData &last92() const { return _last92; }
+
+  /** Poll-drain the bus until BOTH motors of this pair have replied or timeout_us elapses. Only this
+   *  pair is outstanding (<=2), so the 2-deep MCP2515 RX buffer never overflows. Ingests each reply
+   *  (rev-tracking) as it arrives, in order; a still-pending motor at timeout is a miss. Reads the EFLG
+   *  RX-overflow flag. Updates the tx_fail / rx_miss / rx_overflow diagnostic counters.
+   *
+   *  presweep (S2 CARRY, default false = bit-identical for the serial/interleave callers): run ONE
+   *  UNCONDITIONAL non-blocking pass that reads+routes every CAN_MSGAVAIL frame already in the RX
+   *  buffers BEFORE the deadline loop. A carried pair's replies have ALREADY landed by drain time
+   *  (age > flight), so an age-based deadline computes ~0 and the plain path would declare a MISS
+   *  without reading them -> permanent zero-fire recovery churn (FATAL-2). The pre-sweep consumes the
+   *  buffered replies first; the deadline then governs only the residual WAIT for not-yet-arrived frames. */
+  static void collectPair(LKM_Motor *mA, LKM_Motor *mB, uint32_t timeout_us, bool presweep = false);
+
+  bool lastReplyValid() const { return _last_reply_valid; }  ///< was the last fire's reply collected?
+  bool firePending() const { return _fire_pending; }         ///< is a command's reply still outstanding?
+  void clearFire() { _fire_pending = false; }                ///< drop an outstanding fire (e-stop preempt)
+  uint32_t fireTimestampUs() const { return _fire_t_us; }    ///< micros() latched at the last fire (S2 CARRY time authority)
+
+  /// Drain and DISCARD any stale frames sitting in the MCP2515 RX buffers (bounded by
+  /// maxDrain). Interleave-mode pre-fire sweep: late replies from a previously timed-out
+  /// collect are ownerless (collectPair cleared _fire_pending on the miss) and would occupy
+  /// both RX buffers through the next pair's unattended flight window, hard-dropping the
+  /// fresh replies. Call ONLY when no fire is pending on this bus. Returns frames discarded.
+  int flushStaleRx(int maxDrain);
+
+  /// O4a: enable /INT-gated draining in collectPair (-1 = disabled, pure SPI poll).
+  /// SPI fallback every 16 idle spins runs regardless, so a bad INT line cannot hang the drain.
+  static void setCollectIntPin(int pin);
+  /// Stage-1 instrumentation: fire->reply latency histogram, 8 buckets
+  /// (<200,<300,<400,<500,<700,<1000,<1500,>=1500 us), cumulative.
+  static const uint32_t *latencyHistogram();
+  static void resetLatencyHistogram();
+
+  // Bus-health diagnostic counters (cumulative since resetBusDiag()).
+  static uint32_t txFailCount();
+  static uint32_t rxMissCount();
+  static uint32_t rxOverflowCount();
+  static void resetBusDiag();
+
+  // S2 carry residual-wait stats (G1 carry-correctness signal; cumulative). residual ~0 = carry hid
+  // the flight; carryWaitOverCount/carryWaitMaxUs non-zero = the carry did not fully hide it.
+  static uint32_t carryCollectCount();
+  static uint32_t carryWaitOverCount();
+  static uint32_t carryWaitMaxUs();
+  static void resetCarryWaitStats();
+
+  // ---------------------------------------------------------------
   // REVOLUTION TRACKING (for 0xA1 response-based angle reading)
   // ---------------------------------------------------------------
 
@@ -501,6 +578,20 @@ public:
    * then applies offset and inversion — identical output to 0x92 reading.
    */
   float getTrackedAngle() const;
+
+  /**
+   * @brief Snap the tracked angle to a freshly-measured 0x92 absolute (measurement path only).
+   * @param absMotorAngle_centideg Absolute motor-side angle from a routed 0x92 reply, 0.01° units.
+   *
+   * S2 substitute-fire: on a within-threshold watchdog cycle the DOF fired 0x92 (not torque), so no fresh
+   * 0xA1 encoder advanced the tracking this cycle. Correct ONLY the revolution count so getTrackedAngle()
+   * reflects the just-validated absolute, keeping the ongoing single-turn wrap tracking (_prevEncoder) as the
+   * sub-revolution source. This is the SAME revolution math as initRevTracking() but reusing the live encoder
+   * (no re-anchor of _prevEncoder — the rev-anchor path is left untouched). Removes the 2-cycle repeated-sample
+   * stutter (the substitute cycle + its consume cycle would otherwise feed the inner D/GMS the same angle).
+   * No-op until tracking is initialized.
+   */
+  void setTrackedAngleFromAbsolute(int64_t absMotorAngle_centideg);
 
   /**
    * @brief Check if revolution tracking has been initialized
@@ -649,6 +740,31 @@ private:
   int32_t _revolutions;          ///< Tracked full actuator/output revolutions
   uint16_t _prevEncoder;         ///< Previous encoder reading from 0xA1 response
   bool _revTrackInit;            ///< Whether revolution tracking has been initialized
+
+  // ---------------------------------------------------------------
+  // BURST-AWARE COMMAND TRANSACTION STATE (fireTorque / fireAngle2 / collectPair)
+  // ---------------------------------------------------------------
+  bool _fire_pending = false;      ///< an 0xA1 fire is outstanding, awaiting its reply
+  bool _last_reply_valid = false;  ///< the last fire's reply was collected (else missed)
+  uint32_t _fire_t_us = 0;         ///< micros() at the last fire
+  unsigned long _fire_canId = 0;   ///< CAN id the reply will carry (0x140 + motorID)
+  uint8_t _fire_cmd = 0;           ///< command byte of the outstanding fire (0xA1/0xA4/0x92) — collectPair
+                                   ///< routes the reply to the matching parser by this byte (S2 sub92)
+  MultiAngleData _last92 = {};     ///< last ROUTED 0x92 reply parsed by collectPair (S2 substitute-fire); the
+                                   ///< consume reads it instead of the blocking getMultiAnglePairPipelined result
+
+  /** Parse a motor state reply (temp/iq/speed/encoder), store it, and advance rev-tracking. */
+  void ingestTorqueReply(const unsigned char *buf);
+
+  /** Parse an 0x92 multi-turn angle reply (DATA[1..7] = int56 motor-side centideg) into output-space.
+   *  Factored out of getMultiAnglePairPipelined() so a ROUTED 0x92 reply (S2 substitute-fire, collectPair)
+   *  parses through the exact same conversion (reductionGear / offsetEncoder / invertEncoder). Static: it
+   *  reads only per-motor calibration and the 8-byte frame, with no bus/transaction side effects.
+   *  waitTime is left 0 (the caller has no round-trip window for a carried reply). */
+  static void parseMultiAngleReply(LKM_Motor *motor, const unsigned char *buf, MultiAngleData &data);
+
+  /** Shared non-blocking send + transaction record for a pre-built command frame (0xA1 / 0xA4). */
+  bool fireCommand(const unsigned char *buf);
 };
 
 #endif // LKM_MOTOR_H

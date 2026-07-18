@@ -4,6 +4,7 @@
  */
 
 #include <MagneticSensorMT6835.h>
+#include <hot_path.h>
 
 MagneticSensorMT6835::MagneticSensorMT6835(int nCS, SPISettings settings)
     : MT6835(settings, nCS) {
@@ -14,7 +15,7 @@ MagneticSensorMT6835::~MagneticSensorMT6835() {
   // Cleanup handled by base class
 }
 
-float MagneticSensorMT6835::getSensorAngle() {
+float HOT_FUNC(MagneticSensorMT6835::getSensorAngle)() {
   return getCurrentAngle();
 }
 

@@ -409,8 +409,9 @@
 #define MCP_RXBUF_0 (MCP_RXB0SIDH)
 #define MCP_RXBUF_1 (MCP_RXB1SIDH)
 
-#define MCP2515_SELECT()   digitalWrite(MCPCS, LOW)
-#define MCP2515_UNSELECT() digitalWrite(MCPCS, HIGH)
+#include <hot_path.h>  // HOT_DIGITAL_WRITE: CS toggles run per register access on the hot path
+#define MCP2515_SELECT()   HOT_DIGITAL_WRITE(MCPCS, LOW)
+#define MCP2515_UNSELECT() HOT_DIGITAL_WRITE(MCPCS, HIGH)
 
 #define MCP2515_OK         (0)
 #define MCP2515_FAIL       (1)

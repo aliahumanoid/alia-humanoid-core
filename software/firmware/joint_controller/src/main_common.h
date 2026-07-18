@@ -50,6 +50,7 @@
 #include "pico/util/queue.h"
 #include <utils.h>
 #include <vector>
+#include <hot_path.h>
 
 // ============================================================================
 // RUNTIME JOINT PROFILE / BOARD MODE
@@ -189,6 +190,12 @@ extern volatile bool can_load_pid_requested;
 extern volatile bool can_save_linear_eq_requested;
 extern volatile bool can_load_linear_eq_requested;
 
+// CAN-triggered fine-map (piecewise) flash save (Core1 sets flag, Core0 executes)
+extern volatile bool can_save_fine_map_requested;
+
+// CAN-triggered 2D bilinear grid flash save (Core1 sets flag, Core0 executes)
+extern volatile bool can_save_grid_requested;
+
 // CAN-triggered auto-start setting (Core1 sets params + flag, Core0 executes flash save)
 extern volatile bool can_set_auto_start_requested;
 extern volatile uint8_t can_auto_start_enabled;
@@ -241,6 +248,34 @@ extern queue_t diag_event_notice_queue;
  */
 extern volatile uint16_t inner_loop_period_us;  // Inner loop period in µs (default: 2000 = 500Hz)
 extern volatile uint8_t outer_loop_divisor;     // Outer loop runs every N inner cycles (default: 1 = 500Hz)
+
+// S2 substitute-fire (bit2): the per-DOF 0x92 tracking-drift watchdog interval, in inner-loop CYCLES.
+// Rate-scaled so the wall-clock cadence stays ~1s at every loop rate: interval = 1e6 / inner_loop_period_us
+// (250 @250Hz, 500 @500Hz, 1000 @1kHz). Recomputed on boot and in the 0x006 LOOP_FREQUENCY handler. Kept a
+// runtime variable so the drift protection is never weakened by a rate change. Used by the watchdog trigger
+// AND the I/3 per-DOF stagger seed (wpWatchdogSeed). Clamped to a sane floor/ceiling.
+extern volatile uint32_t wp_watchdog_interval;  // 0x92 watchdog interval in cycles (rate-scaled)
+// Derive the rate-scaled watchdog interval from the inner-loop period (single source of truth for boot +
+// the 0x006 handler). Clamp: >=50 cycles (never spam the bus) and <=2000 (never let drift protection lapse).
+static inline uint32_t deriveWpWatchdogInterval(uint16_t inner_period_us) {
+  uint32_t iv = (inner_period_us > 0) ? (uint32_t)(1000000UL / inner_period_us) : 250UL;
+  if (iv < 50U)   iv = 50U;
+  if (iv > 2000U) iv = 2000U;
+  return iv;
+}
+// Historical fixed cadence (Stage-1 baseline). Used whenever SUB92 (bit2) is OFF so the OFF/serial
+// path stays bit-identical to the validated Stage-1 timing. Only when SUB92 is ON does the interval
+// rate-scale: a substitute-fire 0x92 is a cheap 2-frame pair, so verifying ~1s at any rate
+// strengthens drift protection; with SUB92 OFF the 0x92 is the BLOCKING 2.5ms read, so a tighter
+// cadence would be a pure regression (doubles the blocking-0x92 stretch cycles).
+static const uint32_t WP_WATCHDOG_INTERVAL_FIXED = 500U;
+// Re-derive wp_watchdog_interval for a new inner-loop period AND re-clamp each per-DOF watchdog counter to
+// min(count, new_interval-1) so a rate change never leaves a counter above the (possibly smaller) interval
+// (which would fire the watchdog every cycle). Defined in JointController_ControlLoop.cpp (owns the counters);
+// called by the 0x006 LOOP_FREQUENCY handler. Owned/called on core1 only (same core as the control loop).
+void s2RescaleWatchdogInterval(uint16_t new_inner_period_us);
+void jcResetCycleProfiling();  // rate switch: don't let the old rate's [PROFILING] max leak
+void jcMetricsFlushPendingLogs();  // e-stop/loop-stop: flush deferred [Metrics] lines (last-stroke forensics)
 extern volatile uint16_t torque_ramp_time_ms;   // Time for torque to go 0→max (default: 100ms, 0=disabled)
 extern volatile uint16_t encoder_error_threshold_ms;  // Time before encoder error triggers emergency stop (default: 100ms)
 // NOTE: SPI encoder read interval now uses inner_loop_period_us for automatic synchronization
@@ -291,8 +326,10 @@ extern volatile float retension_probe_min_hold_q_deg;    // Minimum |joint angle
 extern volatile uint16_t diag_hold_min_samples;          // Minimum gated samples before DIAG_HOLD emission
 extern volatile uint16_t diag_hold_ema_settled_samples;  // Minimum gated samples before EMA is considered settled
 extern volatile uint16_t diag_hold_period_ms;            // Period of DIAG_HOLD emission while gated
+extern volatile uint16_t diag_move_period_ms;            // Period of [DIAG_MOVE] motion telemetry (~50 Hz) — TELEMETRY ONLY
 extern volatile uint16_t trim_dry_run_min_samples;       // Minimum gated samples before proposed trim updates
 extern volatile uint16_t trim_dry_run_period_ms;         // Minimum time between proposed trim updates
+extern volatile bool compliance_detection_enabled;       // Enable deflection/stall compliance detection
 
 // HOLDING deflection detection (expected velocity ~ 0)
 extern volatile float hold_error_threshold_deg;          // |error| > this
@@ -327,8 +364,13 @@ extern volatile bool soft_hold_enabled;                  // Enable soft hold
 // This feedforward adds a small torque in the direction of motion to pre-load
 // against static friction, reducing the stall duration and overshoot at break-free.
 extern volatile bool friction_ff_enabled;                 // Enable friction feedforward
-extern volatile float friction_ff_torque;                 // Torque magnitude (motor units)
-extern volatile float friction_ff_speed_thresh;           // Below this speed (deg/s): apply FF
+extern volatile float friction_ff_torque;                 // GMS Fs break-away level (motor units)
+extern volatile float friction_ff_speed_thresh;           // GMS sigma1 over-slip damping (NOT a speed gate)
+extern volatile float friction_ff_torque_neg;             // GMS Fs for negative commanded direction (0 = symmetric)
+extern volatile bool cascade_slope_scaling_enabled;       // Per-tendon dth slope scaling (IMPEDANCE_CTRL 0x06)
+extern volatile bool sched_interleave_enabled;            // O1 strict-interleave motor-CAN scheduler (IMPEDANCE_CTRL 0x08 bit0)
+extern volatile bool sched_carry_enabled;                 // S2 cross-cycle CARRY (IMPEDANCE_CTRL 0x08 bit1)
+extern volatile bool sched_sub92_enabled;                 // S2 SUBSTITUTE-FIRE 0x92 watchdog (IMPEDANCE_CTRL 0x08 bit2)
 
 // Recovery parameters
 extern volatile ComplianceRecoveryPolicy recovery_policy;
@@ -480,6 +522,7 @@ struct PIDDiagnostics {
 extern PIDDiagnostics pid_diagnostics;
 extern volatile bool pid_diag_stream_active;   // Cross-core: CAN sets, Core1 reads
 extern volatile bool pid_diag_terms_enabled;   // Cross-core: enable P/I/D breakdown streaming
+extern volatile bool pid_measured_dt_enabled;  // Cross-core: CAN A/B flag — PID uses measured loop dt
 
 // ============================================================================
 // HOLDING DIAGNOSTICS (Phase 1 slack/bias data for UI streaming)
@@ -501,7 +544,7 @@ struct DiagHoldData {
     int16_t stiffness_x10;      // stiffness_ref (°×10)
     int16_t tension_trim_x100;  // tension_trim_deg (°×100) — Phase 2, signed
     uint8_t dof;                // DOF index
-    uint8_t flags;              // bit0=iq_valid, bit1=ema_settled, bit2-7=reserved
+    uint8_t flags;              // bit0=iq_valid, bit1=ema_settled, bit2-3=map_health(0=OK/1=WARN/2=DEGRADED), bit4-7=reserved
     volatile uint32_t seq;      // sequence counter: Core0 increments before+after write
                                 // Core1 reads seq, copies, reads seq again — retry if mismatch
 };
@@ -542,6 +585,12 @@ extern RetensionProbeResultData retension_probe_result_data[MAX_DOFS];
 // Defined in JointController_ControlLoop.cpp, callable from core1 E-Stop path.
 void resetDiagHoldState(uint8_t dof);
 
+// Reset per-DOF safety fault streak counters (MOTOR_RANGE escalation, tendon
+// encoder-fault torque-cut) for a DOF. Defined in JointController_ControlLoop.cpp
+// (where the counters are file-scope statics), callable from the core1 E-Stop path
+// so a fault streak never carries across an e-stop into the next session.
+void resetControlLoopFaultStreaks(uint8_t dof);
+
 // ============================================================================
 // DIAGNOSTIC PLANE (CAN-first observability)
 // ============================================================================
@@ -552,7 +601,7 @@ enum DiagFaultCode : uint8_t {
   DIAG_FAULT_LOOP_OVERRUN = 2,
   DIAG_FAULT_HOST_WATCHDOG_TIMEOUT = 3,
   DIAG_FAULT_ENCODER_INVALID = 4,
-  DIAG_FAULT_ENCODER_STALE = 5,
+  DIAG_FAULT_MOTOR_FEEDBACK_INVALID = 5,
   DIAG_FAULT_MOTOR_TIMEOUT = 6,
   DIAG_FAULT_SAFETY_LIMIT = 7,
   DIAG_FAULT_MAPPING_LIMIT = 8,
@@ -585,6 +634,7 @@ enum DiagEventCode : uint8_t {
   DIAG_EVENT_LOOP_OVERRUN_BURST = 0x0F,
   DIAG_EVENT_SNAPSHOT_FROZEN = 0x10,
   DIAG_EVENT_SNAPSHOT_AVAILABLE = 0x11,
+  DIAG_EVENT_MOTOR_FEEDBACK_INVALID = 0x12,
 };
 
 enum DiagEventSourceKind : uint8_t {
@@ -602,11 +652,39 @@ void diag_init_boot_reason();
 void diag_set_startup_in_progress(bool active);
 void diag_set_estop_latched(bool latched);
 void diag_note_watchdog_timeout(uint8_t dof, uint32_t elapsed_ms);
+void clearImpedanceTauFF(uint8_t dof);  // zero committed+staged tau_ff (watchdog forfeits the host FF)
 void diag_note_loop_overrun();
+void diag_note_loop_profile(uint32_t dof_us, uint32_t outer_us, uint32_t eq_us,
+                            uint32_t can_us, uint32_t pid_us, uint32_t torque_us,
+                            uint32_t safety_us);
+void diag_record_control_sample(uint8_t dof, float q_deg, float dth, float outer_i,
+                                int16_t torque);
+// Hi-rate windowed motion recorder: append one record (this DOF, this cycle) into the dedicated
+// capture buffer. O(1), no-op unless armed/capturing for this DOF. ADDITIVE telemetry — reads
+// only live values, writes only the hi-rate buffer; never touches control state.
+void diag_hirate_capture_sample(uint8_t dof, float q_deg, float q_des_deg, float dth,
+                                int16_t iqA, int16_t iqB, float resA_deg, float resB_deg);
+// Cheap gate: true only while the hi-rate capture is armed/recording for this DOF. The control
+// loop checks this before doing any capture-input math, so idle cost is ~one bool read.
+bool diag_hirate_is_capturing(uint8_t dof);
 void diag_note_motor_timeout(uint8_t dof, uint8_t motor_index);
 void diag_note_encoder_invalid(uint8_t dof);
+void diag_note_motor_feedback_invalid(uint8_t dof, uint8_t reason_flags);
 void diag_note_safety_violation(uint8_t dof, SafetyViolationType violation_type);
 void diag_note_bad_command(uint8_t source_kind, uint8_t source_index);
+
+struct DiagMotorFeedbackSnapshot {
+  uint8_t flags;                 // bit0=rev_init, bit1=bootstrap_done, bit2=need_0x92, bit3=recover,
+                                 // bit4=last_reply_A, bit5=last_reply_B, bit6=jump_seen, bit7=reserved
+  uint8_t a1_miss_count;
+  uint16_t watchdog_cycle_count;
+  int16_t watchdog_err_a_x100;    // 0x7FFF if no 0x92 comparison has happened
+  int16_t watchdog_err_b_x100;    // 0x7FFF if no 0x92 comparison has happened
+  uint8_t invalid_reason;         // bitmask: 1=NaN A, 2=NaN B, 4=range A, 8=range B, 16=miss, 32=jump
+  uint8_t last_reply_mask;        // bit0=A reply valid, bit1=B reply valid
+};
+
+extern DiagMotorFeedbackSnapshot diag_motor_feedback_snapshot[MAX_DOFS];
 
 // Control loop cycle time profiling (Core1, read by health sender)
 void getLoopProfilingStats(uint32_t& last_us, uint32_t& avg_us, uint32_t& max_us);
@@ -927,18 +1005,54 @@ extern SharedDofAngles shared_dof_angles;
 // Function to update shared DOF angles (called by Core0)
 void updateSharedDofAngles();
 
-// Read a consistent snapshot of shared DOF angles (sequence lock)
-inline void readSharedDofAnglesSnapshot(SharedDofAngles &out) {
+// Read a consistent snapshot of shared DOF angles (sequence lock).
+//
+// All callers of this reader run on Core1 (the single reader core); Core0 is the single
+// writer. That lets us keep the last successfully-read snapshot in a function-local static
+// as a fail-safe without any extra locking.
+//
+// Bounded retry (ITEM 6): the seqlock retry loop is capped at SEQLOCK_READ_MAX_RETRIES.
+// On a healthy system the read succeeds on the first or second attempt; the cap only
+// matters if the writer were to get stuck mid-write (odd seq) or thrash — in that case we
+// stop spinning and hand back the last good snapshot (flagged stale via .updated=false)
+// so Core1's control loop can never be hung by Core0. The __ATOMIC_ACQUIRE loads below are
+// the matching acquire for the writer's release fence (ITEM 6 writer side in core0.cpp),
+// making the payload-vs-seq ordering correct by construction, not just by RP2350 in-order.
+inline void HOT_FUNC(readSharedDofAnglesSnapshot)(SharedDofAngles &out) {
+  static SharedDofAngles last_good_snapshot = {};
+  static bool last_good_valid = false;
+
+  const uint32_t SEQLOCK_READ_MAX_RETRIES = 1024U;  // ~ ample for a single in-flight write
   uint32_t seq_start = 0;
   uint32_t seq_end = 0;
-  do {
+  for (uint32_t attempt = 0; attempt < SEQLOCK_READ_MAX_RETRIES; ++attempt) {
     seq_start = __atomic_load_n(&shared_dof_angles.seq, __ATOMIC_ACQUIRE);
     if (seq_start & 1U) {
       continue;  // Writer in progress
     }
     out = shared_dof_angles;
     seq_end = __atomic_load_n(&shared_dof_angles.seq, __ATOMIC_ACQUIRE);
-  } while (seq_start != seq_end || (seq_end & 1U));
+    if (seq_start == seq_end && !(seq_end & 1U)) {
+      // Clean, consistent read — cache it as the last good snapshot.
+      last_good_snapshot = out;
+      last_good_valid = true;
+      return;
+    }
+  }
+
+  // Retry cap exhausted (writer stuck or thrashing). Do NOT hang Core1: return the last
+  // good snapshot if we have one, flagged stale; otherwise hand back an all-invalid
+  // snapshot so consumers degrade gracefully (treat every DOF as no-feedback).
+  if (last_good_valid) {
+    out = last_good_snapshot;
+    out.updated = false;  // mark stale: not a fresh Core0 publication
+  } else {
+    out = SharedDofAngles{};
+    for (uint8_t d = 0; d < MAX_DOFS; ++d) {
+      out.valid[d] = false;
+    }
+    out.updated = false;
+  }
 }
 
 // ============================================================================
@@ -969,6 +1083,18 @@ extern command_data_extended_t command_buffer[2];
 extern volatile int active_buffer;
 extern volatile bool buffer_ready[2];
 extern volatile uint8_t pending_command_type;
+// MOTION GUARD V2 (MG2-S, 2026-07-18): 0=LEGACY (boot default) 1=SHADOW 2=ACTIVE.
+// Set via IMPEDANCE_CTRL 0x01E sub 0x21; forced back to 0 by the core1 e-stop path.
+// Compile-time master switch: -DMOTION_GUARD_V2=0 removes ALL v2 code (control loop,
+// CAN handler, e-stop hooks) — the flag-off build is today's guard behavior, and the
+// 0x21 handler NAKs so the host cannot believe an unarmed mode is armed.
+#ifndef MOTION_GUARD_V2
+#define MOTION_GUARD_V2 1
+#endif
+#if MOTION_GUARD_V2
+extern volatile uint8_t motion_guard_mode;
+void motionGuardV2ResetState();   // clears the per-DOF v2 guard state (mode changes + e-stop)
+#endif
 
 // Separate emergency flag for extra safety (atomic for cross-core access)
 extern std::atomic<bool> emergency_stop_requested;
@@ -1111,6 +1237,34 @@ extern OuterLoopBackup outer_loop_backup[MAX_DOFS];
 // Set by core1 (restoreInnerPidGains), consumed by control loop.
 extern volatile bool inner_pid_reinit_after_impedance[MAX_DOFS];
 
+enum InnerActuationMode : uint8_t {
+  INNER_ACTUATION_LOOP1_TORQUE = 0,
+  INNER_ACTUATION_LOOP2_POSITION = 1
+};
+
+// Loop2 speed sizing (bench-derived, 2026-07-01/03 offline analysis):
+// - The FIRST binding limit is the TARGET SLEW STEP, not maxSpeed:
+//   joint_dps ~= (step_x100/100) * loop_rate_hz / S(q), with S = local map slope
+//   (motor-deg per joint-deg, ~4.4-5 on knee/ankle-DOF0). step 0.1 @250 Hz -> 5 dps
+//   measured; step u8 wire caps at 2.55 deg/cycle -> ~127 joint-dps @ S=5.
+// - The LKM 0xA4 maxSpeed LSB is UNPINNED (vendor doc ambiguity, rotor vs output dps:
+//   factor 10). No 07-01 run was maxSpeed-bound, so it could not be measured. The old
+//   "0.01 dps units" comment had no evidence. Size maxSpeed generously so the STEP
+//   stays the binding knob until a bench characterization pins the LSB.
+static constexpr uint16_t LOOP2_DEFAULT_ANGLE_MAXSPEED = 300;       // LKM 0xA4 maxSpeed, raw units (LSB unpinned)
+static constexpr uint16_t LOOP2_DEFAULT_TARGET_STEP_X100 = 50;      // motor target slew, centideg/cycle
+static constexpr uint16_t LOOP2_MIN_TARGET_STEP_X100 = 1;
+static constexpr uint16_t LOOP2_MAX_TARGET_STEP_X100 = 255;
+static constexpr uint16_t LOOP2_MIN_ANGLE_MAXSPEED = 10;
+static constexpr uint16_t LOOP2_MAX_ANGLE_MAXSPEED = 10000; // u16 wire field (was 2500, byte-packed /10 -> 2550 cap)
+
+// Per-DOF inner actuation mode for the antagonistic tendon impedance path.
+// Default is Loop1 torque cascade. Loop2 0xA4 dual-position is diagnostic-only
+// and must be enabled explicitly via IMPEDANCE_CTRL before a run.
+extern volatile uint8_t inner_actuation_mode[MAX_DOFS];
+extern volatile uint16_t loop2_angle_max_speed[MAX_DOFS];
+extern volatile uint16_t loop2_target_step_x100[MAX_DOFS];
+
 // Per-DOF impedance targets (written by CAN handler on Core1)
 extern ImpedanceTarget impedance_target[MAX_DOFS];
 
@@ -1128,5 +1282,7 @@ bool evaluateImpedanceSegment(uint8_t dof, uint32_t now_ms, float &q_ref_deg, fl
 float getImpedanceHoldReference(uint8_t dof);
 void restoreInnerPidGains(uint8_t dof, JointController *jc);
 void restoreOuterLoopParameters(uint8_t dof, JointController *jc);
+void resetLoop2ActuationState(uint8_t dof);
+void forceLoop1ActuationMode(uint8_t dof);
 
 #endif // MAIN_COMMON_H

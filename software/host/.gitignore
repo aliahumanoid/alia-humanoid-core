@@ -17,6 +17,9 @@ serial_communication_*.log
 *.csv
 encoder_values.json
 
+# Hi-rate capture output (raw CSVs + dump artifacts) — D067: raw data stays local, out of git
+jetson_controller/hirate_runs/
+
 # Node/web build (if any)
 dist/
 build/

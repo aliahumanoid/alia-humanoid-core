@@ -36,6 +36,10 @@
 constexpr float PID_DEFAULT_INNER_KP = 10.0f;
 constexpr float PID_DEFAULT_INNER_KI = 1.0f;
 constexpr float PID_DEFAULT_INNER_KD = 0.25f;
+// Safety floor for antagonistic tendon DOFs. Bench data on 2026-06-30 showed
+// inner Kd=0 can remove enough motor-loop damping to cause a physical runaway
+// before higher-level mapping limits intervene.
+constexpr float PID_MIN_TENDON_INNER_KD = 0.20f;
 
 // Default outer loop PID values (position control)
 // These control the joint position using the cascade architecture

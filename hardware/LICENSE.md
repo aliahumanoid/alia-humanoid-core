@@ -128,10 +128,10 @@ We're open to discussing terms that work for research, startups, and established
 
 ## Software License (Separate)
 
-**Firmware and host software** in this repository are licensed under **MIT License** (see root `LICENSE` file).
+**Firmware and host software** in this repository are licensed under **GPLv3** from the July 2026 release onward (see root `LICENSE` file; earlier MIT snapshots remain MIT). Protocol specifications stay MIT where marked.
 
 Software and hardware licenses are independent:
-- ✅ You can use the software (MIT) without hardware
+- ✅ You can use the software (GPLv3) without hardware
 - ✅ You can print hardware (NC-ND) without using our software
 - ✅ Both together work seamlessly
 

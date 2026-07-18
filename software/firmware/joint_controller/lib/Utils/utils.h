@@ -125,6 +125,54 @@ void save_linear_equations_data(struct LinearEquationsDeviceData data);
 bool load_linear_equations_data(struct LinearEquationsDeviceData *data);
 
 // ===================================================================
+// FLASH STORAGE - FINE-MAP (PIECEWISE, v8)
+// ===================================================================
+
+/**
+ * @brief Save the v8 fine-map record into the LINEAR_EQ sector (whole-sector RMW)
+ *
+ * Preserves any co-located v5 linear-eq record in the same sector.
+ *
+ * @param fm Fine-map structure to save
+ */
+void save_fine_map_data(const struct FineMapDeviceDataV8 *fm);
+
+/**
+ * @brief Load the v8 fine-map record from flash
+ *
+ * @param[out] data Pointer to structure where the loaded fine-map will be stored
+ * @return true if a valid fine-map blob was found; false on absence/corruption
+ */
+bool load_fine_map_data(struct FineMapDeviceDataV8 *data);
+
+// ===================================================================
+// FLASH STORAGE - FINE-MAP 2D (BILINEAR, v9)
+// ===================================================================
+
+/**
+ * @brief Save the v9 2D (bilinear) record into the LINEAR_EQ sector (whole-sector RMW)
+ *
+ * Preserves any co-located v5 linear-eq and v8 fine-map records in the same sector.
+ *
+ * @param v9 2D (bilinear) grid structure to save
+ */
+void save_fine_map_2d_data(const struct FineMap2DDeviceDataV9 *v9);
+
+/**
+ * @brief Load the v9 2D (bilinear) record from flash
+ *
+ * @param[out] data Pointer to structure where the loaded 2D grids will be stored
+ * @return true if a valid 2D blob was found; false on absence/corruption
+ */
+bool load_fine_map_2d_data(struct FineMap2DDeviceDataV9 *data);
+
+/**
+ * @brief Save v8 fine-map + v9 2D grid in a single whole-sector RMW (see utils.cpp)
+ */
+void save_fine_map_and_2d(const struct FineMapDeviceDataV8 *v8,
+                          const struct FineMap2DDeviceDataV9 *v9);
+
+// ===================================================================
 // FLASH STORAGE - SYSTEM SETTINGS
 // ===================================================================
 

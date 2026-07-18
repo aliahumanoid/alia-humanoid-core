@@ -7,7 +7,7 @@ extern volatile bool flash_operation_in_progress;
 extern volatile bool core1_flash_acknowledged;
 extern volatile bool core1_runtime_started;
 
-inline void intercore_memory_barrier() {
+__attribute__((always_inline)) static inline void intercore_memory_barrier() {
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 

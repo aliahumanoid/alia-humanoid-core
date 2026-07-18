@@ -237,7 +237,16 @@ struct AutoMappingState_t {
  * to the communication core (core0). Includes message buffer for debug/log.
  */
 struct shared_data_extended_t {
-  uint8_t flag;               // Status flag (see CMD1_* defines)
+  // volatile (2026-07-09): this is a BIDIRECTIONAL cross-core rendezvous flag —
+  // Core0 resets it to 0 before each dispatch and polls it; Core1 writes the result
+  // through a guarded `if (flag == 0) flag = RESULT`. Non-volatile let Core1's guard
+  // read a STALE non-zero flag (e.g. the not-yet-cleared previous FAIL) and silently
+  // SKIP the result write -> Core0 polls its own 0 to the 30s startup timeout. The
+  // single-dispatch recalc masked it (one clean 0->END->0 rendezvous); the startup
+  // saved-offsets double-dispatch (0->FAIL->0->END on the same flag) exposed it. volatile forces a
+  // fresh load on every poll AND every guard read; the forward/message barriers stay
+  // (ARM volatile emits no DMB, so it does not order the non-volatile message payload).
+  volatile uint8_t flag;      // Status flag (see CMD1_* defines)
   uint8_t joint_id;           // Active joint ID
   uint8_t dof_index;          // Active DOF index
   MultiAngleData *motor_data; // Motor encoder data (runtime-sized array)
