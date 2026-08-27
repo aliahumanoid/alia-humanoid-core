@@ -1,10 +1,15 @@
 # Battery Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Design Reference (work in progress)
-> **Last Updated**: 2026-07-06
+> **Last Updated**: 2026-07-28
 > **Note**: This document supports battery selection during design. The voltage/pack architecture
-> (**9S LiPo now, 48 V-ready infrastructure, 24 V buck for all motors**) is decided in the internal
-> hardware-architecture roadmap (source of truth); this doc holds the sizing detail.
+> (**10S3P Li-ion NMC pack now — 30–42 V; 48 V-ready infrastructure; 24 V buck for all motors**)
+> is decided in the internal hardware-architecture roadmap (source of truth); this doc holds
+> the sizing detail. The earlier 9S LiPo decision (2026-07-06) was **superseded on 2026-07-21**
+> by the purchase of a UPP 36 V 10S3P NMC pack: the 40 V motor-ceiling constraint that drove 9S
+> moved from the pack choice to the rail architecture, because every 24 V-class motor sits
+> BEHIND the buck and never sees pack voltage. The power-distribution electronics are
+> designed and marked for **30–42 V** accordingly.
 
 ---
 
@@ -13,7 +18,7 @@
 | Parameter | Value | Source |
 |-----------|-------|--------|
 | Robot total weight | ~25 kg (target) | project-specs-master |
-| Main rail voltage | ~33 V (9S) now; 48 V-ready wiring/BMS | hardware-architecture-roadmap |
+| Main rail voltage | 36 V nominal (10S NMC, 30–42 V) now; 48 V-ready wiring/BMS | hardware-architecture-roadmap |
 | Motor sub-rail | 24 V (buck, sized for ALL motors) | hardware-architecture-roadmap |
 | Motor count (full robot) | 22 (11/leg) | MOTOR_SPECIFICATIONS |
 | Motor classes | 50mm (420g, 4.4A cont.) + 40mm (183g, 1.6A cont.) | MOTOR_SPECIFICATIONS |
@@ -73,18 +78,31 @@ Antagonistic tendon-driven joints use 2 motors per DOF. Efficiency depends on co
 
 > **Space planning**: Current estimates cover lower body only (22 motors; 27 with the pelvis). Adding the upper limbs (2 arms + head) scales the two budgets **differently**: motor **count / CAN / compute ≈ 2×** (arms are DOF-rich), but **power ≈ 1.5×** (arms don't bear weight + reduced-power motors → upper ≈ 50 % of the legs). The torso battery compartment should still be sized for **~200–300 Wh** to cover full-body operation without redesigning the frame (internal roadmap: Upper-body reserve).
 
-### LiPo Configuration — 9S (decided 2026-07-06)
+### Pack Configuration — 10S3P Li-ion NMC (supersedes 9S, 2026-07-21)
+
+| Configuration | Nominal Voltage | Range (cutoff–full) | Pack |
+|---------------|----------------|---------------------|------|
+| **10S3P NMC** | **36 V** | **30 V – 42 V** | UPP 36 V pack with integrated BMS (purchased) |
+
+> **Why the change from 9S:** 9S existed to keep full-charge voltage under the MG5010E-i10
+> 40 V ceiling. With the final architecture every 24 V-class motor is fed from the buck and
+> **never sees pack voltage**, so the ceiling constraint moved from the pack to the rail
+> design — freeing the choice to a commercial 10S NMC pack with integrated BMS. All power
+> electronics (pack disconnect, fuse voltage class, DC-DC input stage) are
+> rated for the full **30–42 V** window; the 30 V documented floor equals the pack's 3.0 V/cell
+> cutoff. Wiring, connectors and the buck input remain **48 V-ready**, but the move to 13S
+> (54.6 V full) is **not** a pack swap: it exceeds the input ceiling of the current DC-DC stage and the
+> overvoltage protection window of the pack-disconnect electronics —
+> **the power-distribution boards need a revision for 13S**.
+> Bench gate: verify precharge/UVLO behaviour at the true end-of-discharge voltage.
+
+<details><summary>Superseded: 9S LiPo sizing (2026-07-06)</summary>
 
 | Configuration | Nominal Voltage | Max (full) | Capacity for ~100 Wh | Capacity for ~150 Wh |
 |---------------|----------------|-----------|----------------------|----------------------|
-| **9S** | **33.3 V** | **37.8 V** | **~3000 mAh** | **~4500 mAh** |
+| 9S | 33.3 V | 37.8 V | ~3000 mAh | ~4500 mAh |
 
-> **Why 9S:** its full-charge 37.8 V stays **under the MG5010E-i10 40 V ceiling** (10S would hit
-> 42 V and over-volt them). It sits well above 24 V for torque headroom, and the **24 V MG4005
-> ankles are fed from a buck** — sized for *all* motor positions, so any legacy MG5010 can also run
-> at 24 V once the main rail later moves to 48 V-native motors. Infrastructure (BMS, connectors,
-> wiring, buck input) is rated **48 V-ready** so that transition is a drop-in 13S pack.
-> Rationale in `hardware-architecture-roadmap.md` §3.
+</details>
 
 ---
 
@@ -140,7 +158,7 @@ Alia's lower Wh/kg ratio is justified by:
 
 ## 7) Open Questions
 
-- [x] ~~6S vs 7S~~ → **RESOLVED: 9S** (2026-07-06; MG5010 12–40 V range confirms headroom). MG4005 ankles on the 24 V buck.
+- [x] ~~6S vs 7S vs 9S~~ → **RESOLVED: 10S3P NMC** (2026-07-21 supersession; the 40 V motor ceiling moved to the rail architecture — 24 V motors sit behind the buck). MG4005 ankles on the 24 V buck.
 - [ ] Peak current draw during walking (measure on prototype) — **the gate for final capacity/C-rate**
 - [ ] Co-contraction energy cost (measure idle vs walking power delta)
 - [ ] Battery placement effect on CoM (simulation needed)
@@ -152,9 +170,9 @@ Alia's lower Wh/kg ratio is justified by:
 
 1. Measure actual power consumption on lower-body prototype (tethered 24V PSU) — incl. co-contraction idle draw
 2. Determine peak vs average current profiles during walking
-3. ~~Select 6S vs 7S~~ → **done: 9S** (see §3); size final mAh from the measurement above
-4. Source candidate 9S LiPo packs for physical fit test in torso
-5. Design the PMB (power management board) + battery tray CAD — after the current measurement
+3. ~~Select the pack~~ → **done: UPP 10S3P NMC purchased** (see §3); size any second pack from the measurement above
+4. ~~Source candidate packs~~ → done (UPP pack in hand); torso fit check at integration
+5. Design the power-management electronics + battery tray CAD — after the current measurement
 
 ---
 
