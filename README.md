@@ -243,7 +243,7 @@ See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-
 
 ### Phase 0 (Current) — Prove the Concept
 - **Focus:** Lower body (hip + knee + ankle) validation
-- **Release:** Software (MIT), Hardware docs (CC BY-NC-ND)
+- **Release:** Software (GPLv3 from the July 2026 release; earlier snapshots remain MIT), Hardware docs + STL (CC BY-NC-ND)
 - **Timeline:** In progress
 
 ### Phase 1 — Expand Hardware
@@ -318,6 +318,16 @@ This implementation is an independent engineering development released under the
 By contributing code, you license it under GPLv3 (DCO sign-off required). Hardware design feedback is welcome now; canonical hardware geometry changes will open later as the hardware release surface expands.
 
 ---
+
+### How the pieces fit (what protects what)
+
+| Layer | License / instrument | What it means in practice |
+|---|---|---|
+| Firmware + host software | **GPLv3** (July 2026 onward; earlier snapshots remain MIT) | Commercial use is allowed; modified versions must stay GPLv3; no locked-down derivatives |
+| Protocol specifications | **MIT** | Third-party tools can implement the protocols without copyleft obligations |
+| Hardware (STL, docs, BOM) | **CC BY-NC-ND 4.0** today → CC BY-NC-SA (STEP) → CC BY-SA (CAD source) | Print and study now; no commercial use or derivatives yet; opens in phases, see [hardware/LICENSE.md](hardware/LICENSE.md) |
+| Published technical notes | **Public prior art** | Keeps the methods free for everyone to use: nobody can patent them later. Prior art does not restrict copying; the licenses above do |
+| Name and logo | Not covered by any of the above | Trade mark rules apply separately |
 
 ## Developer Certificate of Origin (DCO)
 
