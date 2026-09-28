@@ -230,6 +230,8 @@ Builds verified: `pico2_debug_rev_d` SUCCESS and `pico2_debug` (regression) SUCC
 control of a real motor with safety-limit enforcement. The board powers the motor via
 the `TPS2492` / FET path.
 
+**Update 2026-08-01:** after this validation a reproducible fault was found — the switched motor rail sags or turns off when the powered board is touched (or the gate node is contaminated), with `PWRGD_N` still asserted. See `README.md` → "Known issues" for the mechanism and the handling rules.
+
 ## Open Follow-Ups (pending, not done)
 
 - Phase 7 high-current stress (`22 A` continuous / `~38 A` peak) — needs a battery or
