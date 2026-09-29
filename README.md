@@ -329,6 +329,8 @@ By contributing code, you license it under GPLv3 (DCO sign-off required). Hardwa
 | Published technical notes | **Public prior art** | Keeps the methods free for everyone to use: nobody can patent them later. Prior art does not restrict copying; the licenses above do |
 | Name and logo | Not covered by any of the above | Trade mark rules apply separately |
 
+ALIA HUMANOID is a registered EU trade mark (EUTM 019380142). The name and the brand are not covered by the open licenses of this repository.
+
 ## Developer Certificate of Origin (DCO)
 
 All commits must include a `Signed-off-by` line to certify you have the right to contribute:
