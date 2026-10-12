@@ -45,7 +45,8 @@ update path.
 2. Multiple boards may be present on that bus.
 3. Only one board is updated at a time.
 4. Targeting still happens by the existing `joint` selection plus firmware-side
-   UID verification.
+   UID verification of `BEGIN_UPDATE` — which protects the slot writes only, see
+   the warning below.
 5. The same software build can be provided as both `slot A` and `slot B`
    artifacts.
 6. Different boards may currently be active on different slots, so the
@@ -54,6 +55,17 @@ update path.
    flash-base boot/update selector image (`pico2_boot_update_debug` or
    equivalent production build). The CAN updater does not repair a stale
    selector automatically.
+
+---
+
+> **Warning (2026-10) — shared bus.** The firmware-update control frames
+> (`0x020`-`0x023`) carry no board address. On a shared bus **every idle**
+> controller (including one holding a limb) executes `ENTER_MAINTENANCE` (motors
+> stopped, motor power disabled), and every controller executes `EXIT_MAINTENANCE`
+> and `REBOOT`; only `BEGIN_UPDATE` checks the board UID (and not at all if the
+> host sends a CRC of `0`, see CAN_FIRMWARE_UPDATE_PROTOCOL_SPEC.md §8.3).
+> Until the protocol carries a target, update one board per bus with the other
+> boards unpowered, or give each board its own CAN channel.
 
 ---
 
@@ -195,7 +207,8 @@ Default behavior:
 
 - stop the batch on the first failed board
 - attempt one cleanup on the failing board
-- leave all remaining boards untouched
+- start no further board updates (the other boards on a shared bus still saw the
+  maintenance and reboot frames, see the warning in §3)
 
 This is the right default for robot servicing.
 
@@ -300,7 +313,8 @@ With the current bench-validated fast default pacing in `fw_update.py`:
   around `22-25 s`, but it does so with substantially more recovered pages and
   should be treated as an operator-selected high-speed mode, not the default
 
-Therefore, on one shared Host CAN bus:
+Therefore, on one shared Host CAN bus (target design; until the protocol carries a
+board address see the shared-bus warning in §3 — today one powered board per bus):
 
 - `6` boards will be updated **sequentially**
 - write + verify only should be expected to take roughly:

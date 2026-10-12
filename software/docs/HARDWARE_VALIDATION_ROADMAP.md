@@ -60,7 +60,7 @@
 - Smart impedance buttons with multi-DOF mapping
 
 **Specific risks:**
-- Motor CAN bus contention: 4 motors at 50Hz = 200 frames/s for torque command+response alone
+- Motor CAN bus contention: 4 motors × the control-loop rate × 2 (cmd+resp) for torque command+response alone (50 Hz is the host stream, not the motor loop)
 - Mechanical interaction between the 2 DOFs (one DOF moves the other's load)
 - Init/homing sequence: does DOF order matter?
 
@@ -81,18 +81,18 @@
 
 ## L3 — Hip Single (3 DOF, 1 controller)
 
-**Status:** ⏸ Blocked by hybrid-model refactor
+**Status:** 🟡 In progress — hybrid model implemented (2026-04), tendon DOFs validated on the hip and the direct-drive roll on a separate single-motor bench (2026-08), first 3-DOF runs on the bench (2026-09)
 
 **Goal:** Validate the heaviest single-controller case: 3 DOF, 5 motors.
 
 **Platform:** Webapp
 
-**Current blocker:**
+**Former blocker (resolved 2026-04):**
 - the real `HIP` is not a uniform `3 DOF / 6 motors / 2 motors per DOF` joint
 - the correct model is a hybrid joint:
   - 2 tendon-driven antagonistic DOFs
   - 1 direct-drive single-motor roll DOF
-- before the single HIP test, the software abstraction must be fixed, as described in [HIP_HYBRID_DOF_SPEC.md](software/docs/HIP_HYBRID_DOF_SPEC.md)
+- the software abstraction was fixed before the single HIP test, as described in [HIP_HYBRID_DOF_SPEC.md](HIP_HYBRID_DOF_SPEC.md)
 
 **Bench note (2026-04-09):**
 - the direct-drive `hip_roll_bench_right` sub-case has already been brought up
@@ -101,7 +101,7 @@
 - this does not unlock full `L3` yet, but it de-risks the isolated roll path
   and confirms that single-DOF physical bring-up is practicable
 - still open:
-  - destructive reference test (`REFERENCE_REQUIRED -> Set Reference -> reboot`)
+  - destructive reference test (`REFERENCE_REQUIRED -> Set Reference -> reboot`) — closed 2026-08: the roll reference persists across motor and board power cycles
   - final cleanup of CAN warnings under motion
   - the recent `MOTOR_TIMEOUT` block seen on cold-start after `PRETENSION_ALL`
     was due to a bench power-supply issue; after the hardware fix the
@@ -150,24 +150,27 @@
     large PSU + external 30A ATO fuse + real load — not yet executed
   - real TPS2492 overcurrent latch-off not yet exercised (requires a stiff
     power supply)
+  - known issue (2026-08): the motor rail sags or switches off on bare-finger
+    contact or gate-node contamination while `PWRGD_N` stays asserted — see the
+    [rev_d_power README](../../hardware/electronics/joint_controller_board/rev_d_power/README.md)
 
 **What it tests beyond L2:**
 - MAX_DOFS=3 all active
-- 5 motors on the same motor CAN bus (~250 frames/s torque loop)
+- 5 motors on the same motor CAN bus (one torque command + response per motor every control cycle)
 - Outer PID for 3 concurrent DOFs
 - DIAG_HOLD for 3 DOFs — maximum telemetry load per controller
 - Control loop timing: 2 + 2 + 1 active motors with a tendon/direct-drive mix = critical cycle time
 
 **Specific risks:**
-- Control loop not completing within 2ms with 5 motors (2 tendon pairs + 1 direct-drive)
-- Saturated motor CAN bus: 5 motors × 50Hz × 2 (cmd+resp) = 500 frames/s
+- Control loop not completing within its cycle budget with 5 motors (2 tendon pairs + 1 direct-drive); the hip runs at the firmware default of 250 Hz (4 ms); the rate is a runtime setting (`0x006`, a bus-wide frame) — overruns were observed in September 2026 during a 3-DOF hold; the scheduler change that fixed them ships with the next release
+- Saturated motor CAN bus: 5 motors × 250 Hz × 2 (cmd+resp) = 2,500 frames/s
 - Pretension/recalc on 2 tendon DOFs + direct-drive roll startup: total time, stability
 - Heat: 5 motors active in hold generate heat — thermal throttling?
 
 **Exit criteria:**
 - [ ] Init + homing of all 3 DOFs without errors
 - [ ] Stable hold on 3 DOFs simultaneously for 120s
-- [ ] Control loop rate stable at 500Hz (jitter measured via logs)
+- [ ] Control loop rate stable at the configured rate (hip: 250 Hz; jitter measured via logs)
 - [ ] No CAN error/overrun on the motor bus with 5 motors
 - [ ] DIAG_HOLD for all 3 DOFs: consistent signals
 - [ ] Motor temperature stable after 5 min of hold (no thermal runaway)
@@ -221,7 +224,7 @@
 - Working Jetson controller software for sending impedance commands
 - At least knee + ankle controllers flashed and individually functional
 - Single-controller CAN-first bring-up executed with checklist:
-  [JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md](software/docs/JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md)
+  [JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md](JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md)
 
 **Metrics to collect:**
 - Actual Jetson loop rate (target 50Hz)
@@ -397,7 +400,7 @@ Decision deferred until after L5 data. Don't choose out of abstract prudence —
 ```
 L1    Knee single        ✅  Closed (baseline)
 L2    Ankle single       ✅  Closed (baseline)
-L3    Hip single         ⏸  Blocked by hybrid model
+L3    Hip single         🟡  In progress (3 DOF on the bench)
 L3.5  Protocol freeze    ✅  Closed
 L4    2-ctrl bench       🟡  Bench-validated, extended recovery pending
 L5    3-ctrl stress      🔲  After L4
@@ -406,7 +409,7 @@ L7    Two legs           🔲  After L6
 ```
 
 **Possible parallelism:**
-- L3 (HIP) is blocked by an architectural refactor, not by CAN/Jetson availability
+- L3 (HIP) is in bench validation; the hybrid-model refactor that blocked it is done (2026-04)
 - L3.5 is closed and can be used as a stable baseline
 - L4 already has bench evidence, but should not be "closed" yet without resolving the remaining recovery edge cases
 - L5 requires:
@@ -415,7 +418,7 @@ L7    Two legs           🔲  After L6
 
 ---
 
-## Recommended Next Steps (2026-03-31)
+## Recommended Next Steps (2026-03-31, historical — items 2-4 done)
 
 Recommended order, given the actual bench state:
 
@@ -436,13 +439,13 @@ Recommended order, given the actual bench state:
      - minimum production telemetry set
    - this is the next real documentation gate
 
-3. **Open the `HIP` refactor as a separate track**
+3. **Open the `HIP` refactor as a separate track** (done 2026-04)
    - do not use the `knee + ankle` bench to "simulate" the `HIP`
-   - implement the hybrid model instead, as per [HIP_HYBRID_DOF_SPEC.md](software/docs/HIP_HYBRID_DOF_SPEC.md)
+   - implement the hybrid model instead, as per [HIP_HYBRID_DOF_SPEC.md](HIP_HYBRID_DOF_SPEC.md)
 
-4. **Only after the `HIP` refactor, do the first single `HIP` bring-up**
+4. **Only after the `HIP` refactor, do the first single `HIP` bring-up** (done: tendon DOFs 2026-08, 3 DOF on one controller 2026-09)
    - not before
-   - the dominant risk now is no longer CAN/Jetson: it is the wrong software model of the hybrid joint
+   - at the time the dominant risk was the wrong software model of the hybrid joint, not CAN/Jetson
 
 5. **Defer the "Jetson restart after E-stop" case to a later bugfix**
    - useful, but it does not block the current milestone
@@ -459,7 +462,7 @@ To support sizing at each level.
 | Stream | Direction | Rate | Frames |
 |--------|-----------|------|--------|
 | Impedance command | Host→Controller | 50 Hz | 1 |
-| Torque cmd+resp (per motor) | Controller↔Motor | 50 Hz | 2 × N_motors |
+| Torque cmd+resp (per motor) | Controller↔Motor | control-loop rate (default 250 Hz) | 2 × N_motors per cycle |
 | Encoder stream | Controller→Host | 50 Hz | 1 |
 | JOINT_STATE | Controller→Host | ~10 Hz | 1 |
 | DIAG_HOLD | Controller→Host | 0.3 Hz | 2 |

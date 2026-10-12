@@ -4,6 +4,11 @@
 > **Joint:** KNEE_RIGHT
 > **Firmware version:** post-commit 845afa5 (PID diagnostics pipeline fix)
 
+> **Historical (note added 2026-10-12).** The feed-forward below (`uff_agonist = FF`,
+> `uff_antagonist = -FF`) is not joint friction compensation: on a tendon DOF whose two map slopes share a
+> sign (knee, hip, ankle) that antisymmetric pair only changes tendon tension, and only the slope mismatch
+> of the DOF reaches the joint (2-3% measured on the hip; well under 1% on the knee map). See the `tau_ff` known limitation in [SET_IMPEDANCE_OPERATIONAL_GUIDE.md](SET_IMPEDANCE_OPERATIONAL_GUIDE.md#what-tau_ff-is-for).
+
 ---
 
 ## Problem

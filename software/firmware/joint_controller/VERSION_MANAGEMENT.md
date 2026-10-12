@@ -60,7 +60,7 @@ git push origin v0.1.1  # or whatever version you tagged
 Next time you build, `FW_VERSION` will automatically be `0.1.1` (or whatever you tagged).
 
 ```bash
-# Click build button in Cursor
+# Click the PlatformIO build button in the IDE
 # OR: cd software && make fw-build-controller ENV=pico2
 ```
 
