@@ -809,7 +809,8 @@ Included in this freeze:
 - encoder stream via `0x003` / `0x410`
 - runtime feedback via `JOINT_STATE (0x4F0+joint)`
 - probe telemetry via `RPROBE_RESULT (0x500+joint)`
-- same-session post-`E-stop` recovery using `PRETENSION_ALL (0x00D)`
+- same-session post-`E-stop` recovery using `PRETENSION_ALL (0x00D)` — **SUPERSEDED (2026-10), do not use on `rev_d`:**
+  see [SAFETY_LIMITATIONS.md](../../SAFETY_LIMITATIONS.md); recovery is a power cycle, then startup
 
 Explicitly **not** included in this freeze:
 - recovery after restarting the Jetson process post-`E-stop`
@@ -859,7 +860,9 @@ with the following special cases:
    - seed impedance targets from the current pose
    - resume directly into `READY`
 
-4. **Post-`E-stop` recovery in the same Jetson process**
+4. **Post-`E-stop` recovery in the same Jetson process** — **SUPERSEDED (2026-10), do not use on `rev_d`:** the
+   drivers are still booting when `PRETENSION_ALL` sends torque. Power-cycle, then startup
+   ([SAFETY_LIMITATIONS.md](../../SAFETY_LIMITATIONS.md)).
    - if the host knows it sent the `E-stop`, **or** if diagnostics later reveal
      `ESTOP_LATCHED` on a controller that still announces `ready=true`
    - send `PRETENSION_ALL` to re-enable motor power

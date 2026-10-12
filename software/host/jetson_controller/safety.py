@@ -47,7 +47,7 @@ class SafetyManager:
         "INTERNAL_ERROR",
     })
     _FAULT_RECOVERY_HINTS = {
-        "ESTOP_LATCHED": "Recover motor power with PRETENSION_ALL or power-cycle the joint controller.",
+        "ESTOP_LATCHED": "Power-cycle the joint controller (motor supply first, then USB), then run startup. Do not use PRETENSION_ALL to recover.",
         "HOST_WATCHDOG_TIMEOUT": "Re-seed impedance targets from live telemetry and confirm host keepalive timing.",
         "ENCODER_INVALID": "Check encoder wiring, power, and angle validity before moving.",
         "MOTOR_FEEDBACK_INVALID": "Check 0xA1 replies, 0x92 re-anchor health, and motor-CAN counters before moving.",

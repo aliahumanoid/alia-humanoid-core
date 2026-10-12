@@ -1,4 +1,4 @@
-(kicad_symbol_lib (version 20211014) (generator codex)
+(kicad_symbol_lib (version 20211014) (generator kicad_symbol_editor)
   (symbol "Buck24VTo5V_TBD"
     (pin_names (offset 1.016))
     (in_bom yes)

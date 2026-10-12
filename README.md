@@ -125,6 +125,8 @@ This repository carries the **replication core** — firmware, protocols, base h
 
 We document **both successes and failures** transparently.
 
+> **Safety:** before powering any joint, read [Known safety limitations](SAFETY_LIMITATIONS.md).
+
 **Current validation snapshot: knee and ankle closed as architecture baselines; per-joint power board bench-validated (known issues documented); hip tendon DOFs validated on the bench and the direct-drive roll on a single-motor bench, first 3-DOF runs on the bench; natural walking gait achieved in simulation, gait-like trajectory tracked on the physical hip at natural walking speed**
 
 ### ✅ Validated On Hardware (Phase 0)
