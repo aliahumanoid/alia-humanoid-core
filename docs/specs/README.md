@@ -1,7 +1,7 @@
 # Technical Specifications — Alia Humanoid
 
 > **Status**: Phase 0 Reference Documentation  
-> **Last Updated**: 2026-03-07
+> **Last Updated**: 2026-10-12
 
 ---
 
@@ -25,6 +25,7 @@ This directory contains authoritative technical specifications for all mechanica
 | [KNEE_SPECIFICATIONS.md](KNEE_SPECIFICATIONS.md) | 1-DOF knee joint | ✅ Validated |
 | [MOTOR_SPECIFICATIONS.md](MOTOR_SPECIFICATIONS.md) | QDD motor classes (50mm, 40mm) | Phase 0 |
 | [TENDON_SPECIFICATIONS.md](TENDON_SPECIFICATIONS.md) | UHMWPE tendons, routing, terminations | Phase 0 |
+| [BATTERY_SPECIFICATIONS.md](BATTERY_SPECIFICATIONS.md) | Battery pack | Phase 0 |
 
 ---
 
@@ -45,7 +46,7 @@ This directory contains authoritative technical specifications for all mechanica
 |-------|-----|--------|---------|-------------|
 | Ankle | ✅ | ✅ | ✅ | 🔄 In progress |
 | Knee | ✅ | ✅ | ✅ | 🔄 In progress |
-| Hip | — | — | — | ⏳ Planning |
+| Hip | ✅ (CAD stops, encoder-zeroed) | ✅ (design) | ✅ tendon DOFs on the hip, roll on a single-motor bench | 🔄 First 3-DOF runs on the bench (hip specification with the next release) |
 
 ---
 

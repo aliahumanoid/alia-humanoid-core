@@ -366,6 +366,8 @@ Byte 6-7: reserved
 Controller acceptance rule:
 - `board_uid_crc32` must match the local board
 - if it does not match, the board rejects the session before any slot erase
+- current firmware treats `board_uid_crc32 = 0` as a wildcard (the check is
+  skipped): hosts must always send the board's real CRC
 
 ### 8.4 `0x022` `FW_UPDATE_PAGE_BEGIN`
 
@@ -591,6 +593,7 @@ This is intentional. A candidate image must prove both:
 If `board_uid_crc32` does not match:
 - controller rejects `BEGIN_UPDATE`
 - no slot erase occurs
+- a `board_uid_crc32` of `0` skips the check (see §8.3)
 
 ### 11.2 Transport corruption
 

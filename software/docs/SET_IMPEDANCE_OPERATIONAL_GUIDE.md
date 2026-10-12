@@ -65,11 +65,11 @@ If the goal is already within the hold epsilon, the segment is inactive and the 
 
 `tau_ff` is an additive feedforward torque term sent by the host.
 
-- `tau_ff > 0` biases torque toward the agonist direction
+- `tau_ff > 0` biases torque toward the agonist direction (on tendon DOFs this is tension, see the known limitation below)
 - `tau_ff < 0` biases torque toward the antagonist direction
 - it is applied on top of the local friction feedforward already running in firmware
 
-Use `tau_ff` for:
+Use `tau_ff` for (direct-drive DOFs; on tendon DOFs see the known limitation below):
 
 - known static or slowly varying loads
 - gravity compensation
@@ -77,6 +77,13 @@ Use `tau_ff` for:
 - reducing steady-state tracking effort under predictable load
 
 Do **not** use `tau_ff` as the primary response to an unexpected collision. It adds push; it does not make the joint compliant.
+
+> **Known limitation (measured on the hip, 2026-10; the ankle and knee presets share the same slope-sign case).** On a tendon-driven DOF, `tau_ff` is applied as `+tau_ff` on the
+> agonist and `-tau_ff` on the antagonist. When the two motor-to-joint map slopes of the DOF share a sign (the
+> case of the hip, ankle and knee presets), that pair changes tendon **tension**, not joint torque: only the
+> slope mismatch of the DOF reaches the joint (2-3% measured on the hip). Do not rely on `tau_ff` for gravity compensation or load
+> bias on these DOFs; a joint-torque feed-forward mode is in development. On a direct-drive DOF (hip roll)
+> `tau_ff` is a plain joint torque.
 
 ### Parameters to change first during contact or collision
 

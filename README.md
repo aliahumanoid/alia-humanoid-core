@@ -77,12 +77,15 @@ The result? A robot that can fit human environments, wear human clothing, and in
 This repository carries the **replication core** — firmware, protocols, base host operation, hardware documentation, and results. Advanced lab tooling (calibration campaigns, learning-control experiments, gait tooling) is developed in a private suite and opens progressively as milestones mature. Results, videos, logs, and writeups continue to be published openly. We publish what fails alongside what works; simulation results are labeled as simulation results.
 
 ### Latest Updates
+- 2026-09: **Hip roll motor integrated — first 3-DOF runs on the bench.** The two tendon-driven DOFs and the direct-drive roll now run together on one joint controller; results with the next Joint Design Log
+- 2026-08-27: **Hip on the bench — first run at natural walking speed.** The 2-DOF tendon-driven hip tracks a gait-like reference (flexion and abduction sines in quadrature, 1.1 s cycle), free swing with no external load, with one learned feed-forward correction from a previous run (uncorrected at the same speed: 6.0° / 2.0° rms): 27 cycles, 2.95° / 1.37° rms, repeatable run to run — [X post](https://x.com/AliaHumanoid/status/2092992852150108425) (the post calls it the simulation policy's walking trajectory; the reference was a synthetic gait-like cycle)
+- 2026-08: Direct-drive hip roll validated on a separate single-motor bench, free shaft (reference persistence, sweeps; a ±6° segment of the simulated walking trajectory tracked on hardware at 0.28° rms with the motor-internal loop, best run after timing and learning-control correction)
 - 2026-07: **Development drop** — control-loop rate hardening (bench-validated to 625 Hz on the ankle), joint-map capture improvements, saved-offset warm-boot fast path, MOTION GUARD V2 (gait-aware safety guards; ships disabled, bench validation pending), host impedance-stream `tau_ff` channel — [details](PUBLIC_UPDATES.md)
 - 2026-07-18: **Technical note published:** [Deterministic boot-time offset reconstruction for tendon-driven joints](https://aliahumanoid.com/notes/deterministic-boot-offset-reconstruction.html) — method published as prior art
 - 2026-07: **License change:** software is GPLv3 from this release (prior MIT snapshots remain MIT); protocol specs stay MIT; hardware licensing unchanged — [rationale](PUBLIC_UPDATES.md)
 - 2026-06-04: **First natural walking gait in simulation** — motion-tracking RL on the lower body, ONNX-verified locally — [X thread](https://x.com/AliaHumanoid/status/2062545958991265831) · [details](PUBLIC_UPDATES.md)
-- 2026-06: Per-joint power board (`rev_d_power`) bench-validated end-to-end — closed-loop motor control on real hardware, 0.08° tracking error ([report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md))
-- 2026-04: Hip hybrid firmware path implemented (3 DOF / 5 motors) — roll bench bring-up in progress
+- 2026-06: Per-joint power board (`rev_d_power`) bench-validated end-to-end — closed-loop motor control on real hardware, 0.08° tracking error ([report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md) · [known issues](hardware/electronics/joint_controller_board/rev_d_power/README.md))
+- 2026-04: Hip hybrid firmware path implemented (3 DOF / 5 motors)
 - 2026-01-26: Joint Design Log #002 (Knee) published — [YouTube](https://youtu.be/4jU5Na2z-s8) · [X thread](https://x.com/AliaHumanoid/status/2015812906101657848)
 - 2025-11-13: Joint Design Log #001 (Ankle) published — [YouTube](https://youtu.be/1Z9GlTnYEFs)
 - 2025-10-31: Phase 0 public release — [PUBLIC_UPDATES.md](PUBLIC_UPDATES.md)
@@ -122,7 +125,7 @@ This repository carries the **replication core** — firmware, protocols, base h
 
 We document **both successes and failures** transparently.
 
-**Current validation snapshot: knee and ankle closed as architecture baselines; per-joint power board bench-validated; hip firmware complete, bench bring-up in progress; natural walking gait achieved in simulation**
+**Current validation snapshot: knee and ankle closed as architecture baselines; per-joint power board bench-validated (known issues documented); hip tendon DOFs validated on the bench and the direct-drive roll on a single-motor bench, first 3-DOF runs on the bench; natural walking gait achieved in simulation, gait-like trajectory tracked on the physical hip at natural walking speed**
 
 ### ✅ Validated On Hardware (Phase 0)
 
@@ -136,7 +139,7 @@ We document **both successes and failures** transparently.
 - PA12 structure passes current static/load validation
 - Peak torque within biomechanics requirements at the validated bench conditions — [motor specs](docs/specs/MOTOR_SPECIFICATIONS.md)
 - Rolling impedance control via CAN with cascade PID on the validated tendon-driven joints — [operational guide](software/docs/SET_IMPEDANCE_OPERATIONAL_GUIDE.md)
-- Per-joint power board (`rev_d_power`) validated end-to-end: power rails, hot-swap protection, health telemetry, closed-loop motor control (0.08° tracking error) — [bench report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md)
+- Per-joint power board (`rev_d_power`) validated end-to-end: power rails, hot-swap protection, health telemetry, closed-loop motor control (0.08° tracking error) — [bench report](hardware/electronics/joint_controller_board/rev_d_power/BENCH_VALIDATION_REPORT.md) · [known issues](hardware/electronics/joint_controller_board/rev_d_power/README.md) (motor rail sags on touch or gate-node contamination; handling rules)
 
 ### 🧪 Validated In Simulation (Not Hardware)
 
@@ -145,20 +148,24 @@ We document **both successes and failures** transparently.
 - Robustness via domain randomization (actuator gains, latency, mass) grounded in measured bench data
 - **Honest boundary:** simulation results are simulation results — hardware walking requires foot sole, batteries and full-leg integration first
 
-### 🛠️ Implemented In Firmware, Pending Hip Bench Validation
+### ✅ Hip — Per-Axis Bench Validation (August–September 2026)
 
-- Hip hybrid model in firmware (`3 DOF / 5 motors`)
-- Per-DOF `DriveType` / `DofCapabilityFlags`
-- Direct-drive runtime path for hip axial roll
-- Hybrid-aware auto-mapping path (tendon DOFs only)
-- `HIP_ROLL_BENCH_*` single-motor bench profiles
+Bench runs used firmware changes that ship with the next release, and host-side gait-replay tooling (timing and learned corrections) that stays in the private suite; this release carries the hybrid model and the `HIP_ROLL_BENCH_*` profiles.
+
+- Hip hybrid model (`3 DOF / 5 motors`, per-DOF `DriveType` / `DofCapabilityFlags`) exercised on hardware: both tendon-driven DOFs mapped, calibrated and driven with the hybrid-aware auto-mapping path (known issue: at the end of a mapping run all motors are released and, with the tendons slack, a gravity-loaded limb drops freely; support the limb before the run ends; a slow slack take-up is in development)
+- Joint encoders zeroed at the CAD mechanical stops, persistent across power cycles
+- Gait-like reference (flexion and abduction sines in quadrature, 1.1 s cycle) tracked on the physical hip (2 tendon-driven DOFs) at natural walking speed, free swing with no external load, with one learned feed-forward correction from a previous run (uncorrected at the same speed: 6.0° / 2.0° rms): 27 cycles, 2.95° / 1.37° rms, repeatable run to run — [X post](https://x.com/AliaHumanoid/status/2092992852150108425) (the post calls it the simulation policy's walking trajectory; the reference was a synthetic gait-like cycle)
+- Direct-drive axial roll validated on a separate single-motor bench, free shaft (`HIP_ROLL_BENCH_*` profiles): reference persistence across power cycles, sweeps, a ±6° segment of the simulated walking trajectory tracked on hardware at 0.28° rms with the motor-internal loop (best run, after timing and learning-control correction)
+
+### 🛠️ Implemented In Firmware, Pending Bench Validation
+
 - MOTION GUARD V2 — gait-aware divergence/stall guards behind a runtime mode switch (ships in LEGACY mode = current behavior; SHADOW/ACTIVE pending bench validation)
 
 ### ⚠️ Still Iterating
 
-- Hip roll bench bring-up and per-DOF gain tuning
+- Hip: roll motor mounted, the two tendon-driven DOFs and the roll run together on one controller (September 2026); 3-DOF tracking on the bench in progress, results with the next Joint Design Log, then mounting into the full right leg
 - Full hip 3-DOF integrated validation (L3)
-- Multi-controller integrated test (L4: hip + knee + ankle on Jetson)
+- Multi-controller integrated test (L5: hip + knee + ankle on Jetson)
 - Walking gait as integrated lower-body system **on hardware**
 - Sim-to-real transfer (policy deployment on the onboard computer; gated by foot sole, power boards at scale, batteries)
 - Power board high-current stress testing (22A continuous / ~38A peak)
