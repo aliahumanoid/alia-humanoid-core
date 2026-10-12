@@ -77,6 +77,10 @@ GP17 (was slave CS)  ──────────────────► G
 
 **Purpose**: Independent hardware-level safety cutoff for motor power.
 
+> **Status (2026-10):** see [SAFETY_LIMITATIONS.md](../../../SAFETY_LIMITATIONS.md). On the `rev_d` logic board the
+> external watchdog is not active, and the internal RP2350 watchdog is off unless `SAFETY_ENABLE_INTERNAL_WDT` is
+> defined. A firmware hang therefore does not cut motor power by itself; use a physical stop upstream.
+
 **GPIO Assignments:**
 - `GP15` → `SAFETY_WDT_KICK` (Watchdog kick pulse)
 - `GP22` → `SAFETY_ENABLE` (Motor power enable)
@@ -114,14 +118,15 @@ safety_motor_power_enable();     // Enable power after full init
 safety_watchdog_kick();          // Kick external MAX6369 + internal RP2350 WDT
 
 // Emergency stop — immediate hardware cutoff
-safety_motor_power_disable();    // GP22 LOW → MOSFETs off in <10µs
+safety_motor_power_disable();    // GP22 LOW → motor power cut (time to zero torque not measured)
 
-// Recovery after e-stop (e.g. on PRETENSION command)
-safety_motor_power_enable();     // Re-enable motor power
+// Recovery after e-stop: do NOT re-enable from a motion command (PRETENSION).
+// On rev_d the drivers need ~1.5 s to boot after power-up: power-cycle, then startup.
 ```
 
 **Safety Behavior:**
-- MCU freeze → Watchdog timeout → MOSFETs OFF → Motors coast to stop
+- MCU freeze → watchdog timeout → MOSFETs OFF → motor torque removed; a tendon-driven limb is not held and falls
+  (only when a watchdog is actually active — not the case on `rev_d` today)
 - Software disable (GP22 LOW) → Immediate power cutoff
 - Both paths independent of MCU software state
 

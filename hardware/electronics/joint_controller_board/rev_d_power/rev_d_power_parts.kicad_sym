@@ -1,4 +1,4 @@
-(kicad_symbol_lib (version 20211014) (generator codex)
+(kicad_symbol_lib (version 20211014) (generator kicad_symbol_editor)
   (symbol "TPS2492PW" (pin_names (offset 1.016)) (in_bom yes) (on_board yes)
     (property "Reference" "U" (id 0) (at -12.7 15.24 0)
       (effects (font (size 1.27 1.27)) (justify left bottom))

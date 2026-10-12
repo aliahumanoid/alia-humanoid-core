@@ -42,7 +42,8 @@
 // TIMING CONSTANTS
 // ============================================================================
 
-// MAX6369KA timeout is ~1.0 second. Kick at least every 500ms for 2× margin.
+// MAX6369 timeout depends on its SET strapping (board documentation); the external watchdog is
+// not active on the rev_d logic board. Kick interval kept for boards where it is.
 #define SAFETY_WDT_KICK_INTERVAL_MS  200
 
 // RP2350 internal watchdog timeout (milliseconds).
