@@ -6,6 +6,20 @@ Structured log of outward-facing progress notes. Updates published as milestones
 
 ---
 
+## 2026-11-09 — Joint Design Log #003: the hip
+
+**Published:** [Joint Design Log #003 (Hip)](https://youtu.be/a9sh70xy4z0) on YouTube.
+
+**What the video shows:** the three-axis hip on the bench, hanging free with no ground contact: one cycle of our simulated walk replayed at half speed on all three axes, then a simpler, synthetic gait-like cycle at full speed, one cycle every 1.1 seconds, with the roll held still.
+
+**What it does not show:** walking with ground contact; the full right leg; a policy running on the hardware (the simulated walk is replayed as a fixed trajectory).
+
+**Context:** the ankle (Joint Design Log #001) and the knee (#002) were validated as single-controller baselines; the hip is the third joint of the right leg, with two tendon-driven axes and one direct-drive roll axis. The next step is mounting the joints together in the right leg; no date.
+
+**Announcement:** [X post](https://x.com/AliaHumanoid/status/2119707647737819585)
+
+---
+
 ## 2026-07 — Development drop, a published method note, and a software license change
 
 **What ships** (curated release from the private working tree):
