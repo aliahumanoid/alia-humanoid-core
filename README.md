@@ -117,7 +117,7 @@ This repository carries the **replication core** — firmware, protocols, base h
 - 🚶 **Walking — In Simulation**
   Natural full-amplitude gait via motion-tracking RL (knee ROM ~57°, foot clearance ~14 cm); sim-to-real gated by remaining hardware
 
-- 📂 **Progressive Open Source**
+- 📂 **Files released in phases**
   Phased licensing roadmap: STL → STEP → CAD source
 
 ---
@@ -216,7 +216,7 @@ Last reviewed: 2026-11-09. Ankle and knee validated as single-controller baselin
 | **Electronics** | ✅ Public | CC BY-NC-ND | RP2350 controller board + per-joint power board (KiCad source, Gerber, STEP) |
 | **CAD Source** | 📅 Phase 2+ (TBD) | CC BY-SA | Full parametric Fusion 360 timeline |
 
-See our [licensing roadmap](hardware/LICENSE.md) for details on the phased open-source transition.
+See our [licensing roadmap](hardware/LICENSE.md) for details on what is released when.
 
 ---
 
