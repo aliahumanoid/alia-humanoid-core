@@ -77,6 +77,7 @@ The result? A robot that can fit human environments, wear human clothing, and in
 This repository carries the **replication core** — firmware, protocols, base host operation, hardware documentation, and results. Advanced lab tooling (calibration campaigns, learning-control experiments, gait tooling) is developed in a private suite and opens progressively as milestones mature. Results, videos, logs, and writeups continue to be published openly. We publish what fails alongside what works; simulation results are labeled as simulation results.
 
 ### Latest Updates
+- 2026-11-09: Joint Design Log #003 (Hip) published — [YouTube](https://youtu.be/a9sh70xy4z0)
 - 2026-09: **Hip roll motor integrated — first 3-DOF runs on the bench.** The two tendon-driven DOFs and the direct-drive roll now run together on one joint controller; results with the next Joint Design Log
 - 2026-08-27: **Hip on the bench — first run at natural walking speed.** The 2-DOF tendon-driven hip tracks a gait-like reference (flexion and abduction sines in quadrature, 1.1 s cycle), free swing with no external load, with one learned feed-forward correction from a previous run (uncorrected at the same speed: 6.0° / 2.0° rms): 27 cycles, 2.95° / 1.37° rms, repeatable run to run — [X post](https://x.com/AliaHumanoid/status/2092992852150108425) (the post calls it the simulation policy's walking trajectory; the reference was a synthetic gait-like cycle)
 - 2026-08: Direct-drive hip roll validated on a separate single-motor bench, free shaft (reference persistence, sweeps; a ±6° segment of the simulated walking trajectory tracked on hardware at 0.28° rms with the motor-internal loop, best run after timing and learning-control correction)
@@ -203,7 +204,9 @@ cd software/firmware/joint_controller && pio run
 
 Bench bring-up: [Jetson single-controller checklist](software/docs/JETSON_SINGLE_CONTROLLER_BRINGUP_CHECKLIST.md). Minimum bench: one joint controller board, CAN adapter, 24V supply.
 
-## Current Status (Phase 0 — July 2026)
+## Current Status (Phase 0)
+
+Last reviewed: 2026-11-09. Ankle and knee validated as single-controller baselines; hip on the bench; walking shown in simulation only.
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
