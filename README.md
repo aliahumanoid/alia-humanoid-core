@@ -207,7 +207,7 @@ Last reviewed: 2026-11-19. Ankle and knee validated as single-controller baselin
 
 | Component | Status | License | Notes |
 |-----------|--------|---------|-------|
-| **Software** | ✅ Public | GPLv3 | Python host + C++ firmware (RP2350 Pico 2); releases before July 2026 remain MIT |
+| **Software** | ✅ Public | GPLv3 | Python host + C++ firmware (RP2350 Pico 2); releases before July 2026 remain MIT; vendored third-party code keeps its own license |
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | BOM, mechanical release guide, joint/motor/tendon specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
 | **Electronics** | ✅ Public | CC BY-NC-ND | Joint controller logic board (RP2350), per-joint power board, encoder hub and motor CAN/power hub: KiCad source and STEP; fabrication packages for the logic board and the two hubs |
@@ -304,6 +304,7 @@ This implementation is an independent engineering development released under the
 
 - **Software (firmware + host):** [GNU GPLv3](LICENSE) from the July 2026 release onward. Releases published before July 2026 were MIT and remain MIT — irrevocable for anyone who obtained them.
 - **Protocol specifications** ([CAN system architecture](software/docs/CAN_SYSTEM_ARCHITECTURE.md), [firmware-update protocol](software/docs/CAN_FIRMWARE_UPDATE_PROTOCOL_SPEC.md)): **MIT**, so third-party tools can integrate without copyleft obligations.
+- **Third-party code** keeps its own license: the vendored CAN library in `software/firmware/joint_controller/lib/mcp_can` (v1.5.1) is under the GNU Lesser General Public License, version 2.1 or (at your option) any later version, as stated in its source files.
 - **Hardware:** unchanged — see [hardware/LICENSE.md](hardware/LICENSE.md) for the phased CC roadmap.
 
 Contributions are accepted under the license of the files they change: GPLv3 for software, MIT for the protocol specifications; hardware contributions follow the phased roadmap in [hardware/LICENSE.md](hardware/LICENSE.md). Every commit needs a DCO sign-off; see [CONTRIBUTING.md](CONTRIBUTING.md#license-acknowledgement).
