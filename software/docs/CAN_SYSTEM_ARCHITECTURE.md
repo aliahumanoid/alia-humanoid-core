@@ -928,11 +928,8 @@ continue to pass this bench checklist:
    - full run completes
    - no automatic `EMERGENCY_STOP` on exit unless explicitly requested
 
-5. Post-`E-stop` same-session recovery
-   - `E-stop`
-   - press `S`
-   - verify `PRETENSION_ALL -> RECOVERY_SETTLE -> READY`
-   - nudge works again from current pose
+5. Post-`E-stop` same-session recovery — **SUPERSEDED (2026-10), do not run on `rev_d`:** see
+   [SAFETY_LIMITATIONS.md](../../SAFETY_LIMITATIONS.md); recovery is a power cycle (motor supply first, then USB), then startup.
 
 The benchmark is considered clean if the validated run stays at:
 - `INVALID CAN READ = 0`

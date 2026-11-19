@@ -252,6 +252,7 @@
   - selective `PRETENSION_ALL`
   - `RECOVERY_SETTLE`
   - resume on the current pose
+  - **Superseded (2026-10), not valid on `rev_d`:** after an `E-stop`, follow [SAFETY_LIMITATIONS.md](../../SAFETY_LIMITATIONS.md) (power cycle, then startup)
 
 **Still open on L4:**
 - automatic recovery if the Jetson process is restarted after `E-stop`
@@ -428,7 +429,7 @@ Recommended order, given the actual bench state:
      - nominal startup
      - manual home / nudge
      - automatic exercise
-     - post-`E-stop` recovery within the same Jetson session
+     - post-`E-stop` handling per [SAFETY_LIMITATIONS.md](../../SAFETY_LIMITATIONS.md) (power cycle, then startup)
 
 2. **Close `L3.5 Protocol Freeze`**
    - the evidence collected on `knee + ankle` is already sufficient to freeze:

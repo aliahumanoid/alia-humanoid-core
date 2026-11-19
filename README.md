@@ -211,7 +211,7 @@ Last reviewed: 2026-11-19. Ankle and knee validated as single-controller baselin
 | **Hardware Docs** | ✅ Public | CC BY-NC-ND | BOM, mechanical release guide, joint/motor/tendon specs |
 | **STL Files** | ✅ Public | CC BY-NC-ND | 19 files: ankle, lower leg, common components |
 | **Electronics** | ✅ Public | CC BY-NC-ND | Joint controller logic board (RP2350), per-joint power board, encoder hub and motor CAN/power hub: KiCad source and STEP; fabrication packages for the logic board and the two hubs |
-| **CAD Source** | 📅 Phase 2+ (TBD) | CC BY-SA | Full parametric Fusion 360 timeline |
+| **CAD Source** | 📅 Later release step (validation-gated, no fixed date) | CC BY-SA | Full parametric Fusion 360 timeline |
 
 See our [licensing roadmap](hardware/LICENSE.md) for details on what is released when.
 

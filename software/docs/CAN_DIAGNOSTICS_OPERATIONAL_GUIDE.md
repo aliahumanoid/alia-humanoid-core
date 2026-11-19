@@ -139,42 +139,18 @@ The TUI exposes:
 - latest `EVENT_NOTICE`
 - health counters and fault epoch
 
-## Diagnostic Scripts (host bench tools)
+## Host Tools
 
-Repeatable bench tools that drive the CAN diagnostic surfaces above. Run from `software/host`
-(`PYTHONPATH="$(pwd)" arch -arm64 .venv/bin/python -m jetson_controller.<script>`).
+The Jetson controller retrieves the fault snapshot for the selected joint (`[R]` in the TUI): it queries the metadata,
+requests the dump if a snapshot is stored, and writes the decoded dump to the per-joint diagnostic history. The firmware
+also has a hi-rate windowed recorder that downloads over the same CAN frame IDs; its sub-commands are not documented
+here, and the host tools that drive it are not part of this repository.
 
-### Black box — `read_blackbox.py`
-
-Retrieves + decodes the firmware FAULT SNAPSHOT over CAN (query `0x01F` sub `0x00` → meta `0x540`; if
-`snapshot_present`, dump sub `0x01` → chunks `0x550` → decoded blob). Shows the freeze event, the active +
-latched faults, the per-DOF / per-motor state AT the freeze, and the health counters. Use it whenever a
-joint "went wild" or e-stopped and you need to know WHY.
-
-- **KEY GOTCHA:** the snapshot lives in RAM. The MCU stays powered over USB even after the MOTOR power rail
-  is cut, so the snapshot SURVIVES a motor-rail e-stop / power cut — **retrieve it BEFORE rebooting or
-  USB-power-cycling the board**, or it is lost.
-
-### 250 Hz motion recorder — `capture_hirate_dof1.py`, `capture_holdperturb_dof1.py`
-
-Arms the firmware hi-rate windowed recorder (diag `CTRL 0x05`), runs a motion, then dumps the ~7 s / 1800-
-record buffer (q, qdes, dth = outer-PID output, iqA/iqB, motor residuals) for offline analysis.
-
-- `capture_hirate_dof1.py` — a slow-ramp sweep (the stick-slip / smoothness probe).
-- `capture_holdperturb_dof1.py` — hold at center + record. Flags: `--hand` (operator hand-vibration with a
-  timed GO/STOP signal), `--measured-dt` (toggle the PID measured-dt flag, CAN `0x005`), `--ab` (single-
-  connection mid-window A/B toggle).
-- **Metric:** report SLIPS/° (burst-segmented), NOT freeze% (a sub-LSB quantization artefact at slow speed).
-- **GOTCHAS:** (1) GRACEFUL SHUTDOWN — these de-power the motors BEFORE stopping the host stream, so the
-  stream-end never leaves a tensioned cascade that freezes into the overrun oscillation. (2) DE-POWER
-  BETWEEN RUNS — a rev_d e-stop cuts GP22 motor power; power-cycle before the next motor run. (3) Do NOT A/B
-  back-to-back — the gap / re-startup between two runs is itself a trigger; use the single-connection `--ab`.
-
-### Single-motor loop probes — `capture_veltest_dof1.py`, `capture_postest_dof1.py`
-
-Drive ONE motor by the LKM internal VELOCITY (`0xA2`, diag `0x09/0x0A`) or POSITION (`0xA4`, diag `0x0B`)
-loop — joint-encoder-guarded + de-power-on-exit — to measure the motor-internal friction rejection vs the
-torque cascade. These are the harness reused for the Loop 2 (motor-position) prototype.
+- **Fault snapshot and power:** the snapshot lives in RAM and is lost when the MCU loses power. On `rev_d` boards a
+  firmware `E-stop` cuts only the switched motor output, so the MCU keeps running; cutting the board's 24 V supply also
+  removes the logic supply, so the MCU stays on only if its USB cable is connected. Read the snapshot before rebooting
+  the board, cutting its supply without USB, or cycling its USB power; after an `E-stop`, read it from the Jetson
+  session that is still running (see [Recovery Discipline](#recovery-discipline)).
 
 ## Recommended Operator Workflow
 
@@ -207,7 +183,11 @@ Representative launch commands from `software/host/jetson_controller/`:
 ### Recovery Discipline
 
 - Clear the operational cause first, not just the symptom.
-- Use Jetson recovery paths for nominal `E-stop` / post-`E-stop` handling.
+- After an `E-stop`, follow [Known safety limitations](../../SAFETY_LIMITATIONS.md). On `rev_d` boards: if a snapshot was
+  frozen, read it first from the Jetson session that is still running (`[R]`); then power-cycle (motor supply first,
+  then USB) and run the startup again. Never recover with `PRETENSION` / `PRETENSION_ALL`, and do not press `[S]` or
+  restart the Jetson controller before that power cycle: after an `E-stop`, `[S]` can make it send `PRETENSION_ALL` on
+  its own.
 - Do not assume a controller is safe to resume simply because active fault bits cleared;
   latched faults and fault epoch still matter.
 

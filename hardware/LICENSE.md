@@ -76,8 +76,8 @@ STL files alone make **significant modifications impractical** (see technical no
 - Community feedback integrated
 - Confidence design is "stable enough" for parametric release
 
-### Later Release Step (Target: 2027+)
-**License**: CC BY-SA 4.0 (full open)  
+### Later Release Step (validation-gated, no fixed date)
+**License**: CC BY-SA 4.0  
 **Assets Released**: STL + STEP + **Fusion 360 sources** (.f3d with parametric history)  
 **Rationale**: Complete timeline enables efficient collaborative development
 
@@ -122,7 +122,7 @@ We're open to discussing terms that work for research, startups, and established
 - ✅ Recognizable features (holes, extrusions, fillets)
 - ✅ Modifiable geometry (though not full timeline)
 
-**Full parametric sources** (.f3d) will come in Phase 2 for maximum collaboration efficiency.
+**Full parametric sources** (.f3d) come in the later release step.
 
 ---
 
@@ -156,8 +156,8 @@ Software and hardware licenses are independent:
 ### When will you release STEP files?
 🎯 **When validation permits** — contingent on design maturity (Rev B+ validation through testing). We deliberately avoid fixed dates: the trigger is engineering evidence, not the calendar.
 
-### Will you ever be fully open?
-✅ **Yes**, planned for 2027. We're phasing to ensure quality, not to stay closed.
+### Will the Fusion 360 sources be released?
+✅ **Yes**, the Fusion 360 sources (.f3d with parametric history) come in the later release step (CC BY-SA 4.0), validation-gated, with no fixed date. We're phasing to ensure quality, not to stay closed.
 
 ### Can I contribute improvements?
 🔄 **Not yet as hardware geometry PRs while the release is STL-only**. Contributions will be more practical when we release STEP and later CAD sources. For now, feedback via GitHub Issues is valuable and encouraged.
@@ -189,7 +189,7 @@ https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
 
 ---
 
-**Last Updated**: 2026-06-12  
+**Last Updated**: 2026-11-19  
 **License Version**: CC BY-NC-ND 4.0  
 **Transition Plan**: See roadmap above  
 **Questions**: info@aliahumanoid.com
